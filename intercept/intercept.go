@@ -510,8 +510,9 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	if err != nil || len(rules) == 0 {
 		return Decision{}, false
 	}
+	normalized := normalizeToolInput(input)
 	for _, r := range rules {
-		if ruleMatches(r, toolName, input) {
+		if ruleMatches(r, toolName, input, normalized) {
 			msg := r.Message
 			if msg == "" {
 				msg = defaultMessage(r.Action, r.Name)
@@ -531,20 +532,69 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	return Decision{}, false
 }
 
-func ruleMatches(r compiledRule, toolName string, input []byte) bool {
-	var subject string
+func ruleMatches(r compiledRule, toolName string, input []byte, normalized string) bool {
+	var subjects []string
 	switch r.MatchTarget {
 	case "tool_name":
-		subject = toolName
+		subjects = []string{toolName}
 	case "tool_input":
-		subject = string(input)
+		subjects = []string{string(input)}
+		if normalized != "" {
+			subjects = append(subjects, normalized)
+		}
 	default:
 		return false
 	}
 	if r.MatchType == "regex" {
-		return r.re != nil && r.re.MatchString(subject)
+		if r.re == nil {
+			return false
+		}
+		for _, s := range subjects {
+			if r.re.MatchString(s) {
+				return true
+			}
+		}
+		return false
 	}
-	return strings.Contains(subject, r.Pattern)
+	for _, s := range subjects {
+		if strings.Contains(s, r.Pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeToolInput 对入参做 JSON 深解码。norma 流式路径原样透传入参、
+// 不解码不重序列化，故 {"command":"\u0072m -rf /tmp"} 的字节里不存在字符
+// 'r'，词表正则永不命中。返回空串表示非 JSON 对象，调用方应只匹配 raw。
+func normalizeToolInput(input []byte) string {
+	if len(input) == 0 || input[0] != '{' {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	fields := []string{"command", "text", "pattern", "file_path", "path", "query", "description", "content", "args"}
+	var b strings.Builder
+	for _, k := range fields {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			b.WriteString(t)
+			b.WriteByte('\n')
+		default:
+			enc, err := json.Marshal(t)
+			if err == nil {
+				b.Write(enc)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
 }
 
 func defaultMessage(action, name string) string {

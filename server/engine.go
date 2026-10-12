@@ -72,6 +72,8 @@ const (
 	modelErrorRetries      = 2               // model_error 收场后额外重试的次数
 	modelErrorRetryBackoff = 3 * time.Second // 每次重试前的退避
 	workControlWaitTimeout = 30 * time.Second
+	steerMsgMaxRunes       = 2000
+	steerQueueMax          = 10
 )
 
 var errWorkControlConflict = errors.New("work control conflict")
@@ -494,6 +496,10 @@ func (e *Engine) SteerWork(intentID int64, msg string) error {
 	if strings.TrimSpace(msg) == "" {
 		return fmt.Errorf("纠偏消息不能为空")
 	}
+	// 消息直入 worker 上下文且不过任何闸，无上限既是资源风险也是注入面。
+	if n := len([]rune(msg)); n > steerMsgMaxRunes {
+		return fmt.Errorf("纠偏消息过长（%d 字符，上限 %d）", n, steerMsgMaxRunes)
+	}
 	e.workMu.Lock()
 	running := e.work[intentID] != nil
 	e.workMu.Unlock()
@@ -501,6 +507,10 @@ func (e *Engine) SteerWork(intentID int64, msg string) error {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
 	e.steerMu.Lock()
+	if len(e.steerBox[intentID]) >= steerQueueMax {
+		e.steerMu.Unlock()
+		return fmt.Errorf("意图 %d 的纠偏队列已满（上限 %d 条），worker 消费不过来", intentID, steerQueueMax)
+	}
 	e.steerBox[intentID] = append(e.steerBox[intentID], msg)
 	e.steerMu.Unlock()
 	return nil

@@ -1,0 +1,102 @@
+package guard
+
+import "testing"
+
+func TestShortCircuitPlatformToolsAsk(t *testing.T) {
+	for _, tool := range []string{
+		"create_mcp", "update_mcp", "create_custom_tool", "update_custom_tool",
+		"create_skill", "update_skill_file", "delete_assets_by_host",
+	} {
+		dec := shortCircuit(tool, []byte(`{"command":"http://127.0.0.1"}`))
+		if dec == nil {
+			t.Fatalf("%s 应命中短路表", tool)
+		}
+		if dec.Action != "ask" {
+			t.Fatalf("%s 应为 ask，得到 %s", tool, dec.Action)
+		}
+		if !dec.TimeoutEnabled || dec.TimeoutSeconds != 60 || dec.TimeoutAction != "deny" {
+			t.Fatalf("%s 的 ask 超时须为 60s/deny，得到 %+v", tool, dec)
+		}
+	}
+}
+
+func TestShortCircuitPlatformCredentialsDeny(t *testing.T) {
+	deny := []struct{ desc, in string }{
+		{"平台签名密钥", `{"command":"cat /app/jwt.key"}`},
+		{"平台 .env", `{"command":"cat /app/.env"}`},
+		{"MITM CA 私钥", `{"command":"cat /app/data/traffic/_ca/mitmproxy-ca.pem"}`},
+		{"MITM CA 证书", `{"file_path":"/app/data/traffic/_ca/mitmproxy-ca-cert.crt"}`},
+		{"相对路径回溯到平台密钥", `{"command":"cat ../../../jwt.key"}`},
+		{"宽字符变形", `{"command":"cat '/app/j w t . k e y'"}`},
+		{"proc environ", `{"command":"cat /proc/1/environ"}`},
+		{"proc cmdline", `{"file_path":"/proc/1234/cmdline"}`},
+		{"proc mem", `{"command":"cat /proc/9/mem"}`},
+		{"proc self environ", `{"command":"cat /proc/self/environ"}`},
+	}
+	for _, c := range deny {
+		dec := shortCircuit("Bash", []byte(c.in))
+		if dec == nil || dec.Action != "deny" {
+			t.Fatalf("%s：输入 %s 应被 deny，得到 %+v", c.desc, c.in, dec)
+		}
+	}
+}
+
+func TestShortCircuitMustNotBlockPentestWork(t *testing.T) {
+	allow := []struct{ desc, in string }{
+		{"跑扫描", `{"command":"nmap -sV 10.0.0.5"}`},
+		{"写会话笔记", `{"file_path":"/app/data/sessions/conv-1/notes.md"}`},
+		{"跑 sqlmap", `{"command":"sqlmap -u http://target/x?id=1"}`},
+		{"读目标私钥", `{"file_path":"/tmp/target/id_rsa"}`},
+		{"写报告", `{"content":"# 报告\n发现 XX 风险"}`},
+		{"读目标 .env", `{"command":"cat /app/data/sessions/conv-1/target/.env"}`},
+		{"相对路径读目标 .env", `{"command":"cat ../target/.env"}`},
+		{"读目标 .key", `{"command":"cat /app/data/sessions/conv-1/server.key"}`},
+		{"读目标 jwt.key", `{"command":"cat /app/data/sessions/conv-1/jwt.key"}`},
+		{"读目标 pem", `{"command":"cat /app/data/sessions/conv-1/private.pem"}`},
+		{"本机侦察 /proc/net/tcp", `{"command":"cat /proc/net/tcp"}`},
+		{"列进程", `{"command":"ps aux"}`},
+	}
+	for _, c := range allow {
+		if dec := shortCircuit("Bash", []byte(c.in)); dec != nil {
+			t.Fatalf("%s：输入 %s 不应命中短路表，得到 %+v", c.desc, c.in, dec)
+		}
+	}
+}
+
+func TestShortCircuitDisableFlag(t *testing.T) {
+	ShortCircuitEnabled = false
+	defer func() { ShortCircuitEnabled = true }()
+	if dec := shortCircuit("create_mcp", []byte(`{}`)); dec != nil {
+		t.Fatal("feature flag 关闭后短路表不应生效")
+	}
+}
+
+func TestDisableFlagFromEnv(t *testing.T) {
+	defer func() { ShortCircuitEnabled = true }()
+
+	cases := []struct {
+		raw      string
+		wantStop bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"maybe", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"Yes", true},
+		{"on", true},
+	}
+	for _, c := range cases {
+		ShortCircuitEnabled = true
+		t.Setenv("ARTEX_DISABLE_SHORT_CIRCUIT", c.raw)
+		got, _ := disableFlagFromEnv()
+		if got != c.wantStop {
+			t.Fatalf("env=%q 应得 disabled=%v，得到 %v", c.raw, c.wantStop, got)
+		}
+		if ShortCircuitEnabled == c.wantStop {
+			t.Fatalf("env=%q 应把 ShortCircuitEnabled 置为 %v", c.raw, !c.wantStop)
+		}
+	}
+}

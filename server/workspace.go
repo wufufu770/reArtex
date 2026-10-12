@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -34,7 +35,37 @@ func (s *Server) wsResolve(rel string) (string, bool) {
 	if abs != base && !strings.HasPrefix(abs, base+string(os.PathSeparator)) {
 		return "", false
 	}
+	// 上方注释说 Clean 收敛 ".." 故爬不出根——那只对词法成立，工作目录内的
+	// 符号链接仍可指向根外。须解析真实路径后再判。
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", false
+	}
+	realAbs, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		realAbs, err = resolveExistingAncestor(abs)
+		if err != nil {
+			return "", false
+		}
+	}
+	if realAbs != realBase && !strings.HasPrefix(realAbs, realBase+string(os.PathSeparator)) {
+		return "", false
+	}
 	return abs, true
+}
+
+func resolveExistingAncestor(path string) (string, error) {
+	cur := path
+	for {
+		if p, err := filepath.EvalSymlinks(cur); err == nil {
+			return p, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("no existing ancestor for %s", path)
+		}
+		cur = parent
+	}
 }
 
 // wsRel renders an absolute path back as a workspace-relative path (forward slashes).
@@ -271,7 +302,7 @@ func saveUpload(hdr *multipart.FileHeader, dest string) error {
 		return err
 	}
 	defer src.Close()
-	out, err := os.Create(dest)
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|openNoFollow, 0o644)
 	if err != nil {
 		return err
 	}
