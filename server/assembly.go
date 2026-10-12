@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -238,9 +239,28 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	const bashInteractiveShellNote = "\n\n需要【交互输入】的程序（msfconsole / ssh 交互登录 / mysql、psql、python 等 REPL / 密码或 yes/no 提示 / nc 反弹 shell）不要用 Bash（它没有 stdin、会卡住），改用 shell_open 开交互会话（用完 shell_close）。一次性、非交互命令仍用 Bash。"
 	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
 		rows, err := pg.ListTools()
+		degraded := false
 		if err != nil {
-			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
-			return tools
+			cached, _ := lastGoodToolRows.Load().([]*db.Tool)
+			if cached == nil {
+				degraded = true
+				log.Printf("[tools] 读取工具表失败且无可用快照（冷启动），降级为最小工具面: %v", err)
+			} else {
+				log.Printf("[tools] 读取工具表失败，沿用上一份已验证快照（%d 行）: %v", len(cached), err)
+				rows = cached
+			}
+		} else {
+			lastGoodToolRows.Store(rows)
+		}
+		if degraded {
+			// rows 为空则 byKey 空、全部工具走 !known 分支原样放行，故此处不能 return tools。
+			out := make([]actool.CoreTool, 0, len(tools))
+			for _, t := range tools {
+				if degradedToolAllow[t.Name()] {
+					out = append(out, t)
+				}
+			}
+			return out
 		}
 		byKey := make(map[string]*db.Tool, len(rows))
 		for _, t := range rows {
@@ -370,4 +390,18 @@ func jsonStrMap(raw json.RawMessage) map[string]string {
 		_ = json.Unmarshal(raw, &out)
 	}
 	return out
+}
+
+// lastGoodToolRows 保存最后一次成功读取的工具表。ListTools 失败时沿用它而非
+// 全量放行：放行意味着 DB 一抖动，所有 agent 就拿到完整工具面（含本该被
+// 白名单挡住的），且无任何告警可见性。残留缺口：进程冷启动即遇 DB 故障时
+// 仍无快照可沿用，该路径待按 V2 G-04④ 补「拒绝创建新 run」。
+var lastGoodToolRows atomic.Value
+
+// degradedToolAllow 是工具表不可读且无快照时仅放行的 SDK 基础件。
+// 平台/MCP/领域/自定义工具一律不在此列：它们的效果依赖 DB 绑定关系，
+// 而此刻 DB 恰好不可读，无从判断该不该给。
+var degradedToolAllow = map[string]bool{
+	"Bash": true, "Read": true, "Write": true, "Edit": true,
+	"MultiEdit": true, "LS": true, "Glob": true, "Grep": true,
 }

@@ -81,6 +81,22 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 // applyIntercept evaluates user-configured intercept rules against the tool call.
 // Both rules and the fallback judge receive the complete tool input.
 func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
+	// 短路表须先于 IsToolEnabled 求值：不在 intercept_enabled_tools 名单内的工具
+	// 会在下一行直接放行，表排其后即失效。代码常量，不受 settings 覆盖。
+	if dec := shortCircuit(ev.ToolName, ev.Input); dec != nil {
+		if dec.Action == "ask" {
+			if g.interceptor == nil {
+				return g.block(ev.ToolName, systemBlockMessage("人工审批通道不可用（"+dec.Message+"）"), "")
+			}
+			ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
+			if !g.interceptor.HandleAsk(ctx, intercept.ConvIDFromContext(ctx), *dec, ev.ToolName, ev.Input) {
+				return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
+			}
+			return hook.Result{}
+		}
+		g.record(ev.ToolName, "block", dec.Message, "")
+		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
+	}
 	if g.interceptor == nil {
 		return hook.Result{}
 	}

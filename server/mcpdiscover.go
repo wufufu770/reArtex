@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -11,6 +14,42 @@ import (
 	"github.com/Autumn-27/norma/mcp"
 	actool "github.com/Autumn-27/norma/tool"
 )
+
+// stdioPackageRunners 从 registry 拉取代码执行，等价于任意第三方代码执行，
+// 且包名可抢注、无版本 pin 可供应链翻转。比对 base name，允许路径前缀。
+var stdioPackageRunners = map[string]bool{
+	"npx": true, "uvx": true, "bunx": true, "pnpx": true,
+	"pipx": true, "dlx": true, "docker": true, "podman": true,
+	"sh": true, "bash": true, "zsh": true, "dash": true,
+	"python": true, "python3": true, "perl": true, "ruby": true, "node": true,
+}
+
+// validateStdioCommand 拒绝包执行器，且要求命令解析为绝对路径。裸命令名允许
+// （V2 字面要求绝对路径，但既有 stdio MCP 用裸名强制绝对路径会打断），
+// 但必须在 PATH 解析到真实可执行文件。
+func validateStdioCommand(cmd string) (string, error) {
+	if strings.TrimSpace(cmd) == "" {
+		return "", fmt.Errorf("stdio 传输缺少命令")
+	}
+	base := filepath.Base(cmd)
+	if stdioPackageRunners[base] {
+		return "", fmt.Errorf(
+			"stdio MCP 禁止使用包执行器 %q：它等价于任意第三方代码执行且包名可被抢注。"+
+				"请改用已安装的本地二进制绝对路径", base)
+	}
+	resolved := cmd
+	if !filepath.IsAbs(cmd) {
+		p, err := exec.LookPath(cmd)
+		if err != nil {
+			return "", fmt.Errorf("stdio MCP 命令 %q 无法在 PATH 中解析: %w", cmd, err)
+		}
+		resolved = p
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("stdio MCP 命令必须解析为绝对路径，得到 %q", resolved)
+	}
+	return resolved, nil
+}
 
 // mcpClient is the shared surface of a connected MCP server (stdio, Streamable HTTP,
 // or legacy SSE),
@@ -24,10 +63,11 @@ type mcpClient interface {
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 	switch m.Transport {
 	case "stdio":
-		if m.Command == "" {
-			return nil, fmt.Errorf("stdio 传输缺少命令")
+		resolved, err := validateStdioCommand(m.Command)
+		if err != nil {
+			return nil, err
 		}
-		return mcp.NewStdioClient(ctx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
+		return mcp.NewStdioClient(ctx, m.Name, resolved, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
 	case "http":
 		if m.URL == "" {
 			return nil, fmt.Errorf("http 传输缺少 URL")
