@@ -4,10 +4,81 @@
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
-
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
+> **reArtex = ARTEX 安全加固分支。** 本仓库在上游基础上修了一批 agent 越权与失效开放（fail-open）缺陷，核心是把安全约束从「可热改的 DB / settings」移到「代码常量 + 编译期」。改动清单与验证证据见下方 [安全加固](#安全加固)。
+
 </div>
+
+---
+
+## 安全加固
+
+本仓库相对上游的改动。
+
+### 为什么改
+
+原实现里，**决定 agent 能做什么的那几张表和设置项，本身可被持有 JWT 的人改**——`settings.intercept_enabled_tools` 决定哪些工具进拦截器，`intercept_rules` 是规则本身。一次 `PUT /api/settings` 或一条 `DELETE` 就能把整套防线整体关闭，且无审计留痕。
+
+所以加固的第一原则是：**安全边界不能挂在任何可热改的存储上**。本仓库所有新增约束都写进 Go 源码，关闭途径只剩编译期开关 + 重启。
+
+### 修复的缺陷
+
+以下 7 项均已直读源码逐条验证属实（非推测），编号沿用《ARTEX限制强化方案-终版V2》。
+
+| 编号 | 缺陷 | 原行为 | 现行为 |
+|---|---|---|---|
+| G-01① | 平台工具绕过白名单 | 改平台配置的工具若不在 `intercept_enabled_tools` 名单内，在 `IsToolEnabled` 处直接放行，规则根本轮不到求值 | 短路表插在 `applyIntercept` **最前面**，先于 `IsToolEnabled` |
+| G-01③ | stdio MCP 无任何白名单 | 命令任意指定，等价于任意第三方代码执行；包名可抢注、无版本 pin 可供应链翻转 | 拒 17 个包执行器（`npx`/`uvx`/`bunx`/`pnpx`/`pipx`/`dlx`/`docker`/`podman`/`sh`/`bash`/`zsh`/`dash`/`python*`/`perl`/`ruby`/`node`），且命令须 PATH 解析成功 |
+| G-02①-a | agent 可读平台自身凭据 | worker 的 Bash 与 server 同 UID，可读 `/app/jwt.key` 与 server 原始环境块（含 `ANTHROPIC_API_KEY`、`ARTEX_PG_DSN`） | 硬拦平台签名密钥、MITM CA 私钥与 `/proc/*/{environ,cmdline,mem}` |
+| G-03 | 拦截规则可被 JSON 转义绕过 | `Match` 只对原始入参字节做正则，`"r\u0065ad /app/jwt.key"` 匹配不上 `read` | 匹配前 JSON 深解码，raw 与 decoded 双形态都试 |
+| G-04④ | 工具表故障时全量放行 | `ListTools` 失败 → 打条日志 → `return tools`，DB 一抖动所有 agent 立刻拿到完整工具面 | 沿用上一份已验证快照；冷启动无快照时降级为 SDK 基础件 8 件 |
+| G-07 | 工作区符号链接可越界 | `wsResolve` 只做词法 `Clean`，注释称"爬不出根"——但那对软链不成立；`saveUpload` 跟随符号链接 | `EvalSymlinks` 复核真实路径 + `O_NOFOLLOW` |
+| G-09 | steer 消息无上限 | 纠偏消息直入 worker 上下文且不过闸，队列无界 | 限 2000 字符、队列 cap 10 |
+
+### 改动清单
+
+```
+a  guard/shortcircuit.go          +160   代码常量短路表（新文件）
+a  guard/shortcircuit_test.go     +102
+a  intercept/normalize_test.go    +51
+a  server/nofollow_unix.go        +10    O_NOFOLLOW 常量
+a  server/nofollow_windows.go     +7
+m  intercept/intercept.go         +57/-7
+m  server/mcpdiscover.go          +43/-3
+m  server/assembly.go             +36/-2
+m  server/workspace.go            +32/-1
+m  guard/guard.go                 +16
+m  server/engine.go               +10
+m  docker-compose.yml             +1     env 开关透传
+```
+
+被转人工审批的 7 件平台工具：`create_mcp`、`update_mcp`、`create_custom_tool`、`update_custom_tool`、`create_skill`、`update_skill_file`、`delete_assets_by_host`（60 秒不确认即拒绝）。**这是有意的行为变更**——auto agent 不再能自主建 MCP / skill。
+
+### 审计过程中额外发现并修掉的三个问题
+
+1. **MITM CA 私钥未受保护**：原注释声称覆盖 `*.pem`，正则里根本没有；而容器里确实存在 `/app/data/traffic/_ca/mitmproxy-ca.pem`（MITM CA 私钥）。已补进拦截表。
+2. **规则过宽误伤渗透正常工作**：初版按目录前缀一刀切（`/app/data/**/*.key`、裸 `/\.env\b`）。但 agent 工作目录正是 `/app/data/sessions/<key>`，工作区就落在 data 目录里——**目标的 `.env` / `.key` / `jwt.key` 全被误拦**，而 `.env` 恰恰是渗透最常要读的东西。已改为按具体凭据文件列举。
+3. **应急开关是假的**：注释写着 `ARTEX_DISABLE_SHORT_CIRCUIT=1` 可停用短路表，代码里从没读过这个环境变量。已实现（`init()` 读取，启动日志留痕），并把开关内核抽成可测函数。
+
+### 已知残留（未做）
+
+- **短路表是入参字符串预筛，不是路径解析级强制。** `cat $(realpath ../../../jwt.key)` 这类经 shell 展开后才现形的路径仍可绕过。真正闭合需要执行前的 `realpath` 校验与环境变量白名单。
+- G-17 审计事件骨架与 digest 链（需改表结构）
+- G-09 ask 队列治理（需 per-agent 聚合计数）
+- G-04④ 的「拒绝创建新 run」目前以最小工具面降级代替，不是硬拒绝
+- **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
+
+### 应急回滚
+
+短路表整体停用（重启生效，无需重新构建镜像）：
+
+```bash
+# docker-compose.yml 里设，或临时注入
+ARTEX_DISABLE_SHORT_CIRCUIT=1 docker compose up -d
+```
+
+启动日志出现 `[guard] ⚠ 短路表已停用` 即生效。接受 `1/true/yes/on`。停用后平台退化为「仅 DB 规则」防线——而 DB 规则本身可被持 JWT 者热改。
 
 ---
 
