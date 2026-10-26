@@ -59,6 +59,9 @@ func TestSkillTools(t *testing.T) {
 
 // validateMCPDefinition 是 guard 硬拦之外的兜底层，用例要覆盖两类真实绕过动机：
 // 用 stdio 包执行器拿下 root 代码执行，或用 http/sse 把平台变成已认证 SSRF 原语。
+//
+// 夹具用 RFC 5737 文档保留地址，不写真实 MCP 服务地址：这些文件会进版本库，
+// 真实地址会连带暴露本机 MCP 拓扑。
 func TestValidateMCPDefinitionRejectsRisky(t *testing.T) {
 	cases := []struct {
 		desc string
@@ -70,7 +73,7 @@ func TestValidateMCPDefinitionRejectsRisky(t *testing.T) {
 		{"stdio 命令为空", mcpToolInput{Transport: "stdio"}},
 		{"file 协议", mcpToolInput{Transport: "http", URL: "file:///etc/passwd"}},
 		{"缺 host", mcpToolInput{Transport: "http", URL: "http://"}},
-		{"内嵌 userinfo", mcpToolInput{Transport: "http", URL: "http://u:p@172.19.0.1:8001/mcp"}},
+		{"内嵌 userinfo", mcpToolInput{Transport: "http", URL: "http://u:p@203.0.113.10:8001/mcp"}},
 		{"未知 transport", mcpToolInput{Transport: "grpc", URL: "http://x"}},
 	}
 	for _, c := range cases {
@@ -82,9 +85,9 @@ func TestValidateMCPDefinitionRejectsRisky(t *testing.T) {
 
 func TestValidateMCPDefinitionAllowsNormal(t *testing.T) {
 	for _, u := range []string{
-		"http://172.19.0.1:8001/mcp",
+		"http://203.0.113.10:8001/mcp",
 		"https://mcp.example.com/sse",
-		"http://172.19.0.1:9879/sse",
+		"http://203.0.113.10:9879/sse",
 	} {
 		in := mcpToolInput{Transport: "http", URL: u}
 		if tr, err := validateMCPDefinition(&in); err != nil || tr != "" {

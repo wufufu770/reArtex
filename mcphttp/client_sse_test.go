@@ -108,20 +108,22 @@ func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
 }
 
 func TestReadSSEEndpointSameOrigin(t *testing.T) {
-	const base = "http://172.19.0.1:9879/sse"
+	// 夹具用 RFC 5737 文档保留地址，不写真实 MCP 服务地址：
+	// 这些文件会进版本库，而真实地址会连带暴露本机 MCP 拓扑。
+	const base = "http://203.0.113.10:9879/sse"
 	cases := []struct {
 		name    string
 		data    string
 		want    string
 		wantErr string
 	}{
-		{name: "同源绝对地址(MCP 规范用法)", data: "http://172.19.0.1:9879/message?sessionId=x", want: "http://172.19.0.1:9879/message?sessionId=x"},
-		{name: "同源相对路径", data: "/message?sessionId=x", want: "http://172.19.0.1:9879/message?sessionId=x"},
-		{name: "同源且大小写不同", data: "http://172.19.0.1:9879/message", want: "http://172.19.0.1:9879/message"},
+		{name: "同源绝对地址(MCP 规范用法)", data: "http://203.0.113.10:9879/message?sessionId=x", want: "http://203.0.113.10:9879/message?sessionId=x"},
+		{name: "同源相对路径", data: "/message?sessionId=x", want: "http://203.0.113.10:9879/message?sessionId=x"},
+		{name: "同源且大小写不同", data: "http://203.0.113.10:9879/message", want: "http://203.0.113.10:9879/message"},
 		{name: "跨主机", data: "http://evil.example.com/message", wantErr: "跨源端点被拒绝"},
-		{name: "跨端口", data: "http://172.19.0.1:9999/message", wantErr: "跨源端点被拒绝"},
-		{name: "跨 scheme", data: "https://172.19.0.1:9879/message", wantErr: "跨源端点被拒绝"},
-		{name: "带 userinfo", data: "http://u:p@172.19.0.1:9879/message", wantErr: "拒绝带 userinfo"},
+		{name: "跨端口", data: "http://203.0.113.10:9999/message", wantErr: "跨源端点被拒绝"},
+		{name: "跨 scheme", data: "https://203.0.113.10:9879/message", wantErr: "跨源端点被拒绝"},
+		{name: "带 userinfo", data: "http://u:p@203.0.113.10:9879/message", wantErr: "拒绝带 userinfo"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

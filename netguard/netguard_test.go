@@ -29,8 +29,11 @@ func TestAgentEgressBlocksSensitiveRanges(t *testing.T) {
 
 // 对渗透 agent 而言内网通常就是目标，放行 RFC1918 是刻意的取舍，照搬通知侧的
 // 收紧会把内网测评直接废掉。
+//
+// 夹具取 RFC1918 段内的通用地址，不写本机实际网关：这些文件会进版本库，
+// 真实地址会连带暴露本机网络拓扑。
 func TestAgentEgressAllowsPrivateTargets(t *testing.T) {
-	for _, s := range []string{"10.0.0.5", "172.19.0.1", "192.168.1.10"} {
+	for _, s := range []string{"10.0.0.5", "172.16.0.1", "192.168.1.10"} {
 		if AgentEgress.blockedIP(net.ParseIP(s)) {
 			t.Fatalf("%s 属 RFC1918，对 agent 应放行（内网常是渗透目标）", s)
 		}
@@ -109,7 +112,7 @@ func TestCheckURLHost(t *testing.T) {
 	allow := []string{
 		"https://target.example.com/path",
 		"http://192.168.31.10/",
-		"http://172.19.0.1:8001/mcp",
+		"http://172.16.0.1:8001/mcp",
 	}
 	for _, u := range allow {
 		if err := AgentEgress.CheckURLHost(u); err != nil {
