@@ -49,6 +49,10 @@ func TestShortCircuitPlatformCredentialsDeny(t *testing.T) {
 		{"proc cmdline", `{"file_path":"/proc/1234/cmdline"}`},
 		{"proc mem", `{"command":"cat /proc/9/mem"}`},
 		{"proc self environ", `{"command":"cat /proc/self/environ"}`},
+		{"proc environ glob", `{"command":"cat /proc/*/environ"}`},
+		{"proc environ 变量展开", `{"command":"cat /proc/$$/environ"}`},
+		{"proc environ 字符类 glob", `{"command":"cat /proc/[0-9]*/environ"}`},
+		{"proc environ 文件名 glob", `{"command":"cat /proc/1/envi*on"}`},
 	}
 	for _, c := range deny {
 		dec := shortCircuit("Bash", []byte(c.in))
@@ -71,6 +75,11 @@ func TestShortCircuitMustNotBlockPentestWork(t *testing.T) {
 		{"读目标 jwt.key", `{"command":"cat /app/data/sessions/conv-1/jwt.key"}`},
 		{"读目标 pem", `{"command":"cat /app/data/sessions/conv-1/private.pem"}`},
 		{"本机侦察 /proc/net/tcp", `{"command":"cat /proc/net/tcp"}`},
+		// cmdline 维持现状：字面数字形态（/proc/1234/cmdline）仍被拦，
+		// 只有 glob 形态放过。负向用例只能用 glob 形态，否则断言会失败。
+		{"本机侦察 /proc/cpuinfo", `{"command":"cat /proc/cpuinfo"}`},
+		{"本机侦察 /proc/*/cmdline", `{"command":"cat /proc/*/cmdline"}`},
+		{"本机侦察 /proc/self/status", `{"command":"cat /proc/self/status"}`},
 		{"列进程", `{"command":"ps aux"}`},
 	}
 	for _, c := range allow {

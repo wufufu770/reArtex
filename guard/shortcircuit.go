@@ -103,9 +103,15 @@ var platformCredentialRe = regexp.MustCompile(
 		// 相对路径回溯到 /app/jwt.key（cwd 为 /app/data/sessions/<key>，
 		// 三层 .. 即到 /app）
 		`|(?:\.\./){2,}jwt\.key` +
-		// /proc 族：任意 PID 的环境块 / 命令行 / 内存
-		`|/proc/self/environ` +
-		`|/proc/\d+/environ` +
+		// /proc 族：任意 PID 的环境块 / 命令行 / 内存。
+		// environ 用一条覆盖形态的规则收口：pid 段可以是数字、self、*、
+		// [0-9]*、$$ 等任意写法，文件名段也可能是 glob（envi*on）。
+		// 只认字面形态的话，cat /proc/*/environ 就绕过去了。
+		//
+		// 这是纵深防御，不是闭合：运行时才成形的路径（find /proc -name environ
+		// -exec cat {} \;）字符串预筛挡不住。真正的闭合靠供给侧 —— 凭据根本
+		// 不进进程环境块（ARTEX_PG_DSN_FILE + 启动即读入即删除）。
+		`|/proc/[^\s"']*envi[^\s"']*` +
 		`|/proc/\d+/cmdline` +
 		`|/proc/\d+/mem` +
 		`)`,
