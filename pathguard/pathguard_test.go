@@ -102,6 +102,8 @@ func TestBlocksProcEnvironment(t *testing.T) {
 
 // 渗透工作流不能被误伤：agent 的工作区、证据目录、/tmp、系统侦察文件都必须放行。
 // 这条用例对应 Oracle 的「不要做根目录收敛」——收在这里就是事故。
+//
+// 家目录用通用占位，不写真实用户路径：这些文件会进版本库。
 func TestAllowsPentestPaths(t *testing.T) {
 	withSecretRoots(t, "/app/jwt.key", "/app/.env", "/app/data/traffic/_ca")
 	for _, p := range []string{
@@ -111,7 +113,7 @@ func TestAllowsPentestPaths(t *testing.T) {
 		"/tmp/nmap-out.xml",
 		"/etc/passwd",
 		"/var/www/html/index.php",
-		"/home/kali/Desktop/dig/shared/intel/TARGET.md",
+		"/home/analyst/workspace/intel/TARGET.md",
 	} {
 		for _, tool := range []string{"Read", "Write", "Edit"} {
 			if err := call(t, tool, "file_path", p); err != nil {
