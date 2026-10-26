@@ -107,7 +107,7 @@ if cfg, ok := s.loadLLMConfig(); ok {   // → "LLM configured from DB"
 | A1 | `docker exec artex-artex-1 sh -c 'tr "\000" "\n" < /proc/1/environ \| grep -E "ARTEX_PG_DSN=\|_API_KEY="'` | 0 行 | 1 行 |
 | A2 | `docker exec artex-artex-1 sh -c 'cat /proc/*/environ \| tr "\000" "\n" \| grep -c "^ARTEX_PG_DSN=postgres"'` | 0 | 8 |
 | A3 | 5 种 glob/展开形态喂 `shortCircuit("Bash", …)` | 全部 `deny` | 5 种 BYPASS |
-| A4 | `/proc/net/tcp`、`/proc/cpuinfo`、`/proc/1/cmdline`、`/proc/self/status` | 不拦 | 不拦（须保持） |
+| A4 | `/proc/net/tcp`、`/proc/cpuinfo`、`/proc/*/cmdline`、`/proc/self/status` | 不拦 | 不拦（须保持） |
 | A5 | 重建前后 `findings` / `assets` / `conversations` 行数 | 不变 | — |
 | A6 | `go build ./...` | exit 0 | 0 |
 | A7 | `go test ./config/... ./guard/... ./db/...` | 全绿 | 全绿 |
@@ -328,11 +328,17 @@ func SecretEnvLeak() []string {
 **负向**（必须**不拦**，守住渗透正事）：
 
 ```
-{"本机网络侦察",  `{"command":"cat /proc/net/tcp"}`},
-{"本机 cpu 信息",  `{"command":"cat /proc/cpuinfo"}`},
-{"进程命令行侦察",  `{"file_path":"/proc/1234/cmdline"}`},
-{"进程状态侦察",    `{"command":"cat /proc/self/status"}`},
+{"本机网络侦察",        `{"command":"cat /proc/net/tcp"}`},      // 既有 allow 表已有
+{"本机 cpu 信息",        `{"command":"cat /proc/cpuinfo"}`},
+{"进程命令行 glob 形态",   `{"command":"cat /proc/*/cmdline"}`},
+{"进程状态侦察",          `{"command":"cat /proc/self/status"}`},
 ```
+
+**注意 cmdline 的口径**（与 §4.3 一致）：按 Sir 决定 cmdline/mem 维持现状，故
+- `/proc/<数字>/cmdline`（字面数字形态）**仍被拦** —— 既有规则 `/proc/\d+/cmdline` 不动；
+- `/proc/*/cmdline`（glob 形态）**放过** —— 这才是本批新增的 environ 规则之外的行为。
+
+因此负向用例只能用 glob 形态；把字面数字形态写成负向用例会直接失败。
 
 负向用例的必要性来自仓库既有纪律（`guard/shortcircuit.go` 顶部注释：每条安全规则必须配「不许误伤渗透正事」的反向用例）。
 
