@@ -3,6 +3,7 @@
 package db
 
 import (
+	"os"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -90,8 +91,29 @@ func coordinateWithSchemaMigration(tx *sql.Tx) error {
 // Precedence: env ARTEX_PG_DSN > config file (config.json). There is no
 // built-in default — it errors if neither source is configured.
 func DSN() (dsn, source string, err error) {
-	return config.PostgresDSN()
+	if dsnCached != "" {
+		return dsnCached, dsnSource, nil
+	}
+	dsn, source, err = config.PostgresDSN()
+	if err != nil {
+		return "", "", err
+	}
+	dsnCached, dsnSource = dsn, source
+	// 读入即从进程环境抹掉。norma 的 Bash 子进程无条件继承 os.Environ()
+	// （norma/tool/task.go:144 的 append(os.Environ(), extra...)），留着就等于
+	// 让 agent 敲一条 env / printenv 就读出数据库口令。
+	//
+	// 抹除放在这一层而不是 config.PostgresDSN()：后者是通用的取值函数，缓存会改掉
+	// 它的「env > 配置文件」优先级语义；这一层每进程只被启动期的 NewManager 调一次，
+	// 值在进程生命周期内本就不变。
+	_ = os.Unsetenv("ARTEX_PG_DSN")
+	return dsnCached, dsnSource, nil
 }
+
+var (
+	dsnCached string
+	dsnSource string
+)
 
 // DB wraps the shared *sql.DB. PG handles its own connection pool + concurrency
 // (MVCC), so unlike the old SQLite store there is no process-wide write mutex.
