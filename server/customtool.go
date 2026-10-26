@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -397,7 +398,7 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 	defer cancel()
 	c := exec.CommandContext(runCtx, interp, tmp)
 	c.Dir = workDir
-	c.Env = append(os.Environ(), sessionEnv...) // 会话代理 env
+	c.Env = append(toolScriptBaseEnv(), sessionEnv...) // 会话代理 env
 	for k, v := range params {                  // 标量参数镜像成 TOOL_<NAME>
 		if sv, ok := scalarStr(v); ok {
 			c.Env = append(c.Env, "TOOL_"+strings.ToUpper(k)+"="+sv)
@@ -416,6 +417,35 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 }
 
 // ---------- http:原生请求 + 代理 ----------
+
+// toolScriptEnvAllowlist 是自定义脚本工具允许从宿主进程继承的环境变量。
+//
+// 用白名单而非黑名单：进程环境里可能存在本次未预料到的凭据（新增的 *_TOKEN、
+// CI 注入的变量、第三方 SDK 塞进来的），黑名单永远追不上新变量。
+var toolScriptEnvAllowlist = map[string]bool{
+	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "LANGUAGE": true, "TZ": true,
+	"TERM": true, "TMPDIR": true, "PWD": true, "HOSTNAME": true, "SHLVL": true,
+	"PYTHONPATH": true, "PYTHONHOME": true, "PYTHONUNBUFFERED": true,
+	"VIRTUAL_ENV": true, "PYTHONHASHSEED": true,
+	// 代理与 CA：会话 env 会覆盖同名项，这里给出缺省值。
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
+	"http_proxy": true, "https_proxy": true, "no_proxy": true, "all_proxy": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
+	"REQUESTS_CA_BUNDLE": true, "CURL_CA_BUNDLE": true,
+}
+
+// toolScriptBaseEnv 返回白名单内的宿主环境变量。
+func toolScriptBaseEnv() []string {
+	out := make([]string, 0, len(toolScriptEnvAllowlist))
+	for _, kv := range os.Environ() {
+		k, _, ok := strings.Cut(kv, "=")
+		if ok && toolScriptEnvAllowlist[k] {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
 
 func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec httpExec
@@ -442,7 +472,19 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 		req.Header.Set(k, renderTemplate(v, params, identity))
 	}
 	client := &http.Client{Timeout: timeoutOr(spec.TimeoutMs, 30000)}
-	if tr := s.httpProxyTransport(spec); tr != nil {
+	tr := s.httpProxyTransport(spec)
+	if tr == nil {
+		// 无代理：目标由本进程直连，拨号期守卫是权威判据，能挡住 DNS 重绑定与重定向。
+		client.Transport = netguard.AgentEgress.Transport(nil)
+		client.CheckRedirect = netguard.AgentEgress.CheckRedirect
+	} else {
+		// 走代理时目标由代理端解析，拨号守卫只能看见代理地址——录制代理本身就在
+		// 127.0.0.1:8788，套上守卫会把功能整个拦死。故此处只做 URL 主机的字面预检：
+		// 挡得住明写的 169.254.169.254 / 环回，挡不住 DNS 重绑定与跨主机重定向。
+		// 这是已知残留，不是等价防护。
+		if err := netguard.AgentEgress.CheckURLHost(rawURL); err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
 		client.Transport = tr
 	}
 	resp, err := client.Do(req)
