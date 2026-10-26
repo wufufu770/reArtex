@@ -2459,7 +2459,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       profile_id: 0,
       prompt: "",
       timeout_seconds: 15,
-      fail_action: "allow",
+      fail_action: "deny",
       ask_timeout_seconds: 300,
       ask_timeout_action: "deny",
     };

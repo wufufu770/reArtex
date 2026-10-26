@@ -311,9 +311,13 @@ const (
 )
 
 // Judge default values.
+//
+// FailAction 默认 deny：判官不可用（超时、报错、输出不可解析）时若回落 allow，
+// 等于「审批形同虚设」—— 只要让判官失效就能绕过全部规则。管理员仍可在
+// 「系统 → 命令拦截」里显式改成 allow / ask，那是有意的放宽。
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
+	defaultJudgeFailAction       = "deny"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
 )
@@ -330,15 +334,29 @@ type JudgeConfig struct {
 	AskTimeoutAction  string `json:"ask_timeout_action"` // allow|deny
 }
 
+// judgeFailAction 解析 llm_judge_fail_action：缺失或非法值回落到
+// defaultJudgeFailAction。
+//
+// 抽成纯函数是为了能在没有数据库的环境里确定性地测这条安全默认值 —— 它
+// 是「判官不可用时到底放不放行」的唯一开关。
+func judgeFailAction(stored string) string {
+	switch v := strings.TrimSpace(stored); v {
+	case "allow", "ask", "deny":
+		return v
+	}
+	return defaultJudgeFailAction
+}
+
 // judgeConfig reads the judge configuration from settings, applying defaults for
 // missing/invalid keys. Read fresh on each fallback judgement — the LLM call that
 // follows dwarfs a few KV reads, and freshness avoids a cache-invalidation path.
 func (i *Interceptor) judgeConfig() JudgeConfig {
+	failStored, _, _ := i.db.GetSetting(settingJudgeFailAction)
 	c := JudgeConfig{
 		Enabled:           i.db.GetBool(settingJudgeEnabled, false),
 		ProfileID:         int64(i.getSettingInt(settingJudgeProfileID, 0)),
 		TimeoutSeconds:    i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
-		FailAction:        i.getSettingChoice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
+		FailAction:        judgeFailAction(failStored),
 		AskTimeoutSeconds: i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
 		AskTimeoutAction:  i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
 	}
