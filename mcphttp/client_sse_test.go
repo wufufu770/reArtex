@@ -1,6 +1,7 @@
 package mcphttp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -103,5 +104,44 @@ func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
 	got, err := c.Call(ctx, "echo", map[string]any{"value": "x"})
 	if err != nil || got != "ok" {
 		t.Fatalf("Call() = %q, %v", got, err)
+	}
+}
+
+func TestReadSSEEndpointSameOrigin(t *testing.T) {
+	const base = "http://172.19.0.1:9879/sse"
+	cases := []struct {
+		name    string
+		data    string
+		want    string
+		wantErr string
+	}{
+		{name: "同源绝对地址(MCP 规范用法)", data: "http://172.19.0.1:9879/message?sessionId=x", want: "http://172.19.0.1:9879/message?sessionId=x"},
+		{name: "同源相对路径", data: "/message?sessionId=x", want: "http://172.19.0.1:9879/message?sessionId=x"},
+		{name: "同源且大小写不同", data: "http://172.19.0.1:9879/message", want: "http://172.19.0.1:9879/message"},
+		{name: "跨主机", data: "http://evil.example.com/message", wantErr: "跨源端点被拒绝"},
+		{name: "跨端口", data: "http://172.19.0.1:9999/message", wantErr: "跨源端点被拒绝"},
+		{name: "跨 scheme", data: "https://172.19.0.1:9879/message", wantErr: "跨源端点被拒绝"},
+		{name: "带 userinfo", data: "http://u:p@172.19.0.1:9879/message", wantErr: "拒绝带 userinfo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "event: endpoint\ndata: " + tc.data + "\n\n"
+			got, err := readSSEEndpoint(bufio.NewReader(strings.NewReader(stream)), base)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("期望被拒绝，实际放行: %q", got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("错误信息未含 %q: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("不应被拒绝: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

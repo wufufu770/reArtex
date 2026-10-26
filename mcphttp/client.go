@@ -180,6 +180,10 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 }
 
 func readSSEEndpoint(r *bufio.Reader, base string) (string, error) {
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -197,15 +201,33 @@ func readSSEEndpoint(r *bufio.Reader, base string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("mcp sse endpoint URL: %w", err)
 		}
-		if !u.IsAbs() {
-			b, err := url.Parse(base)
-			if err != nil {
-				return "", err
-			}
-			candidate = b.ResolveReference(u).String()
+		// 绝对地址原本直接放行、只有相对地址才做 ResolveReference。统一走一遍才能拿到
+		// 最终形态比对；对绝对地址它是恒等变换，所以既有行为不变。
+		resolved := b.ResolveReference(u)
+		if err := sameOriginEndpoint(b, resolved); err != nil {
+			return "", err
 		}
-		return candidate, nil
+		return resolved.String(), nil
 	}
+}
+
+// sameOriginEndpoint 拒绝 MCP 服务端自报的、指向别处的消息端点。
+//
+// 必要性：端点由被连接的 MCP 服务端通过 SSE 的 data: 行自行公告，而 legacyRoundTrip
+// 随后会把全部请求头 POST 过去——其中含 mcp_servers.env 提供的 Authorization /
+// X-API-Key。零校验时，连上任意 SSE 端点就等价于把平台凭据交给它指定的任意主机。
+// 端口计入判定：换端口即换 origin，可能落到另一台机器的明文监听端口。
+func sameOriginEndpoint(base, u *url.URL) error {
+	if u.User != nil {
+		return fmt.Errorf("mcp sse endpoint: 拒绝带 userinfo 的端点 %q", u.Redacted())
+	}
+	if !strings.EqualFold(u.Scheme, base.Scheme) {
+		return fmt.Errorf("mcp sse endpoint: 跨源端点被拒绝（scheme %q != %q）", u.Scheme, base.Scheme)
+	}
+	if !strings.EqualFold(u.Host, base.Host) {
+		return fmt.Errorf("mcp sse endpoint: 跨源端点被拒绝（host %q != %q）", u.Redacted(), base.Host)
+	}
+	return nil
 }
 
 func (c *Client) readLegacySSE(r *bufio.Reader) {
