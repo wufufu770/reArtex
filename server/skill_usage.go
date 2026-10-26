@@ -27,21 +27,27 @@ type meteredSkill struct {
 	actool.CoreTool
 	pg       *db.DB
 	reg      *skill.Registry
+	skillDir string
 	agentKey string
 	ri       agent.RunInfo
 }
 
 // meterSkillTool returns t unchanged when there is no DB to meter into.
-func meterSkillTool(t actool.CoreTool, pg *db.DB, reg *skill.Registry, agentKey string, ri agent.RunInfo) actool.CoreTool {
+func meterSkillTool(t actool.CoreTool, pg *db.DB, reg *skill.Registry, skillDir, agentKey string, ri agent.RunInfo) actool.CoreTool {
 	if pg == nil {
 		return t
 	}
-	return &meteredSkill{CoreTool: t, pg: pg, reg: reg, agentKey: agentKey, ri: ri}
+	return &meteredSkill{CoreTool: t, pg: pg, reg: reg, skillDir: skillDir, agentKey: agentKey, ri: ri}
 }
 
 func (m *meteredSkill) Call(ctx context.Context, input json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
 	m.record(input)
-	return m.CoreTool.Call(ctx, input, tc)
+	res, err := m.CoreTool.Call(ctx, input, tc)
+	if err != nil {
+		return res, err
+	}
+	m.demoteIfUntrusted(&res, input)
+	return res, nil
 }
 
 // record appends the ledger row. Best-effort by design: a metering failure must
