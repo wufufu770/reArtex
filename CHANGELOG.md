@@ -4,6 +4,40 @@
 
 ## [Unreleased]
 
+### 安全
+
+#### 修复的问题
+
+- **平台凭据不再残留在进程环境块**：`ARTEX_PG_DSN` 原先经容器环境变量下发，而环境变量会留在进程的 exec 期环境块里 —— `/proc/<pid>/environ` 对同 UID 的 agent 子进程可读，一条 `cat /proc/*/environ` 就能取走数据库口令，进而读到 LLM key 与全部会话/流量/漏洞数据。
+  新增 `ARTEX_PG_DSN_FILE`：DSN 由一次性文件供给，进程启动读入后立刻清零并删除该文件；部署侧在 `exec` 之前 `unset` 环境变量，使进程环境块内不再有任何秘密。
+  配套的启动自检会读取 `/proc/self/environ` 并给出「未残留 / 仍残留」的明确结论 —— 部署形态退化时当场喊出来，而不是默默「看起来加固了」。
+- **平台环境块拦截覆盖 glob 与展开形态**：原规则只认 `/proc/self/environ` 与 `/proc/<数字>/environ` 两种字面形态，`/proc/*/environ`、`/proc/$$/environ`、`/proc/[0-9]*/environ`、`/proc/1/envi*on` 均可绕过。现改为一条覆盖形态的规则。
+- **MCP 注册工具由 ask 收紧为 deny**：stdio 传输会以容器 root 拉起任意二进制，http/sse 传输则把 env 字段当 HTTP header 回放。新建 MCP 等价于「让平台对任意地址带任意 header 发请求」，不应由 agent 在测评中途自行开通。
+- **MCP 定义写库侧校验**：与短路表构成双层拦截；短路表被 `ARTEX_DISABLE_SHORT_CIRCUIT=1` 停用时，写库侧仍拦得住。
+- **MCP SSE 端点同源校验**：端点由被连接的 MCP 服务端自行公告，校验 scheme/host/port 并拒绝带 userinfo 的端点，阻断 Authorization / X-API-Key 向任意主机回放。
+- **控制面凭据读入即从进程环境抹除**：`ARTEX_PG_DSN` 与 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 读入后立即 `os.Unsetenv`，避免子进程 `env` / `printenv` 直接读走。
+- **自定义脚本工具改白名单继承宿主环境**：黑名单追不上新增的 `*_TOKEN` 一类变量。
+- **工具执行前的平台侧安全策略**：在工具真正执行前按解析后的真实参数判定，短路表负责「该不该做」，策略装饰器负责「够不够得着」。
+- **skill 信任分档**：记录 skill 的写入来源 —— operator 写入的照常注入，agent 写入的降权注入；失败一律 fail-closed。
+
+#### 新增
+
+- `ARTEX_PG_DSN_FILE`：DSN 文件来源（读入即清零并删除），优先级低于 `ARTEX_PG_DSN`、高于配置文件。
+- `ARTEX_REQUIRE_ENV_SCRUB`：设为 `1` 时，若启动自检发现平台凭据仍残留在 `/proc/self/environ`，拒绝启动。默认只告警。
+- 启动自检：读取 `/proc/self/environ` 并在日志中给出明确结论。
+
+### 已知残留
+
+- `/proc/<pid>/mem` 读父进程内存仍可取到 DSN 字符串（需 ptrace 权限）。本批未处理。
+- 运行时才成形的路径（如 `find /proc -name environ -exec cat {} \;`）仍能绕过字符串预筛。正则只是纵深防御，闭合靠的是凭据不进环境块这一供给侧措施。
+- `docker inspect` 仍可见容器配置里的 DSN（需宿主 / docker socket 权限）。同理，`docker exec` 拉起的进程会继承容器配置面的 env —— 但 agent 的 Bash 是 artex 的子孙进程，继承的是 artex 的（干净的）环境块，不在此列。
+- 平台环境块规则作用在整个工具入参 JSON 上，故「把含 `/proc/…/environ` 字样的内容写进文件」也会被拦。
+- `llm_profiles.api_key` 仍以明文存于数据库（需数据库读权限才能取到）。
+- G-17 审计事件骨架与 digest 链（需改表结构）—— 短路表 deny 目前仍只落内存切片，进程退出即失。
+- G-09 ask 队列治理（需 per-agent 聚合计数）。
+- G-04④ 的「拒绝创建新 run」仍以最小工具面降级代替，不是硬拒绝。
+- 尚未做运行时端到端验证：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认防线在链路中生效。
+
 ## [0.3.15] - 2026-10-07
 
 ### 拦截
