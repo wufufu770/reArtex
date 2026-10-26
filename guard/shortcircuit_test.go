@@ -4,7 +4,7 @@ import "testing"
 
 func TestShortCircuitPlatformToolsAsk(t *testing.T) {
 	for _, tool := range []string{
-		"create_mcp", "update_mcp", "create_custom_tool", "update_custom_tool",
+		"create_custom_tool", "update_custom_tool",
 		"create_skill", "update_skill_file", "delete_assets_by_host",
 	} {
 		dec := shortCircuit(tool, []byte(`{"command":"http://127.0.0.1"}`))
@@ -16,6 +16,23 @@ func TestShortCircuitPlatformToolsAsk(t *testing.T) {
 		}
 		if !dec.TimeoutEnabled || dec.TimeoutSeconds != 60 || dec.TimeoutAction != "deny" {
 			t.Fatalf("%s 的 ask 超时须为 60s/deny，得到 %+v", tool, dec)
+		}
+	}
+}
+
+// MCP 注册与「改平台配置」不同档：它能开通凭据后端，故硬拦且无人工放行路径。
+// 特别断言没有 ask 超时字段——若被误并回 ask 档，这里会失败。
+func TestShortCircuitMCPDeny(t *testing.T) {
+	for _, tool := range []string{"create_mcp", "update_mcp"} {
+		dec := shortCircuit(tool, []byte(`{"name":"evil","transport":"http","url":"http://169.254.169.254/"}`))
+		if dec == nil {
+			t.Fatalf("%s 应命中短路表", tool)
+		}
+		if dec.Action != "deny" {
+			t.Fatalf("%s 应为 deny，得到 %s", tool, dec.Action)
+		}
+		if dec.TimeoutEnabled || dec.TimeoutSeconds != 0 {
+			t.Fatalf("%s 为 deny 档，不应带 ask 超时语义，得到 %+v", tool, dec)
 		}
 	}
 }

@@ -53,14 +53,17 @@ func disableFlagFromEnv() (bool, string) {
 	}
 }
 
-// platformAskTools 是 G-01① 的对象：改平台配置的工具，一律 ask（人工确认），
-// 不直接 deny —— 建 MCP / 自定义工具 / skill 是 auto agent 的合法日常操作，
-// 拦死会废掉平台运维能力；但必须经人确认。
-//
-// 与 V2 能力影响论证一致：这 7 件属「改平台配置」而非「做测评任务」。
+// platformDenyTools 比 ask 更严的一档。MCP 注册是凭据汇：stdio 传输会以容器 root
+// 拉起任意二进制，http/sse 传输则把 env 字段当 HTTP header 回放。所以「新建 MCP」
+// 等价于「让平台对任意地址带任意 header 发请求」，不该由 agent 在测评中途自行开通。
+var platformDenyTools = map[string]bool{
+	"create_mcp": true,
+	"update_mcp": true,
+}
+
+// platformAskTools 是 G-01① 的对象：改平台配置的工具一律 ask，不直接 deny —— 建自定义
+// 工具 / skill 是 auto agent 的合法日常操作，拦死会废掉平台运维能力。MCP 见上。
 var platformAskTools = map[string]bool{
-	"create_mcp":            true,
-	"update_mcp":            true,
 	"create_custom_tool":    true,
 	"update_custom_tool":    true,
 	"create_skill":          true,
@@ -118,8 +121,11 @@ var platformCredentialLooseRe = regexp.MustCompile(
 	`(?i)/app/j[\s._-]*w[\s._-]*t[\s._-]*\.?[\s._-]*k[\s._-]*e[\s._-]*y`)
 
 const (
-	msgPlatformAsk = "该工具用于修改平台自身配置（建/改 MCP、自定义工具、skill、资产库）。" +
+	msgPlatformAsk = "该工具用于修改平台自身配置（建/改自定义工具、skill、资产库）。" +
 		"已转人工确认，确认后即可执行。"
+	msgMCPDeny = "MCP 注册属于凭据汇：stdio 会以容器 root 拉起任意二进制，" +
+		"http/sse 会把 env 当 HTTP header 对任意地址回放。agent 不得自行开通，" +
+		"需要时请由 owner 在管理界面配置。"
 	msgSensitiveDeny = "该路径指向 ARTEX 平台自身的签名密钥或进程环境" +
 		"（含 LLM API Key / 数据库口令），属于控制面，不是渗透目标资产。已禁止读取。"
 )
@@ -129,11 +135,19 @@ const (
 //
 // 动作语义：
 //
-//	deny —— 硬拦，无人工放行路径（平台自身凭据）
+//	deny —— 硬拦，无人工放行路径（平台自身凭据、MCP 注册）
 //	ask  —— 转人工审批（改平台配置的工具）
 func shortCircuit(toolName string, input []byte) *intercept.Decision {
 	if !ShortCircuitEnabled {
 		return nil
+	}
+	// 必须独立求值而非并入 platformAskTools：deny 无人工放行路径，ask 有 60s 超时兜底，合并即丢一档语义。
+	if platformDenyTools[toolName] {
+		return &intercept.Decision{
+			Action:   "deny",
+			RuleName: "[代码常量] MCP 注册属凭据汇",
+			Message:  msgMCPDeny,
+		}
 	}
 	// G-01①：平台工具一律 ask
 	if platformAskTools[toolName] {
