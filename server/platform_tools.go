@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +117,7 @@ func (s *Server) toolCreateSkill() actool.CoreTool {
 				_ = os.RemoveAll(path)
 				return actool.Errorf(err.Error()), nil
 			}
+			recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted)
 			return actool.Text("skill created: " + a.Name), nil
 		})
 }
@@ -152,6 +154,10 @@ func (s *Server) toolUpdateSkillFile() actool.CoreTool {
 			}
 			if err := os.WriteFile(full, []byte(a.Content), 0o644); err != nil {
 				return actool.Errorf(err.Error()), nil
+			}
+			// 只有 SKILL.md 会被注入对话；改 scripts/ 不改变注入内容，故不动信任档。
+			if clean == "SKILL.md" {
+				recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted)
 			}
 			return actool.Text("skill file written: " + a.Name + "/" + clean), nil
 		})
@@ -291,6 +297,33 @@ func (a mcpToolInput) toDB() *db.MCPServer {
 	}
 }
 
+// validateMCPDefinition 是写库侧兜底校验，与 guard/shortcircuit.go 的 MCP 硬拦构成双层。
+// 需要第二层的原因：ARTEX_DISABLE_SHORT_CIRCUIT=1 是受支持的应急回滚配置，启用后
+// 短路表整体停用，只剩这里。规则复用拨号侧 validateStdioCommand，避免两处判定漂移。
+func validateMCPDefinition(a *mcpToolInput) (string, error) {
+	switch a.Transport {
+	case "stdio":
+		return validateStdioCommand(a.Command)
+	case "http", "sse":
+		u, err := url.Parse(a.URL)
+		if err != nil {
+			return "", fmt.Errorf("URL 解析失败: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return "", fmt.Errorf("MCP URL 只允许 http/https，得到 %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return "", fmt.Errorf("MCP URL 缺少 host")
+		}
+		if u.User != nil {
+			return "", fmt.Errorf("MCP URL 不允许内嵌 userinfo")
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("transport 只允许 stdio/http/sse，得到 %q", a.Transport)
+	}
+}
+
 func (s *Server) toolCreateMCP() actool.CoreTool {
 	return wrTool("create_mcp", "创建一个 MCP 服务器(stdio/http/sse)。创建后其工具需按 agent 可见性授权。",
 		mcpSchema(false),
@@ -300,6 +333,13 @@ func (s *Server) toolCreateMCP() actool.CoreTool {
 			a.ID = 0
 			if strings.TrimSpace(a.Name) == "" || strings.TrimSpace(a.Transport) == "" {
 				return actool.Errorf("name / transport 必填"), nil
+			}
+			resolved, err := validateMCPDefinition(&a)
+			if err != nil {
+				return actool.Errorf(fmt.Sprintf("MCP 定义不合规：%v", err)), nil
+			}
+			if resolved != "" {
+				a.Command = resolved
 			}
 			id, err := s.m.pg.SaveMCP(a.toDB())
 			if err != nil {
@@ -317,6 +357,15 @@ func (s *Server) toolUpdateMCP() actool.CoreTool {
 			_ = json.Unmarshal(in, &a)
 			if a.ID == 0 {
 				return actool.Errorf("id 必填"), nil
+			}
+			if strings.TrimSpace(a.Transport) != "" {
+				resolved, err := validateMCPDefinition(&a)
+				if err != nil {
+					return actool.Errorf(fmt.Sprintf("MCP 定义不合规：%v", err)), nil
+				}
+				if resolved != "" {
+					a.Command = resolved
+				}
 			}
 			if _, err := s.m.pg.SaveMCP(a.toDB()); err != nil {
 				return actool.Errorf(err.Error()), nil
