@@ -56,3 +56,47 @@ func TestSkillTools(t *testing.T) {
 		t.Fatal("path traversal should be rejected")
 	}
 }
+
+// validateMCPDefinition 是 guard 硬拦之外的兜底层，用例要覆盖两类真实绕过动机：
+// 用 stdio 包执行器拿下 root 代码执行，或用 http/sse 把平台变成已认证 SSRF 原语。
+func TestValidateMCPDefinitionRejectsRisky(t *testing.T) {
+	cases := []struct {
+		desc string
+		in   mcpToolInput
+	}{
+		{"stdio 用 npx", mcpToolInput{Transport: "stdio", Command: "npx"}},
+		{"stdio 用 bash", mcpToolInput{Transport: "stdio", Command: "/bin/bash"}},
+		{"stdio 用 python3", mcpToolInput{Transport: "stdio", Command: "python3"}},
+		{"stdio 命令为空", mcpToolInput{Transport: "stdio"}},
+		{"file 协议", mcpToolInput{Transport: "http", URL: "file:///etc/passwd"}},
+		{"缺 host", mcpToolInput{Transport: "http", URL: "http://"}},
+		{"内嵌 userinfo", mcpToolInput{Transport: "http", URL: "http://u:p@172.19.0.1:8001/mcp"}},
+		{"未知 transport", mcpToolInput{Transport: "grpc", URL: "http://x"}},
+	}
+	for _, c := range cases {
+		if _, err := validateMCPDefinition(&c.in); err == nil {
+			t.Fatalf("%s 应被拒: %+v", c.desc, c.in)
+		}
+	}
+}
+
+func TestValidateMCPDefinitionAllowsNormal(t *testing.T) {
+	for _, u := range []string{
+		"http://172.19.0.1:8001/mcp",
+		"https://mcp.example.com/sse",
+		"http://172.19.0.1:9879/sse",
+	} {
+		in := mcpToolInput{Transport: "http", URL: u}
+		if tr, err := validateMCPDefinition(&in); err != nil || tr != "" {
+			t.Fatalf("正常 URL %s 被误伤: %v", u, err)
+		}
+	}
+	in := mcpToolInput{Transport: "stdio", Command: "/usr/bin/playwright-mcp"}
+	got, err := validateMCPDefinition(&in)
+	if err != nil {
+		t.Fatalf("本地绝对路径 stdio 应放行: %v", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("命令应规范化为绝对路径，得到 %q", got)
+	}
+}
