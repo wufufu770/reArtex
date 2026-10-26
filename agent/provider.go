@@ -142,10 +142,41 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_BASE_URL = endpoint        (optional)
 //	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
+var (
+	envKeysRead    bool
+	anthKeyCached  string
+	oaiKeyCached   string
+)
+
+// envAPIKeys 读一次 API key 并立刻从进程环境抹掉。
+//
+// 抹除而非仅读取的原因同 config.PostgresDSN：norma 的 Bash 无条件继承
+// os.Environ()，进程环境里留着明文 key 就等于 agent 用 env / printenv 直接读走。
+// 缓存后重复调用仍能拿到值。
+func envAPIKeys() (anth, oai string) {
+	if envKeysRead {
+		return anthKeyCached, oaiKeyCached
+	}
+	anthKeyCached = os.Getenv("ANTHROPIC_API_KEY")
+	oaiKeyCached = os.Getenv("OPENAI_API_KEY")
+	envKeysRead = true
+	_ = os.Unsetenv("ANTHROPIC_API_KEY")
+	_ = os.Unsetenv("OPENAI_API_KEY")
+	return anthKeyCached, oaiKeyCached
+}
+
+// ScrubSecretEnv 把 API key 从进程环境里抹掉，无论是否用得上。
+//
+// 必须无条件调用：FromEnv 只在「DB 里没有 LLM profile」时才会被调用，而生产部署
+// 通常有 profile —— 那条路径下 env 里的明文 key 既没被读也没被抹除，而 norma 的
+// Bash 子进程无条件继承 os.Environ()，agent 一条 env 就能读到。
+func ScrubSecretEnv() {
+	envAPIKeys()
+}
+
 func FromEnv() (Config, bool) {
 	prov := os.Getenv("ARTEX_LLM_PROVIDER")
-	anthKey := os.Getenv("ANTHROPIC_API_KEY")
-	oaiKey := os.Getenv("OPENAI_API_KEY")
+	anthKey, oaiKey := envAPIKeys()
 
 	if prov == "" {
 		switch {
