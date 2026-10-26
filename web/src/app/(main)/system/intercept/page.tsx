@@ -200,7 +200,10 @@ const defaultJudge = (): JudgeConfig => ({
   profile_id: 0,
   prompt: "",
   timeout_seconds: 15,
-  fail_action: "allow",
+  // 必须与后端 defaultJudgeFailAction 一致（deny）。这是表单初值：
+  // 若这里仍是 "allow"，管理员打开页面直接保存就会把 "allow" 写回 DB，
+  // 静默恢复「判官挂了也放行」的 fail-open。
+  fail_action: "deny",
   ask_timeout_seconds: 300,
   ask_timeout_action: "deny",
 });
