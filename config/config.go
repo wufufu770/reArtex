@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -128,15 +129,22 @@ func SkillDir() string {
 
 // PostgresDSN resolves the connection string with precedence:
 //
-//	env ARTEX_PG_DSN  >  config file (database.dsn, or assembled from fields)
+//	env ARTEX_PG_DSN  >  file ARTEX_PG_DSN_FILE  >  config file (database.dsn, or assembled from fields)
 //
-// There is NO built-in fallback: when neither source supplies a database config,
+// There is NO built-in fallback: when no source supplies a database config,
 // it returns an error naming the config path it inspected, so startup fails loudly
 // instead of silently connecting to a wrong default. source describes where the
 // DSN came from (for startup logging).
 func PostgresDSN() (dsn, source string, err error) {
 	if v := strings.TrimSpace(os.Getenv("ARTEX_PG_DSN")); v != "" {
 		return v, "环境变量 ARTEX_PG_DSN", nil
+	}
+	if p := strings.TrimSpace(os.Getenv("ARTEX_PG_DSN_FILE")); p != "" {
+		d, err := readAndBurnDSNFile(p)
+		if err != nil {
+			return "", "", fmt.Errorf("读取 ARTEX_PG_DSN_FILE %q 失败: %w", p, err)
+		}
+		return d, "文件 " + p + " (读入后已删除)", nil
 	}
 	db := Load().Database
 	if d := strings.TrimSpace(db.DSN); d != "" {
@@ -146,6 +154,31 @@ func PostgresDSN() (dsn, source string, err error) {
 		return db.buildDSN(), "配置文件 " + Path() + " (database 字段)", nil
 	}
 	return "", "", fmt.Errorf("未找到数据库配置：环境变量 ARTEX_PG_DSN 未设置，且配置文件 %s 未提供 database（dsn 或 host/user/dbname）。请创建该配置文件或设置环境变量后重试", Path())
+}
+
+// readAndBurnDSNFile 读连接串后立刻把磁盘上的那份抹掉。
+//
+// 只读不删等于把秘密留在盘上等 agent 来捡：agent 的 Bash 与 artex 同 UID，
+// 且 /app/data 是它的工作区根。内容已在内存里，磁盘上的副本没有存在价值。
+//
+// 顺序是先清零再删：删除失败时至少内容不在了。
+func readAndBurnDSNFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Truncate(0)
+		_ = f.Close()
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("删除 DSN 文件失败（内容已清零）: %w", err)
+	}
+	dsn := strings.TrimSpace(string(b))
+	if dsn == "" {
+		return "", errors.New("DSN 文件为空")
+	}
+	return dsn, nil
 }
 
 func (d Database) buildDSN() string {
