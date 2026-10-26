@@ -62,7 +62,7 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
 	for i, t := range out {
-		out[i] = guardPanic(t)
+		out[i] = enforceToolPolicy(guardPanic(t))
 	}
 	return out, def, cleanup
 }
@@ -70,8 +70,10 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 // guardPanic turns a panicking tool handler into an ordinary tool error. The
 // harness runs each tool on its own goroutine, so a panic inside a handler can't
 // be recovered by the caller that started the run — it takes the whole process
-// down, and on restart the agent replays the same call and crashes again. Applied
-// last, so it covers every tool the agent can reach: domain, SDK, MCP and skill.
+// down, and on restart the agent replays the same call and crashes again. Wrapped
+// per tool in AugmentTools, so it covers every tool the agent can reach: domain,
+// SDK, MCP and skill. It sits inside enforceToolPolicy — policy decides first,
+// panic recovery only matters once a call is allowed through.
 func guardPanic(t actool.CoreTool) actool.CoreTool { return &guardedTool{CoreTool: t} }
 
 type guardedTool struct{ actool.CoreTool }
