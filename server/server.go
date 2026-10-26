@@ -252,6 +252,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	// 无论上面走的是 DB 还是 env 分支，都把 env 里的明文 key 抹掉：norma 的 Bash
+	// 子进程无条件继承进程环境，留着等于让 agent 用 env / printenv 读走。
+	agent.ScrubSecretEnv()
 	s.restoreTaskRuntimes()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()

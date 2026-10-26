@@ -1173,6 +1173,7 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1438,6 +1439,7 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "安装失败："+err.Error())
 		return
 	}
+	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
 	writeJSON(w, 201, map[string]any{"name": name, "files": entries})
 }
 
@@ -1470,6 +1472,7 @@ func (s *Server) fsDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	clearSkillTrust(s.db(), name)
 	writeJSON(w, 200, map[string]any{"deleted": name})
 }
 
@@ -1641,6 +1644,9 @@ func (s *Server) fsWriteFile(w http.ResponseWriter, r *http.Request) {
 	if err := os.WriteFile(fullPath, []byte(body.Content), 0o644); err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if file == "SKILL.md" {
+		recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
