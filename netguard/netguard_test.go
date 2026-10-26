@@ -112,7 +112,9 @@ func TestCheckURLHost(t *testing.T) {
 	allow := []string{
 		"https://target.example.com/path",
 		"http://192.168.31.10/",
-		"http://172.16.0.1:8001/mcp",
+		// 夹具用通用端口 9001，不写真实 MCP 服务端口：这些文件会进版本库，
+		// 真实端口会连带暴露本机 MCP 拓扑。
+		"http://172.16.0.1:9001/mcp",
 	}
 	for _, u := range allow {
 		if err := AgentEgress.CheckURLHost(u); err != nil {
