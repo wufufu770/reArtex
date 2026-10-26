@@ -223,3 +223,68 @@ func Redact(dsn string) string {
 	}
 	return fmt.Sprintf("%s", u.String())
 }
+
+// secretEnvKeys 是平台自身凭据在环境块里的键名。
+var secretEnvKeys = []string{"ARTEX_PG_DSN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+
+// SecretEnvReport 是启动自检的结论。
+type SecretEnvReport struct {
+	Leaks  []string // 仍可从 /proc/self/environ 读到的平台秘密键名
+	Fatal  bool     // 是否应拒绝启动
+	Reason string   // 人类可读的结论（无泄露时为空）
+}
+
+// leakSecretEnvKeys 从一段环境块字节里挑出仍带值的平台秘密键名。
+//
+// 空值不算泄露：键在但没值，agent 读走也没有秘密。
+func leakSecretEnvKeys(block []byte) []string {
+	want := map[string]bool{}
+	for _, k := range secretEnvKeys {
+		want[k] = true
+	}
+	var hits []string
+	for _, kv := range strings.Split(string(block), "\x00") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !want[k] || strings.TrimSpace(v) == "" {
+			continue
+		}
+		hits = append(hits, k)
+	}
+	return hits
+}
+
+// SecretEnvLeak 返回仍能从 /proc/self/environ 读到的平台秘密键名。
+//
+// 平台自己的 exec 期环境块是 agent 子进程够得着的（同 UID）：os.Unsetenv 只改
+// Go 进程内的副本，改不动内核那块。所以凭据一旦进了容器环境，agent 一条
+// `cat /proc/*/environ` 就能读走。这里读的就是那块，用来在启动时把问题喊出来。
+//
+// 读不到（非 Linux / 权限不足）时返回 nil：无法判定就不谎报。
+func SecretEnvLeak() []string {
+	b, err := os.ReadFile("/proc/self/environ")
+	if err != nil {
+		return nil
+	}
+	return leakSecretEnvKeys(b)
+}
+
+// secretEnvPolicy 决定发现残留凭据时的动作：致命，还是仅告警。
+//
+// requireEnvScrub 来自 ARTEX_REQUIRE_ENV_SCRUB：只有显式设为 "1" 才致命。
+// 默认只告警 —— 官方镜像等既有部署可能合法地用 env 传参，硬失败会让它们起不来。
+func secretEnvPolicy(leaks []string, requireEnvScrub string) (fatal bool, reason string) {
+	if len(leaks) == 0 {
+		return false, ""
+	}
+	reason = fmt.Sprintf("平台凭据仍可经 /proc/self/environ 读取（%v）："+
+		"同 UID 的 agent 子进程可用 `cat /proc/*/environ` 读走。"+
+		"请改用 ARTEX_PG_DSN_FILE，或把密钥移出容器环境。", leaks)
+	return requireEnvScrub == "1", reason
+}
+
+// CheckSecretEnv 读进程自身的环境块，判断平台凭据是否仍可被 agent 子进程读到。
+func CheckSecretEnv() SecretEnvReport {
+	leaks := SecretEnvLeak()
+	fatal, reason := secretEnvPolicy(leaks, os.Getenv("ARTEX_REQUIRE_ENV_SCRUB"))
+	return SecretEnvReport{Leaks: leaks, Fatal: fatal, Reason: reason}
+}

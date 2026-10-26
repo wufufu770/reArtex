@@ -109,3 +109,36 @@ func TestPostgresDSNEnvWinsOverFile(t *testing.T) {
 		t.Fatalf("env 优先时不应动文件：%v", err)
 	}
 }
+
+func TestLeakSecretEnvKeys(t *testing.T) {
+	block := []byte("PATH=/usr/bin\x00ARTEX_PG_DSN=postgres://u:p@db/x\x00ANTHROPIC_API_KEY=\x00OPENAI_API_KEY=sk-xxx\x00HOME=/root\x00")
+	got := leakSecretEnvKeys(block)
+	want := []string{"ARTEX_PG_DSN", "OPENAI_API_KEY"}
+	if len(got) != len(want) {
+		t.Fatalf("泄露键: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("泄露键: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestSecretEnvPolicy(t *testing.T) {
+	// 无残留 → 不致命、无理由
+	if fatal, reason := secretEnvPolicy(nil, "1"); fatal || reason != "" {
+		t.Fatalf("无残留时应不致命且无理由，得到 fatal=%v reason=%q", fatal, reason)
+	}
+	// 有残留但未开启 → 只告警
+	fatal, reason := secretEnvPolicy([]string{"ARTEX_PG_DSN"}, "")
+	if fatal {
+		t.Fatal("未开启 ARTEX_REQUIRE_ENV_SCRUB 时不应致命")
+	}
+	if !strings.Contains(reason, "ARTEX_PG_DSN") {
+		t.Fatalf("理由应含泄露键名，得到 %q", reason)
+	}
+	// 有残留且开启 → 致命
+	if fatal, _ := secretEnvPolicy([]string{"ARTEX_PG_DSN"}, "1"); !fatal {
+		t.Fatal("开启 ARTEX_REQUIRE_ENV_SCRUB=1 后应致命")
+	}
+}

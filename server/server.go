@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
@@ -255,6 +256,16 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// 无论上面走的是 DB 还是 env 分支，都把 env 里的明文 key 抹掉：norma 的 Bash
 	// 子进程无条件继承进程环境，留着等于让 agent 用 env / printenv 读走。
 	agent.ScrubSecretEnv()
+	// 但 os.Unsetenv 只改 Go 进程内的副本，改不动内核保存的 exec 期环境块 ——
+	// agent 子进程读父进程的 /proc/<pid>/environ 仍能拿到明文。这里自检的就是那块。
+	rep := config.CheckSecretEnv()
+	if len(rep.Leaks) == 0 {
+		log.Printf("[security] 平台凭据未残留在进程环境块中")
+	} else if rep.Fatal {
+		log.Fatalf("[security] %s", rep.Reason)
+	} else {
+		log.Printf("[security] %s", rep.Reason)
+	}
 	s.restoreTaskRuntimes()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
