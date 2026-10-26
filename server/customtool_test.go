@@ -111,6 +111,9 @@ print("port=" + str(a["port"]))
 // method/url/header/body templates are rendered from params, the request is sent,
 // and the response status+body are returned. No recording proxy → s.m untouched.
 func TestRunHTTPTool(t *testing.T) {
+	// httptest 固定监听环回，而 agent 出网策略默认拒绝环回。开的是环回专用开关，
+	// 不是 ARTEX_AGENT_EGRESS_ALLOW_LOCAL —— 后者连链路本地（云元数据）一起放开。
+	t.Setenv("ARTEX_AGENT_EGRESS_ALLOW_LOOPBACK", "1")
 	var gotMethod, gotAuth, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
