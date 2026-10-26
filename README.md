@@ -30,13 +30,15 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 |---|---|---|---|
 | G-01① | 平台工具绕过白名单 | 改平台配置的工具若不在 `intercept_enabled_tools` 名单内，在 `IsToolEnabled` 处直接放行，规则根本轮不到求值 | 短路表插在 `applyIntercept` **最前面**，先于 `IsToolEnabled` |
 | G-01③ | stdio MCP 无任何白名单 | 命令任意指定，等价于任意第三方代码执行；包名可抢注、无版本 pin 可供应链翻转 | 拒 17 个包执行器（`npx`/`uvx`/`bunx`/`pnpx`/`pipx`/`dlx`/`docker`/`podman`/`sh`/`bash`/`zsh`/`dash`/`python*`/`perl`/`ruby`/`node`），且命令须 PATH 解析成功 |
-| G-02①-a | agent 可读平台自身凭据 | worker 的 Bash 与 server 同 UID，可读 `/app/jwt.key` 与 server 原始环境块（含 `ANTHROPIC_API_KEY`、`ARTEX_PG_DSN`） | 硬拦平台签名密钥、MITM CA 私钥与 `/proc/*/{environ,cmdline,mem}` |
+| G-02①-a | agent 可读平台自身凭据 | worker 的 Bash 与 server 同 UID，可读 `/app/jwt.key` 与 server 原始环境块（含 `ANTHROPIC_API_KEY`、`ARTEX_PG_DSN`） | 硬拦平台签名密钥、MITM CA 私钥与 `/proc/*/{environ,cmdline,mem}`；控制面凭据读入即从进程环境抹除；DSN 另可走 `ARTEX_PG_DSN_FILE`，读入即清零并删除文件，使进程环境块内不再有秘密 |
 | G-03 | 拦截规则可被 JSON 转义绕过 | `Match` 只对原始入参字节做正则，`"r\u0065ad /app/jwt.key"` 匹配不上 `read` | 匹配前 JSON 深解码，raw 与 decoded 双形态都试 |
 | G-04④ | 工具表故障时全量放行 | `ListTools` 失败 → 打条日志 → `return tools`，DB 一抖动所有 agent 立刻拿到完整工具面 | 沿用上一份已验证快照；冷启动无快照时降级为 SDK 基础件 8 件 |
 | G-07 | 工作区符号链接可越界 | `wsResolve` 只做词法 `Clean`，注释称"爬不出根"——但那对软链不成立；`saveUpload` 跟随符号链接 | `EvalSymlinks` 复核真实路径 + `O_NOFOLLOW` |
 | G-09 | steer 消息无上限 | 纠偏消息直入 worker 上下文且不过闸，队列无界 | 限 2000 字符、队列 cap 10 |
 
 ### 改动清单
+
+第一批（相对上游 `e6ec569`）：
 
 ```
 a  guard/shortcircuit.go          +160   代码常量短路表（新文件）
@@ -53,6 +55,39 @@ m  server/engine.go               +10
 m  docker-compose.yml             +1     env 开关透传
 ```
 
+第二批（相对 `1b29664`）：30 files changed, 1899 insertions(+), 34 deletions(-)
+
+```
+a  pathguard/pathguard.go         +136/-0   真实路径解析 + 控制面秘密拒绝列表（新文件）
+a  pathguard/pathguard_test.go    +153/-0
+a  netguard/netguard.go           +166/-0   拨号期出网目的地守卫（新文件）
+a  netguard/netguard_test.go      +153/-0
+a  agent/toolpolicy.go            +42/-0    工具执行前的平台侧安全策略（新文件）
+a  agent/toolpolicy_test.go       +110/-0
+a  server/skill_trust.go          +108/-0   skill 信任分档（新文件）
+a  server/skill_trust_test.go     +129/-0
+a  server/skill_demote.go         +108/-0   agent 写入的 skill 正文降权注入（新文件）
+a  server/skill_demote_test.go    +108/-0
+a  config/config_test.go          +102/-0
+a  agent/provider_env_test.go     +41/-0
+a  db/pgdsn_env_test.go           +40/-0
+a  server/customtool_env_test.go  +39/-0
+a  server/platform_tools_test.go  +47/-0
+a  mcphttp/client_sse_test.go     +42/-0
+m  config/config.go               +100/-2   ARTEX_PG_DSN_FILE 来源 + 启动自检
+m  db/db.go                       +23/-1    DSN 读入即从进程环境抹除
+m  agent/provider.go              +33/-2    API key 读入即抹除
+m  agent/assembly.go              +5/-3     策略装饰器包裹全量工具
+m  server/customtool.go           +44/-2    自定义脚本改白名单继承宿主环境
+m  server/platform_tools.go       +49/-0    MCP 定义写库侧校验
+m  mcphttp/client.go              +29/-7    MCP SSE 端点同源校验
+m  guard/shortcircuit.go          +32/-12   environ 规则覆盖 glob 与展开形态
+m  server/skill_usage.go          +9/-3     skill 计量接入信任档
+m  server/server_mgmt.go          +6/-0     skill 写操作同步信任档
+m  server/server.go               +14/-0    启动自检调用点
+m  server/assembly.go             +1/-1     计量链路传入 skill 目录
+```
+
 被转人工审批的 7 件平台工具：`create_mcp`、`update_mcp`、`create_custom_tool`、`update_custom_tool`、`create_skill`、`update_skill_file`、`delete_assets_by_host`（60 秒不确认即拒绝）。**这是有意的行为变更**——auto agent 不再能自主建 MCP / skill。
 
 ### 审计过程中额外发现并修掉的三个问题
@@ -64,9 +99,14 @@ m  docker-compose.yml             +1     env 开关透传
 ### 已知残留（未做）
 
 - **短路表是入参字符串预筛，不是路径解析级强制。** `cat $(realpath ../../../jwt.key)` 这类经 shell 展开后才现形的路径仍可绕过。真正闭合需要执行前的 `realpath` 校验与环境变量白名单。
-- G-17 审计事件骨架与 digest 链（需改表结构）
-- G-09 ask 队列治理（需 per-agent 聚合计数）
-- G-04④ 的「拒绝创建新 run」目前以最小工具面降级代替，不是硬拒绝
+- **平台环境块规则同样是字符串预筛。** 运行时才成形的路径（`find /proc -name environ -exec cat {} \;`）仍能绕过。闭合靠的是供给侧 —— 凭据根本不进进程环境块，见下一节的 `ARTEX_PG_DSN_FILE`。
+- **`/proc/<pid>/mem` 读父进程内存仍可取到 DSN 字符串**（需 ptrace 权限）。本批未处理。
+- **`docker inspect` 仍可见容器配置里的 DSN**（需宿主 / docker socket 权限）。同理 `docker exec` 拉起的进程会继承容器配置面的 env —— 但 agent 的 Bash 是 artex 的子孙进程，继承的是 artex 的（干净的）环境块，不在此列。
+- **平台环境块规则作用在整个工具入参 JSON 上**，故「把含 `/proc/…/environ` 字样的内容写进文件」也会被拦。
+- **`llm_profiles.api_key` 仍以明文存于数据库**（需数据库读权限才能取到）。
+- G-17 审计事件骨架与 digest 链（需改表结构）—— 短路表 deny 目前仍只落内存切片，进程退出即失。
+- G-09 ask 队列治理（需 per-agent 聚合计数）。
+- G-04④ 的「拒绝创建新 run」目前以最小工具面降级代替，不是硬拒绝。
 - **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
 
 ### 应急回滚
@@ -79,6 +119,37 @@ ARTEX_DISABLE_SHORT_CIRCUIT=1 docker compose up -d
 ```
 
 启动日志出现 `[guard] ⚠ 短路表已停用` 即生效。接受 `1/true/yes/on`。停用后平台退化为「仅 DB 规则」防线——而 DB 规则本身可被持 JWT 者热改。
+
+### 平台凭据不出现在进程环境块
+
+`ARTEX_PG_DSN` 经容器环境变量下发时，会留在进程的 exec 期环境块里，而 `/proc/<pid>/environ` 对同 UID 的 agent 子进程可读。若希望凭据不出现在环境块，改用 `ARTEX_PG_DSN_FILE` 指向一次性文件：
+
+````yaml
+services:
+  artex:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        umask 077; mkdir -p /run/artex;
+        printf '%s' "$$ARTEX_PG_DSN" > /run/artex/pg_dsn;
+        unset ARTEX_PG_DSN;
+        exec /app/start.sh "$$@"
+      - --
+    # 必须显式写出：覆盖 entrypoint 后 compose 不再带镜像的 CMD，
+    # 而 wrapper 的 "$@" 就空了 —— 结果只剩默认的 :8787，录制代理 :8788 不会起。
+    command: ["-addr", ":8787", "-proxy", ":8788"]
+    environment:
+      ARTEX_PG_DSN_FILE: /run/artex/pg_dsn
+````
+
+三点说明：
+
+- **`unset` 必须在 `exec` 之前。** `unset` 只改 shell 内部变量表，改不动内核保存的 exec 期环境块；而 `exec` 会用当前环境**重建**进程映像，所以 exec 出来的进程环境块里才没有 DSN。顺序反了无效。
+- **进程启动后会读入该文件并立即清零、删除它**，磁盘上不留副本。
+- **`command` 不能省。** 覆盖 `entrypoint` 后 compose 不再带镜像的 `CMD`，wrapper 的 `"$@"` 会是空的。
+
+启动时平台会自检 `/proc/self/environ` 是否仍残留平台凭据并给出结论（`[security] 平台凭据未残留在进程环境块中`）。若希望残留时直接拒绝启动，设 `ARTEX_REQUIRE_ENV_SCRUB=1`。
 
 ---
 
