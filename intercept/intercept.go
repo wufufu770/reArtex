@@ -639,6 +639,10 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 	if err == nil {
 		i.bindResult(ctx, id, audit)
 	}
+	// 被拦下的判定进审计链：intercept_pending 的行可以直接被改，链能报出断在第几条。
+	if status == "denied" {
+		i.appendAuditEvent(ctx, dec, toolName, input, "denied")
+	}
 }
 
 // HandleAsk creates a pending approval record and blocks until the user decides
@@ -659,6 +663,8 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	if err != nil {
 		return false
 	}
+	// 人工审批也是判定动作，进审计链（放行/拒绝/超时都在这张 pending 行上）。
+	i.appendAuditEvent(ctx, dec, toolName, input, "ask")
 
 	i.bindResult(ctx, pendingID, audit)
 	ch := i.pending.add(pendingID)
