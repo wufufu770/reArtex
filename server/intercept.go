@@ -125,6 +125,7 @@ func (s *Server) interceptCreateRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	normalizeAskTimeout(&req)
 	rule, err := pg.CreateInterceptRule(req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -153,6 +154,7 @@ func (s *Server) interceptUpdateRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	normalizeAskTimeout(&req)
 	rule, err := pg.UpdateInterceptRule(id, req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -507,6 +509,32 @@ func validateInterceptRuleReq(req interceptRuleReq) error {
 	}
 	return nil
 }
+
+// normalizeAskTimeout 给 ask 类规则补上默认超时。
+//
+// ask 规则若不配超时，人工审批一直没人确认就是「无限等待」—— 而 ask 的语义
+// 本来是「拿不准就问人」，问不到人就等于变相放行。给 ask 补一个与短路表
+// 侧一致的 60s 超时（到点按 deny 处理），把「等不到人」从放行改成拒绝。
+//
+// 超时对 ask 规则是强制的：timeout_enabled 传 false 也照样启用。原因是
+// timeout_enabled 是 bool，JSON 里「未指定」与「显式 false」不可区分 ——
+// 既然分不清，就不能把它当成「管理员明确要无限等」的凭据。管理员仍可
+// 通过 timeout_seconds 调等待时长、通过 timeout_action 调到点后的动作。
+func normalizeAskTimeout(req *interceptRuleReq) {
+	if req.Action != "ask" {
+		return
+	}
+	req.TimeoutEnabled = true
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = askRuleDefaultTimeoutSeconds
+	}
+	if req.TimeoutAction == "" {
+		req.TimeoutAction = "deny"
+	}
+}
+
+// askRuleDefaultTimeoutSeconds 是 ask 规则未显式配置时的默认等待上限。
+const askRuleDefaultTimeoutSeconds = 60
 
 func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
