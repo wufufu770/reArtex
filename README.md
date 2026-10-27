@@ -24,7 +24,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ### 修复的缺陷
 
-以下 8 项均已直读源码逐条验证属实（非推测），编号沿用《ARTEX限制强化方案-终版V2》。
+以下 9 项均已直读源码逐条验证属实（非推测），编号沿用《ARTEX限制强化方案-终版V2》。
 
 | 编号 | 缺陷 | 原行为 | 现行为 |
 |---|---|---|---|
@@ -32,10 +32,11 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | G-01③ | stdio MCP 无任何白名单 | 命令任意指定，等价于任意第三方代码执行；包名可抢注、无版本 pin 可供应链翻转 | 拒 17 个包执行器（`npx`/`uvx`/`bunx`/`pnpx`/`pipx`/`dlx`/`docker`/`podman`/`sh`/`bash`/`zsh`/`dash`/`python*`/`perl`/`ruby`/`node`），且命令须 PATH 解析成功 |
 | G-02①-a | agent 可读平台自身凭据 | worker 的 Bash 与 server 同 UID，可读 `/app/jwt.key` 与 server 原始环境块（含 `ANTHROPIC_API_KEY`、`ARTEX_PG_DSN`） | 硬拦平台签名密钥、MITM CA 私钥与 `/proc/*/{environ,cmdline,mem}`；控制面凭据读入即从进程环境抹除；DSN 另可走 `ARTEX_PG_DSN_FILE`，读入即清零并删除文件，使进程环境块内不再有秘密 |
 | G-03 | 拦截规则可被 JSON 转义绕过 | `Match` 只对原始入参字节做正则，`"r\u0065ad /app/jwt.key"` 匹配不上 `read` | 匹配前 JSON 深解码，raw 与 decoded 双形态都试 |
-| G-04④ | 工具表故障时全量放行 | `ListTools` 失败 → 打条日志 → `return tools`，DB 一抖动所有 agent 立刻拿到完整工具面 | 沿用上一份已验证快照；冷启动无快照时降级为 SDK 基础件 8 件 |
+| G-04④ | 工具表故障时全量放行 | `ListTools` 失败 → 打条日志 → `return tools`，DB 一抖动所有 agent 立刻拿到完整工具面 | 沿用上一份已验证快照；冷启动无快照时降级为 SDK 基础件 8 件，**且直接拒绝创建新 run**（白名单未知时开工等于无边界放行） |
 | G-07 | 工作区符号链接可越界 | `wsResolve` 只做词法 `Clean`，注释称"爬不出根"——但那对软链不成立；`saveUpload` 跟随符号链接 | `EvalSymlinks` 复核真实路径 + `O_NOFOLLOW` |
 | G-09 | steer 消息无上限 | 纠偏消息直入 worker 上下文且不过闸，队列无界 | 限 2000 字符、队列 cap 10 |
-| G-04①② | 模型兜底审批 fail-open | 判官超时、报错或输出不可解析时回落 `allow` —— 让判官失效即可绕过全部规则；ask 类规则默认无超时，审批可无限等待 | 失败/超时一律回落 `deny`；ask 默认 300s 超时后 `deny`；前端表单初值与后端默认对齐，避免保存一次就把 `allow` 写回 |
+| G-04①② | 模型兜底审批 fail-open | 判官超时、报错或输出不可解析时回落 `allow` —— 让判官失效即可绕过全部规则；ask 类规则默认无超时，审批可无限等待 | 失败/超时一律回落 `deny`；ask 规则强制带超时（默认 60s，到点 `deny`）；前端表单初值与后端默认对齐，避免保存一次就把 `allow` 写回 |
+| G-17 | 拦截动作无留痕 | 短路表的 deny 只落内存切片（上限 2000、进程退出即失），且与 DB 规则/模型判定混作一谈 | 短路表 deny 写入 `intercept_pending` 已决行，「审批记录」页与任务拦截列表可查；来源标识区分 `rule` / `model` / `shortcircuit` |
 
 ### 改动清单
 
@@ -105,9 +106,9 @@ m  server/assembly.go             +1/-1     计量链路传入 skill 目录
 - **`docker inspect` 仍可见容器配置里的 DSN**（需宿主 / docker socket 权限）。同理 `docker exec` 拉起的进程会继承容器配置面的 env —— 但 agent 的 Bash 是 artex 的子孙进程，继承的是 artex 的（干净的）环境块，不在此列。
 - **平台环境块规则作用在整个工具入参 JSON 上**，故「把含 `/proc/…/environ` 字样的内容写进文件」也会被拦。
 - **`llm_profiles.api_key` 仍以明文存于数据库**（需数据库读权限才能取到）。
-- G-17 审计事件骨架与 digest 链（需改表结构）—— 短路表 deny 目前仍只落内存切片，进程退出即失。
+- G-17 的审计事件骨架与 digest 链（需改表结构）仍未做 —— 短路表 deny 已落库可查，但只有结论与理由，没有 digest 链式的防篡改。
 - G-09 ask 队列治理（需 per-agent 聚合计数）。
-- G-04④ 的「拒绝创建新 run」目前以最小工具面降级代替，不是硬拒绝。
+- **CI 里有一个已知断测被单独排除**：`TestGraphOverviewExpandsAssociatedCompanyScope` 断言 `graph_overview` 的 `coverage.scope` 含公司范围展开，而生产代码尚未接线该字段（测试超前于实现，基线即红）。排除项与理由写在 workflow 里，修好后应去掉排除。
 - **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
 
 ### 应急回滚
