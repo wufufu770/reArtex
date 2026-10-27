@@ -55,13 +55,27 @@ func Setup(pkg string) (dsn string, release func(), err error) {
 
 	u.Path = "/" + name
 	return u.String(), func() {
-		rebuild(conn, name) //nolint:errcheck
+		drop(conn, name) //nolint:errcheck
 		conn.Close()
 	}, nil
 }
 
-// rebuild 在集群锁下把目标库重建为空库；drop=true 时只删不建。
+// rebuild 在集群锁下把目标库重建为空库。
 func rebuild(conn *sql.DB, name string) error {
+	if err := drop(conn, name); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// drop 在集群锁下删掉目标库。
+//
+// 删库和建库必须分两步：收尾时只要「删掉」，如果顺手又建一个空库，测完
+// 会在 postgres 里留下一堆 artex_test_* 空壳。
+func drop(conn *sql.DB, name string) error {
 	if _, err := conn.Exec(fmt.Sprintf("SELECT pg_advisory_lock(%d)", advisoryLockID)); err != nil {
 		return err
 	}
@@ -69,9 +83,6 @@ func rebuild(conn *sql.DB, name string) error {
 
 	// WITH (FORCE) 踢掉残留连接：上一次运行可能还有连接挂在库上。
 	if _, err := conn.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, name)); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
 		return err
 	}
 	return nil
