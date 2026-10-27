@@ -58,14 +58,19 @@ jobs:
           go test ./... -timeout 30m
           -skip 'TestSideUsageRecordedOnceOnConsumerCancellation'
 
-  # ② 前端：静态构建
+  # ② 前端：静态构建 + lint 门
   #
-  # 不把 biome lint 设为门：仓库现有 lint 基线本身是红的（134 errors / 138 warnings，
-  # 集中在既有文件），设为门等于永久失败、无人再看。先只保证前端能构建。
+  # lint 门是**棘轮**：只查相对基线改动的文件（biome --changed --since）。
+  # 仓库现有 lint 基线本身是红的（134 errors / 138 warnings，集中在既有文件），
+  # 全量设为门等于永久失败、之后就没人再看它了。棘轮只要求新写的代码干净，
+  # 旧账另开清理任务逐步还 —— 门因此能一直绿着有约束力。
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # biome --changed --since 要能取到基线 ref，浅克隆取不到。
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -75,3 +80,15 @@ jobs:
         working-directory: web
       - run: npm run build:static
         working-directory: web
+      - name: lint（仅相对基线改动的文件）
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          BASE="${PR_BASE:-$PUSH_BASE}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "没有可比较的基线 ref（首推或历史缺失），跳过 lint 门"
+            exit 0
+          fi
+          cd web
+          npx biome check --changed --since="$BASE"
