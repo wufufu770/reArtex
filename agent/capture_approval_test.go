@@ -44,7 +44,9 @@ func TestCaptureApprovalLifecycle(t *testing.T) {
 		name, action, status, execution string
 		manual, approve, toolError      bool
 	}{
-		{"model_fallback", "invalid", "allowed", "succeeded", false, false, false},
+		// model_fallback：模型输出不可解析 → 走失败策略。失败策略是 fail-closed，
+		// 所以判定为 denied、工具不执行（原先回落 allow 时是 allowed/succeeded）。
+		{"model_fallback", "invalid", "denied", "not_executed", false, false, false},
 		{"model_allow", "allow", "allowed", "succeeded", false, false, false},
 		{"model_deny", "deny", "denied", "not_executed", false, false, false},
 		{"human_allow_tool_error", "ask", "allowed", "failed", true, true, true},
@@ -114,7 +116,10 @@ func TestCaptureApprovalLifecycle(t *testing.T) {
 			a := detail.Audit
 			initialAction := tc.action
 			if tc.action == "invalid" {
-				initialAction = "allow"
+				// 模型输出不可解析 → 走失败策略。失败策略现在是 fail-closed
+				// （defaultJudgeFailAction = deny）：判官不可用时若回落 allow，
+				// 等于「让判官失效就能绕过全部规则」。所以这里的初始动作是 deny。
+				initialAction = "deny"
 			}
 			wantUserMessage := "record this review"
 			if initialAction == "allow" {
