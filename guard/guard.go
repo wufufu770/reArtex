@@ -94,6 +94,14 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 			}
 			return hook.Result{}
 		}
+		// 短路表的 deny 也要落库。此前它只进内存 audit 切片（上限 2000、
+		// 进程退出即失），于是「谁在何时想干什么」查无实据 —— 而短路表
+		// 恰恰是唯一一道不受 DB 热改面影响的防线，最需要留痕。
+		// Log 是 best-effort：DB 写失败不影响本次调用结果。
+		if g.interceptor != nil {
+			logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
+			g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), *dec, ev.ToolName, ev.Input, "denied")
+		}
 		g.record(ev.ToolName, "block", dec.Message, "")
 		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
 	}

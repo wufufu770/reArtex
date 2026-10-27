@@ -108,18 +108,30 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge variant={variant}>{labels[status] ?? status}</Badge>;
 }
 
+// 来源徽章：模型判定 / 代码常量短路表 / DB 规则名。
+// 短路表判定没有 rule_id（它不是一条 DB 规则），只能按来源类型显示，
+// 具体命中哪条内置防线在详情页的 audit.rule_name 里。
+function SourceBadge({ row }: { row: InterceptApprovalRow }) {
+  const src = source(row);
+  if (src === "model") {
+    return (
+      <Badge variant="outline">
+        <BotIcon />
+        模型判定
+      </Badge>
+    );
+  }
+  if (src === "shortcircuit") {
+    return <Badge variant="outline">代码常量短路表</Badge>;
+  }
+  return <span className="truncate">{row.rule_name || "规则未记录或已删除"}</span>;
+}
+
 function MatchCell({ row, showReason = true }: { row: InterceptApprovalRow; showReason?: boolean }) {
   const reason = row.reason?.replace(/^\[模型\]\s*/, "");
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      {source(row) === "model" ? (
-        <Badge variant="outline">
-          <BotIcon />
-          模型判定
-        </Badge>
-      ) : (
-        <span className="truncate">{row.rule_name || "规则未记录或已删除"}</span>
-      )}
+      <SourceBadge row={row} />
       {showReason ? (
         <p className="truncate text-muted-foreground text-xs" title={reason}>
           {reason || "未记录理由"}
@@ -334,6 +346,7 @@ export function ApprovalDetail({
   if (audit && audit.correlation !== "exact" && audit.effective_action === "allow") execution = "未关联执行结果";
   const command = typeof row.tool_input?.command === "string" ? row.tool_input.command : undefined;
   let initialLabel = source(row) === "model" ? "模型初判" : "规则初判";
+  if (source(row) === "shortcircuit") initialLabel = "内置防线初判";
   if (audit?.model_fallback) initialLabel = "模型异常回退";
 
   return (
@@ -835,6 +848,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
                 <SelectItem value="all">全部来源</SelectItem>
                 <SelectItem value="model">模型判定</SelectItem>
                 <SelectItem value="rule">规则判定</SelectItem>
+                <SelectItem value="shortcircuit">代码常量短路表</SelectItem>
                 <SelectItem value="unknown">来源未知</SelectItem>
               </SelectGroup>
             </SelectContent>
