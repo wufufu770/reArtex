@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -212,6 +213,19 @@ func seedPrompts(pg *db.DB) {
 // and缺省入参 get injected. MCP/skill/host tools have no row and pass through.
 func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	agent.FindingTrafficBindingEnabled = func() bool { return pg.GetBool(settingAgentTrafficBinding, false) }
+	// 工具表不可读且无快照时，拒绝创建新 run（V2 G-04④）。
+	//
+	// 降级为最小工具面只是「少给几个工具」；但冷启动那一次恰恰是无人值守的时刻，
+	// 白名单未知时开工等于无边界放行。这道闸由 db 层在所有任务创建入口的汇合点执行。
+	db.ToolTableUnavailable = func() error {
+		if _, err := pg.ListTools(); err == nil {
+			return nil
+		}
+		if cached, _ := lastGoodToolRows.Load().([]*db.Tool); cached != nil {
+			return nil
+		}
+		return errors.New("工具表不可读且无可用快照，拒绝创建新任务：工具白名单未知，此时开工等于无边界放行")
+	}
 	// Seed the built-in domain tools (first-insert only; DO NOTHING preserves edits).
 	// No startup prune: rows we didn't seed are left alone so future user-defined
 	// custom tools (system=false, added via the UI) survive restarts.
