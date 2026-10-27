@@ -144,5 +144,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 必填：构建期会跑一次装进去的二进制，核对它自报的版本与本次构建期望的
+          # 版本一致。缺了它，dist/<arch>/artex 若是旧文件，镜像照样构建成功，
+          # 旧二进制就被静默装了进去。ref_name 与 binaries job 注入的版本同源
+          # （校验脚本会剥掉 tag 的 v 前缀）。
+          build-args: |
+            ARTEX_BINARY_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

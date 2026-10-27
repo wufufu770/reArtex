@@ -44,6 +44,28 @@ jobs:
           cache: true
       - run: go build ./...
       - run: go vet ./...
+      # 镜像构建链路的回归：构建期校验必须能区分「这次编的」与「上次留下的」。
+      #
+      # 校验逻辑放在仓库里（verify-binary-version.sh），Dockerfile 与本步共用同一份，
+      # 免得两边各写一套、日久漂移。这里不跑 docker（慢），只验脚本本身：版本对要
+      # 放行，版本不对、期望版本为空都要拒绝 —— 校验没做成时也必须算失败，否则
+      # 等于没有校验。
+      #
+      # 不带 -tags embedui：这个 job 没有前端的 server/webui/dist，而版本校验
+      # 只需要二进制自己报版本，跟前端无关。
+      - name: 镜像二进制版本校验
+        run: |
+          go build -ldflags "-s -w -buildid= -X main.version=ci-probe" -o /tmp/artex-probe ./cmd/artex
+          ./verify-binary-version.sh /tmp/artex-probe ci-probe
+          if ./verify-binary-version.sh /tmp/artex-probe wrong-version; then
+            echo "版本不符的二进制竟被放行"; exit 1
+          fi
+          if ./verify-binary-version.sh /tmp/artex-probe ""; then
+            echo "没给期望版本竟被放行"; exit 1
+          fi
+          if ./verify-binary-version.sh /tmp/artex-probe; then
+            echo "参数不全竟被放行"; exit 1
+          fi
       # -timeout 30m：db / server 两个包要跑真实数据库读写，加班时单包可能
       # 逼近 go test 默认的 10 分钟上限而被打断 —— 那是超时不是失败。
       #
