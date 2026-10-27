@@ -108,7 +108,7 @@ m  server/assembly.go             +1/-1     计量链路传入 skill 目录
 - **`llm_profiles.api_key` 仍以明文存于数据库**（需数据库读权限才能取到）。
 - G-17 的审计事件骨架与 digest 链（需改表结构）仍未做 —— 短路表 deny 已落库可查，但只有结论与理由，没有 digest 链式的防篡改。
 - G-09 ask 队列治理（需 per-agent 聚合计数）。
-- **CI 里有一个已知断测被单独排除**：`TestGraphOverviewExpandsAssociatedCompanyScope` 断言 `graph_overview` 的 `coverage.scope` 含公司范围展开，而生产代码尚未接线该字段（测试超前于实现，基线即红）。排除项与理由写在 workflow 里，修好后应去掉排除。
+- **CI 里有两个已知断测被单独排除**：`TestGraphOverviewExpandsAssociatedCompanyScope`（断言 `graph_overview` 的 `coverage.scope` 含公司范围展开，而生产代码尚未接线该字段 —— 测试超前于实现）与 `TestSideUsageRecordedOnceOnConsumerCancellation`（llmrec 包内测试互相干扰：单独跑通过、整包跑失败）。两条在基线上同样失败。排除项与理由写在 workflow 里，修好后应去掉排除。
 - **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
 
 ### 应急回滚
