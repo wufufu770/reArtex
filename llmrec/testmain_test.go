@@ -10,8 +10,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// TestMain 给本包准备一个独立的测试库，并持有集群级 advisory lock
-// (7337741002) 直到测试结束。
+// TestMain 给本包准备一个独立的测试库。
 //
 // 本包原先没有取锁，于是它的测试会与其它包**并发**跑在同一个库上：本包的
 // db.Open 会触发建表 DDL，而那些包正在做 DML，双方互相阻塞 —— 表现是每次
@@ -22,12 +21,19 @@ func TestMain(m *testing.M) {
 		// No DB configured — tests that need PG will skip themselves.
 		os.Exit(m.Run())
 	}
-	defer release()
 	_ = os.Setenv("ARTEX_PG_DSN", dsn)
 
+	code := runSuite(m, dsn)
+	release()
+	os.Exit(code)
+}
+
+// runSuite 在派生库上跑用例。os.Exit 不执行 defer，所以收尾（关连接、删库）
+// 必须在退出前显式做完。
+func runSuite(m *testing.M, dsn string) int {
 	conn, err := sql.Open("pgx", dsn)
 	if err != nil || conn.Ping() != nil {
-		os.Exit(m.Run())
+		return m.Run()
 	}
 	defer conn.Close()
 
@@ -38,5 +44,5 @@ func TestMain(m *testing.M) {
 		_ = pg.EnsureLLMUsageTable()
 		pg.Close()
 	}
-	os.Exit(m.Run())
+	return m.Run()
 }

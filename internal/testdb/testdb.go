@@ -19,20 +19,18 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// advisoryLockID 与各测试包 TestMain 里用的锁号一致（集群级互斥）。
-//
-// 锁在重建库之前取：否则两个并发的同名包运行会互相把对方正在用的库删掉。
+// advisoryLockID 是集群级互斥锁：重建库这一步必须互斥，否则两个并发的同名
+// 包运行会互相把对方正在用的库删掉。
 const advisoryLockID = 7337741002
 
 // Setup 返回按包名派生的独立测试库连接串，并把该库重建为空库。
 //
-// 返回的 release 必须被调用（defer），它会释放集群级锁。
+// 返回的 release 必须被调用，它会删掉派生库。pkg 传包名（如 "server"）。
+// 返回空串表示没有可用的数据库配置 —— 调用方应当照旧跳过需要库的用例。
 //
-// pkg 传包名（如 "server"）。返回空串表示没有可用的数据库配置 —— 调用方
-// 应当照旧跳过需要库的用例。
-//
-// 锁在整个测试运行期间持有：重建库与运行用例之间若有间隙，并发的同名包运行
-// 会把对方正在用的库删掉。
+// 锁只在重建库期间持有，跑用例时不持有：各包各用各的库，本来就不需要互斥，
+// 而把锁持到测试跑完会让整个套件退化成串行（全量实测 llmrec 包从 10 秒
+// 变成 304 秒，全靠排队等前面的包）。
 func Setup(pkg string) (dsn string, release func(), err error) {
 	base, _, err := config.PostgresDSN()
 	if err != nil {
@@ -44,34 +42,39 @@ func Setup(pkg string) (dsn string, release func(), err error) {
 	}
 	name := "artex_test_" + sanitize(pkg)
 
-	// 用维护库连接：先取集群级锁，再重建目标库。
 	admin := *u
 	admin.Path = "/postgres"
 	conn, err := sql.Open("pgx", admin.String())
 	if err != nil {
 		return "", func() {}, err
 	}
-	if _, err := conn.Exec(fmt.Sprintf("SELECT pg_advisory_lock(%d)", advisoryLockID)); err != nil {
+	if err := rebuild(conn, name); err != nil {
 		conn.Close()
-		return "", func() {}, err
-	}
-	unlock := func() {
-		conn.Exec(fmt.Sprintf("SELECT pg_advisory_unlock(%d)", advisoryLockID)) //nolint:errcheck
-		conn.Close()
-	}
-
-	// WITH (FORCE) 踢掉残留连接：上一次运行可能还有连接挂在库上。
-	if _, err := conn.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, name)); err != nil {
-		unlock()
-		return "", func() {}, err
-	}
-	if _, err := conn.Exec(fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
-		unlock()
 		return "", func() {}, err
 	}
 
 	u.Path = "/" + name
-	return u.String(), unlock, nil
+	return u.String(), func() {
+		rebuild(conn, name) //nolint:errcheck
+		conn.Close()
+	}, nil
+}
+
+// rebuild 在集群锁下把目标库重建为空库；drop=true 时只删不建。
+func rebuild(conn *sql.DB, name string) error {
+	if _, err := conn.Exec(fmt.Sprintf("SELECT pg_advisory_lock(%d)", advisoryLockID)); err != nil {
+		return err
+	}
+	defer conn.Exec(fmt.Sprintf("SELECT pg_advisory_unlock(%d)", advisoryLockID)) //nolint:errcheck
+
+	// WITH (FORCE) 踢掉残留连接：上一次运行可能还有连接挂在库上。
+	if _, err := conn.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, name)); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // sanitize 把包名变成合法的库名片段。
