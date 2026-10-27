@@ -5,6 +5,7 @@ import (
 	"iter"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
@@ -106,14 +107,24 @@ func TestSideUsageRecordedOnceOnConsumerCancellation(t *testing.T) {
 			}
 		}
 		cancel()
+		// 计量是异步写的：consumer 退出之后写入才落地。这里轮询等它出现，
+		// 而不是查一次就下结论 —— 机器一忙，写入还没到就断言 count=0，
+		// 表现为「有时过有时挂」。
 		var count, input, output int
 		var worker, status string
-		err = pg.QueryRow(`SELECT count(*),max(input_tokens),max(output_tokens),max(worker),max(status)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err = pg.QueryRow(`SELECT count(*),max(input_tokens),max(output_tokens),max(worker),max(status)
 FROM llm_usage WHERE profile_name=$1`, profile).Scan(&count, &input, &output, &worker, &status)
-		_, _ = pg.Exec(`DELETE FROM llm_usage WHERE profile_name=$1`, profile)
-		if err != nil {
-			t.Fatal(err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count > 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
+		_, _ = pg.Exec(`DELETE FROM llm_usage WHERE profile_name=$1`, profile)
 		wantStatus := "ok"
 		if early {
 			wantStatus = "error"
