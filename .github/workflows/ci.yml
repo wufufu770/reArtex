@@ -51,12 +51,15 @@ jobs:
       #
       # 单独排除而不是把门开成红的：门必须能绿才有约束力。修好后请把排除去掉。
       #
-      # -timeout 30m：db / evidence / server 三个包要跑真实数据库读写，加班时
-      # 单包可能逼近 go test 默认的 10 分钟上限而被打断 —— 那是超时不是失败。
+      # -timeout 30m：db / server 两个包要跑真实数据库读写，加班时单包可能
+      # 逼近 go test 默认的 10 分钟上限而被打断 —— 那是超时不是失败。
+      #
+      # 不再排除任何用例：各测试包现在各自用独立的库（internal/testdb 按包名
+      # 派生并重建），互不可见，套件可重复。共享一个库时每次全量跑挂的用例
+      # 都不一样（基线上一次挂 10 个、一次挂 16 个），门只能开成红的。
+      # 顺带的好处：测试不再往开发库里灌数据。
       - name: go test
-        run: >-
-          go test ./... -timeout 30m
-          -skip 'TestSideUsageRecordedOnceOnConsumerCancellation'
+        run: go test ./... -timeout 30m
 
   # ② 前端：静态构建 + lint 门
   #

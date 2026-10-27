@@ -5,28 +5,29 @@ import (
 	"os"
 	"testing"
 
+	"github.com/Autumn-27/artex/internal/testdb"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// TestMain acquires a PostgreSQL advisory lock (7337741002) for the entire
-// db test suite. Packages agent and server hold the same lock, so parallel
-// `go test ./...` runs serialize across packages on the shared dev DB and
-// avoid cross-package cleanup races (e.g. DELETE FROM assets WHERE id > X
-// from one package deleting assets created by another).
+// TestMain 给本包准备一个独立的测试库，并持有集群级 advisory lock
+// (7337741002) 直到测试结束。
+//
+// 各包共用同一个库时，前一个包留下的数据会让后一个包的用例莫名其妙地挂
+// （实测每次挂的用例都不一样）。派生独立库后各包互不可见，套件才可重复 ——
+// CI 门才能一直绿着有约束力。顺带的好处：测试不再往开发库里灌数据。
 func TestMain(m *testing.M) {
-	dsn, _, err := DSN()
+	dsn, release, err := testdb.Setup("db")
 	if err != nil {
 		// No DB configured — tests that need PG will skip themselves.
 		os.Exit(m.Run())
 	}
+	defer release()
+	_ = os.Setenv("ARTEX_PG_DSN", dsn)
+
 	conn, err := sql.Open("pgx", dsn)
 	if err != nil || conn.Ping() != nil {
 		os.Exit(m.Run())
 	}
 	defer conn.Close()
-	if _, err := conn.Exec(`SELECT pg_advisory_lock(7337741002)`); err != nil {
-		os.Exit(m.Run())
-	}
-	defer conn.Exec(`SELECT pg_advisory_unlock(7337741002)`) //nolint:errcheck
 	os.Exit(m.Run())
 }
