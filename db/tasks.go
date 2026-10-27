@@ -158,9 +158,29 @@ type TaskCreateOptions struct {
 	InterceptRules []TaskInterceptRuleInput
 }
 
+// ToolTableUnavailable 在「工具表不可读且无任何可用快照」时返回非 nil。
+//
+// 由 server 包在装配阶段注入实现（见 server/assembly.go 的 wireTools）。放在 db
+// 包是因为拒绝创建 run 的那道闸必须落在所有创建入口的共同点 ——
+// db.CreateTaskWithOptions 是 API 建任务、自动拆子任务、管理接口三条路的唯一汇合处。
+//
+// 为 nil 表示不启用该闸（无 server 装配的纯 db 使用场景）。
+var ToolTableUnavailable func() error
+
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
 // and the ordered task LLM chain in one transaction.
 func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOptions) (*Task, error) {
+	// 工具表不可读且无快照 → 拒绝创建新 run。
+	//
+	// 降级放行只是「少给几个工具」，但冷启动那一次恰恰是无人值守的时刻：
+	// 工具白名单未知，贸然开工等于无边界放行。此时宁可建不了任务。
+	//
+	// 闸门放在事务之前 —— 拒绝创建不该留下半截的 exploration 行。
+	if ToolTableUnavailable != nil {
+		if err := ToolTableUnavailable(); err != nil {
+			return nil, err
+		}
+	}
 	if len(opts.SourceTaskIDs) > MaxTaskSourceCount {
 		return nil, fmt.Errorf("too many source tasks: got %d, maximum is %d", len(opts.SourceTaskIDs), MaxTaskSourceCount)
 	}
