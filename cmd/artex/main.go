@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -25,6 +26,15 @@ import (
 // version is the build version, injected at release time via
 // -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
 var version = "dev"
+
+// printVersion writes the build version to out.
+//
+// 镜像构建期要靠它确认装进去的二进制就是刚编出来的那个：直接 grep 二进制里的
+// 版本串并不可靠（七位十六进制的版本号在几十 MB 的二进制里偶然出现的概率不小），
+// 而版本号本身也可能短到无法区分。跑一次二进制拿它自己的输出，才是准确答案。
+func printVersion(out io.Writer) {
+	fmt.Fprintln(out, version)
+}
 
 const banner = `
     _    ____ _____ _______  __
@@ -53,10 +63,16 @@ func main() {
 func run() int {
 	var (
 		addr    = flag.String("addr", ":8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
+		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the binary)")
 		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		showVer = flag.Bool("version", false, "print build version and exit")
 	)
 	flag.Parse()
+
+	if *showVer {
+		printVersion(os.Stdout)
+		return 0
+	}
 
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.
