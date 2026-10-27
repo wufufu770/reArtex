@@ -131,7 +131,7 @@ func (d *DB) CreateInterceptPending(ruleID, convID int64, taskID, agentName, too
 	err := d.QueryRow(`
 INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, reason, decision_source, audit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, reason, interceptSource(ruleID, reason, audits), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
@@ -167,7 +167,7 @@ func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, too
 	err := d.QueryRow(`
 INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, decision_source, audit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, interceptSource(ruleID, reason, audits), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
@@ -244,12 +244,21 @@ LEFT JOIN intercept_rules ir ON ir.id = ip.rule_id`
 const approvalRowSelect = `SELECT ` + approvalRowColumns + approvalRowJoins
 const approvalRowSelectWithAudit = `SELECT ` + approvalRowColumns + `, ip.audit` + approvalRowJoins
 
-func interceptSource(ruleID int64, reason string) string {
+// interceptSource 判定一条拦截记录的来源标签。
+//
+// 三种来源：DB 规则（rule）、模型兜底审批（model）、代码常量短路表
+// （shortcircuit）。短路表的判定没有 rule_id（它不是一条 DB 规则），
+// 靠 audit 里的 RuleName 前缀识别 —— 前缀是代码常量短路表的约定标记
+// （见 guard/shortcircuit.go）。
+func interceptSource(ruleID int64, reason string, audits []*InterceptAudit) string {
 	if ruleID != 0 {
 		return "rule"
 	}
 	if strings.HasPrefix(reason, "[模型]") {
 		return "model"
+	}
+	if len(audits) > 0 && audits[0] != nil && strings.HasPrefix(audits[0].RuleName, "[代码常量]") {
+		return "shortcircuit"
 	}
 	return "unknown"
 }
