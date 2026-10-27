@@ -351,6 +351,48 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // graph_overview tool and the planner's wake-up prompt (which pre-injects it so
 // the model needn't spend a turn calling the tool — every plan round starts with
 // an empty context and always needs this first).
+// scopeOverview 组装任务范围视图，供 graph_overview 展示。
+//
+// task_scope 里只有「这个任务属于某公司」这一类引用（kind=company）；公司到底管
+// 哪些资产（domain / ip / cidr / icp / keyword）记在 company_scope。规划前 agent
+// 要知道实际范围，否则从概览看到的范围是空的 —— 这里把公司范围展开进来。
+//
+// 值取 raw（原始输入）而不是规范化后的列：规范化会去掉空格并转小写（ICP 与
+// 企业关键词都会），而范围原文才是 agent 要拿去匹配的东西。
+func (t *ToolSet) scopeOverview() []map[string]any {
+	if t.as == nil || t.taskID <= 0 {
+		return nil
+	}
+	scopes, err := t.as.ListTaskScopeWithSources(t.taskID)
+	if err != nil || len(scopes) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(scopes))
+	for _, sc := range scopes {
+		row := map[string]any{"kind": sc.Kind, "source": sc.Source}
+		if sc.CompanyID != nil {
+			row["company_id"] = *sc.CompanyID
+			row["company_name"] = sc.CompanyName
+			rules := []map[string]any{}
+			keywords := []string{}
+			if t.cs != nil {
+				if companyRules, err := t.cs.GetScope(*sc.CompanyID); err == nil {
+					for _, r := range companyRules {
+						rules = append(rules, map[string]any{"kind": r.Kind, "value": r.Raw})
+						if r.Kind == "keyword" {
+							keywords = append(keywords, r.Raw)
+						}
+					}
+				}
+			}
+			row["company_scope"] = rules
+			row["company_keywords"] = keywords
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
 	// goals summary folded in so the planner needn't call list_goals each round.
@@ -542,6 +584,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
 				// 都重复携带的大量字符串，对规划决策价值有限）；具体主机按需 list_assets 查。
 				m["host_count"] = len(hosts)
+			}
+			if scopeRows := t.scopeOverview(); len(scopeRows) > 0 {
+				m["scope"] = scopeRows
 			}
 			if len(m) > 0 {
 				out["coverage"] = m

@@ -44,11 +44,7 @@ jobs:
           cache: true
       - run: go build ./...
       - run: go vet ./...
-      # 已知断测（两条都在基线 1b29664 上同样失败，与本次加固无关）：
-      #
-      #   TestGraphOverviewExpandsAssociatedCompanyScope（agent 包）
-      #     断言 graph_overview 的 coverage.scope 含公司范围展开，而生产代码
-      #     （agent/tools.go 的 coverage 构造）尚未接线该字段 —— 测试超前于实现。
+      # 已知断测（一条，在基线 1b29664 上同样失败，与本次加固无关）：
       #
       #   TestSideUsageRecordedOnceOnConsumerCancellation（llmrec 包）
       #     包内测试互相干扰：单独跑通过、整包跑失败，基线同样如此。
@@ -60,7 +56,7 @@ jobs:
       - name: go test
         run: >-
           go test ./... -timeout 30m
-          -skip 'TestGraphOverviewExpandsAssociatedCompanyScope|TestSideUsageRecordedOnceOnConsumerCancellation'
+          -skip 'TestSideUsageRecordedOnceOnConsumerCancellation'
 
   # ② 前端：静态构建
   #
