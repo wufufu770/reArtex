@@ -226,6 +226,31 @@ WHERE channel_id=$1 AND state=$2`, chID, db.NotifyStatePending); err != nil {
 	}
 }
 
+// fanOutUntilPending 反复扇出，直到该渠道真的攒够 want 条待发投递。
+//
+// 扇出是全局批处理：一次只处理 LIMIT 条「未扇出」事件，而且用 SKIP LOCKED
+// 跳过别人正锁着的行。本包前面用例留下的未扇出事件会占掉批次窗口，本用例的
+// 60 条可能被挤出窗口 —— 那时一条投递都没生成，后面「应只发出一条消息」的
+// 断言就变成「得到 0」。所以扇出到够数为止，不假定一次就够。
+func (f *notifyFixture) fanOutUntilPending(t *testing.T, chID int64, want int) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 40; i++ {
+		if _, _, err := f.pg.FanOutPendingEvents(ctx, 500); err != nil {
+			t.Fatal(err)
+		}
+		var pending int
+		if err := f.pg.QueryRow(`SELECT count(*) FROM notification_deliveries
+WHERE channel_id=$1 AND state=$2`, chID, db.NotifyStatePending).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending >= want {
+			return
+		}
+	}
+	t.Fatalf("扇出 40 轮后该渠道的待发投递仍不足 %d 条", want)
+}
+
 func TestNotifyEndToEndRealtimeDelivery(t *testing.T) {
 	f := newNotifyFixture(t)
 	hook := newFakeWebhook(t)
@@ -747,9 +772,7 @@ func TestNotifyDigestSegmentsAndDefersRemainder(t *testing.T) {
 		f.record(t, longName+strconv.Itoa(i+1), "high")
 	}
 	ctx := context.Background()
-	if _, _, err := f.pg.FanOutPendingEvents(ctx, 500); err != nil {
-		t.Fatal(err)
-	}
+	f.fanOutUntilPending(t, chID, total)
 	f.agePendingBatch(t, chID)
 	ch := f.channel(t, chID)
 
