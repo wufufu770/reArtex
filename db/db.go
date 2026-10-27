@@ -117,7 +117,15 @@ var (
 
 // DB wraps the shared *sql.DB. PG handles its own connection pool + concurrency
 // (MVCC), so unlike the old SQLite store there is no process-wide write mutex.
-type DB struct{ *sql.DB }
+type DB struct {
+	*sql.DB
+	// toolTableFallback 报「工具表不可读但仍有上一份可用快照」。
+	// 由 server 装配时注册（见 server/assembly.go 的 wireTools）。
+	toolTableFallback func() bool
+	// listTools 读工具表，默认用 d.ListTools。抽成字段是为了让「工具表不可读
+	// 时拒绝创建 run」这道闸能在没有数据库的情况下被测试。
+	listTools func() ([]*Tool, error)
+}
 
 // ensureDatabase connects to the postgres system database and creates the target
 // database if it does not exist. dsn must be a postgres:// URL.
@@ -174,7 +182,7 @@ func Open(dsn string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)
 	}
-	d := &DB{sqlDB}
+	d := &DB{sqlDB, nil, nil}
 	// pgx runs multi-statement Exec via the simple protocol when there are no args.
 	// Keep the dedicated lock connection checked out until both DDL and seeding
 	// finish so concurrent application instances cannot initialize out of order.

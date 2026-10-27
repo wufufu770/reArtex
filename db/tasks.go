@@ -158,29 +158,44 @@ type TaskCreateOptions struct {
 	InterceptRules []TaskInterceptRuleInput
 }
 
-// ToolTableUnavailable 在「工具表不可读且无任何可用快照」时返回非 nil。
+// SetToolTableFallback 注册「工具表不可读但仍有上一份可用快照」的判定。
 //
-// 由 server 包在装配阶段注入实现（见 server/assembly.go 的 wireTools）。放在 db
-// 包是因为拒绝创建 run 的那道闸必须落在所有创建入口的共同点 ——
-// db.CreateTaskWithOptions 是 API 建任务、自动拆子任务、管理接口三条路的唯一汇合处。
+// 由 server 装配时调用（见 server/assembly.go 的 wireTools）。刻意做成 per-DB
+// 而不是包级钩子：包级钩子捕获的是某个 DB 指针，而测试里前一个用例关库后，
+// 钩子就会指向已关闭的库 —— 后续用例的建任务会被无端拒绝。
+func (d *DB) SetToolTableFallback(f func() bool) { d.toolTableFallback = f }
+
+// toolTableUnavailable 报「工具表不可读且无快照」。
 //
-// 为 nil 表示不启用该闸（无 server 装配的纯 db 使用场景）。
-var ToolTableUnavailable func() error
+// 工具表可读 → 工具白名单已知，放行；不可读但有上一份可用快照 → 仍可按快照
+// 划边界，放行；两者都没有 → 拒绝：白名单未知时开工等于无边界放行。
+//
+// 工具表始终按**当前这个库**读，不借用别的 DB 的结果。
+func (d *DB) toolTableUnavailable() error {
+	read := d.listTools
+	if read == nil {
+		read = d.ListTools
+	}
+	return toolTableUnavailable(read, d.toolTableFallback)
+}
+
+// toolTableUnavailable 是判定的纯逻辑部分：readTools 报「工具表能否读」，
+// fallback 报「是否还有上一份可用快照」。拆出来是为了能脱离数据库单测这条闸。
+func toolTableUnavailable(readTools func() ([]*Tool, error), fallback func() bool) error {
+	if _, err := readTools(); err == nil {
+		return nil
+	}
+	if fallback != nil && fallback() {
+		return nil
+	}
+	return errors.New("工具表不可读且无可用快照，拒绝创建新任务：工具白名单未知，此时开工等于无边界放行")
+}
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
 // and the ordered task LLM chain in one transaction.
 func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOptions) (*Task, error) {
-	// 工具表不可读且无快照 → 拒绝创建新 run。
-	//
-	// 降级放行只是「少给几个工具」，但冷启动那一次恰恰是无人值守的时刻：
-	// 工具白名单未知，贸然开工等于无边界放行。此时宁可建不了任务。
-	//
-	// 闸门放在事务之前 —— 拒绝创建不该留下半截的 exploration 行。
-	if ToolTableUnavailable != nil {
-		if err := ToolTableUnavailable(); err != nil {
-			return nil, err
-		}
-	}
+	// 先做纯参数校验（不碰数据库），再做需要读库的闸门，最后才开事务 ——
+	// 顺序有讲究：参数错误应当以参数错误的形式返回，而不是被闸门的错误盖住。
 	if len(opts.SourceTaskIDs) > MaxTaskSourceCount {
 		return nil, fmt.Errorf("too many source tasks: got %d, maximum is %d", len(opts.SourceTaskIDs), MaxTaskSourceCount)
 	}
@@ -189,6 +204,15 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
+	// 工具表不可读且无快照 → 拒绝创建新 run。
+	//
+	// 降级放行只是「少给几个工具」，但冷启动那一次恰恰是无人值守的时刻：
+	// 工具白名单未知，贸然开工等于无边界放行。此时宁可建不了任务。
+	//
+	// 闸门放在事务之前 —— 拒绝创建不该留下半截的 exploration 行。
+	if err := d.toolTableUnavailable(); err != nil {
+		return nil, err
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
