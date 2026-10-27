@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -217,15 +216,13 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	//
 	// 降级为最小工具面只是「少给几个工具」；但冷启动那一次恰恰是无人值守的时刻，
 	// 白名单未知时开工等于无边界放行。这道闸由 db 层在所有任务创建入口的汇合点执行。
-	db.ToolTableUnavailable = func() error {
-		if _, err := pg.ListTools(); err == nil {
-			return nil
-		}
-		if cached, _ := lastGoodToolRows.Load().([]*db.Tool); cached != nil {
-			return nil
-		}
-		return errors.New("工具表不可读且无可用快照，拒绝创建新任务：工具白名单未知，此时开工等于无边界放行")
-	}
+	//
+	// 只注册「有无快照」这个判定，工具表本身由 db 层按**当前这个库**读取 ——
+	// 若把 pg 捕获进钩子，测试里前一个用例关库后钩子就会指向已关闭的库。
+	pg.SetToolTableFallback(func() bool {
+		cached, _ := lastGoodToolRows.Load().([]*db.Tool)
+		return cached != nil
+	})
 	// Seed the built-in domain tools (first-insert only; DO NOTHING preserves edits).
 	// No startup prune: rows we didn't seed are left alone so future user-defined
 	// custom tools (system=false, added via the UI) survive restarts.
