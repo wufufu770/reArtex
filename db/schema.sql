@@ -1384,3 +1384,22 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- 审计链：平台自身的安全判定（deny / ask / timeout）按顺序追加的哈希链。
+-- 每条的 digest 都把上一条的 digest 算进去，改动任何一条都会让后续链条对不上。
+-- 与 intercept_pending 互补：那张表的行可以直接被 UPDATE 掉，链能报出断在第几条。
+CREATE TABLE IF NOT EXISTS audit_events (
+    id          BIGSERIAL PRIMARY KEY,
+    seq         BIGINT NOT NULL,
+    actor       TEXT NOT NULL DEFAULT '',
+    tool_name   TEXT NOT NULL DEFAULT '',
+    action      TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    -- 存 TEXT 而不是 JSONB：JSONB 落库会重排键、改空白，读回来的字节与写入
+    -- 时不同，链的 digest 就会误报断裂。审计链要的是字节级可复算。
+    payload     TEXT NOT NULL DEFAULT '{}',
+    digest      TEXT NOT NULL,
+    prev_digest TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_seq ON audit_events(seq);
