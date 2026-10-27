@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/testdb"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -29,5 +30,13 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	defer conn.Close()
+
+	// llm_usage 的建表语句不在 schema.sql 里，而是由应用启动时调用
+	// EnsureLLMUsageTable 单独执行（server/manager.go）。派生库是全新的，
+	// 没人建这张表，计量用例就会报 relation "llm_usage" does not exist。
+	if pg, err := db.Open(dsn); err == nil {
+		_ = pg.EnsureLLMUsageTable()
+		pg.Close()
+	}
 	os.Exit(m.Run())
 }
