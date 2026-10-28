@@ -91,6 +91,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 			if g.interceptor != nil {
 				logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
 				g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), *dec, ev.ToolName, ev.Input, "allowed")
+				g.interceptor.AppendDecisionEvent(logCtx, *dec, ev.ToolName, ev.Input, "allow")
 			}
 			g.record(ev.ToolName, "allow", dec.Message, "")
 			return hook.Result{}
