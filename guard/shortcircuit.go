@@ -98,6 +98,7 @@ var platformAllowTools = map[string]bool{
 //
 //	/app/jwt.key                     —— 签发管理员 JWT 的签名密钥
 //	/app/.env                        —— 若日后挂载平台环境文件
+//	/run/secrets/...                        —— docker secret（数据库连接串等）
 //	/app/data/traffic/_ca/*.pem|key|crt —— mitmproxy MITM CA 私钥/证书
 //
 // /proc 族：worker 的 Bash 是 server 子进程、同 UID，可读 server 原始环境块，
