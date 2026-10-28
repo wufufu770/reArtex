@@ -7,19 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Autumn-27/artex/config"
 )
 
 // ---------- LLM profiles ----------
 
 type LLMProfile struct {
-	ID            int64   `json:"id"`
-	Name          string  `json:"name"`
-	Format        string  `json:"format"`
-	BaseURL       string  `json:"base_url,omitempty"`
-	Proxy         string  `json:"proxy,omitempty"` // LLM 出站代理(http/https/socks5);空=用环境变量
-	Model         string  `json:"model"`
-	APIKey        string  `json:"-"` // never serialized to UI
-	APIKeyHint    string  `json:"api_key_hint,omitempty"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Format     string `json:"format"`
+	BaseURL    string `json:"base_url,omitempty"`
+	Proxy      string `json:"proxy,omitempty"` // LLM 出站代理(http/https/socks5);空=用环境变量
+	Model      string `json:"model"`
+	APIKey     string `json:"-"` // never serialized to UI
+	APIKeyHint string `json:"api_key_hint,omitempty"`
+	// APIKeyCipher 是加密落库的 key（AAD 绑定 Name）。不序列化。
+	APIKeyCipher  string  `json:"-"`
 	RatePerSecond float64 `json:"rate_per_second"`
 	RatePerMinute float64 `json:"rate_per_minute"`
 	// ContextWindowK is the model's context window in K tokens, used to size
@@ -80,8 +84,8 @@ type RetryOverride struct {
 // profileCols is the read column list (hint variant, no api key) shared by the
 // list query; profileColsKey is the same with api_key for the single-row loads.
 const profileRetryCols = `COALESCE(retry_connect_attempts,0),COALESCE(retry_connect_interval_ms,0),COALESCE(retry_empty_attempts,0),COALESCE(retry_empty_interval_ms,0),COALESCE(retry_stream_attempts,0),COALESCE(retry_stream_interval_ms,0)`
-const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols
-const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
 
 // scanProfile reads one row in the profileCols / profileColsKey column order. The
 // 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
@@ -91,7 +95,8 @@ func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile
 		&p.MaxTokens, &p.MaxTokensField, &p.SessionHeaderKey,
 		&p.Retry.Connect.Attempts, &p.Retry.Connect.IntervalMS,
 		&p.Retry.Empty.Attempts, &p.Retry.Empty.IntervalMS,
-		&p.Retry.Stream.Attempts, &p.Retry.Stream.IntervalMS)
+		&p.Retry.Stream.Attempts, &p.Retry.Stream.IntervalMS,
+		&p.APIKeyCipher)
 }
 
 func (d *DB) ListProfiles() ([]*LLMProfile, error) {
@@ -118,7 +123,13 @@ func (d *DB) ActiveProfile() (*LLMProfile, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &p, err
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveProfileAPIKey(&p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // ProfileByID returns one profile with its api key by id, or nil if not found.
@@ -129,7 +140,13 @@ func (d *DB) ProfileByID(id int64) (*LLMProfile, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &p, err
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveProfileAPIKey(&p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // PoolProfiles returns the failover chain in run order, api keys included: the
@@ -139,7 +156,7 @@ func (d *DB) ProfileByID(id int64) (*LLMProfile, error) {
 // walk the slice front to back.
 func (d *DB) PoolProfiles() ([]*LLMProfile, error) {
 	rows, err := d.Query(`SELECT ` + profileColsKey + ` FROM llm_profiles
-WHERE COALESCE(api_key,'') <> '' AND (is_default OR NOT pool_exclude)
+WHERE (COALESCE(api_key,'') <> '' OR COALESCE(api_key_cipher,'') <> '') AND (is_default OR NOT pool_exclude)
 ORDER BY is_default DESC, priority DESC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -149,6 +166,9 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 	for rows.Next() {
 		var p LLMProfile
 		if err := scanProfile(rows, &p.APIKey, &p); err != nil {
+			return nil, err
+		}
+		if err := resolveProfileAPIKey(&p); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -163,23 +183,47 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 		hint = "…" + p.APIKey[len(p.APIKey)-4:]
 	}
 	r := p.Retry.Clamped()
+	// 加密落库：密文进 api_key_cipher，明文列留空。
+	// 没配主密钥时保持原样（明文落库）—— 既有部署不能因为这次加固起不来。
+	cipherText := ""
+	plainColumn := p.APIKey
+	if p.APIKey != "" {
+		key, err := config.MasterKey()
+		if err != nil {
+			return 0, err
+		}
+		if len(key) > 0 {
+			cipherText, err = encryptSecret(p.APIKey, key, p.Name)
+			if err != nil {
+				return 0, err
+			}
+			// 密文落库后，明文列必须置空 —— 两处都留明文等于没加密。
+			plainColumn = ""
+		}
+	}
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING id`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
-			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS).Scan(&id)
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,api_key_cipher)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NULLIF($25,'')) RETURNING id`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, cipherText).Scan(&id)
 		return id, err
 	}
 	if p.APIKey == "" {
+		// 保留原 key。但 AAD 绑的是行名：改名后旧密文解不开，
+		// 故取旧名解出明文、用新名重加密（必须在改名的 UPDATE 之前做，
+		// 否则旧名就丢了）。
+		if err := d.reencryptProfileKey(p.ID, p.Name); err != nil {
+			return p.ID, err
+		}
 		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11,thinking_type=$12,streaming=$13,max_tokens=$14,max_tokens_field=$15,session_header_key=$16,retry_connect_attempts=$17,retry_connect_interval_ms=$18,retry_empty_attempts=$19,retry_empty_interval_ms=$20,retry_stream_attempts=$21,retry_stream_interval_ms=$22 WHERE id=$23`,
 			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ID)
 		return p.ID, err
 	}
-	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24 WHERE id=$25`,
-		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.APIKey, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
-		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ID)
+	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,api_key_cipher=NULLIF($25,'') WHERE id=$26`,
+		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, cipherText, p.ID)
 	return p.ID, err
 }
 
@@ -815,7 +859,7 @@ type MCPServer struct {
 	Env       json.RawMessage `json:"env"`
 	URL       string          `json:"url,omitempty"`
 	Enabled   bool            `json:"enabled"`
-	Insecure  bool            `json:"insecure"` // http: skip TLS cert verification (self-signed servers, issue #108)
+	Insecure  bool            `json:"insecure"`        // http: skip TLS cert verification (self-signed servers, issue #108)
 	Tools     []string        `json:"tools,omitempty"` // cached tool names (mcp_tools_cache)
 }
 
@@ -1083,5 +1127,62 @@ ON CONFLICT (agent_id,resource_kind,resource_id,mcp_tool_name) DO UPDATE SET ena
 		return err
 	}
 	_, err := d.Exec(`DELETE FROM agent_visibility WHERE agent_id=$1 AND resource_kind=$2 AND resource_id=$3`, agentID, kind, resourceID)
+	return err
+}
+
+// resolveProfileAPIKey 把密文解成明文 key。
+//
+// 三种情形：
+//   - 没有密文：历史明文行（api_key 列仍有值），照旧返回，不报错。
+//   - 有密文且配了主密钥：解出明文。
+//   - 有密文但没配主密钥：报错 —— 不能静默当成「无 key」，否则会表现为
+//     「配了却调不通」这种难查的现象。
+func resolveProfileAPIKey(p *LLMProfile) error {
+	if p.APIKeyCipher == "" {
+		return nil
+	}
+	key, err := config.MasterKey()
+	if err != nil {
+		return err
+	}
+	if len(key) == 0 {
+		return fmt.Errorf("profile %q 的 api_key 已加密，但未配置 %s：无法解密", p.Name, config.MasterKeyFileEnv)
+	}
+	plain, err := decryptSecret(p.APIKeyCipher, key, p.Name)
+	if err != nil {
+		return fmt.Errorf("profile %q 的 api_key 解密失败: %w", p.Name, err)
+	}
+	p.APIKey = plain
+	return nil
+}
+
+// reencryptProfileKey 在行名变化时用新名重加密该行的 key。
+//
+// AAD 绑的是行名，故改名后旧密文解不开；这里取旧名解出明文、用新名重加密。
+func (d *DB) reencryptProfileKey(id int64, newName string) error {
+	var oldName, cipherText string
+	err := d.QueryRow(`SELECT name, COALESCE(api_key_cipher,'') FROM llm_profiles WHERE id=$1`, id).Scan(&oldName, &cipherText)
+	if err != nil {
+		return err
+	}
+	if cipherText == "" || oldName == newName {
+		return nil
+	}
+	key, err := config.MasterKey()
+	if err != nil {
+		return err
+	}
+	if len(key) == 0 {
+		return nil // 没配主密钥：明文行，无需重加密
+	}
+	plain, err := decryptSecret(cipherText, key, oldName)
+	if err != nil {
+		return fmt.Errorf("profile %q 改名失败：旧名下的密文解不开: %w", oldName, err)
+	}
+	newCipher, err := encryptSecret(plain, key, newName)
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`UPDATE llm_profiles SET api_key_cipher=$2 WHERE id=$1`, id, newCipher)
 	return err
 }

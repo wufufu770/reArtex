@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/config"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
@@ -372,6 +373,18 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
+	}
+	// 主密钥不得落在数据目录里：那是 agent 的工作区根，agent 读得到就等于
+	// 没加密。位置不对就拒绝启动 —— 静默继续只会让人以为加密生效了。
+	if err := config.MasterKeyOutsideDir(dir); err != nil {
+		pg.Close()
+		return nil, err
+	}
+	// 历史明文 LLM key 行迁移成密文（未配主密钥时是 no-op，既有部署照旧工作）。
+	if n, err := pg.MigrateLLMProfileKeys(); err != nil {
+		log.Printf("[security] LLM key 迁移失败: %v", err)
+	} else if n > 0 {
+		log.Printf("[security] 已把 %d 行 LLM key 迁移为密文", n)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
 	wireToolDenialRecorder(m.interceptor)
