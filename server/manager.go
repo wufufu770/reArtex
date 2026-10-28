@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -375,16 +374,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
-	// 工具层的拒绝（路径/秘密判定）发生在 hook 之前，拿不到短路表那条留痕路径，
-	// 由这里补一条审计链记录：用 interceptor 写入，payload 的规范化与串行化
-	// 与其他判定动作保持一致，链不会因此断掉。
-	agent.ToolDenialRecorder = func(ctx context.Context, toolName, reason string, input []byte) {
-		m.interceptor.AppendDecisionEvent(ctx, intercept.Decision{
-			Action:   "deny",
-			RuleName: "[代码常量] 工具层秘密判定",
-			Message:  reason,
-		}, toolName, input, "denied")
-	}
+	wireToolDenialRecorder(m.interceptor)
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
