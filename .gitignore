@@ -58,3 +58,8 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+
+# 本地部署形态：compose 的本机覆盖（entrypoint wrapper / 本机镜像 / 本机挂载），
+# 不属于仓库内容，也绝不能带进发布包。
+docker-compose.override.yml
+docker-compose.override.yml.bak-*

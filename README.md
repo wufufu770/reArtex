@@ -1,28 +1,72 @@
 <div align="center">
 
-# ARTEX
+# reArtex
 
-AI 自主渗透测试系统（Go 后端 + Next.js 前端）
+AI 自主渗透测试系统（Go 后端 + Next.js 前端）· ARTEX 的安全加固分支
 
-🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
+> **reArtex = ARTEX 的安全加固分支，独立发布线。** 本仓库在上游基础上修了一批 agent
+> 越权与失效开放（fail-open）缺陷，核心是把安全约束从「可热改的 DB / settings」移到
+> 「代码常量 + 编译期」。
+>
+> | | |
+> |---|---|
+> | **上游** | [wufufu770/ARTEX](https://github.com/wufufu770/ARTEX)（原作者仓库）—— reArtex **不向它推送任何改动** |
+> | **本仓库的发布线** | 镜像 `ghcr.io/wufufu770/reartex`、二进制 [Releases](https://github.com/wufufu770/reArtex/releases) |
+> | **更新策略** | 页面「一键更新」只跟随 **reArtex 自己的 Release**；上游的后续变更按需择取回合，**不自动同步** |
+> | **安装** | 见 [安装](#安装)（Compose 拉镜像 / 下载预编译二进制 / 一键脚本 / 源码编译） |
+> | **改了什么** | 见 [重点改了什么](#重点改了什么) 与 [与原版的区别](#这是什么--与原版-artex-的区别) |
+> | **为什么改** | 见 [为了达到什么目的](#为了达到什么目的) |
+> | **接下来** | 见 [未来打算改什么](#未来打算改什么) |
 
-> **reArtex = ARTEX 安全加固分支。** 本仓库在上游基础上修了一批 agent 越权与失效开放（fail-open）缺陷，核心是把安全约束从「可热改的 DB / settings」移到「代码常量 + 编译期」。改动清单与验证证据见下方 [安全加固](#安全加固)。
+上游的在线 Demo（**非** reArtex 本体）：[artex-demo.vercel.app](https://artex-demo.vercel.app/)
 
 </div>
 
 ---
 
-## 安全加固
+## 这是什么 · 与原版 ARTEX 的区别
 
-本仓库相对上游的改动。
+上游 ARTEX 是一套完整的 AI 自主渗透测试系统：Go 后端 + Next.js 前端，通过规则拦截、
+模型判官审批、steer 纠偏等机制约束 agent 的工具调用。reArtex **不是重写**，而是**在它
+之上做安全加固**的一支。
 
-### 为什么改
+具体差别：
 
-原实现里，**决定 agent 能做什么的那几张表和设置项，本身可被持有 JWT 的人改**——`settings.intercept_enabled_tools` 决定哪些工具进拦截器，`intercept_rules` 是规则本身。一次 `PUT /api/settings` 或一条 `DELETE` 就能把整套防线整体关闭，且无审计留痕。
+| 维度 | 原版 ARTEX | reArtex |
+|---|---|---|
+| **安全边界的载体** | 决定 agent 能做什么的表与设置项（`settings.intercept_enabled_tools`、`intercept_rules`）**本身可被持有 JWT 的人改** —— 一次 `PUT /api/settings` 或一条 `DELETE` 就能把整套防线整体关闭，且无留痕 | 关键约束写进 **Go 源码常量**，关闭途径只剩编译期开关 + 重启；DB 规则降级为「可调参数」而非「安全边界」 |
+| **判官 / 审批失效时** | 判官超时、报错、输出不可解析 → 回落 `allow`（**fail-open**）；ask 类规则默认无超时，可无限等待 | 一律回落 `deny`（**fail-closed**）；ask 规则**强制**带超时（默认 60s，到点 deny） |
+| **平台凭据** | `ARTEX_PG_DSN`、`ANTHROPIC_API_KEY` 等留在进程 exec 期环境块里，同 UID 的 agent 子进程可从 `/proc/<pid>/environ` 读走 | 控制面凭据读入即从进程环境抹除；DSN 可改走一次性文件（读入即清零删除）；启动自检给出「未残留/仍残留」结论 |
+| **拦截动作的留痕** | 短路表的 deny 只落内存切片（上限 2000、进程退出即失） | 写入 `intercept_pending` 已决行（页面可查），并有 **digest 链**逐条串联、被篡改可定位到第几条 |
+| **工具白名单故障** | `ListTools` 失败 → 打条日志 → 照常返回完整工具面（DB 一抖动，agent 立刻拿到全部工具） | 沿用上一份已验证快照；冷启动无快照时**拒绝创建新 run**（白名单未知时开工等于无边界放行） |
+| **工程门禁** | 无测试 CI：发布 workflow 只编译，测试只能本地跑 | CI 门禁：编译 + vet + **全量测试（真实 Postgres，排除项为零）** + 前端构建 + **lint 棘轮门**；tag 发布前也必须过门 |
+| **交付链** | 镜像与产物的来源指向原作者命名空间（fork 无权推），产物校验与"装进去的是不是刚编出来的那个"无人把关 | 交付源全部指向本仓库；镜像构建期**必填版本校验**（装错旧二进制会构建失败），发布后**冒烟**核对版本 |
+| **更新源** | 上游 Release | **本仓库自己的 Release**（一键更新只跟随它） |
+
+**没有改的**：agent 的执行模型、任务编排、探索引擎、前端交互骨架、资产同步
+（ScopeSentry）与对外 API 形态。reArtex 改的是**边界与门禁**，不是功能面。
+
+---
+
+## 为了达到什么目的
+
+先说清**为什么要动它**。原实现里，**决定 agent 能做什么的那几张表和设置项，本身可被持有 JWT 的人改** —— `settings.intercept_enabled_tools` 决定哪些工具进拦截器，`intercept_rules` 是规则本身。一次 `PUT /api/settings` 或一条 `DELETE` 就能把整套防线整体关闭，且无审计留痕。
+
+于是加固落在三条目标上：
+
+| 目标 | 手段 | 达成后的效果 |
+|---|---|---|
+| **① 边界不可被持有者自行放宽** | 关键约束从 DB / settings 移到 Go 源码常量；DB 规则只当参数 | 关掉防线只能改代码 + 重编译 —— 那是另一道门（能读仓库/能推镜像） |
+| **② 任何「判定失效」都不得放行** | 判官超时/报错/输出不可解析 → 统一 `deny`；ask 强制超时；工具表读不到 → 拒绝开工 | 让判官、让 DB、让审批「失效」不再等于「放行」；故障方向从"开到关" |
+| **③ 动作要留痕、边界要可验** | 判定写入已决行可查 + digest 链防篡改；平台凭据不落进程环境块；CI 门禁与交付链校验 | 出事后能定位到具体某一条；发布出去的东西能被证明是「刚编出来的」 |
 
 所以加固的第一原则是：**安全边界不能挂在任何可热改的存储上**。本仓库所有新增约束都写进 Go 源码，关闭途径只剩编译期开关 + 重启。
 
-### 修复的缺陷
+---
+
+## 重点改了什么
+
+### 第一批 · 安全边界与失效开放
 
 以下 9 项均已直读源码逐条验证属实（非推测），编号沿用《ARTEX限制强化方案-终版V2》。
 
@@ -37,6 +81,18 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | G-09 | steer 消息无上限 | 纠偏消息直入 worker 上下文且不过闸，队列无界 | 限 2000 字符、队列 cap 10 |
 | G-04①② | 模型兜底审批 fail-open | 判官超时、报错或输出不可解析时回落 `allow` —— 让判官失效即可绕过全部规则；ask 类规则默认无超时，审批可无限等待 | 失败/超时一律回落 `deny`；ask 规则强制带超时（默认 60s，到点 `deny`）；前端表单初值与后端默认对齐，避免保存一次就把 `allow` 写回 |
 | G-17 | 拦截动作无留痕 | 短路表的 deny 只落内存切片（上限 2000、进程退出即失），且与 DB 规则/模型判定混作一谈 | 短路表 deny 写入 `intercept_pending` 已决行，「审批记录」页与任务拦截列表可查；来源标识区分 `rule` / `model` / `shortcircuit` |
+
+### 第二批 · 凭据治理、审计链、门禁与交付链
+
+| 编号 | 缺陷 | 原行为 | 现行为 |
+|---|---|---|---|
+| G-02①-a | 平台凭据残留在进程环境块 | `ARTEX_PG_DSN` 与平台 API key 留在 exec 期环境块，同 UID 的 agent 子进程可从 `/proc/<pid>/environ` 读走 | 控制面凭据读入即从进程环境抹除；DSN 另可走 `ARTEX_PG_DSN_FILE`（一次性文件，读入即清零删除）；启动自检读 `/proc/self/environ` 给出明确结论，`ARTEX_REQUIRE_ENV_SCRUB=1` 时残留即拒绝启动 |
+| G-17′ | 已决判定无法防篡改 | 短路表 deny 只落内存切片（上限 2000、进程退出即失），与 DB 规则/模型判定混作一谈 | 判定写入 `intercept_pending` 已决行（页面可查），来源标识区分 `rule` / `model` / `shortcircuit`；另加 **digest 链**：每条把上一条的 digest 算进自己的 digest，`VerifyAuditChain` 能报出被改动的位置 |
+| 类别五 | 无测试 CI | 发布 workflow 只编译五个平台，测试只能本地跑；仓库现有 lint 基线本身是红的，全量设为门等于永久失败 | `ci.yml`：编译 + vet + **全量测试（真实 Postgres，排除项为零）** + 前端构建 + **lint 棘轮门**（只查相对基线改动的文件）；tag 发布前也须过门 |
+| — | 测试套件不可重复 | 各测试包共用一个库，前一个包留下的数据让后一个包的用例随机挂（基线上一次挂 10 个、一次挂 16 个，**测试名都不同**），门只能开成红的 | 每个测试包用**自己派生的库**（`internal/testdb`），互不可见；顺带测试不再往开发库灌数据。`llm_usage` 这类不在 `schema.sql` 里、由应用启动时单独建表的，也一并补上 |
+| 类别六 | 交付源 404 / 产物无校验 | 镜像与产物指向原作者命名空间（fork 无权推）；「装进镜像的是不是刚编出来的那个」无人把关 | 交付源全部指向本仓库；镜像构建**必填** `--build-arg ARTEX_BINARY_VERSION`，构建时跑一次装进去的二进制核对版本（旧产物 → **构建失败**）；release 的 docker job **发布后冒烟**，把刚推上去的镜像拉回来真跑一次 |
+| 类别四 | norma SDK 上游缺陷 | `go.mod` 锁 v0.4.3，原样传导三个缺陷（流解析丢 input usage、丢 Gemini thought_signature、长任务/大输出边角） | 升至 **v0.4.4**，上游已修并自带回归测试 |
+| — | `graph_overview` 不展开公司范围 | 返回的 `coverage.scope` 只有任务自身范围 | 展开 `company_scope` 的 domain/ip/cidr/icp/keyword 规则与 `company_keywords`（取值用 `raw` 原文而非规范化列） |
 
 ### 改动清单
 
@@ -106,9 +162,9 @@ m  server/assembly.go             +1/-1     计量链路传入 skill 目录
 - **`docker inspect` 仍可见容器配置里的 DSN**（需宿主 / docker socket 权限）。同理 `docker exec` 拉起的进程会继承容器配置面的 env —— 但 agent 的 Bash 是 artex 的子孙进程，继承的是 artex 的（干净的）环境块，不在此列。
 - **平台环境块规则作用在整个工具入参 JSON 上**，故「把含 `/proc/…/environ` 字样的内容写进文件」也会被拦。
 - **`llm_profiles.api_key` 仍以明文存于数据库**（需数据库读权限才能取到）。
-- G-17 的审计事件骨架与 digest 链（需改表结构）仍未做 —— 短路表 deny 已落库可查，但只有结论与理由，没有 digest 链式的防篡改。
+- **产物无独立签名**：Release 的 `SHA256SUMS` 与二进制同源（同一个 Release），能篡改 Release 的人可以同时替换两者。当前信任模型是「信任 GitHub Release」。
+- **lint 棘轮门是「按文件」判定的**：碰到带着既有 lint 债的文件会让门变红（本轮已把触碰过的文件清干净）。这不是 bug 而是该门的语义 —— **碰了脏文件就得顺手清干净**。
 - G-09 ask 队列治理（需 per-agent 聚合计数）。
-- **CI 里有两个已知断测被单独排除**：`TestGraphOverviewExpandsAssociatedCompanyScope`（断言 `graph_overview` 的 `coverage.scope` 含公司范围展开，而生产代码尚未接线该字段 —— 测试超前于实现）与 `TestSideUsageRecordedOnceOnConsumerCancellation`（llmrec 包内测试互相干扰：单独跑通过、整包跑失败）。两条在基线上同样失败。排除项与理由写在 workflow 里，修好后应去掉排除。
 - **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
 
 ### 应急回滚
@@ -155,7 +211,22 @@ services:
 
 ---
 
-## 截图预览
+## 未来打算改什么
+
+按「还欠着什么」排，不承诺时间。每项都对应上文或[已知残留](#已知残留未做)里登记的东西。
+
+| 计划 | 目的 | 现状 |
+|---|---|---|
+| **运行时权限边界**（可信授权 + 统一入口 + 任务隔离 + 强制网络出口） | 现在的硬边界主要靠**代码常量**与**凭据不落环境块**；真正的"每个任务一个受限身份、出网只走允许的通道"还没建。计划形态：per-task runner + 最小 env/netns + 默认拒绝直连 | 规划中（工作量最大的一项） |
+| **产物签名与来源证明** | Release 的 `SHA256SUMS` 与二进制同源，能改 Release 就能同时换掉两者。计划：产物签名（cosign / minisign）+ SBOM + 校验 buildx provenance | 规划中 |
+| **测试隔离下沉到用例级** | 现在是**每包一个独立库**，包内用例仍共享一个库（顺序敏感）。计划：按用例隔离或补统一的清理钩子，让用例可任意顺序、可并行 | 规划中 |
+| **发布后冒烟扩到多架构 + 不可变标签** | 现在冒烟只验 amd64；Compose 默认用 `latest` 这个可变标签。计划：冒烟覆盖 arm64、Compose 默认改用不可变 tag 或 digest | 规划中 |
+| **上游择取回合的可重复流程** | reArtex **不自动同步**上游（更新只跟自己的 Release），但上游后续仍有变更。计划：把"评估一个上游提交要不要回合"做成有据可依的固定流程，而不是临时手工挑 | 规划中 |
+| **生态补齐**（skills 同步 / 更新即重启 / 回滚数据 / 复测导出） | 上游登记的部署与生态类问题：多端 skill 同步、页面更新后的容器换装、数据回滚、复测结果导出 | 规划中 |
+
+一个刻意的选择：**这一批只做边界与门禁，不动功能面**。agent 的执行模型、任务编排、探索引擎与对外 API 形态都保持上游原样 —— 加固应当让系统更可被信任，而不是更难用。
+
+---
 
 > 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
 
@@ -209,23 +280,11 @@ services:
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
+>
+> 下面所有产物都来自 **reArtex 自己的发布线**（`ghcr.io/wufufu770/reartex` 与本仓库的
+> Releases），不跟上游 ARTEX 的发布。
 
-### 方式一：一键安装脚本（推荐）
-
-```bash
-git clone https://github.com/wufufu770/reArtex.git
-cd reArtex
-./install.sh
-```
-
-脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
-
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
-- **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
-
-装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
-
-### 方式二：Docker Compose（手动）
+### 方式一：Docker Compose（推荐）
 
 ```bash
 git clone https://github.com/wufufu770/reArtex.git
@@ -237,12 +296,15 @@ docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgr
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
-> **镜像还没发布时怎么办**：本仓库目前尚未打过正式 tag，ghcr.io 上还没有
-> `wufufu770/reartex` 这个镜像，上面那条 `docker compose up -d` 会拉取失败。
+指定版本：`.env` 里设 `ARTEX_TAG=v0.4.0`（不设则用 `latest`）。**建议固定版本**，不要用
+可变的 `latest` —— 出了问题没法确定跑的是哪一版。
+
+> **想要拉取的那个 tag 还没发布时**：本仓库的 Release 随 `v*` tag 生成，ghcr 镜像与之同批
+> 推送。若你要的版本尚未发布，镜像就还不存在，上面那条 `docker compose up -d` 会拉取失败。
 > 两条走法：
 >
-> - **等发布**：仓库打 `v*` tag 时，release workflow 会自动构建多架构镜像推上
->   ghcr.io，并生成带 SHA256SUMS 的 GitHub Release；届时上面的命令直接可用。
+> - **等发布**：打 tag 时 release workflow 会自动构建多架构镜像推上 ghcr.io，并生成带
+>   `SHA256SUMS` 的 GitHub Release；届时上面的命令直接可用。
 > - **先本地构建**（需要 Go ≥ 1.26、Node ≥ 20、rsync、zip）：
 >   ```bash
 >   ./build-image.sh                                  # 编前端 + 编二进制 + 构建镜像 artex:local
@@ -258,12 +320,9 @@ docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgr
 `/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
 `Authorization=Bearer <token>` 填写。
 
-### 方式三：下载预编译二进制（Releases）
+### 方式二：下载预编译二进制（reArtex Releases）
 
 到 [Releases](https://github.com/wufufu770/reArtex/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
-
-> 本仓库目前还没有已发布的 Release（首次发布会在打 tag 后自动生成，并附 SHA256SUMS）。
-> 在此之前请用下面的方式四从源码编译。
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
@@ -272,6 +331,21 @@ cp config.example.json config.json   # 填好 database 连接
 
 > 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
 > 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
+
+### 方式三：一键安装脚本
+
+```bash
+git clone https://github.com/wufufu770/reArtex.git
+cd reArtex
+./install.sh
+```
+
+脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
+
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
+
+装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
 
 ### 方式四：从源码编译单二进制
 
@@ -291,7 +365,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 ```bash
 ./build.sh --release
-# 产物：dist/artex-0.3.3-*.zip
+# 产物：dist/artex-0.4.0-*.zip
 ```
 
 UPX 自解压二进制可能与部分 Linux 内核、虚拟化环境或安全策略不兼容，因此默认不启用。可用 `ARTEX_TARGETS` 自定义目标；确认目标运行环境兼容时，可显式传入 `--upx` 进一步缩小二进制：
@@ -305,6 +379,9 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ## 更新升级
 
+> **更新源只有本仓库自己的 Release**（`wufufu770/reArtex`）—— 不跟上游 ARTEX 的发布线。
+> 拉到的包会先比对同批 Release 的 `SHA256SUMS`，再冒烟测试、换装；失败自动回滚。
+>
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
 
 ### 方式一：页面一键更新（推荐）
