@@ -225,19 +225,6 @@ build_target() {
 
   compress_binary "$output" "$goos"
   if command -v file >/dev/null 2>&1; then file "$output"; fi
-  # 镜像构建（Dockerfile）消费的是 dist/<arch>/artex，而默认产物落在
-  # dist/artex-<os>-<arch>/artex。两种布局并存、又不强制同步时，忘了同步就会让
-  # docker build 拿到**上一次**留下的旧文件 —— 而镜像看上去是刚编出来的（层哈希
-  # 变了、镜像 ID 变了），旧二进制就这么被静默装了进去。所以每次编译都顺手把
-  # Linux 二进制摆到镜像要用的位置，两种布局从此不会再各说各话。
-  if [ "$goos" = "linux" ]; then
-    image_layout="${ARTEX_OUTPUT_DIR}/${goarch}/${binary_name}"
-    if [ "$image_layout" != "$output" ]; then
-      mkdir -p "$(dirname "$image_layout")"
-      cp "$output" "$image_layout"
-      info "镜像布局：$image_layout"
-    fi
-  fi
   if [ "${ARTEX_PACKAGE}" = "1" ]; then package_binary "$output" "$goos" "$goarch"; fi
   ok "编译完成：$output"
 }
