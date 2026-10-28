@@ -33,6 +33,17 @@ type DeferredInfo struct {
 // until a user assigns a skill/MCP to the agent in the UI.
 var ToolAugment func(ctx context.Context, agentKey string) (extra []actool.CoreTool, def DeferredInfo, cleanup func())
 
+// ToolDenialRecorder 把工具层的拒绝决定记进审计链。nil 时不记录。
+//
+// 为什么需要它：工具层（norma 的 permission 判定 Stage 1）早于 PreToolUse hook
+// 被求值 —— hook 不会被调用，于是短路表那条路径上的留痕（intercept_pending +
+// audit_events）拿不到。工具层是覆盖面最广的一层（所有 agent 的所有工具都经
+// AugmentTools 包装），不能为了留痕把它降级；但留痕同样不能丢：被拦下的
+// 「谁在何时想干什么」必须可追责。
+//
+// server 侧用 interceptor 实现（它负责审计链的规范化 payload 与串行化写入）。
+var ToolDenialRecorder func(ctx context.Context, toolName, reason string, input []byte)
+
 // AugmentTools returns base plus the agent's visible skill/MCP tools, the
 // DeferredInfo, and a cleanup func the caller must defer (closes MCP clients).
 // Built-in base tools are kept as-is — never filtered (内置工具留代码层，不做可见性过滤).
