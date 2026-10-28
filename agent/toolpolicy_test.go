@@ -87,6 +87,53 @@ func TestPolicyDeniesUnderModeBypass(t *testing.T) {
 	}
 }
 
+// 入参里的相对路径绕过必须被拒：短路表是字符串预筛，挡不住经 shell 展开
+// 才现形的路径；这一层用真实路径解析兜住。
+//
+// 工作目录是 /app/data/sessions/x 时，「../../../jwt.key」正是落到 /app/jwt.key
+// 的那三层回溯 —— 与真实部署同形。
+func TestPolicyDeniesRelativeSecretPathInBash(t *testing.T) {
+	tool := enforceToolPolicy(actool.NewBash())
+	input := []byte(`{"command":"cat ../../../jwt.key"}`)
+	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
+
+	dec := tool.CheckPermissions(context.Background(), input, pc)
+	if dec.Behavior != acperm.Deny {
+		t.Fatalf("相对路径指向平台密钥应被拒，实得 %v", dec.Behavior)
+	}
+}
+
+// 命令替换包裹的同一形态也要被拒：路径字面量就在入参里，只是被 $( ) 包着。
+func TestPolicyDeniesCommandSubstitutedSecretPath(t *testing.T) {
+	tool := enforceToolPolicy(actool.NewBash())
+	input := []byte(`{"command":"cat $(realpath ../../../jwt.key)"}`)
+	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
+
+	dec := tool.CheckPermissions(context.Background(), input, pc)
+	if dec.Behavior != acperm.Deny {
+		t.Fatalf("命令替换包裹的路径绕过应被拒，实得 %v", dec.Behavior)
+	}
+}
+
+// 日常命令不得被新判据误伤：一刀切会让平台不可用。
+func TestPolicyAllowsNormalBashCommand(t *testing.T) {
+	tool := enforceToolPolicy(actool.NewBash())
+	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
+	for _, cmd := range []string{
+		"ls -la",
+		"cat ./notes.md",
+		"curl -s http://127.0.0.1:8787/api/health",
+		"nmap -sV 10.0.0.1",
+		"cat /etc/hosts",
+	} {
+		input := []byte(`{"command":"` + cmd + `"}`)
+		dec := tool.CheckPermissions(context.Background(), input, pc)
+		if dec.Behavior == acperm.Deny {
+			t.Fatalf("命令 %q 被误伤", cmd)
+		}
+	}
+}
+
 func TestPolicyAllowsNormalPathUnderModeBypass(t *testing.T) {
 	tool := enforceToolPolicy(actool.NewRead())
 	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
