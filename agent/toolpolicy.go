@@ -23,14 +23,27 @@ type policyTool struct{ actool.CoreTool }
 // 绕不过。
 func (p *policyTool) CheckPermissions(ctx context.Context, input json.RawMessage, pc acperm.Context) acperm.Decision {
 	if err := pathguard.Check(p.Name(), input); err != nil {
+		recordToolDenial(ctx, p.Name(), err.Error(), input)
 		return acperm.Denied(err.Error())
 	}
 	// 入参路径片段：相对工具工作目录解析真实路径后判定。短路表是字符串预筛，
 	// 挡不住 `cat $(realpath ../../../jwt.key)` 这类经 shell 展开才现形的路径。
 	if err := pathguard.CheckInputPaths(p.Name(), input, pc.WorkingDir); err != nil {
+		recordToolDenial(ctx, p.Name(), err.Error(), input)
 		return acperm.Denied(err.Error())
 	}
 	return p.CoreTool.CheckPermissions(ctx, input, pc)
+}
+
+// recordToolDenial 把工具层的拒绝交给审计链记录。
+//
+// 这一层的拒绝发生在 norma 的 permission 判定阶段，早于 PreToolUse hook ——
+// hook 不会被调用，短路表那条路径上的留痕拿不到。留痕由 server 侧注入的
+// ToolDenialRecorder 负责（见 agent/assembly.go 的说明）。
+func recordToolDenial(ctx context.Context, toolName, reason string, input []byte) {
+	if ToolDenialRecorder != nil {
+		ToolDenialRecorder(ctx, toolName, reason, input)
+	}
 }
 
 func (p *policyTool) policyApplied() {}

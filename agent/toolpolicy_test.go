@@ -134,6 +134,54 @@ func TestPolicyAllowsNormalBashCommand(t *testing.T) {
 	}
 }
 
+// 工具层的拒绝必须留痕：它在 hook 之前求值，hook 不会被调用，
+// 拿不到短路表那条留痕路径 —— 所以必须由 server 注入的记录器补上。
+func TestPolicyRecordsToolLayerDenial(t *testing.T) {
+	orig := ToolDenialRecorder
+	t.Cleanup(func() { ToolDenialRecorder = orig })
+
+	var gotTool, gotReason string
+	var called int
+	ToolDenialRecorder = func(_ context.Context, toolName, reason string, _ []byte) {
+		called++
+		gotTool, gotReason = toolName, reason
+	}
+
+	tool := enforceToolPolicy(actool.NewBash())
+	input := []byte(`{"command":"cat ../../../jwt.key"}`)
+	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
+	dec := tool.CheckPermissions(context.Background(), input, pc)
+	if dec.Behavior != acperm.Deny {
+		t.Fatalf("应被拒绝，实得 %v", dec.Behavior)
+	}
+	if called != 1 {
+		t.Fatalf("工具层拒绝未触发留痕（调用 %d 次）", called)
+	}
+	if gotTool != "Bash" {
+		t.Fatalf("留痕的工具名不对：%q", gotTool)
+	}
+	if gotReason == "" {
+		t.Fatal("留痕缺少原因")
+	}
+}
+
+// 放行的调用不得触发留痕：否则审计链会被正常操作灌满。
+func TestPolicyDoesNotRecordAllowedCall(t *testing.T) {
+	orig := ToolDenialRecorder
+	t.Cleanup(func() { ToolDenialRecorder = orig })
+
+	called := 0
+	ToolDenialRecorder = func(context.Context, string, string, []byte) { called++ }
+
+	tool := enforceToolPolicy(actool.NewBash())
+	input := []byte(`{"command":"ls -la"}`)
+	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
+	tool.CheckPermissions(context.Background(), input, pc)
+	if called != 0 {
+		t.Fatalf("放行的调用不应留痕（调用 %d 次）", called)
+	}
+}
+
 func TestPolicyAllowsNormalPathUnderModeBypass(t *testing.T) {
 	tool := enforceToolPolicy(actool.NewRead())
 	pc := acperm.Context{Mode: acperm.ModeBypass, WorkingDir: "/app/data/sessions/x"}
