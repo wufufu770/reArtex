@@ -25,6 +25,11 @@ func (p *policyTool) CheckPermissions(ctx context.Context, input json.RawMessage
 	if err := pathguard.Check(p.Name(), input); err != nil {
 		return acperm.Denied(err.Error())
 	}
+	// 入参路径片段：相对工具工作目录解析真实路径后判定。短路表是字符串预筛，
+	// 挡不住 `cat $(realpath ../../../jwt.key)` 这类经 shell 展开才现形的路径。
+	if err := pathguard.CheckInputPaths(p.Name(), input, pc.WorkingDir); err != nil {
+		return acperm.Denied(err.Error())
+	}
 	return p.CoreTool.CheckPermissions(ctx, input, pc)
 }
 
