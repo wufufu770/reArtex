@@ -429,7 +429,7 @@ const defaultAskTimeoutSecs = 60
 
 ```go
 // matchRule 把一条命中的 DB 规则变成 Decision，并补齐 ask 类的默认超时。
-func matchRule(r db.InterceptRule, toolName string, input []byte) (Decision, bool) {
+func matchRule(r db.InterceptRule) Decision {
 	msg := r.Message
 	if msg == "" {
 		msg = defaultMessage(r.Action, r.Name)
@@ -452,7 +452,7 @@ func matchRule(r db.InterceptRule, toolName string, input []byte) (Decision, boo
 }
 ```
 
-（`mustJSON` 是本文件内的小辅助：`json.Marshal` 失败时返回 `[]byte("{}")`。`Match` 改为调用 `matchRule(r.InterceptRule, toolName, input)`。）
+（`Match` 改为调用 `matchRule(r.InterceptRule)`。`configJSON` 沿用原有写法：`json.Marshal(r)` 失败时忽略错误即可 —— 它只用来算配置摘要。）
 
 - [ ] **Step 4: 运行测试确认通过**
 
