@@ -1,0 +1,131 @@
+name: ci
+
+# 三种触发：
+#   push / pull_request —— PR 与分支推送的常规门
+#   workflow_call      —— 供 release.yml 复用：打 tag 发布前也必须过这道门
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # ① Go 侧：编译 + vet + 全量测试
+  #
+  # 必须带 Postgres：server / agent / db / evidence 等包的测试用 ARTEX_PG_DSN
+  # 建库、跑真实读写并清理数据。没有库时这些用例会因「未找到数据库配置」而失败，
+  # 门就成了摆设 —— 这正是此前「无测试 CI」掩盖掉的状态。
+  go-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: artex
+          POSTGRES_PASSWORD: artex
+          POSTGRES_DB: artex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U artex -d artex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex:artex@localhost:5432/artex?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      # 镜像构建链路的回归：构建期校验必须能区分「这次编的」与「上次留下的」。
+      #
+      # 校验逻辑放在仓库里（verify-binary-version.sh），Dockerfile 与本步共用同一份，
+      # 免得两边各写一套、日久漂移。这里不跑 docker（慢），只验脚本本身：版本对要
+      # 放行，版本不对、期望版本为空都要拒绝 —— 校验没做成时也必须算失败，否则
+      # 等于没有校验。
+      #
+      # 不带 -tags embedui：这个 job 没有前端的 server/webui/dist，而版本校验
+      # 只需要二进制自己报版本，跟前端无关。
+      - name: 镜像二进制版本校验
+        run: |
+          go build -ldflags "-s -w -buildid= -X main.version=ci-probe" -o /tmp/artex-probe ./cmd/artex
+          ./verify-binary-version.sh /tmp/artex-probe ci-probe
+          if ./verify-binary-version.sh /tmp/artex-probe wrong-version; then
+            echo "版本不符的二进制竟被放行"; exit 1
+          fi
+          if ./verify-binary-version.sh /tmp/artex-probe ""; then
+            echo "没给期望版本竟被放行"; exit 1
+          fi
+          if ./verify-binary-version.sh /tmp/artex-probe; then
+            echo "参数不全竟被放行"; exit 1
+          fi
+      # -timeout 30m：db / server 两个包要跑真实数据库读写，加班时单包可能
+      # 逼近 go test 默认的 10 分钟上限而被打断 —— 那是超时不是失败。
+      #
+      # 不排除任何用例：各测试包现在各自用独立的库（internal/testdb 按包名派生并
+      # 重建），互不可见，套件可重复。此前排除过的两条
+      # TestSideUsageRecordedOnceOnConsumerCancellation 与
+      # TestNotifyDigestSegmentsAndDefersRemainder，根因都是各包共用同一个库：
+      # 前一个包留下的数据、后台扇出占住的行锁、还有全局批次窗口
+      # （FanOutPendingEvents 的 LIMIT + FOR UPDATE SKIP LOCKED），会让后一个包的
+      # 用例随机挂 —— 基线上一次挂 10 个、一次挂 16 个，测试名都不同。
+      # 顺带的好处：测试不再往开发库里灌数据。
+      - name: go test
+        run: go test ./... -timeout 30m
+
+  # ② 前端：静态构建 + lint 门
+  #
+  # lint 门是**棘轮**：只查相对基线改动的文件（biome --changed --since）。
+  # 仓库现有 lint 基线本身是红的（134 errors / 138 warnings，集中在既有文件），
+  # 全量设为门等于永久失败、之后就没人再看它了。棘轮只要求新写的代码干净，
+  # 旧账另开清理任务逐步还 —— 门因此能一直绿着有约束力。
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # biome --changed --since 要能取到基线 ref，浅克隆取不到。
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build:static
+        working-directory: web
+      - name: lint（仅相对基线改动的文件）
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          BASE="${PR_BASE:-$PUSH_BASE}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "没有可比较的基线 ref（首推或历史缺失），跳过 lint 门"
+            exit 0
+          fi
+          # 自己算出改动的文件，而不是交给 biome --changed --since：
+          # 那个用法在"没有可查文件"时退出码是 1（"The list is empty"），
+          # 于是**只改文档的提交会被判成 lint 失败**。空集就明确跳过。
+          #
+          # 注意：git diff 必须在仓库根目录跑。cd 到 web/ 之后再用 pathspec
+          # "web"，路径会被解析成 web/web，永远匹配不到 —— 门就被静默架空了。
+          changed=$(git diff --name-only "$BASE" -- web \
+            | sed 's|^web/||' \
+            | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|json|css)$' || true)
+          if [ -z "$changed" ]; then
+            echo "本次改动没有触及 web/ 下的前端文件，跳过 lint 门"
+            exit 0
+          fi
+          cd web
+          echo "lint 下列文件："
+          echo "$changed"
+          npx biome check $changed
