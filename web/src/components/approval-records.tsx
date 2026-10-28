@@ -201,22 +201,26 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         text={JSON.stringify({ tool_name: input.tool_name, arguments: input.arguments }, null, 2)}
       />
       {input.version >= 2 ? (
-        input.background ? (
-          <div className="flex min-w-0 flex-col gap-2">
-            <CodeBlock
-              label={input.background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要（旧版）"}
-              text={input.background.text}
-              truncated={input.background.truncated}
-            />
-            <p className="text-muted-foreground text-xs">
-              {input.background.source === "user_message"
-                ? "取自当前用户消息。"
-                : "这是旧版发送的 Worker 意图摘要；新版 Worker 审查不再发送此内容。"}
-            </p>
-          </div>
-        ) : (
-          <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>
-        )
+        <>
+          {input.background ? (
+            <div className="flex min-w-0 flex-col gap-2">
+              <CodeBlock
+                label={
+                  input.background.source === "user_message" ? "背景 · 用户消息" : "背景 · Worker 意图摘要（旧版）"
+                }
+                text={input.background.text}
+                truncated={input.background.truncated}
+              />
+              <p className="text-muted-foreground text-xs">
+                {input.background.source === "user_message"
+                  ? "取自当前用户消息。"
+                  : "这是旧版发送的 Worker 意图摘要；新版 Worker 审查不再发送此内容。"}
+              </p>
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-xs">本次审查未附带背景消息。</p>
+          )}
+        </>
       ) : (
         <>
           {input.turn_input ? (
@@ -694,7 +698,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         // filter. Older requests must remain actionable even when newer decisions
         // fill the page or a filter would hide them.
         const [history, pending] = await Promise.allSettled([
-          taskId ? api.interceptTaskPage(taskId, page, pageSize, filter) : api.interceptHistoryPage(page, pageSize, filter),
+          taskId
+            ? api.interceptTaskPage(taskId, page, pageSize, filter)
+            : api.interceptHistoryPage(page, pageSize, filter),
           api.interceptPending(),
         ]);
         if (id !== request.current) return;
