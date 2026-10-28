@@ -8,6 +8,15 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
+// AppendDecisionEvent 把一次判定动作追加进审计链。
+//
+// 与 Log 的区别：Log 只在 status=="denied" 时进链（普通 allow 量太大）。
+// 平台工具的 allow 量小、需要可追责（「谁在何时建过什么」），故单独暴露这个
+// 入口，让短路表的显式放行也留痕。
+func (i *Interceptor) AppendDecisionEvent(ctx context.Context, dec Decision, toolName string, input []byte, action string) {
+	i.appendAuditEvent(ctx, dec, toolName, input, action)
+}
+
 // appendAuditEvent 把一次安全判定追加进审计链（见 db/audit_chain.go）。
 //
 // 只记「判定动作」：普通 allow 量极大（每次工具调用都可能记一条），而事后真正
