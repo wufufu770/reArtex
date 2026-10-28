@@ -386,15 +386,13 @@ import (
 // 种子规则照抄了 timeout_enabled=false —— 照抄即「审批无限等待」。
 // 命中 ask 的规则必须带默认超时，否则审批能一直挂着。
 func TestMatchAskRuleGetsDefaultTimeout(t *testing.T) {
-	dec, ok := matchRule(db.InterceptRule{
+	dec := matchRule(db.InterceptRule{
+		Name:           "种子规则",
 		Action:         "ask",
 		TimeoutEnabled: false,
 		TimeoutSeconds: 0,
 		TimeoutAction:  "",
-	}, "Bash", []byte(`{"command":"ls"}`))
-	if !ok {
-		t.Fatal("规则应命中")
-	}
+	})
 	if !dec.TimeoutEnabled {
 		t.Fatal("ask 类规则必须带超时（否则审批无限等待）")
 	}
@@ -592,11 +590,13 @@ Expected: FAIL —— `ic.AskBurstExceeded` / `settingAskBurstWindowSecs` 尚不
 ```go
 // CountRecentInterceptAsks 统计某 agent 在 since 之后对某工具的审批请求数。
 //
-// 数据源是 intercept_pending 本身：进程重启不丢，且历史审批页与这个数是同一份数据。
+// 只数「真正问过人」的请求：decision_source='shortcircuit' 且状态不是 denied
+// （被拒的行从没问过人）；DB 规则发起的 ask 不计入 —— 那是管理员自己配的面。
 func (d *DB) CountRecentInterceptAsks(agentName, toolName string, since time.Time) (int, error) {
 	var n int
 	err := d.QueryRow(`SELECT COUNT(*) FROM intercept_pending
-		WHERE agent_name=$1 AND tool_name=$2 AND created_at >= $3`,
+		WHERE agent_name=$1 AND tool_name=$2 AND created_at >= $3
+		  AND decision_source='shortcircuit' AND status <> 'denied'`,
 		agentName, toolName, since).Scan(&n)
 	return n, err
 }
@@ -621,11 +621,8 @@ const (
 	defaultAskBurstWindowSecs = 600
 )
 
-// AgentNameFromContext 返回当前上下文的 agent 名；无任务上下文时返回空串。
-func AgentNameFromContext(ctx context.Context) string {
-	_, agentName := taskInfoFromCtx(ctx)
-	return agentName
-}
+// 取 agent 名直接用包内私有的 taskInfoFromCtx —— 只有同包的 AskBurstExceeded
+// 需要它，导出只会平白扩大 API 面。
 
 // AskBurstExceeded 判断该 agent 在时间窗内对某工具的审批请求是否已达阈值。
 //
@@ -757,3 +754,17 @@ go test ./... -timeout 30m -count=1
 ```
 
 **本计划不覆盖**（留给后续波次，勿在本计划里顺手做）：W-B1 签名与 provenance、W-A2 路径解析、W-A3 部署面收口、W-A4 密钥加密、per-task 隔离架构。
+
+---
+
+## 实施偏差记录（2026-10-28 执行后回写）
+
+计划与代码不一致时，**以代码为准并回写计划**（本节即为回写结果）：
+
+| 计划原写法 | 实际实现 | 原因 |
+| --- | --- | --- |
+| `matchRule(r, toolName, input) (Decision, bool)` | `matchRule(r db.InterceptRule) Decision` | 匹配已在上游完成，这两个参数在函数体里用不到，留着是噪声；`bool` 恒为 true 也是噪声 |
+| 导出 `AgentNameFromContext` | 用包内私有 `taskInfoFromCtx` | 只有同包的 `AskBurstExceeded` 需要，导出扩大 API 面无收益 |
+| 测试助手用 `db.NewWithConn` | 用 `db.Open(dsn)` | 仓库里 `db` 包只有 `Open`；它会跑 schema 与种子数据，测试库因此自动建表 |
+| 计数只按 (agent, 工具, 窗口) | 追加 `decision_source='shortcircuit' AND status <> 'denied'` | 「只数真正问过人的请求」——被拒的行从没问过人；DB 规则发起的 ask 属管理员自配面，不该被短路表的治理计数 |
+| `dbInterceptRule` 测试辅助类型 | 直接用 `db.InterceptRule` | 不该为测试另造类型 |
