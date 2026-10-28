@@ -201,4 +201,13 @@ jobs:
             exit 1
           fi
           echo "版本核对通过：$got"
+          # 交付前的环境块洁净性验收：进程树内不得有非空的平台秘密。
+          # 放在 docker rm 之前 —— 容器删了就验不到了。
+          #
+          # ptrace 那条（verify-ptrace-blocked.sh）**刻意不进这道阻断门**：
+          # 同 UID 进程读父进程内存并不需要 CAP_SYS_PTRACE（Docker 默认能力集
+          # 本就不含它），实测仍然读得到 —— 这条残留要靠「工具进程与 artex
+          # 不同 UID」才能闭合，属 per-task 隔离那一档。脚本留在镜像里供
+          # 运维自查，不作为发布门。
+          docker exec "$cid" /usr/local/bin/verify-secret-env.sh 1
           docker rm -f "$cid"
