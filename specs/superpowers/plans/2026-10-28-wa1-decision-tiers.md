@@ -435,7 +435,7 @@ func matchRule(r db.InterceptRule) Decision {
 		msg = defaultMessage(r.Action, r.Name)
 	}
 	dec := Decision{
-		RuleName: r.Name, ConfigDigest: digestInput(mustJSON(r)),
+		RuleName: r.Name, ConfigDigest: digestInput(configJSON),
 		Action:         r.Action,
 		Message:        msg,
 		RuleID:         r.ID,
@@ -448,7 +448,7 @@ func matchRule(r db.InterceptRule) Decision {
 		dec.TimeoutSeconds = defaultAskTimeoutSecs
 		dec.TimeoutAction = "deny"
 	}
-	return dec, true
+	return dec
 }
 ```
 
