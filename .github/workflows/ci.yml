@@ -112,5 +112,20 @@ jobs:
             echo "没有可比较的基线 ref（首推或历史缺失），跳过 lint 门"
             exit 0
           fi
+          # 自己算出改动的文件，而不是交给 biome --changed --since：
+          # 那个用法在"没有可查文件"时退出码是 1（"The list is empty"），
+          # 于是**只改文档的提交会被判成 lint 失败**。空集就明确跳过。
+          #
+          # 注意：git diff 必须在仓库根目录跑。cd 到 web/ 之后再用 pathspec
+          # "web"，路径会被解析成 web/web，永远匹配不到 —— 门就被静默架空了。
+          changed=$(git diff --name-only "$BASE" -- web \
+            | sed 's|^web/||' \
+            | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|json|css)$' || true)
+          if [ -z "$changed" ]; then
+            echo "本次改动没有触及 web/ 下的前端文件，跳过 lint 门"
+            exit 0
+          fi
           cd web
-          npx biome check --changed --since="$BASE"
+          echo "lint 下列文件："
+          echo "$changed"
+          npx biome check $changed
