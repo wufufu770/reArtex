@@ -96,6 +96,19 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 			g.record(ev.ToolName, "allow", dec.Message, "")
 			return hook.Result{}
 		case "ask":
+			// 审批防疲劳：同一 agent 在窗口内反复对同一高危面请求审批，
+			// 达阈值后直接拒绝，不再打扰人（也堵住「疲劳点 allow」的循环）。
+			if g.interceptor != nil && g.interceptor.AskBurstExceeded(ctx, ev.ToolName) {
+				esc := *dec
+				esc.Action = "deny"
+				esc.RuleName = "[代码常量] 审批请求超阈值（同一 agent 重复请求）"
+				esc.Message = "同一 agent 在时间窗内对本工具的审批请求已超阈值，按防疲劳策略直接拒绝。"
+				logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
+				g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), esc, ev.ToolName, ev.Input, "denied")
+				g.interceptor.AppendDecisionEvent(logCtx, esc, ev.ToolName, ev.Input, "denied")
+				g.record(ev.ToolName, "block", esc.Message, "")
+				return g.block(ev.ToolName, systemBlockMessage(esc.Message), "")
+			}
 			if g.interceptor == nil {
 				return g.block(ev.ToolName, systemBlockMessage("人工审批通道不可用（"+dec.Message+"）"), "")
 			}
