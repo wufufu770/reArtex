@@ -520,6 +520,46 @@ func judgeActionLabel(action string) string {
 	}
 }
 
+// 审批防疲劳（可用性参数，故可热改；安全边界不在这里）。
+const (
+	settingAskBurstThreshold = "intercept_ask_burst_threshold"
+	settingAskBurstWindowSecs = "intercept_ask_burst_window_seconds"
+)
+
+const (
+	// defaultAskBurstThreshold 是窗口内「允许进入人工审批」的最大次数。
+	// 第 N+1 次起直接拒绝（不再打扰人），治「疲劳点 allow」的无限循环。
+	defaultAskBurstThreshold = 5
+	// defaultAskBurstWindowSecs 是计数窗口（秒）。
+	defaultAskBurstWindowSecs = 600
+)
+
+// AskBurstExceeded 判断该 agent 在时间窗内对某工具的审批请求是否已达阈值。
+//
+// 只对【有 agent 归属】的请求计数：会话侧没有 agent 归属，计了会误伤人。
+// 计数失败时返回 false（不升级）：这个计数是防疲劳措施、不是安全边界，
+// 误拒的代价（正常任务被卡死）高于漏拒的代价（人多点一次 allow）。
+func (i *Interceptor) AskBurstExceeded(ctx context.Context, toolName string) bool {
+	_, agentName := taskInfoFromCtx(ctx)
+	if agentName == "" {
+		return false
+	}
+	threshold := i.getSettingInt(settingAskBurstThreshold, defaultAskBurstThreshold)
+	if threshold <= 0 {
+		return false
+	}
+	window := i.getSettingInt(settingAskBurstWindowSecs, defaultAskBurstWindowSecs)
+	if window <= 0 {
+		window = defaultAskBurstWindowSecs
+	}
+	since := time.Now().Add(-time.Duration(window) * time.Second)
+	n, err := i.db.CountRecentInterceptAsks(agentName, toolName, since)
+	if err != nil {
+		return false
+	}
+	return n >= threshold
+}
+
 // defaultAskTimeoutSecs 是 DB 规则 ask 类的默认审批超时。
 //
 // 种子规则照抄了 timeout_enabled=false，照抄即「审批无限等待」——审批挂着
