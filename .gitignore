@@ -63,3 +63,6 @@ Thumbs.db
 # 不属于仓库内容，也绝不能带进发布包。
 docker-compose.override.yml
 docker-compose.override.yml.bak-*
+
+# docker secret 文件（数据库连接串）：由 init-pg-dsn-secret.sh 生成，绝不进版本库
+secrets/

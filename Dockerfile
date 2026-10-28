@@ -52,7 +52,12 @@ COPY dist/artex-linux-${TARGETARCH}/artex /app/artex
 # 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。
 COPY start.sh /app/start.sh
 COPY verify-binary-version.sh /usr/local/bin/verify-binary-version.sh
-RUN chmod +x /app/artex /app/start.sh /usr/local/bin/verify-binary-version.sh
+# 交付前的两条安全验收：环境块洁净性、ptrace 封闭。release workflow 的冒烟
+# job 会跑它们 —— 一次性的结论不算数，要有门守着。
+COPY verify-secret-env.sh /usr/local/bin/verify-secret-env.sh
+COPY verify-ptrace-blocked.sh /usr/local/bin/verify-ptrace-blocked.sh
+RUN chmod +x /app/artex /app/start.sh /usr/local/bin/verify-binary-version.sh \
+    /usr/local/bin/verify-secret-env.sh /usr/local/bin/verify-ptrace-blocked.sh
 RUN /usr/local/bin/verify-binary-version.sh /app/artex "$ARTEX_BINARY_VERSION"
 COPY skills/ /app/skills/
 # data/（SQLite + jwt.key）持久化点

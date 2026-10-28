@@ -195,12 +195,21 @@ func readAndBurnDSNFile(path string) (string, error) {
 		}
 		return dsn, nil
 	}
+	// 顺序是先清零再删：删除失败时至少内容不在了。
+	// 清零是否真的成功要如实记录 —— 只读挂载上打不开写句柄，内容其实还在，
+	// 报错却说「已清零」会把人带偏（以为盘上已经没有副本了）。
+	zeroed := false
 	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
-		_ = f.Truncate(0)
+		if err := f.Truncate(0); err == nil {
+			zeroed = true
+		}
 		_ = f.Close()
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("删除 DSN 文件失败（内容已清零）: %w", err)
+		if zeroed {
+			return "", fmt.Errorf("删除 DSN 文件失败（内容已清零）: %w", err)
+		}
+		return "", fmt.Errorf("删除 DSN 文件失败（内容未能清零，文件里仍有明文）: %w", err)
 	}
 	dsn := strings.TrimSpace(string(b))
 	if dsn == "" {
