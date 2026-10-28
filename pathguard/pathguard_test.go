@@ -151,3 +151,12 @@ func TestMalformedInputNotFatal(t *testing.T) {
 		t.Fatalf("畸形输入应放行并交工具自己报错: %v", err)
 	}
 }
+
+// docker secret 目录必须进秘密清单：那里的文件只读、删不掉也清不掉，
+// agent 一条 cat 就能读走数据库连接串。
+func TestBlocksDockerSecretDir(t *testing.T) {
+	withSecretRoots(t, "/run/secrets")
+	if err := call(t, "Read", "file_path", "/run/secrets/pg_dsn"); err == nil {
+		t.Fatal("docker secret 目录内的文件应被拒绝")
+	}
+}
