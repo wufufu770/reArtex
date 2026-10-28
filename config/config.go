@@ -156,16 +156,44 @@ func PostgresDSN() (dsn, source string, err error) {
 	return "", "", fmt.Errorf("未找到数据库配置：环境变量 ARTEX_PG_DSN 未设置，且配置文件 %s 未提供 database（dsn 或 host/user/dbname）。请创建该配置文件或设置环境变量后重试", Path())
 }
 
+// readOnlySecretDir 是只读 secret 的目录前缀。docker secret 以只读方式挂到
+// 这里：既不能清零也不能删。它不在 agent 的工作区（/app/data）内，agent 够不着，
+// 故可容忍「不烧毁」。
+//
+// 做成包级变量是为了让测试能临时指向临时目录（手法与 pathguard 的
+// withSecretRoots 一致），生产代码不留测试专用钩子。
+var readOnlySecretDir = "/run/secrets"
+
+// readOnlySecret 判断路径是否落在只读 secret 目录内。
+func readOnlySecret(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	return abs == readOnlySecretDir || strings.HasPrefix(abs, readOnlySecretDir+string(filepath.Separator))
+}
+
 // readAndBurnDSNFile 读连接串后立刻把磁盘上的那份抹掉。
 //
 // 只读不删等于把秘密留在盘上等 agent 来捡：agent 的 Bash 与 artex 同 UID，
 // 且 /app/data 是它的工作区根。内容已在内存里，磁盘上的副本没有存在价值。
+//
+// 例外：只读 secret（/run/secrets 下的 docker secret）无法清零也无法删除。
+// 那条路径不在 agent 工作区内（且已被 pathguard 的秘密清单拒绝），故容忍
+// 「不烧毁」而不是让启动失败 —— 否则 compose 用 secret 供给 DSN 的部署起不来。
 //
 // 顺序是先清零再删：删除失败时至少内容不在了。
 func readAndBurnDSNFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
+	}
+	if readOnlySecret(path) {
+		dsn := strings.TrimSpace(string(b))
+		if dsn == "" {
+			return "", errors.New("DSN 文件为空")
+		}
+		return dsn, nil
 	}
 	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
 		_ = f.Truncate(0)

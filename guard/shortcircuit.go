@@ -113,6 +113,7 @@ var platformCredentialRe = regexp.MustCompile(
 		// 平台签名密钥
 		`/app/jwt\.key` +
 		`|/app/\.env\b` +
+		`|/run/secrets/` +
 		// MITM CA 私钥/证书
 		`|/app/data/traffic/_ca/[^\s"']*\.(?:pem|key|crt)` +
 		// 相对路径回溯到 /app/jwt.key（cwd 为 /app/data/sessions/<key>，
