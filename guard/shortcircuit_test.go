@@ -141,3 +141,17 @@ func TestDisableFlagFromEnv(t *testing.T) {
 		}
 	}
 }
+
+// docker secret 里的数据库连接串：短路表这一层也要拦（字符串预筛，
+// 挡不住经 shell 展开才现形的形态，但形态在入参里就该先拦下）。
+func TestShortCircuitDockerSecretDeny(t *testing.T) {
+	for _, in := range []string{
+		`{"command":"cat /run/secrets/pg_dsn"}`,
+		`{"file_path":"/run/secrets/pg_dsn"}`,
+	} {
+		dec := shortCircuit("Bash", []byte(in))
+		if dec == nil || dec.Action != "deny" {
+			t.Fatalf("入参 %s 应被 deny，得到 %+v", in, dec)
+		}
+	}
+}

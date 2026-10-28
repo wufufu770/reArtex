@@ -24,6 +24,7 @@ var secretRoots = []string{
 	"/app/jwt.key",          // JWT 签名密钥
 	"/app/.env",             // 容器环境变量落盘（含 DSN 与 LLM key）
 	"/app/data/traffic/_ca", // MITM CA 私钥
+	"/run/secrets",          // docker secret（数据库连接串等）：只读挂载，删不掉也清不掉
 }
 
 // procSecrets 是 /proc 下会泄露宿主/容器进程环境的入口。形态特殊（PID 段可变），

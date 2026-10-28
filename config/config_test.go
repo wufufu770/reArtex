@@ -142,3 +142,46 @@ func TestSecretEnvPolicy(t *testing.T) {
 		t.Fatal("开启 ARTEX_REQUIRE_ENV_SCRUB=1 后应致命")
 	}
 }
+
+// docker secret 是只读挂载：既不能清零也不能删。但它落在 /run/secrets，
+// 不在 agent 的工作区（/app/data）里，agent 够不着 —— 故容忍不烧毁。
+//
+// 否则 compose 用 secret 供给 DSN 的部署根本起不来（删除失败即报错）。
+func TestPostgresDSNFileReadOnlyMountIsTolerated(t *testing.T) {
+	dir := t.TempDir()
+	orig := readOnlySecretDir
+	readOnlySecretDir = dir
+	t.Cleanup(func() { readOnlySecretDir = orig })
+
+	p := filepath.Join(dir, "pg_dsn")
+	const want = "postgres://u:p@h:5432/d"
+	if err := os.WriteFile(p, []byte(want), 0o400); err != nil {
+		t.Fatalf("写 secret 文件失败: %v", err)
+	}
+	t.Setenv("ARTEX_PG_DSN", "")
+	t.Setenv("ARTEX_PG_DSN_FILE", p)
+
+	got, source, err := PostgresDSN()
+	if err != nil {
+		t.Fatalf("只读 secret 应能读出 DSN: %v", err)
+	}
+	if got != want {
+		t.Fatalf("DSN 不对: %q", got)
+	}
+	if !strings.Contains(source, p) {
+		t.Fatalf("来源说明应含文件路径，得到 %q", source)
+	}
+	// 可写路径仍必须被烧毁（既有行为不能被这次改动放松）
+	dir2 := t.TempDir()
+	p2 := filepath.Join(dir2, "pg_dsn")
+	if err := os.WriteFile(p2, []byte(want), 0o600); err != nil {
+		t.Fatalf("写 DSN 文件失败: %v", err)
+	}
+	t.Setenv("ARTEX_PG_DSN_FILE", p2)
+	if _, _, err := PostgresDSN(); err != nil {
+		t.Fatalf("可写 DSN 文件应能读出: %v", err)
+	}
+	if _, err := os.Stat(p2); !os.IsNotExist(err) {
+		t.Fatalf("可写 DSN 文件读入后应被删除，stat err=%v", err)
+	}
+}
