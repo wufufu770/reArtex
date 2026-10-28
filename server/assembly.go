@@ -11,10 +11,26 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/skill"
 	actool "github.com/Autumn-27/norma/tool"
 )
+
+// wireToolDenialRecorder 把工具层的拒绝接进审计链。
+//
+// 工具层（norma 的 permission 判定 Stage 1）早于 PreToolUse hook 求值，hook 不会
+// 被调用，于是短路表那条留痕路径拿不到 —— 由这里补一条。用 interceptor 写入，
+// payload 的规范化与串行化与其他判定动作一致，链不会因此断掉。
+func wireToolDenialRecorder(ic *intercept.Interceptor) {
+	agent.ToolDenialRecorder = func(ctx context.Context, toolName, reason string, input []byte) {
+		ic.AppendDecisionEvent(ctx, intercept.Decision{
+			Action:   "deny",
+			RuleName: "[代码常量] 工具层秘密判定",
+			Message:  reason,
+		}, toolName, input, "denied")
+	}
+}
 
 // wireAgentAugment connects the PG agent_visibility table into the agent runtime:
 // an agent's visible skills are loaded from the filesystem and packed into one
