@@ -368,6 +368,9 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     model            TEXT NOT NULL,
     api_key          TEXT,
     api_key_hint     TEXT,
+    -- api_key_cipher：AES-256-GCM 密文（base64(nonce‖密文‖tag)），AAD 绑定 name。
+    -- 明文 api_key 列在启用主密钥后置空；历史明文行由启动时的迁移改写。
+    api_key_cipher   TEXT,
     rate_per_second  DOUBLE PRECISION NOT NULL DEFAULT 0,
     rate_per_minute  DOUBLE PRECISION NOT NULL DEFAULT 0,
     context_window_k INTEGER NOT NULL DEFAULT 0,
