@@ -156,16 +156,19 @@ m  server/assembly.go             +1/-1     计量链路传入 skill 目录
 
 ### 已知残留（未做）
 
-- **短路表是入参字符串预筛，不是路径解析级强制。** `cat $(realpath ../../../jwt.key)` 这类经 shell 展开后才现形的路径仍可绕过。真正闭合需要执行前的 `realpath` 校验与环境变量白名单。
-- **平台环境块规则同样是字符串预筛。** 运行时才成形的路径（`find /proc -name environ -exec cat {} \;`）仍能绕过。闭合靠的是供给侧 —— 凭据根本不进进程环境块，见下一节的 `ARTEX_PG_DSN_FILE`。
-- **`/proc/<pid>/mem` 读父进程内存仍可取到 DSN 字符串**（需 ptrace 权限）。本批未处理。
-- **`docker inspect` 仍可见容器配置里的 DSN**（需宿主 / docker socket 权限）。同理 `docker exec` 拉起的进程会继承容器配置面的 env —— 但 agent 的 Bash 是 artex 的子孙进程，继承的是 artex 的（干净的）环境块，不在此列。
+- **平台环境块规则是字符串预筛。** 运行时才成形的路径（`find /proc -name environ -exec cat {} \;`）仍能绕过。闭合靠的是供给侧 —— 凭据根本不进进程环境块，见下一节。
+- **`/proc/<pid>/mem` 读同 UID 进程的内存仍可做到**（实测在容器里能读）。这里有个容易想错的点：**同 UID 的 ptrace 不需要 `CAP_SYS_PTRACE`**，所以 `cap_drop: [SYS_PTRACE]`（Docker 默认能力集本就不含它）**挡不住这条**。真正的闭合要让工具进程与 artex **不同 UID**（属 per-task 隔离那一档），或让内存里不留明文秘密。镜像里留了 `verify-ptrace-blocked.sh` 供运维自查（它**故意不进发布门**，因为这条尚未闭合）。
 - **平台环境块规则作用在整个工具入参 JSON 上**，故「把含 `/proc/…/environ` 字样的内容写进文件」也会被拦。
-- **`llm_profiles.api_key` 仍以明文存于数据库**（需数据库读权限才能取到）。
 - **产物无独立签名**：Release 的 `SHA256SUMS` 与二进制同源（同一个 Release），能篡改 Release 的人可以同时替换两者。当前信任模型是「信任 GitHub Release」。
-- **lint 棘轮门是「按文件」判定的**：碰到带着既有 lint 债的文件会让门变红（本轮已把触碰过的文件清干净）。这不是 bug 而是该门的语义 —— **碰了脏文件就得顺手清干净**。
-- G-09 ask 队列治理（需 per-agent 聚合计数）。
-- **尚未做运行时端到端验证**：单测覆盖了函数逻辑，但未通过真实 agent 会话发起工具调用确认短路表在链路中生效。
+- **lint 棘轮门是「按文件」判定的**：碰到带着既有 lint 债的文件会让门变红（触碰过的文件已清干净）。这不是 bug 而是该门的语义 —— **碰了脏文件就得顺手清干净**。
+
+本批已闭合（原先也登记在上面，现已消解）：
+
+- ~~短路表是入参字符串预筛~~ → 入参里的路径片段现在**按工具工作目录解析成真实路径**再判定（`pathguard.CheckInputPaths`），`cat $(realpath ../../../jwt.key)` 这类经 shell 展开才现形的路径已被拒；判定点仍在工具策略层（Stage 1 Deny，任何 permission mode 绕不过）。**剩余边界**：运行时才成形的路径（编码/拼接/下载内容决定）仍在射程外，容器内 root 的读取也不在本层覆盖内。
+- ~~`docker inspect` 仍可见容器配置里的 DSN~~ → 口令改由 **docker secret 文件**供给，`docker inspect` 的 Env 里只有文件路径。
+- ~~`llm_profiles.api_key` 明文存库~~ → 改为 **AES-256-GCM 加密落库**，主密钥由文件供给（不进环境块、不进库），历史明文行在启动时自动迁移。详见[加密落库的 LLM key](#加密落库的-llm-key)。
+- ~~G-09 ask 队列治理未做~~ → 已做：计数维度 (agent, 工具, 时间窗)，**只在同一 agent 反复请求同一高危面超阈值时**才自动拒绝（默认 5 次 / 600 秒，可热改）；单次或少量请求完全不受影响。
+- ~~尚未做运行时端到端验证~~ → 已做：真实装配（`AugmentTools`）→ 工具层判定 → 拒绝 → 审计链留痕整条链有回归用例，并做过反证（撤掉判定后用例确实变红）。
 
 ### 应急回滚
 
@@ -180,7 +183,20 @@ ARTEX_DISABLE_SHORT_CIRCUIT=1 docker compose up -d
 
 ### 平台凭据不出现在进程环境块
 
-`ARTEX_PG_DSN` 经容器环境变量下发时，会留在进程的 exec 期环境块里，而 `/proc/<pid>/environ` 对同 UID 的 agent 子进程可读。若希望凭据不出现在环境块，改用 `ARTEX_PG_DSN_FILE` 指向一次性文件：
+`ARTEX_PG_DSN` 经容器环境变量下发时，会留在进程的 exec 期环境块里，而 `/proc/<pid>/environ` 对同 UID 的 agent 子进程可读；更要紧的是它**还留在容器的配置面**（`docker inspect` 能看到）。
+
+**推荐形态（v0.4.1+）**：口令走 **docker secret 文件**，容器配置面里根本没有口令：
+
+```bash
+./init-pg-dsn-secret.sh   # 由 .env 生成 secrets/pg_dsn（0600，不进版本库）
+docker compose up -d
+```
+
+secret 以只读方式挂到 `/run/secrets/pg_dsn`，`/run/secrets` 已在平台的秘密清单里
+（agent 读不到）。**只读挂载的文件删不掉也清不掉**，所以这条路径不适用「读入即销毁」；
+它靠的是「不在 environment 里、不在 agent 工作区内」这两点。
+
+若不使用 compose（比如裸跑二进制），可用 `ARTEX_PG_DSN_FILE` 指向一次性文件：
 
 ````yaml
 services:
@@ -211,16 +227,47 @@ services:
 
 ---
 
+## 加密落库的 LLM key
+
+`llm_profiles.api_key` 可以用主密钥加密后落库（拿到数据库口令的人，没有主密钥就读不出 key）。**默认不启用** —— 不配主密钥时行为与从前完全一致（明文落库），只是没有这层保护。
+
+启用方式：
+
+1. 生成主密钥，放到**数据目录之外**（数据目录是 agent 的工作区根，放进去等于没加密）：
+
+   ```bash
+   mkdir -p /run/artex
+   openssl rand -hex 32 > /run/artex/master.key
+   chmod 600 /run/artex/master.key
+   ```
+
+2. 在 compose 的 `artex.environment` 里加一行（**只放路径，不放密钥本身**）：
+
+   ```yaml
+   ARTEX_MASTER_KEY_FILE: /run/artex/master.key
+   ```
+
+3. 重启后，历史明文行会在启动时自动迁移成密文（日志里会打印迁移了几行）。
+
+四点说明：
+
+- **主密钥文件放错位置会被拒绝启动**（在数据目录内即报错），因为那等于把钥匙挂在 agent 够得着的地方。
+- **丢了主密钥 = 所有已加密的 LLM key 都解不开**（只能重新填）。请备份该文件。
+- 密文的 **AAD 绑定行名**：不同 profile 的密文不能互换（有库写权限的人不能把 A 行的 key 挪到 B 行再配上自己可控的 `base_url` 把 key 送出去）。因此**改名会触发重加密**。
+- 平台**不会**把主密钥写进环境块或数据库，只留在进程内存里。
+
+---
+
 ## 未来打算改什么
 
 按「还欠着什么」排，不承诺时间。每项都对应上文或[已知残留](#已知残留未做)里登记的东西。
 
 | 计划 | 目的 | 现状 |
 |---|---|---|
-| **运行时权限边界**（可信授权 + 统一入口 + 任务隔离 + 强制网络出口） | 现在的硬边界主要靠**代码常量**与**凭据不落环境块**；真正的"每个任务一个受限身份、出网只走允许的通道"还没建。计划形态：per-task runner + 最小 env/netns + 默认拒绝直连 | 规划中（工作量最大的一项） |
+| **运行时权限边界**（可信授权 + 统一入口 + 任务隔离 + 强制网络出口） | 现在的硬边界主要靠**代码常量**与**凭据不落环境块**；真正的"每个任务一个受限身份、出网只走允许的通道"还没建。计划形态：per-task runner + 最小 env/netns + 默认拒绝直连 | **进行中**：执行层收口已落地（入参路径按工作目录解析并留痕、口令走 secret 文件不进配置面、平台工具分级审核），但 per-task 隔离与净网未做 —— 工作量最大的一项 |
 | **产物签名与来源证明** | Release 的 `SHA256SUMS` 与二进制同源，能改 Release 就能同时换掉两者。计划：产物签名（cosign / minisign）+ SBOM + 校验 buildx provenance | 规划中 |
 | **测试隔离下沉到用例级** | 现在是**每包一个独立库**，包内用例仍共享一个库（顺序敏感）。计划：按用例隔离或补统一的清理钩子，让用例可任意顺序、可并行 | 规划中 |
-| **发布后冒烟扩到多架构 + 不可变标签** | 现在冒烟只验 amd64；Compose 默认用 `latest` 这个可变标签。计划：冒烟覆盖 arm64、Compose 默认改用不可变 tag 或 digest | 规划中 |
+| **发布后冒烟扩到多架构 + 不可变标签** | 现在冒烟只验 amd64；Compose 默认用 `latest` 这个可变标签。计划：冒烟覆盖 arm64、Compose 默认改用不可变 tag 或 digest | **部分**：发布冒烟已加**环境块洁净性**阻断门（每次发布都验），arm64 冒烟与不可变标签未做 |
 | **上游择取回合的可重复流程** | reArtex **不自动同步**上游（更新只跟自己的 Release），但上游后续仍有变更。计划：把"评估一个上游提交要不要回合"做成有据可依的固定流程，而不是临时手工挑 | 规划中 |
 | **生态补齐**（skills 同步 / 更新即重启 / 回滚数据 / 复测导出） | 上游登记的部署与生态类问题：多端 skill 同步、页面更新后的容器换装、数据回滚、复测结果导出 | 规划中 |
 
@@ -290,11 +337,18 @@ services:
 git clone https://github.com/wufufu770/reArtex.git
 cd reArtex
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
+./init-pg-dsn-secret.sh       # 由 .env 生成数据库连接串 secret（0600，不进版本库）
 docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgres
 # → http://localhost:8787
 ```
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+
+> **`init-pg-dsn-secret.sh` 不能省**：数据库口令走 **docker secret 文件**供给
+> （`/run/secrets/pg_dsn`），这样 `docker inspect` 看不到口令 —— 口令留在容器的
+> `environment` 里就等于把它摊开给任何能看容器配置的人。该脚本从 `.env` 拼出连接串
+> 写进 `secrets/pg_dsn`（权限 0600，`secrets/` 已被 .gitignore 排除）。
+> 该形态需要 **v0.4.1 及以后**的镜像（更早的镜像不认只读 secret 挂载）。
 
 指定版本：`.env` 里设 `ARTEX_TAG=v0.4.0`（不设则用 `latest`）。**建议固定版本**，不要用
 可变的 `latest` —— 出了问题没法确定跑的是哪一版。
