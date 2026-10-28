@@ -103,6 +103,9 @@ jobs:
           files: |
             dist/*.zip
             dist/SHA256SUMS
+          # 正文取仓库里的 RELEASE_NOTES.md（打 tag 前写好）：自动生成的提交列表
+          # 附在其后。此前正文只有一行 compare 链接 —— 没人话。
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
 
   # ④ 多架构镜像 → 推 ghcr.io（复用 binaries 编好的 Linux 二进制，

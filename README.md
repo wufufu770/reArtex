@@ -94,6 +94,24 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）· ARTEX 的安全加
 | 类别四 | norma SDK 上游缺陷 | `go.mod` 锁 v0.4.3，原样传导三个缺陷（流解析丢 input usage、丢 Gemini thought_signature、长任务/大输出边角） | 升至 **v0.4.4**，上游已修并自带回归测试 |
 | — | `graph_overview` 不展开公司范围 | 返回的 `coverage.scope` 只有任务自身范围 | 展开 `company_scope` 的 domain/ip/cidr/icp/keyword 规则与 `company_keywords`（取值用 `raw` 原文而非规范化列） |
 
+### 第三批 · W-A 波次（分级审核、路径解析、凭据供给面、密钥加密）
+
+这一批做的是把**已登记的活路径**逐条闭合或如实降级。功能面（执行模型、任务编排、探索引擎、对外 API）仍保持上游原样。
+
+| 编号 | 缺陷 | 原行为 | 现行为 |
+|---|---|---|---|
+| G-01①′ | 平台工具一律要人工确认 | 7 件平台工具全部 ask —— 连「新建技能文件」这种日常操作也要打断 | **三档**：2 件 `deny`（MCP 注册）、4 件 `ask`（改可执行面 / 改既有行为 / 删证据库）、**1 件显式 allow**（新建技能）。显式 allow 是代码常量**主动判定放行**、仍插在判定最前 → 不重开「平台工具绕白名单」的原洞；allow 档判定也进审计链 |
+| G-04①②′ | DB 规则的 ask 类可无限等待 | 种子规则照抄 `timeout_enabled=false` → 审批挂着不回来，人不在时该面永远卡住 | 命中 ask 的规则自动补 **60s 超时且超时即拒**（判官侧「不可用即拒」本就是默认值，第一批表里已成立） |
+| G-09④⑥ | 审批无防疲劳机制 | 同一 agent 反复请求审批时，人只能一次次点 —— 疲劳点 allow 等于无限循环 | 计数维度 (agent, 工具, 时间窗)，**仅超阈值才**自动拒绝（默认 5 次 / 600 秒，可热改）；单次或少量请求**完全不受影响**；计数失败不升级（宁可多问一次人，不误拒正常任务） |
+| G-02①-a′ | 入参路径只做字符串预筛 | `cat $(realpath ../../../jwt.key)` 这类经 shell 展开才现形的路径绕得过短路表 | 入参里的路径片段**按工具工作目录解析成真实路径**再判秘密清单（相对回溯 / 命令替换 / 软链 / 父目录软链都覆盖）；判定点仍在工具策略层（Stage 1 Deny，任何 permission mode 绕不过） |
+| — | 工具层拒绝不留痕 | 工具层（Stage 1）早于 `PreToolUse` hook 求值 → hook 根本不跑 → 拿不到短路表那条留痕路径 | 由 server 注入的记录器把工具层拒绝写进审计链（顺带补上 Read/Write/Edit 面既有的老缺口） |
+| — | 容器配置面暴露数据库口令 | `docker inspect` 能看到 environment 里的 DSN | 口令改由 **docker secret 文件**供给（`/run/secrets/pg_dsn`），配置面只剩文件路径；`/run/secrets` 进平台秘密清单 |
+| — | 平台秘密只靠一次性自检 | 「进程环境块里没有秘密」是一次性结论，没有门守着 | 固化成**发布阻断门**（`verify-secret-env.sh` 进 release 冒烟，每次发布都验） |
+| — | LLM key 明文存库 | 拿到数据库口令即可读出全部 LLM key | 改为 **AES-256-GCM 加密落库**（明文列置空），主密钥由文件供给（不进环境块、不进库；放数据目录内拒绝启动），历史明文行启动时自动迁移；AAD 绑定行名 → 改名触发重加密 |
+| — | 运行时端到端验证缺失 | 单测覆盖了函数逻辑，但没在真实链路里验过 | 真实装配 → 判定 → 拒绝 → 审计链整条链有回归用例，并做过**反证**（撤掉判定后该用例确实变红） |
+
+> **这一批新查实的两件事**（都写进了口径）：① 工具层（Stage 1）**早于** `PreToolUse` hook 求值 → 工具层的拒绝拿不到短路表那条留痕路径，故须另有留痕通道；② **`cap_drop: [SYS_PTRACE]` 是空操作** —— Docker 默认能力集本就不含它，而**同 UID 的 ptrace 并不需要该能力**，实测容器内读同 UID 进程的已映射内存依然成功。故「`/proc/<pid>/mem`」这条残留**仍然开放**（见下）。
+
 ### 改动清单
 
 第一批（相对上游 `e6ec569`）：
@@ -146,7 +164,40 @@ m  server/server.go               +14/-0    启动自检调用点
 m  server/assembly.go             +1/-1     计量链路传入 skill 目录
 ```
 
-被转人工审批的 7 件平台工具：`create_mcp`、`update_mcp`、`create_custom_tool`、`update_custom_tool`、`create_skill`、`update_skill_file`、`delete_assets_by_host`（60 秒不确认即拒绝）。**这是有意的行为变更**——auto agent 不再能自主建 MCP / skill。
+第三批（W-A 波次）：31 files changed, 1553 insertions(+), 38 deletions(-)
+
+```
+a  pathguard/tokens.go             +145/-0   入参路径片段提取与解析（新文件）
+a  pathguard/tokens_test.go        +123/-0
+a  config/masterkey.go             +77/-0    主密钥加载与位置校验（新文件）
+a  config/masterkey_test.go        +91/-0
+a  db/crypto.go                    +77/-0    AES-256-GCM 加解密，AAD 绑定行名（新文件）
+a  db/crypto_test.go               +85/-0
+a  db/llmkey_migration.go          +54/-0    历史明文 key 迁移（新文件）
+a  db/llmkey_test.go               +166/-0
+a  server/toolpolicy_e2e_test.go   +71/-0    端到端回归：装配→拒绝→审计链（新文件）
+a  verify-secret-env.sh            +45/-0    环境块洁净性发布门（新文件）
+a  verify-ptrace-blocked.sh        +42/-0    ptrace 封闭诊断（该条未闭合，供自查）（新文件）
+a  init-pg-dsn-secret.sh           +35/-0    由 .env 生成 secret 文件（新文件）
+m  db/config.go                    +123/-22  profile 读写密文化 + 改名重加密
+m  config/config.go                +39/-2    只读 secret 供给容忍 + 错误信息如实化
+m  agent/toolpolicy_test.go        +95/-0
+m  agent/toolpolicy.go             +18/-0    接入入参路径判定 + 拒绝留痕
+m  agent/assembly.go               +11/-0    工具层留痕注入缝
+m  server/assembly.go              +16/-0    留痕接线（audit 链写入）
+m  server/manager.go               +14/-0    主密钥位置校验 + 迁移调用
+m  docker-compose.yml              +18/-1    secret 供给 + cap_drop
+m  .github/workflows/release.yml   +16/-1    冒烟改 secret 供给 + 环境块洁净性门
+m  Dockerfile                      +6/-1     两个验收脚本进镜像
+m  guard/shortcircuit_test.go      +14/-0    三档断言
+m  pathguard/pathguard_test.go     +9/-0     /run/secrets 秘密清单断言
+m  db/schema.sql                   +3/-0     api_key_cipher 列
+m  .gitignore                      +3/-0     secrets/
+m  guard/shortcircuit.go           +2/-0     allow 档
+m  pathguard/pathguard.go          +1/-0     /run/secrets 进秘密清单
+```
+
+**平台工具的三档归属**（第三批调整后）：`create_mcp` / `update_mcp` = **硬拦**（凭据汇，无人工放行路径）；`create_custom_tool` / `update_custom_tool` / `update_skill_file` / `delete_assets_by_host` = **转人工审批**（60 秒不确认即拒绝）；`create_skill` = **代码级显式放行**（新建技能不覆盖既有行为，日常操作不再被打断）。相对第二批的变化：建 MCP 仍是硬拦，但**建技能从「人工审批」放宽为「显式放行」** —— 这是**有意的行为变更**（用覆盖面换日常可用性），且「显式放行」仍是代码常量在判定最前主动求值，不是漏判。
 
 ### 审计过程中额外发现并修掉的三个问题
 
@@ -350,7 +401,7 @@ docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgr
 > 写进 `secrets/pg_dsn`（权限 0600，`secrets/` 已被 .gitignore 排除）。
 > 该形态需要 **v0.4.1 及以后**的镜像（更早的镜像不认只读 secret 挂载）。
 
-指定版本：`.env` 里设 `ARTEX_TAG=v0.4.0`（不设则用 `latest`）。**建议固定版本**，不要用
+指定版本：`.env` 里设 `ARTEX_TAG=v0.4.1`（不设则用 `latest`）。**建议固定版本**，不要用
 可变的 `latest` —— 出了问题没法确定跑的是哪一版。
 
 > **想要拉取的那个 tag 还没发布时**：本仓库的 Release 随 `v*` tag 生成，ghcr 镜像与之同批
