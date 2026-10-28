@@ -5,7 +5,7 @@ import "testing"
 func TestShortCircuitPlatformToolsAsk(t *testing.T) {
 	for _, tool := range []string{
 		"create_custom_tool", "update_custom_tool",
-		"create_skill", "update_skill_file", "delete_assets_by_host",
+		"update_skill_file", "delete_assets_by_host",
 	} {
 		dec := shortCircuit(tool, []byte(`{"command":"http://127.0.0.1"}`))
 		if dec == nil {
@@ -17,6 +17,21 @@ func TestShortCircuitPlatformToolsAsk(t *testing.T) {
 		if !dec.TimeoutEnabled || dec.TimeoutSeconds != 60 || dec.TimeoutAction != "deny" {
 			t.Fatalf("%s 的 ask 超时须为 60s/deny，得到 %+v", tool, dec)
 		}
+	}
+}
+
+// 低危面（新建技能文件）不再打断日常操作：短路表【显式判定放行】，
+// 而不是「不命中短路表」——后者等于漏判，会重开 G-01① 的洞。
+func TestShortCircuitLowRiskToolExplicitAllow(t *testing.T) {
+	dec := shortCircuit("create_skill", []byte(`{"name":"x"}`))
+	if dec == nil {
+		t.Fatal("create_skill 应命中短路表（显式 allow），不应落回漏判")
+	}
+	if dec.Action != "allow" {
+		t.Fatalf("create_skill 应为 allow，得到 %s", dec.Action)
+	}
+	if dec.RuleName == "" {
+		t.Fatal("allow 档也必须带 RuleName：审计链靠它区分来源")
 	}
 }
 

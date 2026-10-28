@@ -63,12 +63,27 @@ var platformDenyTools = map[string]bool{
 
 // platformAskTools 是 G-01① 的对象：改平台配置的工具一律 ask，不直接 deny —— 建自定义
 // 工具 / skill 是 auto agent 的合法日常操作，拦死会废掉平台运维能力。MCP 见上。
+//
+// create_skill 不在此表：新建技能文件不覆盖既有行为，其后果由动作层护栏兜住
+// （护栏拦行为不拦内容，故写进 skill 的内容无法绕过工具层策略），日常操作不该
+// 被人工审批打断。它落在 platformAllowTools —— 显式判定放行，不是漏判。
 var platformAskTools = map[string]bool{
 	"create_custom_tool":    true,
 	"update_custom_tool":    true,
-	"create_skill":          true,
 	"update_skill_file":     true,
 	"delete_assets_by_host": true,
+}
+
+// platformAllowTools 是低危面：代码常量【显式判定放行】。
+//
+// 与「不命中短路表」的区别是本表存在的全部意义：不命中 = 漏判，平台工具
+// 就能绕开判官（G-01① 原漏洞）；显式 allow = 平台主动判了「这件事无害」，
+// 判定动作照样落审计链。
+//
+// 收录标准：① 不覆盖既有行为（新建不同于改写）；② 其后果由动作层护栏兜住
+// （护栏拦行为不拦内容，故写进 skill 的内容无法绕过工具层策略）。
+var platformAllowTools = map[string]bool{
+	"create_skill": true,
 }
 
 // platformCredentialRe 是 G-02①-a 的对象：只拦 ARTEX 平台自身的凭据。
@@ -142,7 +157,8 @@ const (
 // 动作语义：
 //
 //	deny —— 硬拦，无人工放行路径（平台自身凭据、MCP 注册）
-//	ask  —— 转人工审批（改平台配置的工具）
+//	ask  —— 转人工审批（改写既有行为/可执行面、删证据库）
+//	allow —— 代码常量显式判定放行（低危面，如新建技能文件）
 func shortCircuit(toolName string, input []byte) *intercept.Decision {
 	if !ShortCircuitEnabled {
 		return nil
@@ -166,6 +182,14 @@ func shortCircuit(toolName string, input []byte) *intercept.Decision {
 			TimeoutEnabled: true,
 			TimeoutSeconds: 60,
 			TimeoutAction:  "deny",
+		}
+	}
+	// 低危面：显式放行（仍是代码常量判定，不是漏判）
+	if platformAllowTools[toolName] {
+		return &intercept.Decision{
+			Action:   "allow",
+			RuleName: "[代码常量] 平台低危工具放行",
+			Message:  "新建技能文件不改变既有行为，按平台策略放行。",
 		}
 	}
 	// G-02①-a：平台凭据/进程环境 deny

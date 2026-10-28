@@ -84,7 +84,17 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	// 短路表须先于 IsToolEnabled 求值：不在 intercept_enabled_tools 名单内的工具
 	// 会在下一行直接放行，表排其后即失效。代码常量，不受 settings 覆盖。
 	if dec := shortCircuit(ev.ToolName, ev.Input); dec != nil {
-		if dec.Action == "ask" {
+		switch dec.Action {
+		case "allow":
+			// 显式放行也要留痕：平台工具调用量小，进审计链无压力；
+			// 事后要能回答「谁在何时建过什么」。
+			if g.interceptor != nil {
+				logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
+				g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), *dec, ev.ToolName, ev.Input, "allowed")
+			}
+			g.record(ev.ToolName, "allow", dec.Message, "")
+			return hook.Result{}
+		case "ask":
 			if g.interceptor == nil {
 				return g.block(ev.ToolName, systemBlockMessage("人工审批通道不可用（"+dec.Message+"）"), "")
 			}
@@ -93,17 +103,18 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 				return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
 			}
 			return hook.Result{}
+		default:
+			// 短路表的 deny 也要落库。此前它只进内存 audit 切片（上限 2000、
+			// 进程退出即失），于是「谁在何时想干什么」查无实据 —— 而短路表
+			// 恰恰是唯一一道不受 DB 热改面影响的防线，最需要留痕。
+			// Log 是 best-effort：DB 写失败不影响本次调用结果。
+			if g.interceptor != nil {
+				logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
+				g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), *dec, ev.ToolName, ev.Input, "denied")
+			}
+			g.record(ev.ToolName, "block", dec.Message, "")
+			return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
 		}
-		// 短路表的 deny 也要落库。此前它只进内存 audit 切片（上限 2000、
-		// 进程退出即失），于是「谁在何时想干什么」查无实据 —— 而短路表
-		// 恰恰是唯一一道不受 DB 热改面影响的防线，最需要留痕。
-		// Log 是 best-effort：DB 写失败不影响本次调用结果。
-		if g.interceptor != nil {
-			logCtx := intercept.WithCall(ctx, ev.ToolName, ev.Input)
-			g.interceptor.Log(logCtx, intercept.ConvIDFromContext(logCtx), *dec, ev.ToolName, ev.Input, "denied")
-		}
-		g.record(ev.ToolName, "block", dec.Message, "")
-		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
 	}
 	if g.interceptor == nil {
 		return hook.Result{}
