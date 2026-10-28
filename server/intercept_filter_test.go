@@ -4,11 +4,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 )
+
+// 短路表来源是合法的筛选维度。
+//
+// 后端 interceptSource 会下发 "shortcircuit"（代码常量短路表的判定），前端
+// 来源筛选的下拉框里也有这一项。API 若把它当非法值拒掉，那个下拉框就是死的 ——
+// 用户选了只会拿到 400。
+func TestInterceptFilterParamsAcceptsShortcircuitSource(t *testing.T) {
+	for _, src := range []string{"", "model", "rule", "shortcircuit", "unknown"} {
+		if _, err := interceptFilterParams(url.Values{"decision_source": {src}}); err != nil {
+			t.Errorf("decision_source=%q 应被接受，却报错：%v", src, err)
+		}
+	}
+	if _, err := interceptFilterParams(url.Values{"decision_source": {"bogus"}}); err == nil {
+		t.Error("非法 decision_source 应被拒绝")
+	}
+}
 
 func TestInterceptFilterHTTP(t *testing.T) {
 	dsn, _, err := db.DSN()
