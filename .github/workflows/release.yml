@@ -105,21 +105,37 @@ jobs:
             dist/SHA256SUMS
           generate_release_notes: true
 
-  # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
+  # ④ 多架构镜像 → 推 ghcr.io（复用 binaries 编好的 Linux 二进制，
   #    镜像里只装工具 + 放二进制；arm64 仅需模拟 apt 层，构建快很多）
   docker:
     needs: binaries
     runs-on: ubuntu-latest
+    # 冒烟要用真数据库：应用启动时连库并跑迁移，没有库它根本起不来，
+    # 也就验不出「镜像能不能用」。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: artex
+          POSTGRES_PASSWORD: artex
+          POSTGRES_DB: artex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U artex -d artex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4 # 取 Dockerfile 与 skills/
       - uses: actions/download-artifact@v4
         with:
           name: bin-linux-amd64
-          path: dist/amd64
+          path: dist/artex-linux-amd64
       - uses: actions/download-artifact@v4
         with:
           name: bin-linux-arm64
-          path: dist/arm64
+          path: dist/artex-linux-arm64
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -145,10 +161,44 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # 必填：构建期会跑一次装进去的二进制，核对它自报的版本与本次构建期望的
-          # 版本一致。缺了它，dist/<arch>/artex 若是旧文件，镜像照样构建成功，
+          # 版本一致。缺了它，那个路径下若是旧文件，镜像照样构建成功，
           # 旧二进制就被静默装了进去。ref_name 与 binaries job 注入的版本同源
           # （校验脚本会剥掉 tag 的 v 前缀）。
           build-args: |
             ARTEX_BINARY_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # 发布后冒烟：把刚推上去的镜像拉回来真跑一次，确认它能起来、
+      # 且报出来的版本就是这次发布的 tag。
+      #
+      # 构建期的校验只证明了「镜像里的二进制版本对」；镜像本身能不能起、
+      # 启动脚本和工具链齐不齐，之前没有任何一处验过 —— 而这正是用户
+      # docker compose up 之后立刻会遇到的那一步。
+      - name: 冒烟刚发布的镜像
+        run: |
+          image="ghcr.io/wufufu770/reartex:${{ github.ref_name }}"
+          for i in $(seq 1 12); do
+            if docker pull --platform linux/amd64 "$image"; then break; fi
+            echo "拉取 $image 失败，重试（第 $i 次）"; sleep 10
+          done
+          # --network host：服务容器的 Postgres 是通过 runner 的端口映射露在
+          # localhost:5432 的，而 docker run 起的容器在独立网络里，它自己的
+          # localhost 是容器自己 —— 不共享网络命名空间就永远连不上那个库，
+          # 冒烟会卡在「应用起不来」而不是真正验到东西。
+          cid=$(docker run -d --network host \
+            -e ARTEX_PG_DSN="postgres://artex:artex@localhost:5432/artex?sslmode=disable" "$image")
+          for i in $(seq 1 40); do
+            if curl -sf -m 3 http://127.0.0.1:8787/api/health > /tmp/health.json; then break; fi
+            sleep 2
+          done
+          cat /tmp/health.json
+          got=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' /tmp/health.json)
+          want="${GITHUB_REF_NAME#v}"
+          if [ "$got" != "$want" ]; then
+            echo "刚发布的镜像版本不符：期望 $want，实际 ${got:-（读不到 /api/health）}"
+            docker logs "$cid" || true
+            docker rm -f "$cid" || true
+            exit 1
+          fi
+          echo "版本核对通过：$got"
+          docker rm -f "$cid"

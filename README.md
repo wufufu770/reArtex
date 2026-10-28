@@ -237,6 +237,22 @@ docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgr
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
+> **镜像还没发布时怎么办**：本仓库目前尚未打过正式 tag，ghcr.io 上还没有
+> `wufufu770/reartex` 这个镜像，上面那条 `docker compose up -d` 会拉取失败。
+> 两条走法：
+>
+> - **等发布**：仓库打 `v*` tag 时，release workflow 会自动构建多架构镜像推上
+>   ghcr.io，并生成带 SHA256SUMS 的 GitHub Release；届时上面的命令直接可用。
+> - **先本地构建**（需要 Go ≥ 1.26、Node ≥ 20、rsync、zip）：
+>   ```bash
+>   ./build-image.sh                                  # 编前端 + 编二进制 + 构建镜像 artex:local
+>   echo "image: artex:local" > docker-compose.override.yml
+>   docker compose up -d
+>   ```
+>
+>   `build-image.sh` 会在构建期核对镜像里的二进制版本与本次构建是否一致，
+>   装错旧二进制会直接构建失败，不会让你拿到一个"看着新、其实是旧"的镜像。
+
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
 `/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
@@ -245,6 +261,9 @@ docker compose up -d          # 拉取 ghcr.io/wufufu770/reartex 镜像 + postgr
 ### 方式三：下载预编译二进制（Releases）
 
 到 [Releases](https://github.com/wufufu770/reArtex/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
+
+> 本仓库目前还没有已发布的 Release（首次发布会在打 tag 后自动生成，并附 SHA256SUMS）。
+> 在此之前请用下面的方式四从源码编译。
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
