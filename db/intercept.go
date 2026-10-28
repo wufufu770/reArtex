@@ -293,6 +293,23 @@ func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {
 	return out, rows.Err()
 }
 
+// CountRecentInterceptAsks 统计某 agent 在 since 之后对某工具发起过多少次
+// 「待人工审批」的请求。
+//
+// 只数「真正问过人」的请求：decision_source='shortcircuit'（代码常量短路表
+// 发起的那一档）且状态不是 denied（被拒的行从没问过人）。DB 规则发起的 ask
+// 不计入 —— 那是管理员自己配的面，治理不该越界去改它。
+//
+// 数据源就是 intercept_pending 本身：进程重启不丢，且与审批历史页是同一份数据。
+func (d *DB) CountRecentInterceptAsks(agentName, toolName string, since time.Time) (int, error) {
+	var n int
+	err := d.QueryRow(`SELECT COUNT(*) FROM intercept_pending
+		WHERE agent_name=$1 AND tool_name=$2 AND created_at >= $3
+		  AND decision_source='shortcircuit' AND status <> 'denied'`,
+		agentName, toolName, since).Scan(&n)
+	return n, err
+}
+
 // InterceptApprovalFilter combines exact status and decision-source filters.
 // Empty fields include all values.
 type InterceptApprovalFilter struct {
