@@ -520,6 +520,40 @@ func judgeActionLabel(action string) string {
 	}
 }
 
+// defaultAskTimeoutSecs 是 DB 规则 ask 类的默认审批超时。
+//
+// 种子规则照抄了 timeout_enabled=false，照抄即「审批无限等待」——审批挂着
+// 不回来，人不在的时候这条面就永远卡住。默认给 60s 且超时即拒：超时放行
+// 等于「人不在就通过」。
+const defaultAskTimeoutSecs = 60
+
+// matchRule 把一条命中的 DB 规则变成 Decision。
+//
+// 抽成纯函数是为了能在没有数据库的环境里确定性地测「ask 类规则是否带默认
+// 超时」——那是一条安全默认值，只能靠纯函数测（走 DB 的路径要库就绪）。
+func matchRule(r db.InterceptRule) Decision {
+	msg := r.Message
+	if msg == "" {
+		msg = defaultMessage(r.Action, r.Name)
+	}
+	configJSON, _ := json.Marshal(r)
+	dec := Decision{
+		RuleName: r.Name, ConfigDigest: digestInput(configJSON),
+		Action:         r.Action,
+		Message:        msg,
+		RuleID:         r.ID,
+		TimeoutEnabled: r.TimeoutEnabled,
+		TimeoutSeconds: r.TimeoutSeconds,
+		TimeoutAction:  r.TimeoutAction,
+	}
+	if dec.Action == "ask" && !dec.TimeoutEnabled {
+		dec.TimeoutEnabled = true
+		dec.TimeoutSeconds = defaultAskTimeoutSecs
+		dec.TimeoutAction = "deny"
+	}
+	return dec
+}
+
 // Match evaluates the rule list (priority DESC) against a tool call.
 // Returns (Decision, true) for the first matching enabled rule, or
 // (Decision{}, false) if no rule matches.
@@ -531,20 +565,7 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	normalized := normalizeToolInput(input)
 	for _, r := range rules {
 		if ruleMatches(r, toolName, input, normalized) {
-			msg := r.Message
-			if msg == "" {
-				msg = defaultMessage(r.Action, r.Name)
-			}
-			configJSON, _ := json.Marshal(r.InterceptRule)
-			return Decision{
-				RuleName: r.Name, ConfigDigest: digestInput(configJSON),
-				Action:         r.Action,
-				Message:        msg,
-				RuleID:         r.ID,
-				TimeoutEnabled: r.TimeoutEnabled,
-				TimeoutSeconds: r.TimeoutSeconds,
-				TimeoutAction:  r.TimeoutAction,
-			}, true
+			return matchRule(r.InterceptRule), true
 		}
 	}
 	return Decision{}, false
