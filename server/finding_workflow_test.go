@@ -48,6 +48,9 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	if s.settingsPayload()[settingAgentTrafficBinding] != false {
 		t.Fatal("missing setting must default off")
 	}
+	f, _ := pg.GetFinding(initial.FindingID)
+	// 漏洞流量与报告的读写按任务范围判定，调用必须带上任务上下文。
+	taskCtx := agent.WithRunInfo(ctx, agent.RunInfo{TaskID: *f.TaskID})
 	seedServerEvidenceFlow(t, s, "handoff-proof", []byte("verified local proof"))
 	seedServerEvidenceFlow(t, s, "handoff-baseline", []byte("local baseline"))
 	seedServerEvidenceFlow(t, s, "handoff-verification", []byte{0, 1, 255})
@@ -57,14 +60,13 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	}
 	bind := s.toolBindFindingTraffic()
 	input := map[string]any{"finding_id": initial.FindingID, "traffic_refs": []db.TrafficRef{{TrafficID: "handoff-baseline"}}}
-	workflowCall(t, ctx, bind, input, true)
+	workflowCall(t, taskCtx, bind, input, true)
 	if r := request("PUT", "/api/settings", `{"agent_traffic_binding":true}`); r.Code != 200 {
 		t.Fatal(r.Code, r.Body)
 	}
 	if !pg.GetBool(settingAgentTrafficBinding, false) {
 		t.Fatal("switch was not persisted")
 	}
-	f, _ := pg.GetFinding(initial.FindingID)
 	task := s.m.ResolveTask(fmt.Sprint(*f.TaskID))
 	refs := []db.TrafficRef{{TrafficID: "handoff-baseline", Role: "baseline", Note: "normal response"}, {TrafficID: "handoff-proof", Role: "proof", Note: "proves the finding"}, {TrafficID: "handoff-verification", Role: "verification", Note: "binary verification"}}
 	// Real cross-task Auto hint handler -> persisted graph -> Planner tool.
@@ -129,14 +131,14 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	if !found {
 		t.Fatal("canonical IDs/count missing", list)
 	}
-	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
-	wrong := workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": int64(900000000000000000)}, true)
+	workflowCall(t, taskCtx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
+	wrong := workflowCall(t, taskCtx, s.toolGetFindingTraffic(), map[string]any{"finding_id": int64(900000000000000000)}, true)
 	if !strings.Contains(wrong, "独立漏洞记录 ID") {
 		t.Fatal("ambiguous ID error", wrong)
 	}
 	input["finding_id"] = recorded.FindingID
 	// Duplicate append preserves metadata and version.
-	workflowCall(t, ctx, bind, input, false)
+	workflowCall(t, taskCtx, bind, input, false)
 	after, err := pg.GetFindingTraffic(ctx, recorded.FindingID)
 	if err != nil || len(after.Bindings) != 3 || after.Version != recorded.Traffic.Version || after.Bindings[0].Note != refs[0].Note {
 		t.Fatal("duplicate changed evidence", after, err)
@@ -182,7 +184,7 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	if notices != 3 {
 		t.Fatal("optional no-packet report failed")
 	}
-	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
+	workflowCall(t, taskCtx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
 	tools, def, closeTools := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
 	defer closeTools()
 	if def.FindingGuidance != "" {
@@ -284,27 +286,29 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 		workflowTool(t, tools, name)
 	}
 	finding, _ := pg.GetFinding(f.FindingID)
+	// 流量与报告的读写按任务范围判定，调用必须带上任务上下文。
+	taskCtx := agent.WithRunInfo(ctx, agent.RunInfo{TaskID: *finding.TaskID})
 	detail := workflowCall(t, ctx, workflowTool(t, tools, "get_task_node_detail"), map[string]any{"task_id": fmt.Sprint(*finding.TaskID), "id": f.NodeID}, false)
 	if !strings.Contains(detail, `"finding_id"`) || !strings.Contains(detail, `"finding_node_id"`) {
 		t.Fatal("reporter lacks explicit ID mapping")
 	}
-	workflowCall(t, ctx, workflowTool(t, tools, "traffic_search"), map[string]any{"host": "evidence.local"}, false)
+	workflowCall(t, taskCtx, workflowTool(t, tools, "traffic_search"), map[string]any{"host": "evidence.local"}, false)
 	for _, id := range []string{"reporter-baseline", "reporter-proof"} {
-		packet := workflowCall(t, ctx, workflowTool(t, tools, "traffic_get"), map[string]any{"id": id}, false)
+		packet := workflowCall(t, taskCtx, workflowTool(t, tools, "traffic_get"), map[string]any{"id": id}, false)
 		if !strings.Contains(packet, "local") {
 			t.Fatal("reporter cannot inspect packet", packet)
 		}
 	}
 	refs := []db.TrafficRef{{TrafficID: "reporter-baseline", Role: "baseline"}, {TrafficID: "reporter-proof", Role: "proof", Note: "confirmed from recorded response"}}
-	workflowCall(t, ctx, workflowTool(t, tools, "bind_finding_traffic"), map[string]any{"finding_id": f.FindingID, "traffic_refs": refs}, false)
-	list := workflowCall(t, ctx, workflowTool(t, tools, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
+	workflowCall(t, taskCtx, workflowTool(t, tools, "bind_finding_traffic"), map[string]any{"finding_id": f.FindingID, "traffic_refs": refs}, false)
+	list := workflowCall(t, taskCtx, workflowTool(t, tools, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
 	var summary struct {
 		Version int64 `json:"version"`
 	}
 	if err := json.Unmarshal([]byte(list), &summary); err != nil || summary.Version != 1 {
 		t.Fatal(list, err)
 	}
-	workflowCall(t, ctx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "## Local report\n\nVerified baseline and proof using saved evidence."}, false)
+	workflowCall(t, taskCtx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "## Local report\n\nVerified baseline and proof using saved evidence."}, false)
 	updated, err := pg.GetFinding(f.FindingID)
 	if err != nil || updated.ReportEvidenceVersion != summary.Version || updated.EvidenceVersion != summary.Version {
 		t.Fatal("report did not cover post-binding version", updated, err)
@@ -323,6 +327,6 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 			t.Fatal("auto-binding tool exposed while off", tool.Name())
 		}
 	}
-	workflowCall(t, ctx, workflowTool(t, off, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
+	workflowCall(t, taskCtx, workflowTool(t, off, "get_finding_traffic"), map[string]any{"finding_id": f.FindingID}, false)
 	workflowTool(t, off, "update_finding_report")
 }

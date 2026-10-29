@@ -119,6 +119,19 @@ func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write 
 	if id <= 0 {
 		return errors.New("finding_id 必须为独立漏洞记录 ID；不是探索节点 ID")
 	}
+	// 范围校验：原来这里只看「有没有任务上下文」，有上下文就直接放行、没上下文
+	// 也照常返回 —— 等于「谁都能读任何漏洞的流量」。
+	//
+	// 现在改成真正的范围判定：
+	//   · 没有任务上下文 → 没有授权边界 → 直接拒绝（fail-closed），并且这个检查
+	//     必须排在查库之前，否则调用方可以靠「有漏洞 / 没漏洞」两种报错把别人的
+	//     漏洞探出来；
+	//   · 有任务上下文 → 按漏洞归属判定（findings.task_id，含直接来源任务），
+	//     归属不符即拒绝。
+	ri := agent.RunInfoFrom(ctx)
+	if ri.TaskID <= 0 {
+		return errors.New("缺少任务上下文：读写漏洞流量必须绑定到具体任务")
+	}
 	f, err := s.m.pg.GetFinding(id)
 	if err != nil {
 		return err
@@ -126,21 +139,40 @@ func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write 
 	if f == nil {
 		return fmt.Errorf("%w：finding_id=%d。证据工具使用独立漏洞记录 ID，请从 list_task_findings / get_task_node_detail 的 finding_id 字段读取；不要传 id / finding_node_id", db.ErrFindingNotFound, id)
 	}
-	if ri := agent.RunInfoFrom(ctx); ri.TaskID > 0 {
-		task := s.m.ResolveTask(strconv.FormatInt(ri.TaskID, 10))
-		if task == nil {
-			return errors.New("任务不存在")
-		}
-		_, inherited, allowed := findingProvenanceInTask(task, f.TaskID)
-		if !allowed {
-			return errors.New("当前任务不可读取该漏洞")
-		}
-		if write && inherited {
-			return errors.New("继承漏洞的流量证据只读，请到来源任务修改")
-		}
+	task := s.m.ResolveTask(strconv.FormatInt(ri.TaskID, 10))
+	if task == nil {
+		return errors.New("任务不存在")
+	}
+	_, inherited, allowed := findingProvenanceInTask(task, f.TaskID)
+	if !allowed {
+		return errors.New("当前任务不可读取该漏洞")
+	}
+	if write && inherited {
+		return errors.New("继承漏洞的流量证据只读，请到来源任务修改")
 	}
 	return nil
 }
+
+// trafficScopeGate 把「本次调用的任务上下文」翻译成「可读的 host 集合」。
+//
+// 流量库全局共享，而流量里装着目标的真实凭据（Cookie / Authorization）。所以读
+// 流量必须先落到「这个调用者能碰哪些 host」上 —— 判定复用平台唯一的范围入口
+// （db.AssetStore.ScopeFragmentFor，见 db.DB.TrafficScopeHosts），不在这里另写
+// 一套范围逻辑。
+type trafficScopeGate struct {
+	pg *db.DB
+}
+
+// AllowedHosts implements traffic.ScopeGate.
+func (g trafficScopeGate) AllowedHosts(ctx context.Context) ([]string, error) {
+	ri := agent.RunInfoFrom(ctx)
+	if ri.TaskID <= 0 {
+		return nil, errors.New("缺少任务上下文：读取流量必须绑定到具体任务")
+	}
+	return g.pg.TrafficScopeHosts(ri.TaskID)
+}
+
+var _ traffic.ScopeGate = trafficScopeGate{}
 
 func (s *Server) toolBindFindingTraffic() actool.CoreTool {
 	return wrTool("bind_finding_traffic", "为已登记漏洞补绑经核实的真实 HTTP 流量。finding_id 使用独立漏洞记录 ID；不要传探索节点 ID。同批引用全部成功或全部失败，重复引用不覆盖已有说明。补绑会使已有报告标记待更新；不要为补包重新探测或重复创建漏洞。",
