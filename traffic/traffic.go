@@ -133,12 +133,34 @@ const (
 // and the catalog migration cannot drift apart.
 const TrafficSearchDescription = "查询记录代理已抓取的目标流量（必须指定 host；支持裸主机、主机:端口或完整 URL，可再按 URL 子串或正文关键词过滤）。指定端口时只返回该服务的流量，避免同一 IP 的不同端口串包。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符）。仅返回极轻量索引(id/method/url/status/resp_len)，不含响应内容；结果非空后必须用 traffic_get 逐条核实请求/响应，再把确实支持当前漏洞的 ID 交给 bind_finding_traffic。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页。"
 
+// ScopeGate 判定「本次工具调用可以读哪些 host 的流量」。
+//
+// 为什么流量需要范围门：流量库是全局的，按 host 存着目标的真实报文 —— Cookie、
+// Authorization、Set-Cookie 全在里面。若任何任务都能读任何 host 的流量，就等于
+// 「任何任务都能读别的任务抓到的凭据」，任务边界形同虚设。
+//
+// 判定由调用方注入：traffic 不能 import agent（agent → evidence → traffic 会成
+// 导入环），流量包自己也不认识「任务」这个概念。判定本身复用平台共享的 scope 层
+// （db.AssetStore.ScopeFragmentFor，见 db.DB.TrafficScopeHosts）—— 范围只有一份
+// 真相源。
+type ScopeGate interface {
+	// AllowedHosts 返回本次调用可读的 host 集合（域名或 IP，不含端口）。
+	// 返回 error 表示调用方没有可用的授权上下文（例如没有任务上下文）—— 必须拒绝。
+	AllowedHosts(ctx context.Context) ([]string, error)
+}
+
+// scopeGateHolder 装范围门。用指针容器是为了能原子替换（scope 是 atomic.Pointer）。
+type scopeGateHolder struct{ gate ScopeGate }
+
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
 	dir   string
 	addr  string
 	db    *sql.DB
 	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
+	// scope 是流量的范围门。未注入（nil）时所有读取按拒绝处理 —— 没有范围门就
+	// 意味着无法判断调用者有没有权限，那种情况下「放行」就是越权。
+	scope atomic.Pointer[scopeGateHolder]
 	seq   atomic.Int64
 	proxy *mproxy.Proxy
 	// fts reports whether the full-text index is available. False on a driver
@@ -1995,6 +2017,87 @@ func normalizeSearchHost(raw string) (host, port string, err error) {
 	return strings.ToLower(host), port, nil
 }
 
+// SetScopeGate 注入流量的范围门。门缺失时读取按拒绝处理（fail-closed）。
+func (t *Traffic) SetScopeGate(gate ScopeGate) {
+	t.scope.Store(&scopeGateHolder{gate: gate})
+}
+
+// errTrafficScopeUnavailable 是「范围门没装」时的拒绝文案。
+var errTrafficScopeUnavailable = errors.New("流量读取范围未配置：无法校验本次调用是否有权读取该目标")
+
+// errTrafficOutOfScope 是范围外目标的统一拒绝文案。
+//
+// 不解释目标是否存在、不带出范围外目标的任何细节 —— 拒绝本身不该变成一个
+// 存在性探测器。「目标不存在」与「目标不在范围内」共用同一句文案。
+var errTrafficOutOfScope = errors.New("该目标不在本任务范围内")
+
+// hostInScope 判定 host 是否在本次调用的可读范围内。
+func (t *Traffic) hostInScope(ctx context.Context, host string) (bool, error) {
+	hosts, err := t.allowedHosts(ctx)
+	if err != nil {
+		return false, err
+	}
+	return hostAllowed(hosts, host), nil
+}
+
+// allowedHosts 解析本次调用可读的 host 集合。
+//
+// 每次调用解析一次：traffic_blob 可能有多个引用 host，重复解析会重复打库。
+func (t *Traffic) allowedHosts(ctx context.Context) ([]string, error) {
+	holder := t.scope.Load()
+	if holder == nil || holder.gate == nil {
+		return nil, errTrafficScopeUnavailable
+	}
+	return holder.gate.AllowedHosts(ctx)
+}
+
+// hostAllowed 报告 host 是否在可读集合里（去空格、大小写不敏感）。
+func hostAllowed(hosts []string, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	for _, h := range hosts {
+		if strings.EqualFold(strings.TrimSpace(h), host) {
+			return true
+		}
+	}
+	return false
+}
+
+// exchangeHost 返回一条流量所属的 host。找不到时返回 sql.ErrNoRows。
+func (t *Traffic) exchangeHost(id string) (string, error) {
+	var host string
+	if err := t.db.QueryRow(`SELECT host FROM exchanges WHERE id=?`, id).Scan(&host); err != nil {
+		return "", err
+	}
+	return host, nil
+}
+
+// blobHosts 返回引用某个 blob 的流量所属的 host 集合。
+//
+// blob 是内容寻址的：同一个 hash 在任何 host 上都是同一份字节，所以只要有一份
+// 落在调用者范围内就够了。blob_refs 覆盖不了历史数据（正文里记着 blob hash 但
+// 没有引用行），所以再从 exchange_bodies 反查一次。
+func (t *Traffic) blobHosts(hash string) ([]string, error) {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	rows, err := t.db.Query(`SELECT DISTINCT e.host FROM blob_refs b JOIN exchanges e ON e.id=b.exchange_id WHERE b.hash=?
+UNION SELECT DISTINCT e.host FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.req_blob=? OR b.resp_blob=?`, hash, hash, hash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hosts := []string{}
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // Tools exposes traffic lookup to work agents so they query already-captured
 // traffic instead of re-curling the same resource (token + dedup win).
 func (t *Traffic) Tools() []actool.CoreTool {
@@ -2019,7 +2122,7 @@ func (t *Traffic) Tools() []actool.CoreTool {
 		},
 		ReadOnly:    ro,
 		Permissions: allow,
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var a struct {
 				Host, Contains string
 				BodyContains   string `json:"body_contains"`
@@ -2029,6 +2132,19 @@ func (t *Traffic) Tools() []actool.CoreTool {
 			_ = json.Unmarshal(in, &a)
 			if strings.TrimSpace(a.Host) == "" {
 				return actool.Errorf("host 为必填参数：请指定裸主机、主机:端口或完整 URL，避免全库扫描。"), nil
+			}
+			// 范围门：流量是全局库，能读到哪些 host 就等于能读到那个 host 上抓到的
+			// 全部凭据。范围外的 host 一律拒绝，且不解释该 host 是否存在。
+			hostName, _, err := normalizeSearchHost(a.Host)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			allowed, err := t.hostInScope(ctx, hostName)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if !allowed {
+				return actool.Errorf(fmt.Sprintf("host %q %s", hostName, errTrafficOutOfScope.Error())), nil
 			}
 			rows, err := t.query(a.Host, a.Contains, a.BodyContains, a.Page, a.Limit)
 			if err != nil {
@@ -2064,9 +2180,25 @@ func (t *Traffic) Tools() []actool.CoreTool {
 		},
 		ReadOnly:    ro,
 		Permissions: allow,
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var a struct{ ID string }
 			_ = json.Unmarshal(in, &a)
+			// 范围门：先取这条流量属于哪个 host，再判它是否在本次调用的范围内。
+			// 查不到行时同样只回「不在范围内」—— 不给存在性探测器留口子。
+			host, err := t.exchangeHost(a.ID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return actool.Errorf(errTrafficOutOfScope.Error()), nil
+			}
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			allowed, err := t.hostInScope(ctx, host)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if !allowed {
+				return actool.Errorf(errTrafficOutOfScope.Error()), nil
+			}
 			req, resp, err := t.Get(a.ID)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -2089,13 +2221,35 @@ func (t *Traffic) Tools() []actool.CoreTool {
 		},
 		ReadOnly:    ro,
 		Permissions: allow,
-		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
 			var a struct {
 				Hash   string
 				Offset int64
 				Length int64
 			}
 			_ = json.Unmarshal(in, &a)
+			// 范围门：blob 由内容寻址，落在范围内的引用即可读（字节完全相同）。
+			blobHosts, err := t.blobHosts(a.Hash)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if len(blobHosts) == 0 {
+				return actool.Errorf(errTrafficOutOfScope.Error()), nil
+			}
+			allowed, err := t.allowedHosts(ctx)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			readable := false
+			for _, host := range blobHosts {
+				if hostAllowed(allowed, host) {
+					readable = true
+					break
+				}
+			}
+			if !readable {
+				return actool.Errorf(errTrafficOutOfScope.Error()), nil
+			}
 			if a.Length <= 0 || a.Length > maxBlobRead {
 				a.Length = maxBlobRead
 			}
