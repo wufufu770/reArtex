@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/Autumn-27/artex/db"
@@ -35,24 +36,21 @@ func (t *ToolSet) digestMemberEntry(store *db.ExplorationStore, id int64) map[st
 	return m
 }
 
-// coldDigestsRecent returns a store's active digests as flat bodies for
-// graph_overview, ordered by the recency of their freshest member (max member id ≈
-// latest cooled node — a digest near the live frontier is likelier relevant), and
-// capped at `cap`. Overflow digest ids are returned separately (moreIDs) so they
-// stay reachable via expand_digest even when not shown inline — cold_digests is the
-// only exit for folded cold nodes. Shared by the current task overview and the
-// read-only related-task overview (§2 cross-task reuse).
-func coldDigestsRecent(store *db.ExplorationStore, cap int) (shown []map[string]any, moreIDs []int64) {
+// coldDigest 是折叠冷区的一个 digest：正文 + 它折叠的成员 + 新鲜度。
+type coldDigest struct {
+	id        int64
+	entry     map[string]any
+	freshness int64 // max member id (ids are monotonic ≈ creation time)
+	members   []int64
+}
+
+// collectColdDigests 收集一个 store 的活跃 digest（正文 + 成员 + 新鲜度）。
+func collectColdDigests(store *db.ExplorationStore) []coldDigest {
 	ads, err := store.ActiveDigests()
 	if err != nil || len(ads) == 0 {
-		return nil, nil
+		return nil
 	}
-	type dg struct {
-		id        int64
-		entry     map[string]any
-		freshness int64 // max member id (ids are monotonic ≈ creation time)
-	}
-	items := make([]dg, 0, len(ads))
+	items := make([]coldDigest, 0, len(ads))
 	for _, d := range ads {
 		var p struct {
 			Body string `json:"body"`
@@ -63,12 +61,52 @@ func coldDigestsRecent(store *db.ExplorationStore, cap int) (shown []map[string]
 		if len(ms) > 0 {
 			fresh = ms[len(ms)-1]
 		}
-		items = append(items, dg{
+		items = append(items, coldDigest{
 			id:        d.ID,
 			entry:     map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)},
 			freshness: fresh,
+			members:   ms,
 		})
 	}
+	return items
+}
+
+// coldDigestsRecentVisible 返回一个 store 的活跃 digest（正文），按其最新成员的时间
+// 降序排列，最多取 `cap` 个；被截的更旧 digest 只给裸 id（仍可 expand_digest 展开），
+// 避免冷区唯一出口被无限拉长。
+//
+// 它【整体挡掉】那些覆盖了范围外成员的 digest。
+//
+// 为什么必须整块挡：digest 的正文不是成员的原文，而是模型把它所有成员的 summary
+// 合并写成的一段叙述（agent/compaction.go 的 digestPayload）。所以「只留下范围内
+// 那部分的正文」根本做不到 —— 正文已经混在一起了。半截保留就是泄露，所以要么整块
+// 给，要么整块不给。
+//
+// scopeID<=0（没有任务上下文）⇒ 没有授权边界 ⇒ 一个 digest 都不给。
+func coldDigestsRecentVisible(store *db.ExplorationStore, scopeID int64, cap int) (shown []map[string]any, moreIDs []int64) {
+	if scopeID <= 0 {
+		return nil, nil
+	}
+	items := collectColdDigests(store)
+	if len(items) == 0 {
+		return nil, nil
+	}
+	allMembers := []int64{}
+	for _, it := range items {
+		allMembers = append(allMembers, it.members...)
+	}
+	blocked, err := store.OutOfScopeAnchoredNodeIDs(scopeID, allMembers)
+	if err != nil {
+		return nil, nil
+	}
+	items = slices.DeleteFunc(items, func(it coldDigest) bool {
+		for _, m := range it.members {
+			if blocked[m] {
+				return true
+			}
+		}
+		return false
+	})
 	sort.Slice(items, func(i, j int) bool { return items[i].freshness > items[j].freshness })
 	for i, it := range items {
 		if i < cap {
@@ -141,6 +179,22 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 			}
 			_ = json.Unmarshal(n.Payload, &p)
 			members, _ := store.DigestMembers(in.ID)
+			// ⚠️ digest 的正文是所有成员 summary 的合并叙述，成员里若有一个锚在范围外
+			// 资产上，正文就已经混进了范围外的结论 —— 所以整个 digest 都不给，而不是
+			// 只挑出范围内的成员（那样正文还是混着的）。
+			scopeID := t.scopeTaskID()
+			if scopeID <= 0 {
+				return jsonResult(map[string]any{"error": fmt.Sprintf("#%d 需要任务上下文才能展开 digest：没有任务上下文就没有范围边界，digest 的成员里可能混着范围外的结论", in.ID)})
+			}
+			blocked, err := store.OutOfScopeAnchoredNodeIDs(scopeID, members)
+			if err != nil {
+				return jsonResult(map[string]any{"error": fmt.Sprintf("展开 digest #%d 失败：%v", in.ID, err)})
+			}
+			for _, m := range members {
+				if blocked[m] {
+					return jsonResult(map[string]any{"error": fmt.Sprintf("#%d 折叠的成员里有范围外资产的结论，整个 digest 不展开：正文是所有成员摘要的合并叙述，半截保留就是泄露", in.ID)})
+				}
+			}
 			list := make([]map[string]any, 0, len(members))
 			for _, m := range members {
 				entry := t.digestMemberEntry(store, m)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -168,6 +169,29 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
 
+// scopeTaskID 解析本次读写的【有效任务上下文】——范围判定的唯一输入。
+//
+// 为什么不是直接用 t.taskID：跨任务的编排工具（server 的 get_task_graph /
+// list_task_findings / add_task_hint 等）会为目标任务现造一个 ToolSet，那份
+// ToolSet 没有 SetTaskID，于是 t.taskID=0。此时本探索图自己就绑着目标任务
+// （store 是任务自己的），所以用 store 反查任务 id。
+//
+// 两个来源都拿不到 ⇒ 0 ⇒ 没有授权边界 ⇒ 调用方必须走 fail-closed 的那一侧
+// （范围判定由 db 层按平台范围处理，默认空范围）。
+func (t *ToolSet) scopeTaskID() int64 {
+	if t.taskID > 0 {
+		return t.taskID
+	}
+	if t.ts == nil {
+		return 0
+	}
+	id, err := t.ts.TaskID()
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
 // SetCoverageEnabled records whether this task has the asset-coverage feature on
 // (default enabled). Passing false makes graphOverviewData omit the coverage block
 // and DropCoverageTools filter the two coverage-only tools out of the agent's tool
@@ -226,11 +250,18 @@ func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
 func (t *ToolSet) SetOwnerNode(id int64) { t.ownerNode = id }
 
 // anchorOwner records a lineage edge from this run's owner node to an asset
-// (no-op if unset). Provenance only — the asset graph is global and shared, so
-// this no longer affects which assets a task can read.
+// (no-op if unset).
+//
+// 锚点不只是血缘：它同时是范围读的授权边 —— 一个节点只有在【它锚定的每一个
+// 资产】都在调用者范围内时才可见（见 db.ExplorationStore.ListByKindVisible）。
+// 因此范围外的资产不能锚：锚了既把别人的资产 id 写进共享图，也会让本任务
+// 自己的节点在范围读里整体消失。资产行本身仍属全局共享的资产库，被拒绝的
+// 只是这条边（范围判定在 db 层，规则只有一处）。
 func (t *ToolSet) anchorOwner(assetID int64) {
 	if t.ts != nil && t.ownerNode > 0 && assetID > 0 {
-		_ = t.ts.Anchor(t.ownerNode, assetID)
+		if err := t.ts.AnchorInScope(t.taskID, t.ownerNode, assetID); err != nil {
+			log.Printf("[anchor] 任务 %d 的节点 %d 未锚定资产 %d: %v", t.taskID, t.ownerNode, assetID, err)
+		}
 	}
 }
 
@@ -483,10 +514,18 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
-	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
-	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	//
+	// ⚠️ finding / fact 是【资产锚定节点】：它们的正文是「某个资产的侦察结论」，
+	// 可见性由锚点决定（db.ExplorationStore.ListByKindVisible）。所以这里必须走
+	// 范围版读接口 —— 锚到范围外资产的结论会整条被挡掉（半截保留才是泄露）。
+	// goal / hint / intent 是【任务自有节点】（不锚资产），它们的可见性由探索归属
+	// 决定，走的是上面那几条 ListByKind，别把它们也换成范围版：范围版按锚点判
+	// 可见性，会把没有锚点的任务自有节点整体清空，规划者的视图就没了。
+	scopeID := t.scopeTaskID()
+	vulnNodes, _ := t.ts.ListByKindVisible(scopeID, db.KindFinding, 1000)
+	factNodes, _ := t.ts.ListByKindVisible(scopeID, db.KindFact, 1000) // newest first
+	out["findings_total"] = len(vulnNodes)                             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
+	out["facts"] = len(factNodes)                                      // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -542,8 +581,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
 	// cold-digest §6.1: 折叠冷区的 digest body，按最新成员时间降序取前 N；被截的更旧 digest
 	// 只给裸 id（仍可 expand_digest 展开），避免冷区唯一出口被无限拉长。
+	//
+	// ⚠️ 走范围版：digest 的正文是它所有成员 summary 的合并叙述，成员里若有一个
+	// 锚在范围外资产上，这段正文就已经混进了范围外的结论 —— 所以整体挡掉这个
+	// digest，而不是"只留下范围内那部分正文"（那根本做不到）。
 	const coldDigestsCap = 15
-	if cds, more := coldDigestsRecent(t.ts, coldDigestsCap); len(cds) > 0 {
+	if cds, more := coldDigestsRecentVisible(t.ts, scopeID, coldDigestsCap); len(cds) > 0 {
 		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
 		if len(more) > 0 {
 			out["cold_digests_more"] = more // 被截断的更旧 digest 的 id；用 expand_digest(id) 展开
@@ -711,6 +754,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 	if len(sources) > db.MaxTaskSourceCount {
 		sources = sources[:db.MaxTaskSourceCount]
 	}
+	scopeID := t.scopeTaskID()
 	perSourceTextBudget := relatedOverviewBudgetForSources(len(sources))
 	out := make([]map[string]any, 0, len(sources))
 	for _, source := range sources {
@@ -744,6 +788,8 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			}
 		}
 
+		// goal / hint 是【任务自有节点】：可见性由探索归属决定（来源任务的节点只读
+		// 继承），不按锚点过滤 —— 它们本来就没有锚点，按锚点判会把它们整体清空。
 		goals, _ := ts.ListByKind(db.KindGoal, relatedOverviewMaxGoalsPerSource)
 		goalSummary := make([]map[string]any, 0, len(goals))
 		for _, goal := range goals {
@@ -766,8 +812,12 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		item["hints"] = hintSummary
 
-		facts, _ := ts.ListByKind(db.KindFact, relatedOverviewMaxFactsPerSource)
-		findings, _ := ts.ListByKind(db.KindFinding, relatedOverviewMaxFindingsPerTask)
+		// fact / finding 是【资产锚定节点】：继承过来的也必须过【调用者】的范围。
+		// 授权边界是「调用者能看什么」，不是「来源任务能看什么」——来源任务范围内
+		// 的结论，若落在调用者范围之外，调用者同样看不到（否则跨任务继承就成了
+		// 绕过范围的后门）。
+		facts, _ := ts.ListByKindVisible(scopeID, db.KindFact, relatedOverviewMaxFactsPerSource)
+		findings, _ := ts.ListByKindVisible(scopeID, db.KindFinding, relatedOverviewMaxFindingsPerTask)
 		intentNodes, _ := ts.ListByKind(db.KindIntent, 300)
 		terminalIntent := make(map[int64]bool, len(intentNodes))
 		for _, intent := range intentNodes {
@@ -776,11 +826,26 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		item["facts"] = len(facts)
 		item["findings"] = len(findings)
 		if statsErr == nil {
-			item["facts"] = stats[db.KindFact]
-			item["findings"] = stats[db.KindFinding]
-			if stats[db.KindGoal] > len(goals) || stats[db.KindHint] > len(hints) ||
-				stats[db.KindFact] > len(facts) || stats[db.KindFinding] > len(findings) {
+			// goal / hint 是任务自有节点：未过滤的计数就是它们的真实总数。
+			//
+			// fact / finding 是资产锚定节点：计数必须与上面【范围过滤后】的列表
+			// 同口径。若这里仍用未过滤的 stats 覆盖，「范围内可见 3 条」会被改写成
+			// 「这个任务共有 17 条」——那等于把范围外的结论数量也报出去（数量也是
+			// 范围外资产可达性的一个探测器）。
+			if stats[db.KindGoal] > len(goals) || stats[db.KindHint] > len(hints) {
 				budget.truncated = true
+			}
+			if scopedFacts, err := ts.CountByKindVisible(scopeID, db.KindFact); err == nil {
+				item["facts"] = scopedFacts
+				if scopedFacts > len(facts) {
+					budget.truncated = true
+				}
+			}
+			if scopedFindings, err := ts.CountByKindVisible(scopeID, db.KindFinding); err == nil {
+				item["findings"] = scopedFindings
+				if scopedFindings > len(findings) {
+					budget.truncated = true
+				}
 			}
 		}
 		recentFindings := make([]map[string]any, 0, len(findings))
@@ -849,7 +914,10 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		// §2 cross-task: the source task's folded cold region, read-only, newest-member
 		// first & capped like the current task's. Members (and overflow digests) are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		if cds, more := coldDigestsRecent(ts, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
+		//
+		// 走范围版：digest 正文是成员 summary 的合并叙述，来源任务范围内、调用者
+		// 范围外的结论一旦被折进去，这段正文就带上了范围外的内容 —— 整体挡掉。
+		if cds, more := coldDigestsRecentVisible(ts, scopeID, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
 			for _, cd := range cds {
 				cd["inherited"] = true
 				cd["source_task_id"] = source.Task.TaskID
@@ -947,15 +1015,14 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 	return t.readExpTool("list_findings", "列本任务及直接关联任务的【确认漏洞】(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。这里只含漏洞；普通探索事实用 list_facts，详情用 node_detail(id)。",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
-			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
+			// finding 是资产锚定节点：走范围版读接口（锚到范围外资产的漏洞整条挡掉，
+			// 继承来的漏洞也按【调用者】的范围判）。
+			taskID := t.scopeTaskID()
+			f, _ := t.ts.ListByKindWithSourcesVisible(taskID, db.KindFinding, 500)
 			if err := t.ts.PopulateFindingTrafficIDs(f); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			intentOf, _ := t.ts.FindingIntentsWithSources() // finding id -> 产生它的 intent id
-			taskID := t.taskID
-			if taskID <= 0 {
-				taskID, _ = t.ts.TaskID()
-			}
 			out := make([]map[string]any, 0, len(f))
 			for _, n := range f {
 				m := compactFinding(n)
@@ -1002,7 +1069,7 @@ func (t *ToolSet) listFacts() actool.CoreTool {
 			if limit > 100 {
 				limit = 100
 			}
-			f, hasMore, total, err := t.ts.ListByKindPageWithSources(db.KindFact, a.Before, limit, strings.TrimSpace(a.Q))
+			f, hasMore, total, err := t.ts.ListByKindPageWithSourcesVisible(t.scopeTaskID(), db.KindFact, a.Before, limit, strings.TrimSpace(a.Q))
 			if err != nil {
 				return actool.Result{}, err
 			}
@@ -1046,7 +1113,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if id <= 0 {
 				return actool.Errorf("id 必填"), nil
 			}
-			n, err := t.ts.GetNodeWithSources(id)
+			n, err := t.ts.GetNodeWithSourcesVisible(t.scopeTaskID(), id)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1079,9 +1146,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		return 0, fmt.Errorf("summary 不能为空")
 	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
+	// parent 只能是 fact/finding —— 资产锚定节点，所以按【调用者】的范围取：
+	// 范围外的结论既不能被引用，也不会因为「按 id 取」绕过范围。
 	parents := pidList(it.ParentIDs)
 	for _, pidv := range parents {
-		n, err := t.ts.GetNodeWithSources(pidv)
+		n, err := t.ts.GetNodeWithSourcesVisible(t.scopeTaskID(), pidv)
 		if err != nil || n == nil {
 			return 0, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
 		}
@@ -1113,7 +1182,10 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
+	// 锚点先判范围（db.ExplorationStore.AddIntentInScope）：意图绑定的资产若落在
+	// 本任务范围之外，整条意图不写 —— 锚点既是血缘也是范围读的授权边，把范围外
+	// 的资产锚上去等于把这个节点在范围读里整体抹掉，也把别人的资产 id 写进共享图。
+	id, err := t.ts.AddIntentInScope(t.scopeTaskID(), payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, err
 	}
@@ -1217,11 +1289,13 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if goal == 0 || ev == 0 {
 				return actool.Errorf("goal_id 和 evidence_id 必填"), nil
 			}
+			// goal 是任务自有节点：按归属取（GetNode 只认本探索的节点）。
 			goalNode, err := t.ts.GetNode(goal)
 			if err != nil || goalNode == nil || goalNode.Kind != db.KindGoal {
 				return actool.Errorf("goal_id 必须是本任务的目标节点（关联任务目标只读）"), nil
 			}
-			evidenceNode, err := t.ts.GetNodeWithSources(ev)
+			// evidence 必须是 fact/finding —— 资产锚定节点，按【调用者】的范围取。
+			evidenceNode, err := t.ts.GetNodeWithSourcesVisible(t.scopeTaskID(), ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
@@ -1384,7 +1458,12 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		}
 	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	//
+	// 锚点先判范围（db.ExplorationStore.AddNodeInScope）：fact 的正文是「某个资产的
+	// 侦察结论」，它锚在哪枚资产上就是它对谁负责。范围外的资产一旦被锚上，这条
+	// 事实要么在别的任务的图里被读出来，要么把别人的资产 id 写进共享图 —— 所以
+	// 整条拒绝，一个字节都不写。
+	id, err := t.ts.AddNodeInScope(t.scopeTaskID(), db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
 	if err != nil {
 		return 0, err
 	}
@@ -1480,7 +1559,10 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	}
 	// 唤醒 planner 不在此处逐条做——由 addHint 在整批写完后统一触发一次（带上提示文本），
 	// 避免一次 add_hint 多条提示逐条刷屏 planner 的触发行。
-	return t.ts.AddNode(db.KindHint, payload, 0, "active", "human", anchors)
+	//
+	// 锚点先判范围（db.ExplorationStore.AddNodeInScope）：提示若锚在范围外的资产上，
+	// 同样会把别人的资产 id 带进本任务的图。
+	return t.ts.AddNodeInScope(t.scopeTaskID(), db.KindHint, payload, 0, "active", "human", anchors)
 }
 
 type goalItem struct {
