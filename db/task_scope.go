@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -105,18 +106,51 @@ func (s *AssetStore) upsertTaskScope(ts TaskScope) error {
 // asset item (source='auto'). MUST be called only from insertAssets' top-level loop —
 // never from a db-layer side effect (linkHostAssets), so派生资产不会盲目扩大范围。
 // Rule: scope granularity follows the asset's own type. taskID<=0 → no-op.
+//
+// 它是 agent 侧的扩权路径（worker 登记资产即扩范围），因此与 AddAgentScope 受同一道
+// 上限约束：条数上限与 kind 白名单都读 scopepolicy.Policy。
+//
+// 超限时【截断】而不是报错：这条路径跑在 worker 的资产登记循环里，报错会把 worker
+// 带崩（两个调用点都丢弃返回值）。截断必须可审计 —— 每次丢弃都写一条审计链事件。
 func (s *AssetStore) AddAutoScope(taskID int64, assetType, domain, rawURL, ip string) error {
 	if taskID <= 0 {
 		return nil
 	}
+	ts, ok := autoScopeRow(taskID, assetType, domain, rawURL, ip)
+	if !ok {
+		return nil
+	}
+	if err := s.checkAgentScopeKind(taskID, ts.Kind, scopeRowValue(ts), "insert_assets"); err != nil {
+		var denied *ScopeExpansionDeniedError
+		if errors.As(err, &denied) {
+			return nil // 截断：丢弃这次扩权（已记审计），不让 worker 崩
+		}
+		return err
+	}
+	if err := s.checkAgentScopeBudget(taskID, ts, "insert_assets"); err != nil {
+		var denied *ScopeExpansionDeniedError
+		if errors.As(err, &denied) {
+			return nil // 截断：同上
+		}
+		return err
+	}
+	return s.upsertTaskScope(ts)
+}
+
+// autoScopeRow 算出「这一项资产隐含的保守范围」，不写库。
+// 第二个返回值 false 表示这一项资产不隐含任何范围。
+func autoScopeRow(taskID int64, assetType, domain, rawURL, ip string) (TaskScope, bool) {
+	ts := TaskScope{TaskID: taskID, Source: "auto"}
 	switch assetType {
 	case "root_domain":
 		if d := DomainKey(domain); d != "" {
-			return s.upsertTaskScope(TaskScope{TaskID: taskID, Kind: "root_domain", Domain: d})
+			ts.Kind, ts.Domain = "root_domain", d
+			return ts, true
 		}
 	case "subdomain":
 		if d := DomainKey(domain); d != "" {
-			return s.upsertTaskScope(TaskScope{TaskID: taskID, Kind: "subdomain", Domain: d})
+			ts.Kind, ts.Domain = "subdomain", d
+			return ts, true
 		}
 	case "service", "endpoint":
 		host := domain
@@ -125,32 +159,85 @@ func (s *AssetStore) AddAutoScope(taskID int64, assetType, domain, rawURL, ip st
 		}
 		host = DomainKey(host)
 		if host != "" && net.ParseIP(host) == nil {
-			return s.upsertTaskScope(TaskScope{TaskID: taskID, Kind: "subdomain", Domain: host})
+			ts.Kind, ts.Domain = "subdomain", host
+			return ts, true
 		}
 		// IP-literal host or no host → fall back to ip scope if we have one.
 		if c := ipToHostCIDR(ip); c != "" {
-			return s.upsertTaskScope(TaskScope{TaskID: taskID, Kind: "ip", Net: c})
+			ts.Kind, ts.Net = "ip", c
+			return ts, true
 		}
 	case "ip":
 		if c := ipToHostCIDR(ip); c != "" {
-			return s.upsertTaskScope(TaskScope{TaskID: taskID, Kind: "ip", Net: c})
+			ts.Kind, ts.Net = "ip", c
+			return ts, true
 		}
 	}
-	return nil
+	return ts, false
 }
 
-// AddAgentScope parses a (kind,value) pair and records it as task scope.
-// source is "agent" when called from an LLM tool, "manual" from the UI.
-// company: value = company name or id (must already exist). root_domain/subdomain:
-// value = a domain. ip/cidr: value = an IP or CIDR (bare IP → /32,/128).
+// AddAgentScope is the AGENT-side entry point for declaring task scope (the
+// add_task_scope tool).
+//
+// 它与人工路径（AddManualScope）是两个不同的函数：agent 侧受 scopepolicy 的扩权
+// 上限约束（条数上限 + kind 白名单），人工侧不受约束。人工设范围是授权决定本身，
+// 不是「扩张预算」的一部分 —— 两者共用一个入口的话，要么人工被 agent 的额度卡住，
+// 要么 agent 借「人工」名义绕过上限。
+//
+// source 保留是为了兼容既有调用点，但本函数只接受 agent 来源：人工来源必须走
+// AddManualScope，否则「人工的行不计入 agent 预算」这条规则就成了绕过口子。
 func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source string) (TaskScope, error) {
 	if source == "" {
 		source = "agent"
 	}
 	ts := TaskScope{TaskID: taskID, Kind: kind, Source: source, Reason: reason}
+	if source != "agent" {
+		return ts, fmt.Errorf("AddAgentScope 只接受 agent 来源；人工设范围请走 AddManualScope")
+	}
 	if taskID <= 0 {
 		return ts, fmt.Errorf("需要 task_id")
 	}
+	if err := s.checkAgentScopeKind(taskID, kind, value, "add_task_scope"); err != nil {
+		return ts, err
+	}
+	ts, err := s.parseTaskScope(taskID, kind, value, reason, "agent")
+	if err != nil {
+		return ts, err
+	}
+	if err := s.checkAgentScopeBudget(taskID, ts, "add_task_scope"); err != nil {
+		return ts, err
+	}
+	if err := s.upsertTaskScope(ts); err != nil {
+		return ts, err
+	}
+	return ts, nil
+}
+
+// AddManualScope is the HUMAN-side entry point for declaring task scope (the
+// host/UI/API explicit scope editor).
+//
+// 它【不受 agent 扩权上限约束】：人工设范围是授权边界本身。发现 → 审批 → 纳入，
+// 不是发现即纳入（HackerOne Asset Intelligence / Bugcrowd Savant Vista 的做法）。
+func (s *AssetStore) AddManualScope(taskID int64, kind, value, reason string) (TaskScope, error) {
+	ts := TaskScope{TaskID: taskID, Kind: kind, Source: "manual", Reason: reason}
+	if taskID <= 0 {
+		return ts, fmt.Errorf("需要 task_id")
+	}
+	ts, err := s.parseTaskScope(taskID, kind, value, reason, "manual")
+	if err != nil {
+		return ts, err
+	}
+	if err := s.upsertTaskScope(ts); err != nil {
+		return ts, err
+	}
+	return ts, nil
+}
+
+// parseTaskScope 把 (kind,value) 解析成一条 task_scope 行（不写库）。
+// company: value = company name or id (must already exist). root_domain/subdomain:
+// value = a domain. ip/cidr: value = an IP or CIDR (bare IP → /32,/128).
+func (s *AssetStore) parseTaskScope(taskID int64, kind, value, reason, source string) (TaskScope, error) {
+	ts := TaskScope{TaskID: taskID, Kind: kind, Source: source, Reason: reason}
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ts, fmt.Errorf("value 不能为空")
@@ -213,9 +300,6 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 		ts.Value = parsed.Value
 	default:
 		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
-	}
-	if err := s.upsertTaskScope(ts); err != nil {
-		return ts, err
 	}
 	return ts, nil
 }
