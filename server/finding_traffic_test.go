@@ -37,6 +37,13 @@ func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(str
 	}
 	tid, _ := strconv.ParseInt(task.ID, 10, 64)
 	t.Cleanup(func() { m.pg.Exec(`DELETE FROM task_archives WHERE task_id=$1`, tid); m.pg.DeleteTask(tid) })
+	// 夹具任务的范围：evidence.local 在范围内 —— 流量工具按范围放行。
+	if _, err := m.pg.Exec(`INSERT INTO assets(type,domain,root_domain,last_seen) VALUES ('subdomain','evidence.local','evidence.local',now()) ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.assets.AddAutoScope(tid, "subdomain", "evidence.local", "", ""); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
@@ -231,7 +238,9 @@ func TestFindingTrafficAPIAndExport(t *testing.T) {
 		t.Fatalf("missing attachments/links: %d %v", binaries, linked)
 	}
 	// Reports can use snapshots with capture stopped and original rows gone.
-	result, err := s.toolGetFindingTraffic().Call(context.Background(), json.RawMessage(fmt.Sprintf(`{"finding_id":"%d"}`, f.FindingID)), nil)
+	// 漏洞流量按任务范围放行，所以调用必须带上任务上下文。
+	taskCtx := agent.WithRunInfo(context.Background(), agent.RunInfo{TaskID: *finding.TaskID})
+	result, err := s.toolGetFindingTraffic().Call(taskCtx, json.RawMessage(fmt.Sprintf(`{"finding_id":"%d"}`, f.FindingID)), nil)
 	if err != nil || !strings.Contains(result.Flatten(), "proof note") {
 		t.Fatal(result, err)
 	}
@@ -453,7 +462,7 @@ func TestFindingTrafficUTF8SegmentsAndInheritedWrites(t *testing.T) {
 	if _, err = s.m.traffic.DeleteHost("evidence.local"); err != nil {
 		t.Fatal(err)
 	}
-	result, err := s.toolUpdateFindingReport().Call(ctx, json.RawMessage(fmt.Sprintf(`{"finding_id":%d,"evidence_version":1,"report":"## 证据报告\n\n证据 #%d：已验证完整请求响应"}`, f.NodeID, list.Bindings[0].ID)), nil)
+	result, err := s.toolUpdateFindingReport().Call(agent.WithRunInfo(ctx, agent.RunInfo{TaskID: *finding.TaskID}), json.RawMessage(fmt.Sprintf(`{"finding_id":%d,"evidence_version":1,"report":"## 证据报告\n\n证据 #%d：已验证完整请求响应"}`, f.NodeID, list.Bindings[0].ID)), nil)
 	if err != nil || result.IsError {
 		t.Fatal(result, err)
 	}
