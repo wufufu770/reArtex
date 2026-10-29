@@ -421,8 +421,10 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 
 // toolUpdateFindingReport writes/overwrites a finding's detailed Markdown report.
 // finding_id is the id report_finding returned ("finding recorded: <id>", the
-// finding node id). The write (SetFindingReportByNodeID) is keyed by node_id and
-// task-agnostic, so this host tool needs no task_id / exploration store.
+// finding node id). The write is keyed by node_id, and it is scoped to the
+// caller's task: a report may only be written on a finding that finding's
+// own task owns (findings.task_id), so this host tool needs no task_id
+// parameter — the task comes from the run attribution on the context.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
 		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
@@ -442,7 +444,10 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
 			}
-			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
+			// 跨任务写守卫：写入范围由调用者所属任务决定 —— 别的任务的漏洞改不动。
+			// 没有任务上下文就没有授权边界，直接拒绝。
+			ri := agent.RunInfoFrom(ctx)
+			n, err := s.m.pg.SetFindingReportVersionByNodeIDInScope(ctx, ri.TaskID, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
