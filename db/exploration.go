@@ -16,6 +16,16 @@ import (
 // it to distinguish an expected control race (HTTP 409) from a storage failure.
 var ErrIntentStateConflict = errors.New("intent state changed concurrently")
 
+// 锚点写入的两类拒绝。与兄弟单元的 ErrFindingOutOfScope 同一套约定：
+// 「目标不存在」与「目标存在但不在范围内」共用一句文案 —— 拒绝本身不该变成
+// 一个存在性探测器，否则调用方可以靠「报错文案不同」把别人的资产 id 探出来。
+var (
+	// ErrAnchorOutOfScope 表示资产不在调用者的任务范围内。
+	ErrAnchorOutOfScope = errors.New("资产不存在或不在当前任务范围内")
+	// ErrAnchorNoTaskContext 表示锚点写入缺少任务上下文。
+	ErrAnchorNoTaskContext = errors.New("缺少任务上下文：写入锚点必须绑定到具体任务")
+)
+
 // utf8Clean makes a string safe for a PostgreSQL text column. It (1) replaces
 // invalid UTF-8 byte sequences with U+FFFD and (2) strips NUL (0x00) bytes.
 // Tool output (nmap/curl/… stdout) can carry raw/truncated bytes that PostgreSQL's
@@ -216,12 +226,55 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 	return id, tx.Commit()
 }
 
+// AddNodeInScope writes a typed reasoning node with optional anchors, but only
+// after every anchored asset has been judged inside the caller's scope.
+//
+// 这是 agent / 子任务可达的那条节点写路径。AddNode 本身是宿主/UI 的显式入口
+// （平台操作者可信），它不判范围；agent 能用的只有本函数。
+//
+// 为什么锚点写入前必须判范围（而不只是读侧过滤）：
+//   - 锚点既是血缘，也是【范围读的授权边】：一个节点只有在它锚定的每一个资产都
+//     落在调用者范围内时才可见（见 scopedNodeVisibility）。所以把范围外的资产
+//     锚上去，等于让本任务自己的这个节点在范围读里整体消失（半截保留才是泄露）。
+//   - 范围外的资产 id 一旦落进共享图，它就成了图里的一个可被别处读到的引用。
+//
+// 拒绝策略与 AnchorInScope / RecordFindingTx 完全一致：整单拒绝（一个字节都不写），
+// 错误文案不区分「不存在」与「不在范围内」，因此拒绝不构成存在性探测器。
+//
+// 没有任务上下文（taskID<=0）而又要写锚点 ⇒ ErrAnchorNoTaskContext：没有授权边
+// 就不能建边，也绝不退回「全局资产池」。不写锚点（anchors 为空）的节点不受影响
+// —— 它不指向任何资产（例如 goal 节点），判范围对它没有意义。
+//
+// Idempotent（锚点写入本身幂等）。
+func (s *ExplorationStore) AddNodeInScope(taskID int64, kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
+	if len(anchors) > 0 {
+		if taskID <= 0 {
+			return 0, ErrAnchorNoTaskContext
+		}
+		if err := s.db.anchorAssetsInScope(taskID, anchors); err != nil {
+			return 0, err
+		}
+	}
+	return s.AddNode(kind, payload, priority, state, origin, anchors)
+}
+
 // AddIntent is a convenience: an open intent.
+//
+// ⚠️ 这是【宿主/UI 的显式入口】：它不判锚点范围。agent / 子任务可达的那条写路径
+// 必须用 AddIntentInScope（锚点先判范围，见该函数的说明）。
 func (s *ExplorationStore) AddIntent(payload map[string]any, priority int, anchors []int64, origin string) (int64, error) {
 	if origin == "" {
 		origin = "planner"
 	}
 	return s.AddNode("intent", payload, priority, "open", origin, anchors)
+}
+
+// AddIntentInScope is AddIntent 的 agent 可达版本：锚点先判范围，越界即整单拒绝。
+func (s *ExplorationStore) AddIntentInScope(taskID int64, payload map[string]any, priority int, anchors []int64, origin string) (int64, error) {
+	if origin == "" {
+		origin = "planner"
+	}
+	return s.AddNodeInScope(taskID, "intent", payload, priority, "open", origin, anchors)
 }
 
 // AddGoal writes a goal node (state open).
@@ -243,9 +296,19 @@ func (s *ExplorationStore) OriginFactID() (int64, error) {
 }
 
 // Anchor records a node→asset reference edge (many-to-many): it captures which
-// global assets an exploration node touched, as lineage/provenance. The asset
-// graph itself is global and shared — anchoring no longer gates visibility (any
-// task may read any asset via search); it only preserves the reasoning trail.
+// assets an exploration node touched, as lineage/provenance. The asset graph
+// itself stays global and shared — but anchoring is ALSO the authorization edge
+// of the scoped graph read: a node reaches a caller only when every asset it is
+// anchored to is inside that caller's scope (see ListByKindScoped /
+// scopedNodeVisibility). So an anchored node that touches an out-of-scope asset
+// is filtered out, and a node with no anchors at all is invisible to a scoped
+// read (fail-closed) — "touched nothing" cannot be shown to mean "touched
+// nothing out of scope".
+//
+// ⚠️ 这是【宿主/UI 的显式入口】（平台操作者可信）：它【不做范围判定】。agent /
+// 子任务可达的写路径一律走 AnchorInScope —— 范围外的资产一旦被锚定，既把别人的
+// 资产 id 写进共享图，也会让本任务自己的节点在范围读里整体消失。
+//
 // Idempotent.
 func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 	if nodeID <= 0 || assetID <= 0 {
@@ -253,6 +316,66 @@ func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 	}
 	_, err := s.db.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, assetID)
 	return err
+}
+
+// AnchorInScope records a node→asset edge, but only when the asset is inside
+// the caller's scope —— 这是 agent 可达的那条锚点写路径。
+//
+// 范围判定只走平台唯一的判定入口（AssetStore.ScopedAssetIDs → ScopeFragmentFor），
+// 这里不重写任何范围 SQL：范围规则只有一处，工具面与平台 API 面不会漂移。
+//
+// 拒绝策略：整条边不写，返回 ErrAnchorOutOfScope。为什么不是「跳过这一个越界
+// 资产、其余照写」：同一个越界 id 会同时落进 findings.asset_ids 与推送事件的
+// payload，逐处过滤漏一处就是泄露；不写则零泄露。错误文案不区分「不存在」与
+// 「不在范围内」，因此拒绝不构成存在性探测器（与 ErrFindingOutOfScope 同一套
+// 约定）。
+//
+// 没有任务上下文（taskID<=0）⇒ 没有授权边 ⇒ 一律不写（ErrAnchorNoTaskContext）：
+// 没有边可判时不能退回到「全局资产池」那种无边界的行为。
+//
+// Idempotent.
+func (s *ExplorationStore) AnchorInScope(taskID, nodeID, assetID int64) error {
+	if taskID <= 0 {
+		return ErrAnchorNoTaskContext
+	}
+	if nodeID <= 0 || assetID <= 0 {
+		return nil
+	}
+	if err := s.db.anchorAssetsInScope(taskID, []int64{assetID}); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, assetID)
+	return err
+}
+
+// anchorAssetsInScope 判定这组资产 id 是否【全部】落在 taskID 的范围内。
+//
+// 判定只走平台唯一的范围入口（AssetStore.ScopedAssetIDs）：范围内 ⇒ nil；
+// 任何一个 id 不在范围内（或根本不存在）⇒ ErrAnchorOutOfScope。
+//
+// 「不存在」与「不在范围内」返回同一个错误：拒绝不能变成存在性探测器 ——
+// 否则调用方可以靠「报错文案不同」把别人的资产 id 一个个探出来。
+func (d *DB) anchorAssetsInScope(taskID int64, assetIDs []int64) error {
+	if len(assetIDs) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(assetIDs))
+	seen := make(map[int64]bool, len(assetIDs))
+	for _, id := range assetIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	allowed, err := d.Assets().ScopedAssetIDs(taskID, ids)
+	if err != nil {
+		return err
+	}
+	if len(allowed) != len(ids) {
+		return ErrAnchorOutOfScope
+	}
+	return nil
 }
 
 // Link adds a typed exploration edge (idempotent).
@@ -723,6 +846,10 @@ func scanNodes(rows *sql.Rows) ([]*Node, error) {
 }
 
 // ListByKind lists nodes of a kind (newest first).
+//
+// ⚠️ 这是【无范围约束】的图读：它是宿主/UI 的「给我全部」入口，因此必须显式调用。
+// agent / 子任务可达的读接口一律走 ListByKindScoped —— 「这次调用到底有没有范围」
+// 不能靠调用点自觉，那正是范围外侦察结论漏出去的地方。
 func (s *ExplorationStore) ListByKind(kind string, limit int) ([]*Node, error) {
 	if limit <= 0 {
 		limit = 500
@@ -734,6 +861,454 @@ WHERE exploration_id=$1 AND kind=$2 ORDER BY id DESC LIMIT $3`, s.expID, kind, l
 	}
 	defer rows.Close()
 	return scanNodes(rows)
+}
+
+// scopedNodeVisibility bounds a graph read by the caller's asset scope.
+//
+// 语义（为什么是这两条 EXISTS，而不是一条）：
+//   - 节点必须【至少】锚在一个范围内资产上 —— 没有任何锚点的节点对范围读不可见。
+//     节点的 payload 是它接触过的资产的侦察结论，锚点就是它与资产的全部联系；
+//     「什么都没接触」无法被证明成「只接触了范围内的资产」，故按 fail-closed 处理
+//     （宁可少看见，不可越权）。
+//   - 节点【不能】锚到任何范围外资产 —— 只要有一个范围外锚点，整个节点被过滤掉。
+//     一个节点可以同时谈多个资产，它的 payload 是这些资产的合并结论，过滤掉节点
+//     时范围外那部分也一起没了；半截保留才是真正的泄露。
+const scopedNodeVisibility = `EXISTS (
+    SELECT 1 FROM exploration_anchors ea
+    WHERE ea.node_id = exploration_nodes.id AND ea.asset_id IN (SELECT id FROM target)
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM exploration_anchors ea
+    WHERE ea.node_id = exploration_nodes.id AND ea.asset_id NOT IN (SELECT id FROM target)
+  )`
+
+// scopedNodeVisibilityNoOutOfScope 是【agent 可达读面】的节点可见性关系：
+//
+//	节点锚到了范围外的资产 ⇒ 不可见（整条挡掉）。
+//	节点没有锚点 ⇒ 可见。
+//
+// 它与 scopedNodeVisibility 只差「一个锚点都没有」这一档，后者把无锚点节点也判为
+// 不可见（fail-closed：无法证明它只接触了范围内的资产）。两者不能互相替换，理由：
+//
+//   - 无锚点的节点并不指向任何资产，范围判定对它【没有对象】。图里这类节点很多：
+//     任务起点 fact（db/tasks.go 建任务时自己写的，从不带锚点）、没填 asset_ids
+//     的事实/漏洞（asset_ids 在 record_fact / report_finding 的 schema 里是可选的，
+//     worker 的提示词也不要求填）、以及全部 goal / hint / intent。
+//   - 按锚点判可见性会把它们整体清空：任务起点从规划者视野里消失、没填 asset_ids
+//     的结论凭空消失 —— 那是把范围隔离做成了功能阉割，比泄露本身更糟。
+//
+// 而【锚到范围外资产的节点】必须整条挡掉：节点的正文是它接触过的那些资产的合并
+// 结论，留下半截就是泄露（设计文档 R5：「anchor 为空的节点不按 scope 过滤；只过滤
+// anchor 命中范围外的」）。
+//
+// 范围判定仍然只走 ScopeFragmentFor（全平台唯一入口）：target 关系物化「范围内
+// 资产」，这条关系只拿它做差集，不自己写任何范围 SQL。
+const scopedNodeVisibilityNoOutOfScope = `NOT EXISTS (
+    SELECT 1 FROM exploration_anchors ea
+    WHERE ea.node_id = exploration_nodes.id AND ea.asset_id NOT IN (SELECT id FROM target)
+  )`
+
+// ListByKindScoped lists this exploration's nodes of a kind (newest first),
+// bounded by the caller's asset scope.
+//
+// taskID > 0  → 该任务（及其直接来源任务）声明的范围。
+// taskID <= 0 → 平台范围（scopepolicy.Policy.PlatformScopeMode），默认空 ⇒ 什么都看不到：
+// 没有任务上下文就没有授权边，不得回退到全局图。
+//
+// 可见性关系见 scopedNodeVisibility：锚点全部落在范围内的节点可见；锚到范围外
+// 资产的节点、以及没有锚点的节点，都不可见。
+//
+// 范围判定只走 db/scope.go 的 ScopeFragmentFor（全平台唯一判定入口）：scope CTE 把
+// 范围内资产物化成 target 关系，节点可见性再用锚点关系与它相交 —— 判定与取数在
+// 同一条 SQL 里发生，不存在「先读后判」的窗口。
+//
+// 这与 ListByKind（宿主/UI 的「给我全部」入口）是两件事：agent 可达的读接口走这里。
+//
+// ⚠️ 与 ListByKindVisible 是【两条不同的可见性关系】：本函数更严（无锚点节点也
+// 不可见，fail-closed 口径），ListByKindVisible 是 agent 读面的口径（只挡掉锚到
+// 范围外资产的节点）。两者不能互相替换，理由见 scopedNodeVisibilityNoOutOfScope。
+func (s *ExplorationStore) ListByKindScoped(taskID int64, kind string, limit int) ([]*Node, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	// CTE 占用 $1..$n（任务 id），本查询自己的参数从 $n+1 起。
+	args := append([]any{}, fragment.Args...)
+	args = append(args, s.expID)
+	expPos := len(args)
+	args = append(args, kind)
+	kindPos := len(args)
+	args = append(args, limit)
+	limitPos := len(args)
+
+	q := `WITH ` + fragment.CTE + `
+SELECT ` + nodeCols + ` FROM exploration_nodes
+WHERE exploration_id = $` + strconv.Itoa(expPos) + ` AND kind = $` + strconv.Itoa(kindPos) + `
+  AND ` + scopedNodeVisibility + `
+ORDER BY id DESC LIMIT $` + strconv.Itoa(limitPos)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// ListByKindWithSourcesScoped is ListByKindScoped 的继承版：本探索的节点 + 每个直接
+// 来源任务的节点，全部按【调用者】的范围过滤。
+//
+// 为什么用调用者的范围而不是来源任务自己的范围：授权边界是「调用者能看什么」。
+// 继承只是把来源任务的图搬到调用者面前，搬进来的节点仍要过调用者的范围。
+// 与 ListByKindWithSources 一样，继承来的非终态 intent 不进入结果（来源任务的
+// 在飞工作不是继承内容）。
+func (s *ExplorationStore) ListByKindWithSourcesScoped(taskID int64, kind string, limit int) ([]*Node, error) {
+	out, err := s.ListByKindScoped(taskID, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range sources {
+		nodes, err := source.Store.ListByKindScoped(taskID, kind, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if kind == KindIntent && !inheritedIntentTerminal(node.State) {
+				continue
+			}
+			out = append(out, markInheritedNode(node, source.Task.TaskID))
+		}
+	}
+	return out, nil
+}
+
+// listByKindPageFilteredVisible is listByKindPageFiltered 的范围版：分页与关键词
+// 过滤语义完全不变，只是节点可见性改由 scopedNodeVisibilityNoOutOfScope 决定
+// （锚到了范围外资产的节点整条挡掉）。范围判定仍只走 ScopeFragmentFor 这一个入口。
+func (s *ExplorationStore) listByKindPageFilteredVisible(taskID int64, kind string, before int64, limit int, q string) ([]*Node, error) {
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args = append(args, s.expID)
+	expPos := len(args)
+	args = append(args, kind)
+	kindPos := len(args)
+	args = append(args, before)
+	beforePos := len(args)
+	where := fmt.Sprintf("exploration_id = $%d AND kind = $%d AND ($%d <= 0 OR id < $%d)", expPos, kindPos, beforePos, beforePos)
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		where += fmt.Sprintf(" AND payload->>'summary' ILIKE $%d", len(args))
+	}
+	args = append(args, limit+1)
+	limitPos := len(args)
+	query := `WITH ` + fragment.CTE + `
+SELECT ` + nodeCols + ` FROM exploration_nodes
+WHERE ` + where + `
+  AND ` + scopedNodeVisibilityNoOutOfScope + `
+ORDER BY id DESC LIMIT $` + strconv.Itoa(limitPos)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// countByKindFilteredVisible is countByKindFiltered 的范围版：只数【范围内可见】的节点。
+func (s *ExplorationStore) countByKindFilteredVisible(taskID int64, kind, q string) (int, error) {
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return 0, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args = append(args, s.expID)
+	expPos := len(args)
+	args = append(args, kind)
+	kindPos := len(args)
+	where := fmt.Sprintf("exploration_id = $%d AND kind = $%d", expPos, kindPos)
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		where += fmt.Sprintf(" AND payload->>'summary' ILIKE $%d", len(args))
+	}
+	query := `WITH ` + fragment.CTE + `
+SELECT COUNT(*) FROM exploration_nodes
+WHERE ` + where + `
+  AND ` + scopedNodeVisibilityNoOutOfScope
+	var n int
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// OutOfScopeAnchoredNodeIDs 返回给定节点里【锚到了范围外资产】的那些节点 id。
+//
+// 它是 scopedNodeVisibilityNoOutOfScope 的批量形式：一次查询回答「这批节点里哪些
+// 不能给调用者看」。批量形态存在的理由是 digest 那条读面 —— 一个 digest 的正文是
+// 它所有成员摘要的合并文本，判定必须【整块】做：只要有一个成员不可见，这个 digest
+// 就整体不能给（半截保留才是泄露），所以那里需要的是「这批里哪些被挡了」，而不是
+// 逐个节点判。
+//
+// 范围判定仍只走 ScopeFragmentFor（全平台唯一入口）。
+func (s *ExplorationStore) OutOfScopeAnchoredNodeIDs(taskID int64, nodeIDs []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	if len(nodeIDs) == 0 {
+		return out, nil
+	}
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args = append(args, nodeIDs)
+	idsPos := len(args)
+	query := `WITH ` + fragment.CTE + `
+SELECT DISTINCT ea.node_id FROM exploration_anchors ea
+WHERE ea.node_id = ANY($` + strconv.Itoa(idsPos) + `::bigint[])
+  AND ea.asset_id NOT IN (SELECT id FROM target)`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// ListByKindVisible lists this exploration's nodes of a kind (newest first) that are
+// visible to the caller's scope.
+//
+// ⚠️ 这与 ListByKindScoped 是【两条不同的可见性关系】，不能互相替换：
+//   - ListByKindScoped（scopedNodeVisibility）：节点必须【至少】锚一个范围内资产，
+//     且不得锚任何范围外资产 —— 无锚点节点不可见（db 层那条更严的 fail-closed 口径）。
+//   - 本函数（scopedNodeVisibilityNoOutOfScope）：只有【锚到了范围外资产】的节点被
+//     挡掉；无锚点节点（任务起点 fact、没填 asset_ids 的事实/漏洞）仍可见 ——
+//     agent 读面的口径，否则规划者的视图会被清空。理由见该常量的注释。
+//
+// agent / 子任务可达的读接口一律走本函数；宿主/UI 的「给我全部」入口走 ListByKind。
+func (s *ExplorationStore) ListByKindVisible(taskID int64, kind string, limit int) ([]*Node, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args = append(args, s.expID)
+	expPos := len(args)
+	args = append(args, kind)
+	kindPos := len(args)
+	args = append(args, limit)
+	limitPos := len(args)
+	query := `WITH ` + fragment.CTE + `
+SELECT ` + nodeCols + ` FROM exploration_nodes
+WHERE exploration_id = $` + strconv.Itoa(expPos) + ` AND kind = $` + strconv.Itoa(kindPos) + `
+  AND ` + scopedNodeVisibilityNoOutOfScope + `
+ORDER BY id DESC LIMIT $` + strconv.Itoa(limitPos)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// ListByKindWithSourcesVisible is ListByKindVisible 的继承版：本探索的节点 + 每个
+// 直接来源任务的节点，全部按【调用者】的范围过滤。
+//
+// 为什么用调用者的范围而不是来源任务自己的范围：授权边界是「调用者能看什么」。
+// 继承只是把来源任务的图搬到调用者面前，搬进来的节点仍要过调用者的范围 ——
+// 否则「继承」就成了绕过范围的后门。
+//
+// 与 ListByKindWithSources 一样，继承来的非终态 intent 不进入结果（来源任务的
+// 在飞工作不是继承内容）。
+func (s *ExplorationStore) ListByKindWithSourcesVisible(taskID int64, kind string, limit int) ([]*Node, error) {
+	out, err := s.ListByKindVisible(taskID, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range sources {
+		nodes, err := source.Store.ListByKindVisible(taskID, kind, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if kind == KindIntent && !inheritedIntentTerminal(node.State) {
+				continue
+			}
+			out = append(out, markInheritedNode(node, source.Task.TaskID))
+		}
+	}
+	return out, nil
+}
+
+// ListByKindPageWithSourcesVisible is ListByKindPageWithSources 的范围版：本探索的
+// 节点 + 每个直接来源任务的节点，全部按【调用者】的范围过滤。
+//
+// 与 ListByKindPageWithSources 一样，继承来的非终态 intent 不进入结果（来源任务的
+// 在飞工作不是继承内容）。与 ListByKindWithSourcesVisible 一样，继承来的节点仍要过
+// 【调用者】的范围：授权边界是「调用者能看什么」，不是「来源任务能看什么」。
+func (s *ExplorationStore) ListByKindPageWithSourcesVisible(taskID int64, kind string, before int64, limit int, q string) (nodes []*Node, hasMore bool, total int, err error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	own, err := s.listByKindPageFilteredVisible(taskID, kind, before, limit, q)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	merged := own
+	total, err = s.countByKindFilteredVisible(taskID, kind, q)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, false, 0, err
+	}
+	for _, source := range sources {
+		page, err := source.Store.listByKindPageFilteredVisible(taskID, kind, before, limit, q)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		for _, n := range page {
+			merged = append(merged, markInheritedNode(n, source.Task.TaskID))
+		}
+		cnt, err := source.Store.countByKindFilteredVisible(taskID, kind, q)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		total += cnt
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
+	hasMore = len(merged) > limit
+	if hasMore {
+		merged = merged[:limit]
+	}
+	return merged, hasMore, total, nil
+}
+
+// CountByKindVisible counts this exploration's nodes of a kind that are visible to
+// the caller's scope —— 与 ListByKindVisible 同一套可见性关系。
+//
+// 有了它，界面/工具就不必用「未过滤的总数 - 过滤后的条数」去猜被范围挡掉了多少：
+// 那个减法本身就会把范围外的结论数量报出去。
+func (s *ExplorationStore) CountByKindVisible(taskID int64, kind string) (int, error) {
+	return s.countByKindFilteredVisible(taskID, kind, "")
+}
+
+// nodeVisibleInScope 判断一个节点对 taskID 的调用者是否可见。
+//
+// 图里有两种节点，两种可见性 —— 这是范围隔离里最容易搞混的一处：
+//   - 任务自有节点（goal / hint / intent）：不锚资产，可见性由【探索归属】决定
+//     （本探索的节点对本任务可见；直接来源任务的节点只读继承）。
+//   - 资产锚定节点（fact / finding）：payload 是它接触过的资产的侦察结论，可见性
+//     由【锚点】决定：锚到了范围外资产的节点不可见（见 scopedNodeVisibilityNoOutOfScope）。
+//
+// 两种可见性都【不是】"有没有锚点"这一条判据的同义词：任务自有节点没有锚点，
+// 照样可见；资产锚定节点一旦锚到范围外资产，就不可见。
+func (s *ExplorationStore) nodeVisibleInScope(taskID int64, n *Node) (bool, error) {
+	if n == nil {
+		return false, nil
+	}
+	switch n.Kind {
+	case KindFact, KindFinding:
+		return s.nodeOutOfScopeAnchorFree(taskID, n.ID)
+	}
+	return true, nil
+}
+
+// nodeOutOfScopeAnchorFree 判断一个【资产锚定】节点有没有锚到范围外的资产。
+//
+// 它与 ListByKindVisible 用的是同一条可见性关系（scopedNodeVisibilityNoOutOfScope），
+// 只是作用在单个节点上：按 id 取节点的读路径（node_detail）不能因为「按 id 取」
+// 就绕过范围。
+func (s *ExplorationStore) nodeOutOfScopeAnchorFree(taskID int64, nodeID int64) (bool, error) {
+	fragment, err := s.db.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return false, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args = append(args, nodeID)
+	nodePos := len(args)
+	query := `WITH ` + fragment.CTE + `
+SELECT EXISTS(SELECT 1 FROM exploration_nodes
+WHERE exploration_nodes.id = $` + strconv.Itoa(nodePos) + ` AND ` + scopedNodeVisibilityNoOutOfScope + `)`
+	var visible bool
+	if err := s.db.QueryRow(query, args...).Scan(&visible); err != nil {
+		return false, err
+	}
+	return visible, nil
+}
+
+// GetNodeWithSourcesVisible reads a node only when it belongs to this exploration
+// or one of its direct sources AND it is visible to the caller's scope.
+//
+// 与 GetNodeWithSources 的区别只有一条：资产锚定节点（fact / finding）额外要过
+// 范围判定 —— 锚到了范围外资产的节点取不到。任务自有节点（goal / hint / intent）
+// 的可见性仍由探索归属决定（把它们也按锚点过滤会清空规划者的视图，见
+// nodeVisibleInScope）。
+//
+// 取不到时返回 (nil, nil)：范围外的节点与不存在的节点【无法区分】，因此按 id
+// 探测不能变成存在性探测器。
+func (s *ExplorationStore) GetNodeWithSourcesVisible(taskID int64, id int64) (*Node, error) {
+	node, err := s.GetNode(id)
+	if err != nil {
+		return nil, err
+	}
+	if node != nil {
+		visible, err := s.nodeVisibleInScope(taskID, node)
+		if err != nil {
+			return nil, err
+		}
+		if !visible {
+			return nil, nil
+		}
+		return node, nil
+	}
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range sources {
+		node, err = source.Store.GetNode(id)
+		if err != nil {
+			return nil, err
+		}
+		if node != nil {
+			if node.Kind == KindIntent && !inheritedIntentTerminal(node.State) {
+				continue
+			}
+			visible, err := source.Store.nodeVisibleInScope(taskID, node)
+			if err != nil {
+				return nil, err
+			}
+			if !visible {
+				continue
+			}
+			return markInheritedNode(node, source.Task.TaskID), nil
+		}
+	}
+	return nil, nil
 }
 
 // ListByKindPage returns one newest-first page of nodes of a kind for reverse
