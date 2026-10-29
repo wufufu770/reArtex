@@ -339,6 +339,19 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 				}
 				results = append(results, result{Index: i, ID: id, Type: typ})
 				t.writes.Assets++
+				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
+				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
+				// 与覆盖度开关无关：task_scope 是任务的范围边界(list/查询的过滤基准)，
+				// 覆盖度开关只决定要不要把它当分母去算指标，不决定要不要累积范围本身。
+				// 顺序有讲究：范围必须先落库，锚点写入才可能通过范围判定（锚点只允许
+				// 落在范围内的资产，见 ToolSet.anchorOwner）。
+				{
+					svcIP := item.ServiceIP
+					if svcIP == "" {
+						svcIP = item.IP
+					}
+					_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
+				}
 				t.anchorOwner(id)
 				if taskID > 0 {
 					var sourceNodeID *int64
@@ -351,17 +364,6 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 						summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_assets 登记", t.ownerNode)
 					}
 					_ = t.as.SetTaskAssetSource(taskID, id, "agent", summary, sourceNodeID)
-				}
-				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
-				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
-				// 与覆盖度开关无关：task_scope 是任务的范围边界(list/查询的过滤基准)，
-				// 覆盖度开关只决定要不要把它当分母去算指标，不决定要不要累积范围本身。
-				{
-					svcIP := item.ServiceIP
-					if svcIP == "" {
-						svcIP = item.IP
-					}
-					_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
 				}
 			}
 
