@@ -188,7 +188,7 @@ func (s *Store) Record(ctx context.Context, in db.RecordFindingInput, refs []db.
 		if err != nil {
 			return err
 		}
-		out, err = db.RecordFindingTx(ctx, tx, in, prepared)
+		out, err = s.DB.RecordFindingTx(ctx, tx, in, prepared)
 		return err
 	})
 	return
