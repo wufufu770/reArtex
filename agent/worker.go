@@ -401,7 +401,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	sysBody += renderIntentTask(intent)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
-			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
+			// 【读侧范围隔离】这里取的是意图锚定资产的【完整行】（含 auth 凭据），
+			// 整行会进 worker 的 system prompt ⇒ 进提示的必须是【范围内】的行。
+			// GetByIDs 是全局读，会把范围外资产连同凭据塞进模型上下文；GetByIDsInScope
+			// 按本任务的范围过滤，越界的 id 直接不返回。没有任务上下文（taskID<=0）时
+			// 范围解析为平台范围（默认空）⇒ 一个资产都不给（fail-closed），绝不是"全都给"。
+			if assets, err := as.GetByIDsInScope(taskID, ids); err == nil && len(assets) > 0 {
 				if b, err := json.Marshal(assets); err == nil {
 					sysBody += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
 				}
@@ -409,6 +414,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
 				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
 				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
+				// 只累积【范围内】的资产：范围外的资产既不进提示、也不该被这条路径顺手
+				// 扩进本任务范围（否则「意图里写个范围外 id」就是一条免审的扩权通道）。
 				if coverageEnabled {
 					for _, a := range assets {
 						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
