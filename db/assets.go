@@ -17,10 +17,13 @@ import (
 
 // Asset is a row in the assets table.
 type Asset struct {
-	ID         int64   `json:"id"`
-	Type       string  `json:"type"`
-	CompanyID  *int64  `json:"company_id,omitempty"`
-	TaskIDs    []int64 `json:"task_ids"`
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	CompanyID *int64 `json:"company_id,omitempty"`
+	// TaskIDs 是【引用本资产的任务 id 列表】。它只用于内部归属判定（任务删除时解绑、
+	// 归档时判断独占与否），【不序列化】出去：那串 id 会告诉读面「还有别的任务也在碰
+	// 这个资产」—— 越过任务边界。读面只该给调用者自己范围内的信息。
+	TaskIDs    []int64 `json:"-"`
 	Domain     string  `json:"domain,omitempty"`
 	RootDomain string  `json:"root_domain,omitempty"`
 	IP         string  `json:"ip,omitempty"`
