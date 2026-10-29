@@ -1109,8 +1109,20 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 		t.Fatalf("GetByIDsInScope mixed ids → %+v, want only %d", byID, inScopeIDs[0])
 	}
 
-	// taskID<=0 (non-task context) falls back to global: the out-of-scope row is reachable.
-	global, err := assets.QueryDSLInScope(marker, "", 0, 50, 0)
+	// taskID<=0 (non-task context) resolves against the PLATFORM scope, never
+	// "everything": the out-of-scope row must not be reachable. The explicit
+	// global query is QueryDSL — a deliberate host/UI entry point, not a
+	// fallback of the scoped path.
+	scoped, err := assets.QueryDSLInScope(marker, "", 0, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range scoped {
+		if a.ID == outIDs[0] {
+			t.Fatalf("taskID<=0 must resolve to the platform scope, but out-of-scope asset %d leaked", outIDs[0])
+		}
+	}
+	global, err := assets.QueryDSL(marker, "", 0, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1121,6 +1133,6 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 		}
 	}
 	if !sawOut {
-		t.Fatalf("taskID<=0 should fall back to global and include out-of-scope asset %d", outIDs[0])
+		t.Fatalf("explicit global QueryDSL must still reach out-of-scope asset %d", outIDs[0])
 	}
 }

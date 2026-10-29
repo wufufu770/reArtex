@@ -503,9 +503,14 @@ func (s *AssetStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 }
 
 // QueryDSL executes a DSL query string against the asset store.
+//
 // typ is an optional asset type filter applied independently of the DSL expression.
 // taskID > 0 scopes results to assets attached to that task and hydrates each
 // row's per-task source metadata (as QueryByTask does).
+//
+// ⚠️ 这是【无范围约束】的查询：它是宿主/UI 的「给我全部」入口，因此必须显式调用。
+// agent 可达的读接口一律走 QueryDSLInScope —— 「这次调用到底有没有范围」不能靠
+// 调用点自觉，那正是范围外资产漏出去的地方。
 func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
 	if limit <= 0 {
 		limit = 50
@@ -549,17 +554,19 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) 
 	return assets, nil
 }
 
-// QueryDSLInScope is QueryDSL restricted to assets that BELONG to taskID's (and its
-// direct source tasks') declared scope — membership, not literal value: a
-// root_domain scope returns every subdomain / service / endpoint under it. This is
-// the agent-facing list_assets path, so an agent queries the task's relevant assets
-// instead of the whole shared库. taskID<=0 (non-task contexts: Auto / pentest / chat)
-// has no scope to honor and falls back to the plain global QueryDSL. Rows carry the
-// same per-task source metadata as QueryByTask.
+// QueryDSLInScope is QueryDSL restricted to the assets the caller may REACH.
+//
+// taskID > 0  → the task's (and its direct source tasks') declared scope —
+//                membership, not literal value: a root_domain scope returns every
+//                subdomain / service / endpoint under it.
+// taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
+//                the global asset pool: without a task there is no authorization
+//                edge, so the default is to see nothing.
+//
+// This is the agent-facing list_assets path, so an agent queries the task's
+// relevant assets instead of the whole shared库. Rows carry the same per-task
+// source metadata as QueryByTask.
 func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
-	if taskID <= 0 {
-		return s.QueryDSL(dsl, typ, 0, limit, offset)
-	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -570,20 +577,24 @@ func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offse
 	if err != nil {
 		return nil, err
 	}
-	// $1 is reserved for taskID (scopeTargetCTE); DSL placeholders start at $2.
-	where, dslArgs, err := buildDSLWhereBase(node, 1)
+	fragment, err := s.ScopeFragmentFor(taskID)
 	if err != nil {
 		return nil, err
 	}
-	args := []any{taskID}
+	// The CTE owns $1..$n (the task id); DSL placeholders start right after them.
+	where, dslArgs, err := buildDSLWhereBase(node, len(fragment.Args))
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{}, fragment.Args...)
 	args = append(args, dslArgs...)
 	if typ != "" {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
-	where += " AND id IN (SELECT id FROM target)"
+	where += " AND " + fragment.Predicate
 	args = append(args, limit, offset)
-	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols + " WHERE " + where +
+	q := `WITH ` + fragment.CTE + ` ` + assetSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -594,33 +605,35 @@ func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offse
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
-		return nil, err
+	if taskID > 0 {
+		if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+			return nil, err
+		}
 	}
 	return assets, nil
 }
 
-// GetByIDsInScope is GetByIDs restricted to ids that BELONG to taskID's (and its
-// direct source tasks') declared scope, so an agent cannot reach out-of-scope
-// assets by id. taskID<=0 (non-task contexts) falls back to the global GetByIDs.
+// GetByIDsInScope is GetByIDs restricted to the assets the caller may REACH, so
+// an agent cannot reach out-of-scope assets by id.
+//
+// taskID > 0  → the task's (and its direct source tasks') declared scope.
+// taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
+//                the global asset pool.
+//
 // Out-of-scope ids are silently dropped from the result (not an error).
 func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error) {
-	if taskID <= 0 {
-		return s.GetByIDs(ids)
-	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, taskID) // $1 reserved for scopeTargetCTE
-	placeholders := make([]string, len(ids))
-	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
-		args = append(args, id)
+	fragment, err := s.ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
 	}
-	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols +
-		" WHERE id IN (" + strings.Join(placeholders, ",") + ")" +
-		" AND id IN (SELECT id FROM target) ORDER BY last_seen DESC, id DESC"
+	args := append([]any{}, fragment.Args...)
+	args, placeholders := scopeIDPlaceholders(args, ids)
+	q := `WITH ` + fragment.CTE + ` ` + assetSelectCols +
+		" WHERE id IN (" + placeholders + ")" +
+		" AND " + fragment.Predicate + " ORDER BY last_seen DESC, id DESC"
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -630,8 +643,46 @@ func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
-		return nil, err
+	if taskID > 0 {
+		if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+			return nil, err
+		}
 	}
 	return assets, nil
+}
+
+// ScopedAssetIDs resolves which of the given asset ids are inside the caller's
+// reachable scope.
+//
+// taskID > 0  → the task's (and its direct source tasks') declared scope.
+// taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
+//                the global asset pool.
+//
+// Out-of-scope ids are dropped from the result (not an error): the caller only
+// needs to know which of the ids it may keep.
+func (s *AssetStore) ScopedAssetIDs(taskID int64, ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	fragment, err := s.ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{}, fragment.Args...)
+	args, placeholders := scopeIDPlaceholders(args, ids)
+	rows, err := s.db.Query(`WITH `+fragment.CTE+` SELECT id FROM assets
+WHERE id IN (`+placeholders+`) AND `+fragment.Predicate+` ORDER BY id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
