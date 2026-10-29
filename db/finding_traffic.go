@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,11 @@ var (
 	ErrEvidenceConflict = errors.New("流量证据已变更，请刷新后重试")
 	ErrFindingNotFound  = errors.New("漏洞不存在")
 	ErrEvidenceNotFound = errors.New("流量证据不存在")
+	// ErrFindingOutOfScope 表示目标漏洞不在调用者的任务范围内。
+	//
+	// 「目标不存在」与「目标存在但不在范围内」共用这一句文案：拒绝本身不该变成
+	// 一个存在性探测器 —— 否则调用方可以靠「报错文案不同」把别人的漏洞探出来。
+	ErrFindingOutOfScope = errors.New("漏洞不存在或不在当前任务范围内")
 )
 
 // This lock covers the evidence filesystem as well as its SQL references. All
@@ -339,7 +346,10 @@ type RecordedFinding struct {
 
 // ctx 由调用方传入本次事务所用的上下文（而非在内部取 context.Background）：
 // 事务内新加的推送事件写入同样应受调用方的取消与超时约束。
-func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, prepared []PreparedTrafficEvidence) (*RecordedFinding, error) {
+//
+// d 是平台句柄：锚点写入前的范围判定要走 AssetStore.ScopedAssetIDs（全平台
+// 唯一的范围判定入口），而判定需要资产库句柄 —— 所以这条路径挂在 *DB 上。
+func (d *DB) RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, prepared []PreparedTrafficEvidence) (*RecordedFinding, error) {
 	if err := LockTaskEvidenceTx(tx, in.TaskID); err != nil {
 		return nil, err
 	}
@@ -350,6 +360,19 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 		}
 		if expID != in.ExplorationID {
 			return nil, errors.New("漏洞所属任务与探索记录不匹配")
+		}
+	}
+	// 锚点写入前先判范围（唯一判定入口：AssetStore.ScopedAssetIDs）。
+	//
+	// 整单拒绝而不是「跳过那一个越界资产、其余照写」：同一个越界 id 会同时落进
+	// findings.asset_ids 与推送事件的 payload，逐处过滤漏一处就是泄露；拒绝则
+	// 一个字节都不写。错误文案不区分「不存在」与「不在范围内」，因此拒绝不构成
+	// 存在性探测器。
+	//
+	// 没有任务上下文（TaskID<=0）⇒ 没有授权边 ⇒ 不建立任何锚点（fail-closed）。
+	if in.TaskID > 0 {
+		if err := d.anchorAssetsInScope(in.TaskID, in.AssetIDs); err != nil {
+			return nil, err
 		}
 	}
 	if in.IntentID > 0 {
@@ -367,9 +390,13 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string(payload), in.Worker).Scan(&out.NodeID); err != nil {
 		return nil, err
 	}
-	for _, asset := range in.AssetIDs {
-		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, out.NodeID, asset); err != nil {
-			return nil, err
+	// 锚点：只有落在任务范围内的资产才建立关系（范围判定见上）。无任务上下文时
+	// 一条都不建 —— 没有授权边就没有锚点。
+	if in.TaskID > 0 {
+		for _, asset := range in.AssetIDs {
+			if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, out.NodeID, asset); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if in.IntentID > 0 {
@@ -410,7 +437,7 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeI
 // RecordFinding is the atomic legacy/no-recorder path used by tools and tests.
 func (s *ExplorationStore) RecordFinding(ctx context.Context, in RecordFindingInput) (out *RecordedFinding, err error) {
 	in.ExplorationID = s.expID
-	err = s.db.WithEvidenceTx(ctx, func(tx *sql.Tx) error { var e error; out, e = RecordFindingTx(ctx, tx, in, nil); return e })
+	err = s.db.WithEvidenceTx(ctx, func(tx *sql.Tx) error { var e error; out, e = s.db.RecordFindingTx(ctx, tx, in, nil); return e })
 	return
 }
 
@@ -453,6 +480,9 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 	return rows.Err()
 }
 
+// SetFindingReportVersionByNodeID 是宿主/UI 的入口：没有任务上下文，写哪条漏洞
+// 都行（平台操作者可信）。agent 可达的那条写路径必须用
+// SetFindingReportVersionByNodeIDInScope（按漏洞归属判定范围）。
 func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (n int64, err error) {
 	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
 		var id int64
@@ -473,4 +503,94 @@ func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, 
 		return err
 	})
 	return
+}
+
+// SetFindingReportVersionByNodeIDInScope 写入漏洞报告，但只在目标漏洞属于 taskID
+// 时才允许 —— 这是 agent 可达的那条写路径。
+//
+// 跨任务写守卫：findings.task_id 是「这条漏洞属于哪个任务」的唯一列（可为 NULL）。
+// 归属不符（含 NULL，即归属不明）一律拒绝：拿到一个 node_id 不等于有权改它的
+// 报告。不设任务上下文（taskID<=0）同样拒绝 —— 没有授权边界就没有写权限。
+//
+// 与 SetFindingReportVersionByNodeID 的区别只在于「有没有任务上下文」这一个判据：
+// 无上下文的那个是宿主/UI 的显式入口（平台操作者可信），本函数是任务侧入口。
+func (d *DB) SetFindingReportVersionByNodeIDInScope(ctx context.Context, taskID, nodeID int64, report string, version *int64) (n int64, err error) {
+	if taskID <= 0 {
+		return 0, errors.New("缺少任务上下文：写入漏洞报告必须绑定到具体任务")
+	}
+	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		var owner sql.NullInt64
+		if err := tx.QueryRow(`SELECT id,task_id FROM findings WHERE node_id=$1`, nodeID).Scan(&id, &owner); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrFindingOutOfScope
+			}
+			return err
+		}
+		if !owner.Valid || owner.Int64 != taskID {
+			return ErrFindingOutOfScope
+		}
+		if err := LockFindingEvidenceTx(tx, id, version); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`UPDATE findings SET report=$2,report_evidence_version=COALESCE($3::bigint,CASE WHEN evidence_version=0 THEN 0 ELSE -1 END) WHERE id=$1`, id, report, version)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return
+}
+
+// TrafficScopeHosts 返回「绑定到 taskID 的调用者可以读取哪些 host 的流量」。
+//
+// 关系选择：流量按 host 存储（traffic exchanges.host），资产也带 domain/ip ⇒
+// 流量与资产的桥就是 host。这正是实际 schema 支持的关系；流量行本身没有 task
+// 维度（流量库全局共享，采集端是同一个代理），findings→asset_ids 那条链只能覆盖
+// 「已绑定到漏洞」的那部分流量，撑不起 traffic_search 这种「先找候选再绑定」的用法。
+//
+// 范围判定复用平台唯一的范围入口（AssetStore.ScopeFragmentFor）：taskID>0 → 该
+// 任务声明的范围；taskID<=0 → 平台范围（默认空）⇒ 什么都看不到。
+//
+// 只取 domain / ip / url 的主机名：能读到哪些 host，就等于能读到那个 host 上抓到
+// 的全部凭据。
+func (d *DB) TrafficScopeHosts(taskID int64) ([]string, error) {
+	fragment, err := d.Assets().ScopeFragmentFor(taskID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`WITH `+fragment.CTE+`
+SELECT DISTINCT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,'')
+FROM assets a WHERE `+fragment.Predicate, fragment.Args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hosts := []string{}
+	seen := map[string]bool{}
+	add := func(host string) {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" || seen[host] {
+			return
+		}
+		seen[host] = true
+		hosts = append(hosts, host)
+	}
+	for rows.Next() {
+		var domain, ip, rawURL string
+		if err := rows.Scan(&domain, &ip, &rawURL); err != nil {
+			return nil, err
+		}
+		add(domain)
+		add(ip)
+		if parsed, err := url.Parse(rawURL); err == nil {
+			add(parsed.Hostname())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(hosts)
+	return hosts, nil
 }
