@@ -356,13 +356,16 @@ func TestTaskAssetContextUsesDirectSourceScopeAndAnchors(t *testing.T) {
 		_ = d.DeleteTask(grand.ID)
 		_, _ = assets.DeleteByIDs([]int64{sourceTestedID, sourceUntestedID, sourceAnchoredOnlyID, grandID})
 	})
-	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceTestedDomain, "test", "agent"); err != nil {
+	// 声明范围走人工路径：root_domain 会把整棵资产树拉进来，agent 侧不得自行扩到
+	// 这种 kind（见 db/task_scope_expansion_test.go）。本用例考的是「任务继承直接
+	// 来源任务声明的范围」，范围从哪条路径写进来与继承语义无关。
+	if _, err := assets.AddManualScope(source.ID, "root_domain", sourceTestedDomain, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.AddAgentScope(source.ID, "root_domain", sourceUntestedDomain, "test", "agent"); err != nil {
+	if _, err := assets.AddManualScope(source.ID, "root_domain", sourceUntestedDomain, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.AddAgentScope(grand.ID, "root_domain", grandDomain, "test", "agent"); err != nil {
+	if _, err := assets.AddManualScope(grand.ID, "root_domain", grandDomain, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Exploration(source.ExplorationID).AddNode(KindFact, map[string]any{"summary": "tested source asset"}, 0, "confirmed", "worker", []int64{sourceTestedID}); err != nil {
