@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS assets (
     -- rebuild can never erase a historical manual association.
     company_source  TEXT NOT NULL DEFAULT 'explicit'
                     CHECK (company_source IN ('explicit','scope')),
+    -- provenance：这个资产是谁带来的。
+    --   'platform' = 平台自建/导入；'agent' = agent 探测产生；'import' = 外部导入。
+    -- 没有任务上下文时的平台范围（platform_scope，见 db/scope.go）只认 'platform'。
+    -- 列不存在时平台范围 fail-closed（什么都看不到），所以这一列是平台自有模式的前提。
+    origin           TEXT NOT NULL DEFAULT 'agent'
+                    CHECK (origin IN ('platform','agent','import')),
     task_ids        BIGINT[] NOT NULL DEFAULT '{}',
     domain          TEXT,
     root_domain     TEXT,
@@ -108,6 +114,12 @@ ALTER TABLE assets ALTER COLUMN company_source SET NOT NULL;
 ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_company_source_check;
 ALTER TABLE assets ADD CONSTRAINT assets_company_source_check
     CHECK (company_source IN ('explicit','scope'));
+-- 旧库升级：加 provenance 列（幂等）。既有行一律 'agent' —— 保守：不被任何
+-- platform_scope 命中；平台自建资产由平台代码显式标 'platform'。
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'agent';
+ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_origin_check;
+ALTER TABLE assets ADD CONSTRAINT assets_origin_check
+    CHECK (origin IN ('platform','agent','import'));
 DROP TRIGGER IF EXISTS trg_av2_upd ON assets;
 CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
