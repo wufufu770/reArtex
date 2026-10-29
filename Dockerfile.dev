@@ -1,0 +1,20 @@
+# 开发实例专用镜像（**新增文件，不改上游 Dockerfile**）。
+#
+# 为什么以【现役镜像】为 base，而不是从 python:3.12-slim-bookworm 重建：
+#   1) 运行时与生产【完全一致】——同样的 apt 工具链（nmap/ripgrep/node20…）、同样的
+#      Playwright 预装；开发实例的观测结论可直接迁移到生产，不会出现「开发环境有、
+#      生产没有」的工具差异。
+#   2) 零 apt 重建、零网络抖动 —— 实测从源码重建时 apt 反复重试同一个 8.7MB 包
+#      （Ign:4 循环），构建耗时不可控。
+#   3) 上游 Dockerfile 仍可照常用于正式发布；本文件只是开发期的等价替代。
+#
+# 与上游 Dockerfile 的差异：**只有这一层** —— 替换预编译二进制与 skills。
+FROM ghcr.io/wufufu770/reartex:v0.4.1
+ARG TARGETARCH
+ARG ARTEX_BINARY_VERSION=""
+COPY dist/artex-linux-${TARGETARCH}/artex /app/artex
+COPY start.sh /app/start.sh
+RUN chmod +x /app/artex /app/start.sh
+# 版本校验：防止把上一次遗留的旧二进制静默装进镜像（上游 Dockerfile 同款门）。
+RUN /usr/local/bin/verify-binary-version.sh /app/artex "$ARTEX_BINARY_VERSION"
+COPY skills/ /app/skills/
