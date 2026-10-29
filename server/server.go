@@ -1877,7 +1877,7 @@ func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	ts, err := as.AddAgentScope(taskID, body.Kind, body.Value, body.Reason, "manual")
+	ts, err := as.AddManualScope(taskID, body.Kind, body.Value, body.Reason)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

@@ -744,6 +744,9 @@ func (m *Manager) HostTools() []actool.CoreTool {
 	if m.traffic == nil || !m.TrafficEnabled() {
 		return nil
 	}
+	// 流量库全局共享，读它必须先过范围门。HostTools 是流量工具唯一的出口，
+	// 范围门在这里注入（判定本身复用平台共享的 scope 层，不在这里另写一套）。
+	m.traffic.SetScopeGate(trafficScopeGate{pg: m.pg})
 	return m.traffic.Tools()
 }
 
