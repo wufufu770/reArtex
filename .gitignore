@@ -66,3 +66,7 @@ docker-compose.override.yml.bak-*
 
 # docker secret 文件（数据库连接串）：由 init-pg-dsn-secret.sh 生成，绝不进版本库
 secrets/
+
+# 打了补丁的第三方框架（由 scripts/prepare-norma.sh 从模块缓存生成 + 打补丁）
+# 不入库：入库的是 patches/norma-privilege-drop.patch 这份可审阅的补丁本身。
+third_party/
