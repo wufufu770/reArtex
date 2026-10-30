@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,7 +21,7 @@ func quotaTestServer(t *testing.T) (*Server, *db.DB) {
 	}
 	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := New(testServerCtx(t), m, td, td, td)
 	return s, m.pg
 }
 
