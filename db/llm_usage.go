@@ -82,6 +82,11 @@ VALUES (NULLIF($1,''),$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$
 // first, from the always-on llm_usage ledger. taskID is the task registry id.
 // Accurate even with per-agent model bindings, pool rotation/failover, and
 // interrupted runs, since every call (success or error) is metered.
+//
+// 返回的是**分列**的求和，不是「总量」。口径：任务的 token 总量 = input_tokens +
+// output_tokens —— 缓存**已经**折在 input_tokens 里（llmrec 落库的是 SDK 规范化
+// 后的 llm.Usage，其 InputTokens 已含缓存），把 cache_read / cache_write 再加一遍
+// 会把缓存前缀算两遍。要总量请用 TotalTokensForTask，不要自己把四列相加。
 func (d *DB) TokenByModel(taskID string) ([]ModelTokenStat, error) {
 	rows, err := d.Query(`
 SELECT COALESCE(NULLIF(model,''),'(unknown)') AS model, COUNT(*) AS calls,
@@ -105,6 +110,41 @@ ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC, model`, taskID)
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// TotalTokensForTask returns the metered token total of a task.
+//
+// 口径：总量 = input_tokens + output_tokens。缓存**不再**另加 —— llmrec 落库的是
+// SDK 规范化后的 llm.Usage，其 InputTokens 已经含缓存（norma 的 Anthropic 路径把
+// cache_read + cache_write 折进 InputTokens；OpenAI 的 prompt_tokens 本就含
+// cached_tokens），平台自己的 dashboard 也把它标成「含缓存」。四列相加会把缓存
+// 前缀算两遍。
+func (d *DB) TotalTokensForTask(taskID string) (int64, error) {
+	var total int64
+	err := d.QueryRow(`
+SELECT COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)
+FROM llm_usage
+WHERE COALESCE(task_id,'') = $1`, taskID).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// CountOrphanLLMUsage counts metered rows that belong to neither a task nor an
+// exploration. Today these are platform-chat calls: llmrec.WithTaskID is injected
+// only on the task runtime and the side-question path, so a plain conversation
+// produces usage no task can claim. Exposing the count keeps missing attribution
+// measurable instead of silently unbilled.
+func (d *DB) CountOrphanLLMUsage() (int64, error) {
+	var n int64
+	err := d.QueryRow(`
+SELECT count(*) FROM llm_usage
+WHERE COALESCE(task_id,'') = '' AND COALESCE(exploration_id,0) = 0`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ProfileUsage aggregates the whole ledger's token spend for one LLM profile
