@@ -1875,3 +1875,273 @@ func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.pendingTriggers = nil
 	return ev
 }
+
+// ---------- 群组并发闸门与 auto 兜底（任务大厅） ----------
+//
+// 两级并发，各自的判定层不同：
+//   - 全局 M（同时跑几个任务 = 几个群组）：在**任务准入**那层判定
+//     （reconcileConcurrency / task_concurrency_limit）。没拿到槽位的任务根本不会
+//     跑到认领这一步 ⇒ 认领点不需要再判一次 M。
+//   - 组内 N（一个群同时最多几个 intent 在执行）：在**认领点**判定
+//     （engine.claimNext → claimIntentWithinGroupCap）。
+//
+// 仲裁顺序：组内并发 N → 全局任务槽位 M → 额度状态（active/draining/parked）。
+// 任一不满足就不认领。
+//
+// 群组表在 db 包（别的单元的文件域），因此这里的 SQL 只能落在 server 侧；口径与
+// db 层的访问器保持一致（同一个 group_quotas.state、同一个 exploration_nodes.state）。
+
+// groupDispatcherKey 是分发者（auto）的 agent key：它既派工，也在组里没人时兜底执行。
+const groupDispatcherKey = "auto"
+
+// groupDispatcherRole 是分发者在群成员表里的分工标记（db/chat_group.go 的枚举）。
+const groupDispatcherRole = "dispatcher"
+
+// rowQuerier 让同一段 SQL 既能跑在连接池上、也能跑在事务里。
+//
+// *sql.DB 与 *sql.Tx 都实现它 ⇒ 组内上限的计数在事务内外是同一份口径，不会出现
+// "外面数一个数、里面数另一个数"的两套真相。
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// GroupConcurrencyLimit 报某个 task 所属群组的并发上限；ok=false 表示没有群组。
+//
+// 为什么放在 manager 侧：群组是 server 侧的数据，engine 不该知道群组表长什么样。
+func (m *Manager) GroupConcurrencyLimit(taskID int64) (int, bool) {
+	if m == nil || m.pg == nil || taskID <= 0 {
+		return 0, false
+	}
+	g, err := m.pg.GroupByTask(taskID)
+	if err != nil || g == nil {
+		return 0, false
+	}
+	return g.ConcurrencyLimit, true
+}
+
+// GroupRunningIntents 报某个 task 当前有多少个 intent 在执行（state='running'）。
+//
+// 它是组内并发上限的**分母**：一个群 = 一个 task = 一张探索图，所以"这张图上在跑的
+// intent 数"就是"这个群同时在跑的执行者数"。
+func (m *Manager) GroupRunningIntents(taskID int64) (int, error) {
+	if m == nil || m.pg == nil || taskID <= 0 {
+		return 0, nil
+	}
+	var expID int64
+	if err := m.pg.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1`, taskID).Scan(&expID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("查任务探索图失败: %w", err)
+	}
+	return groupRunningIntents(m.pg, expID)
+}
+
+// groupRunningIntents 数一张探索图上当前在跑（state='running'）的 intent 数。
+func groupRunningIntents(q rowQuerier, explorationID int64) (int, error) {
+	var n int
+	err := q.QueryRow(`SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='running'`, explorationID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计在跑意图失败: %w", err)
+	}
+	return n, nil
+}
+
+// claimIntentWithinGroupCap 在群组并发上限内认领一个意图。
+//
+// ── 原子性（为什么两个并发认领不会都越过上限）──
+//
+// 一个事务里做四件事：
+//  1. SELECT ... FOR UPDATE 锁住这个 task 的群组行（串行化点）；
+//  2. 读群组额度状态（draining/parked ⇒ 不开新活）；
+//  3. 数这张探索图上在跑（state='running'）的 intent 数；
+//  4. 条件更新 open→running。
+//
+// PostgreSQL 的行锁让并发事务排队：后到的那个在拿到锁之后，下一条语句会**取新快照**
+// （READ COMMITTED 下每条语句一个快照）⇒ 它数到的是先到那个**已提交**的 running 行 ⇒
+// 上限判定自动失效。"数"与"认领"之间没有可被插队的窗口。
+//
+// 为什么不写成"先 SELECT 再 UPDATE"（计划书里的写法）：那是经典的读-改写竞争，两个
+// 并发认领都能读到同一份旧计数并各自通过检查 ⇒ 上限形同虚设。
+//
+// **调低上限不杀在途**：这里只影响**新的**认领；在途 intent 的状态与生命周期完全
+// 不受影响（没有一条 UPDATE 碰它们），只是新认领会被拒，直到在跑的降到上限之下。
+func (m *Manager) claimIntentWithinGroupCap(taskID, explorationID, intentID int64, owner string) (bool, error) {
+	if m == nil || m.pg == nil {
+		return false, errors.New("数据库未连接")
+	}
+	tx, err := m.pg.Begin()
+	if err != nil {
+		return false, fmt.Errorf("开启认领事务失败: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var groupID int64
+	var limit int
+	err = tx.QueryRow(`SELECT id, concurrency_limit FROM chat_groups WHERE task_id=$1 FOR UPDATE`, taskID).
+		Scan(&groupID, &limit)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("锁定群组失败: %w", err)
+		}
+		// 没有群组 ⇒ 没有组内上限（平台的绝大多数任务都没有大厅）。
+		return claimIntentInTx(tx, explorationID, intentID, owner)
+	}
+	denied, err := groupQuotaDeniesNewWork(tx, groupID)
+	if err != nil {
+		return false, err
+	}
+	if denied {
+		return false, nil
+	}
+	running, err := groupRunningIntents(tx, explorationID)
+	if err != nil {
+		return false, err
+	}
+	if running >= limit {
+		return false, nil
+	}
+	return claimIntentInTx(tx, explorationID, intentID, owner)
+}
+
+// claimIntentInTx 在事务里做 open→running 的条件更新（CAS）。
+//
+// 条件与 db.ExplorationStore.ClaimIntent 完全一致：同一张图、同一种节点、只有 open
+// 能被领走 —— 认领权仍然只属于 exploration_nodes.state 这一个权威。
+func claimIntentInTx(tx *sql.Tx, explorationID, intentID int64, owner string) (bool, error) {
+	res, err := tx.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, intentID, explorationID)
+	if err != nil {
+		return false, fmt.Errorf("认领意图失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, nil // 已被别人领走（或已经不是 open）
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("提交认领事务失败: %w", err)
+	}
+	return true, nil
+}
+
+// groupQuotaDeniesNewWork 读群组额度状态，判断它是否拒绝**新**工作。
+//
+// 口径与 db.GroupQuotaState 的契约一致：
+//   - 没有额度行（状态未设）⇒ 不拒绝：额度闸门管的是"能不能发起模型调用"，不是
+//     "能不能认领新意图"（db/quota.go 明确写了这条区别）；
+//   - draining / parked ⇒ 拒绝（收尾中/冻结：不再开新活，在途的照常跑完）；
+//   - 状态解析不出来 / 读失败 ⇒ 拒绝（fail closed：查不出来不等于没有限制）。
+func groupQuotaDeniesNewWork(q rowQuerier, groupID int64) (bool, error) {
+	var state string
+	err := q.QueryRow(`SELECT state FROM group_quotas WHERE group_id=$1`, groupID).Scan(&state)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return true, fmt.Errorf("查群组额度状态失败: %w", err)
+	}
+	switch pgdb.QuotaState(state) {
+	case pgdb.QuotaStateActive, pgdb.QuotaStateUnset:
+		return false, nil
+	case pgdb.QuotaStateDraining, pgdb.QuotaStateParked:
+		return true, nil
+	default:
+		return true, fmt.Errorf("群组额度状态无法解析: %q", state)
+	}
+}
+
+// GroupHasUsableMember 报这个群组现在有没有"能干活"的成员（不含分发者 auto）。
+//
+// 判据（三条都要满足）：
+//  1. 成员不是分发者 —— auto 是派工的，不是干活的；把它算成可用成员会让"有没有
+//     人可用"永远为真，auto 就永远不会兜底；
+//  2. 对应的 agent 存在且 enabled —— 被禁用的 agent 不能干活；
+//  3. 群组没被冻住 —— 额度状态不是 draining/parked，群组状态是 active/resuming。
+//
+// auto 兜底顶替执行正是靠这条判定：它为 false 时，auto 才被放进认领路径。
+func (s *Server) GroupHasUsableMember(groupID int64) (bool, error) {
+	if s == nil || s.m == nil {
+		return false, errors.New("管理器未就绪")
+	}
+	return s.m.groupHasUsableMember(groupID)
+}
+
+// groupHasUsableMember 是 GroupHasUsableMember 的 manager 侧实现。
+func (m *Manager) groupHasUsableMember(groupID int64) (bool, error) {
+	usable, _, err := m.groupUsableMemberDecision(groupID, "")
+	return usable, err
+}
+
+// groupUsableMemberDecision 读群成员，算出两件事：
+//   - usable：组里有没有"现在能干活"的成员；
+//   - member：worker 是不是本组成员。
+func (m *Manager) groupUsableMemberDecision(groupID int64, worker string) (usable bool, member bool, err error) {
+	if m == nil || m.pg == nil || groupID <= 0 {
+		return false, false, nil
+	}
+	group, err := m.pg.GetChatGroup(groupID)
+	if err != nil {
+		return false, false, fmt.Errorf("读群组失败: %w", err)
+	}
+	if group == nil {
+		return false, false, nil
+	}
+	members, err := m.pg.ChatGroupMembers(groupID)
+	if err != nil {
+		return false, false, fmt.Errorf("读群成员失败: %w", err)
+	}
+	for _, mem := range members {
+		if mem.AgentKey == worker {
+			member = true
+		}
+		if mem.Role == groupDispatcherRole {
+			continue // 分发者不是执行者
+		}
+		a, err := m.pg.GetAgentByKey(mem.AgentKey)
+		if err != nil {
+			return false, member, fmt.Errorf("查 agent 失败: %w", err)
+		}
+		if a == nil || !a.Enabled {
+			continue // agent 不存在或被禁用 ⇒ 不能干活
+		}
+		usable = true
+	}
+	// 额度状态：draining/parked ⇒ 整组不再开新活 ⇒ 没有"可用成员"。
+	denied, err := groupQuotaDeniesNewWork(m.pg, groupID)
+	if err != nil {
+		return false, member, err
+	}
+	if denied {
+		return false, member, nil
+	}
+	// 群组状态：只有 active/resuming 的群还有活可派。
+	if group.Status != "active" && group.Status != "resuming" {
+		return false, member, nil
+	}
+	return usable, member, nil
+}
+
+// groupDispatcherYields 判定当前 worker 是否应把这次认领让给 auto。
+//
+// 语义（true = 让位，本次不认领）：
+//   - 组里有可用成员 ⇒ auto 让位（它是分发者，成员干活），其它 worker 正常参与；
+//   - 组里没有可用成员 ⇒ 放行 auto（它是唯一的兜底执行者），组里的其它成员让位；
+//     池里的通用 worker（work#N）不是群成员 —— 它跑的是任务自己的 agent，把它
+//     挡住会让没有 auto worker 的池子彻底停摆，因此不对非成员生效。
+func (m *Manager) groupDispatcherYields(taskID int64, worker string) bool {
+	if m == nil || m.pg == nil || taskID <= 0 {
+		return false
+	}
+	g, err := m.pg.GroupByTask(taskID)
+	if err != nil || g == nil {
+		return false // 没有大厅 ⇒ 不设闸门
+	}
+	usable, member, err := m.groupUsableMemberDecision(g.ID, worker)
+	if err != nil {
+		return false // 判不出来 ⇒ 不额外收紧（认领本身仍受组内上限与额度闸门约束）
+	}
+	if usable {
+		return worker == groupDispatcherKey
+	}
+	return member && worker != groupDispatcherKey
+}
