@@ -110,8 +110,18 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 // keyed by agent key. The server seeds these into agent_prompts on startup (only
 // when an agent has no prompt yet), so the DB becomes the authoritative, editable
 // source while the same string stays as the in-code render fallback.
+//
+// 顾问型 agent（curator / verifier / redteam / creative / intent-normalizer）的正文
+// 来自 agent/prompts/*.md（见 prompts_files.go）——文件是它们的事实来源，改文件即改
+// 种子。合进同一个出口而不是另开一个：服务端只认 BuiltinPromptSeeds 一个入口。
+//
+// prompts/policy-gate.md 刻意不在其中：它是【确定性闸门的规格】而不是 LLM 提示词
+// （scope 检查、tier2 一致性、工具熔断、群组额度状态、anomaly 标记全是确定性检查，
+// 裁决顺序是短路规则表）。登记成 agent 就等于让模型接手裁决，违反「模型只提议，
+// 确定性层裁决」这条铁律。executor / auditor 同理是确定性基础设施：无提示词文件、
+// 无 agent 行、无工具绑定。
 func BuiltinPromptSeeds() map[string]string {
-	return map[string]string{
+	seeds := map[string]string{
 		"goals":     goalsDefaultTmpl,
 		"planner":   plannerDefaultTmpl,
 		"mainagent": mainAgentDefaultTmpl,
@@ -119,4 +129,8 @@ func BuiltinPromptSeeds() map[string]string {
 		"auto":      autoDefaultTmpl,
 		"pentest":   pentestDefaultTmpl,
 	}
+	for key, body := range AdvisoryPromptSeeds() {
+		seeds[key] = body
+	}
+	return seeds
 }
