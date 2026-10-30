@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/Autumn-27/artex/config"
@@ -1185,4 +1186,343 @@ func (d *DB) reencryptProfileKey(id int64, newName string) error {
 	}
 	_, err = d.Exec(`UPDATE llm_profiles SET api_key_cipher=$2 WHERE id=$1`, id, newCipher)
 	return err
+}
+
+// ---------- 顾问型 agent 的工具绑定策略（curator / verifier / redteam / creative / intent-normalizer） ----------
+//
+// 背景：这五个 agent 只【提议】，不【裁决】——「模型只提议，确定性层裁决」。所以它们
+// 绝不能持有改写平台共享状态（finding / intent / scope / 流量绑定 / 目标 / 资产 /
+// 任务 / 平台配置）的工具：那会让它们从顾问变成写入者，绕过确定性层直接改状态。
+//
+// 策略为什么定义在 db 层：工具绑定落在 tools.agents（jsonb 数组），是 db 的资产；而
+// agent 包依赖 db（agent → db），db 不能反向依赖 agent。策略放 db、agent 侧引用，
+// 既避免循环依赖，也避免两份策略各自漂移。
+//
+// 三道闸，缺一不可：
+//  1. 白名单：只有显式列进 Allow 的工具才可能被绑定——「没列＝不给」。
+//  2. 黑名单：Deny 与平台级「共享状态写」判定优先级高于白名单：就算有人误把
+//     report_finding 写进 Allow，也绑不上。拒绝优先是本策略的核心不变量。
+//  3. 能力闸：能执行命令/发请求的工具（kind=command|script/http，或 shell/Bash 系）
+//     对 DenyExec 的 agent 一律不绑——仲裁者与验证者都不许动手。
+//
+// 尚未注册的工具：Allow 里的名字若在 tools 表里还没有对应行（策略库阶段未落地），
+// 跳过并记录；那一阶段落地后由下一次协调自动绑上，不需要再改代码。
+
+// AdvisoryToolCap 描述一个工具对顾问 agent 的能力面。
+type AdvisoryToolCap int
+
+const (
+	// AdvisoryCapRead 只读：读资产/漏洞/流量/任务态势，不改任何状态。
+	AdvisoryCapRead AdvisoryToolCap = iota
+	// AdvisoryCapAdvisoryWrite 写顾问 agent 自己的建议通道（submit_* / propose_*）：
+	// 写的是「提议表」，最终由确定性层裁决，与改写共享状态不是一回事。
+	AdvisoryCapAdvisoryWrite
+	// AdvisoryCapGraphWrite 改写平台共享状态机（finding/intent/scope/流量绑定/…）。
+	AdvisoryCapGraphWrite
+	// AdvisoryCapExec 执行命令或发起请求。
+	AdvisoryCapExec
+)
+
+// AdvisoryAgentToolPolicy 是一个顾问型 agent 的工具绑定策略。
+type AdvisoryAgentToolPolicy struct {
+	Agent     string   // agent key
+	Allow     []string // 白名单：允许绑定的工具 key（按名字；未注册则跳过并记录）
+	Deny      []string // 黑名单：显式禁止的工具 key（优先级高于白名单）
+	DenyExec  bool     // 禁止可执行工具（命令/请求）
+	DenyWrite bool     // 禁止改写平台共享状态的工具
+}
+
+// advisoryGraphWriteTools 是【改写平台共享状态机】的工具 key。
+//
+// 这份清单是顾问 agent 隔离的结构性保证：白名单只负责「谁给什么」，这份清单负责
+// 「顾问永远碰不到什么」。凡是会改 finding / intent / scope / 流量绑定 / 目标 /
+// 约束 / 资产 / 任务 / 平台配置 / 探索图事实的工具都在这里。
+var advisoryGraphWriteTools = map[string]bool{
+	// 探索图与编排（agent/tools*.go）
+	"add_intent": true, "add_hint": true, "steer_work": true,
+	"set_goals": true, "set_constraints": true,
+	"insert_assets": true, "add_company_scope": true, "add_task_scope": true,
+	"report_finding": true, "record_fact": true,
+	"prove_goal": true, "goal_met": true, "kill_work": true,
+	// 跨任务编排（server/orchestration.go）
+	"spawn_task": true, "pause_task": true, "add_task_hint": true,
+	"update_finding_report": true, "bind_finding_traffic": true,
+	// 平台配置（server/platform_tools.go）
+	"create_skill": true, "update_skill_file": true,
+	"create_custom_tool": true, "update_custom_tool": true,
+	"create_mcp": true, "update_mcp": true, "delete_assets_by_host": true,
+	// 漏洞复测结论（server/finding_retests.go）
+	"record_finding_retest_result": true,
+}
+
+// advisoryAdvisoryWriteTools 是顾问 agent 自己的建议通道工具：写的是提议表，
+// 不是平台状态机，故与 advisoryGraphWriteTools 分开列。
+var advisoryAdvisoryWriteTools = map[string]bool{
+	"submit_decision": true, "submit_verdict": true, "submit_contradiction": true,
+	"propose_strategy": true, "propose_scenario_feature": true,
+	// emit_structured_intent：intent-normalizer 的唯一输出通道（结构化意图）。
+	// 它写的是「规整后的动作」，不是平台状态——判定仍由确定性闸门做。
+	"emit_structured_intent": true,
+}
+
+// advisoryScopeQueryTools 是「查 scope」的工具 key。
+//
+// scope 判定属于确定性闸门（policy-gate）的职责。intent-normalizer 只做结构化
+// 转换，不判范围：它一旦能查 scope，就有能力「顺手」判一个 scope 并自行放行，
+// 绕过闸门——职责分离就破了。这类工具对它既不在白名单，也在黑名单里显式列出。
+var advisoryScopeQueryTools = map[string]bool{
+	"list_companies":    true,
+	"add_task_scope":    true,
+	"add_company_scope": true,
+	"get_task_scope":    true,
+}
+
+// AdvisoryToolIsScopeQuery 判断某工具是否属于「查 scope」类。
+func AdvisoryToolIsScopeQuery(toolKey string) bool {
+	return advisoryScopeQueryTools[toolKey]
+}
+
+// advisoryExecTools 是能执行命令/发起请求的工具 key。自定义工具另按 kind 判定
+// （command/script/http 一律算可执行）。
+var advisoryExecTools = map[string]bool{
+	"Bash": true, "bash": true,
+	"shell_open": true, "shell_write": true, "shell_read": true,
+	"shell_close": true, "shell_wait": true,
+	"http_request": true,
+}
+
+// AdvisoryToolCapability 判定一个工具的能力面。kind 是 tools.kind 列
+// （builtin / command / script / http）。判定顺序：执行 > 建议通道 > 共享状态写 > 只读。
+//
+// 未知工具名一律按只读处理：能不能绑给某个 agent 由白名单决定，白名单之外的工具
+// 本来就绑不上，这里判成只读只是不把「没登记」误当成「有权限」。
+func AdvisoryToolCapability(toolKey, toolKind string) AdvisoryToolCap {
+	switch {
+	case advisoryExecTools[toolKey] || toolKind == "command" || toolKind == "script" || toolKind == "http":
+		return AdvisoryCapExec
+	case advisoryAdvisoryWriteTools[toolKey]:
+		return AdvisoryCapAdvisoryWrite
+	case advisoryGraphWriteTools[toolKey]:
+		return AdvisoryCapGraphWrite
+	default:
+		return AdvisoryCapRead
+	}
+}
+
+// AdvisoryAgentToolPolicies 返回五个顾问型 agent（curator/verifier/redteam/creative/
+// intent-normalizer）的工具绑定策略。
+//
+// Allow 里同时列了两类名字：
+//   - 策略库阶段将要注册的工具（此刻尚未注册 → 协调时跳过并记录，落地后自动绑上）；
+//   - 平台已有的等价只读工具（把规格里的意图映射到真实存在的 key 上，例如
+//     read_finding → list_findings、read_asset_graph → list_assets + graph_overview）。
+//
+// 规格里给 probe/redteam 的「bash / http_request 家族」在平台上不是 tools 表的行：
+// 探测能力由 SDK 的 Bash 与交互式 shell（agents 的 interactive_shell 开关）提供，
+// 不经过绑定表，因此这里不给它们开可执行工具的白名单。
+func AdvisoryAgentToolPolicies() []AdvisoryAgentToolPolicy {
+	return []AdvisoryAgentToolPolicy{
+		{
+			Agent: "curator",
+			Allow: []string{
+				"read_strategy_library",       // 策略库读取（策略库阶段注册）
+				"read_pending_contradictions", // 待处理证伪记录读取（同上）
+				"run_replay_eval",             // 冻结重放评估，只读（同上）
+				"submit_decision",             // 裁决写 curator_decisions：自己的建议通道
+			},
+			Deny:      []string{"report_finding", "add_intent"},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+		{
+			Agent: "verifier",
+			Allow: []string{
+				"read_finding",            // 策略库阶段注册
+				"read_traffic_evidence",   // 策略库阶段注册
+				"read_strategy_posterior", // 策略库阶段注册
+				"submit_verdict",          // 建议写 verification_verdicts：自己的建议通道
+				// 平台已有的等价只读工具
+				"list_findings",                                 // ← read_finding
+				"get_finding_traffic",                           // ← read_traffic_evidence
+				"traffic_search", "traffic_get", "traffic_blob", // ← read_traffic_evidence
+			},
+			Deny:      []string{"report_finding", "add_intent"},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+		{
+			Agent: "redteam",
+			Allow: []string{
+				"submit_contradiction",    // 证伪记录写 pending_contradictions：自己的建议通道
+				"read_strategy_library",   // 策略库阶段注册
+				"read_strategy_posterior", // 策略库阶段注册
+				"read_finding",            // 策略库阶段注册
+				"read_traffic_evidence",   // 策略库阶段注册
+				// 平台已有的等价只读工具
+				"list_findings",                                 // ← read_finding
+				"traffic_search", "traffic_get", "traffic_blob", // ← read_traffic_evidence
+			},
+			Deny: []string{"report_finding"},
+			// 证伪者本来就要在 scope 内动手：探测能力走 SDK Bash + 交互式 shell，
+			// 不在 tools 表里，所以这里不放开表内可执行工具的白名单。
+			DenyExec:  false,
+			DenyWrite: true,
+		},
+		{
+			Agent: "creative",
+			Allow: []string{
+				"propose_strategy",         // 策略提案写 strategy_proposals：自己的建议通道
+				"propose_scenario_feature", // 场景特征提案写 proposals 表：同上
+				"read_strategy_library",    // 策略库阶段注册
+				"read_asset_graph",         // 策略库阶段注册
+				// 平台已有的等价只读工具
+				"list_assets",    // ← read_asset_graph
+				"graph_overview", // ← read_asset_graph（探索图锚点视角）
+			},
+			Deny:      []string{"report_finding"},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+		{
+			// intent-normalizer（规整器）：worker 的原始动作 → 结构化意图，
+			// 交给确定性闸门裁决。它是这条链上唯一新增的 LLM 环节，因此工具面
+			// 收得最紧——白名单里只有一个工具，没有第二条路。
+			Agent: "intent_normalizer",
+			Allow: []string{
+				"emit_structured_intent", // 唯一的输出通道：把原始动作转成结构化意图
+			},
+			Deny: []string{
+				// scope 判定是确定性闸门的职责：规整器一旦能查 scope，就有能力
+				// 自己判一个 scope 并放行，绕过闸门。
+				"list_companies", "add_task_scope", "add_company_scope", "get_task_scope",
+			},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+	}
+}
+
+// AdvisoryAgentToolPolicyFor 返回某个 agent 的绑定策略；不是顾问 agent 则返回 false。
+func AdvisoryAgentToolPolicyFor(agentKey string) (AdvisoryAgentToolPolicy, bool) {
+	for _, p := range AdvisoryAgentToolPolicies() {
+		if p.Agent == agentKey {
+			return p, true
+		}
+	}
+	return AdvisoryAgentToolPolicy{}, false
+}
+
+// AdvisoryAgentToolKeys 返回某个顾问型 agent 被授权的工具 key 列表（白名单原序，
+// 已剔除被拒绝的项）。
+//
+// 「授权」与「生效」是两件事，两个视图都要看得见：授权是策略层的白名单，生效是
+// tools 表里真正绑上的行——白名单里尚未注册的工具在协调时跳过并记录，等注册后
+// 自动绑上。只看生效会以为「没授权」，只看授权会以为「已经有工具」。
+func AdvisoryAgentToolKeys(agentKey string) []string {
+	p, ok := AdvisoryAgentToolPolicyFor(agentKey)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(p.Allow))
+	for _, k := range p.Allow {
+		if p.Allows(k, "builtin") {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// Allows 判断某工具是否允许绑给该 agent：先过黑名单与能力闸，再看白名单。
+func (p AdvisoryAgentToolPolicy) Allows(toolKey, toolKind string) bool {
+	if p.Denies(toolKey, toolKind) {
+		return false
+	}
+	for _, k := range p.Allow {
+		if k == toolKey {
+			return true
+		}
+	}
+	return false
+}
+
+// Denies 判断工具是否被策略硬性拒绝。黑名单与「共享状态写」优先于白名单：拒绝优先
+// 是本策略的核心不变量——白名单是授权，黑名单是撤销，撤销永远压过授权。
+func (p AdvisoryAgentToolPolicy) Denies(toolKey, toolKind string) bool {
+	for _, k := range p.Deny {
+		if k == toolKey {
+			return true
+		}
+	}
+	switch AdvisoryToolCapability(toolKey, toolKind) {
+	case AdvisoryCapGraphWrite:
+		return p.DenyWrite
+	case AdvisoryCapExec:
+		return p.DenyExec
+	}
+	return false
+}
+
+// AdvisoryToolBindingAllowed 判断 agentKey 是否允许绑定 toolKey（kind 为 tools.kind）。
+// 不是顾问 agent 一律返回 false：白名单之外的 agent 不碰顾问工具。
+func AdvisoryToolBindingAllowed(agentKey, toolKey, toolKind string) bool {
+	p, ok := AdvisoryAgentToolPolicyFor(agentKey)
+	if !ok {
+		return false
+	}
+	return p.Allows(toolKey, toolKind)
+}
+
+// seedAdvisoryAgentToolBindings 把顾问 agent 的工具绑定策略落实到 tools 表：
+//   - 白名单里的工具若已有行 → 绑上（老库补绑；新库在播种时就已绑好）。
+//   - 违反策略硬拒绝的工具 → 解绑。用户在工具管理页误把 report_finding 绑给
+//     verifier，也会在下一次启动被收回：拒绝是确定性层的职责，不该由 UI 说了算。
+//   - 白名单里尚未注册的工具 → 跳过并记录，等策略库阶段落地后自动生效。
+//
+// 只动这几个 agent 自己的绑定项，别的 agent 在同一数组里的条目一律不碰（纯追加）。
+func (d *DB) seedAdvisoryAgentToolBindings() error {
+	rows, err := d.ListTools()
+	if err != nil {
+		return err
+	}
+	byKey := make(map[string]*Tool, len(rows))
+	for _, t := range rows {
+		byKey[t.Key] = t
+	}
+	for _, p := range AdvisoryAgentToolPolicies() {
+		for _, key := range p.Allow {
+			row, ok := byKey[key]
+			if !ok {
+				log.Printf("[tools] 顾问 agent %s 允许的工具 %s 此刻尚未在 tools 表注册（策略库阶段未落地，或由服务端稍后播种），注册后自动绑定", p.Agent, key)
+				continue
+			}
+			if containsAgentKey(row.Agents, p.Agent) {
+				continue
+			}
+			if err := d.AddAgentToToolBinding(p.Agent, []string{key}); err != nil {
+				return fmt.Errorf("bind %s→%s: %w", key, p.Agent, err)
+			}
+		}
+		for _, row := range rows {
+			if !containsAgentKey(row.Agents, p.Agent) {
+				continue
+			}
+			if !p.Denies(row.Key, row.Kind) {
+				continue
+			}
+			if err := d.RemoveAgentFromTool(p.Agent, row.Key); err != nil {
+				return fmt.Errorf("unbind %s→%s: %w", row.Key, p.Agent, err)
+			}
+		}
+	}
+	return nil
+}
+
+// containsAgentKey 判断 agent key 数组里是否含某个 key。
+func containsAgentKey(keys []string, want string) bool {
+	for _, k := range keys {
+		if k == want {
+			return true
+		}
+	}
+	return false
 }
