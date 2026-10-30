@@ -19,6 +19,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/artex/internal/procguard"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
 )
@@ -83,6 +84,18 @@ func run() int {
 	// capture backend logs into the in-memory sink (still to stderr) so the /logs
 	// page can show a live log stream. Do this first, to catch startup logs too.
 	server.StartLogCapture()
+
+	// 平台进程自身加 /proc 保护：置为不可 dump 后，内核把它的 /proc/<pid>/*
+	// 归到 root 所有，并拒绝没有 CAP_SYS_PTRACE 的进程 ptrace attach 它 ——
+	// agent 的子进程读不到平台的环境块、文件描述符与内存。
+	// 为什么用 prctl 而不是给 /proc 挂 hidepid=2：hidepid 需要重新挂载 /proc，
+	// 而生产容器跑在 docker 默认 AppArmor profile 下，那条 profile 全局禁止
+	// mount(2)；prctl 不需要任何 capability，能原样迁到生产。详见
+	// internal/procguard 的包注释。
+	// 失败就硬失败：这条保护不生效，agent 就还能读平台的 /proc。
+	if err := procguard.Apply(); err != nil {
+		log.Fatalf("[security] 设置 PR_SET_DUMPABLE 失败: %v", err)
+	}
 
 	// Self-update bootstrap: swap in a staged binary, or count a post-swap boot
 	// attempt and roll back if the new build keeps dying. Must run before we open
