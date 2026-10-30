@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/agentcred"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -35,6 +37,7 @@ type ChatAgent struct {
 	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
+	groupMailbox GroupMailbox // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -74,6 +77,10 @@ func (c *ChatAgent) SetWebSearch(o WebSearchOpts) { c.webSearch = o }
 // agent. Must be called before Chat; safe to call multiple times.
 func (c *ChatAgent) SetGuard(g *guard.Guard) { c.guard = g }
 
+// SetGroupMailbox wires the group mailbox reader used to collect unread group
+// messages each turn. A nil handle disables group collection for this runner.
+func (c *ChatAgent) SetGroupMailbox(m GroupMailbox) { c.groupMailbox = m }
+
 // chatWorkDirSpec returns a working-directory notice appended to every chat
 // agent's system prompt. Mirrors artifactSpec but without pentest-specific
 // wording ("payload", "抓响应体") that would be odd in a general assistant.
@@ -92,6 +99,34 @@ func chatSystem(agentKey, dataDir, workDir string) string {
 // universal ones; any other {{.X}} fails to render and falls back to
 // DefaultAssistantPrompt.
 type chatVars struct{ DataDir, Now string }
+
+// WithRunInfoMerged merges the given RunInfo into the context instead of
+// replacing it: every field the caller leaves at its zero value keeps the value
+// already in the context.
+//
+// Why it lives here and not next to WithRunInfo: agent/runinfo.go belongs to
+// another unit's file domain in this worktree, and this is the merge point of
+// the chat runner.
+//
+// Why merging matters: a group-chat member session already knows its task
+// (the group binds exactly one task). Replacing the RunInfo would drop
+// TaskID/ExplorationID and the member would lose its exploration-graph tools.
+func WithRunInfoMerged(ctx context.Context, ri RunInfo) context.Context {
+	cur := RunInfoFrom(ctx)
+	if ri.TaskID == 0 {
+		ri.TaskID = cur.TaskID
+	}
+	if ri.ExplorationID == 0 {
+		ri.ExplorationID = cur.ExplorationID
+	}
+	if ri.IntentID == 0 {
+		ri.IntentID = cur.IntentID
+	}
+	if ri.SessionID == "" {
+		ri.SessionID = cur.SessionID
+	}
+	return WithRunInfo(ctx, ri)
+}
 
 // Chat runs ONE turn of a conversation with the agent identified by agentKey,
 // resuming prior history keyed by sessionID. maxTurns is the per-turn agent step
@@ -113,17 +148,26 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// Isolates file writes across conversations, mirroring how workers use i<intentID>/.
 	sessionWorkDir := filepath.Join(c.workDir, "sessions", sessionID)
 	_ = os.MkdirAll(sessionWorkDir, 0o755)
+	// 目录属主交给 agent 身份：工具子进程降权后仍要在自己的工作目录里写东西。
+	if err := agentcred.ChownToAgent(sessionWorkDir); err != nil {
+		log.Printf("[agent] 会话工作目录 %s 归属 agent 身份失败: %v", sessionWorkDir, err)
+	}
 	ctx = intercept.WithReviewWorkingDirectory(ctx, sessionWorkDir)
 
 	// Pure assistant: DefaultTools as the base; AugmentTools layers in the key's
 	// visible skills/MCP and lets the DB tools table filter/override. DefaultTools
 	// have no tools-table rows, so they always pass through.
 	base := actool.DefaultTools()
-	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID})
+	// 合并而不是覆盖：调用方（群聊成员会话）可能已经把 TaskID/ExplorationID 放进
+	// ctx，覆盖掉会让群聊里的 agent 拿不到任务上下文（report_finding 会直接拒）。
+	ctx = WithRunInfoMerged(ctx, RunInfo{SessionID: sessionID})
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
-	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)
+	// 群聊消息：每轮开始时收取本成员的未读群消息并注入提示（协商上下文，不授权）。
+	groupDigest := c.collectGroupMailbox(ctx, agentKey)
+
+	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir)+groupDigest, def)
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,
