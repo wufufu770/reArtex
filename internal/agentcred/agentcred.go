@@ -11,7 +11,11 @@
 // 而 db 依赖 agent —— 放叶子包才不会被依赖方向卡住（与 internal/scopepolicy 同理）。
 package agentcred
 
-import "os"
+import (
+	"os"
+
+	"github.com/Autumn-27/norma/tool/privdrop"
+)
 
 const (
 	// AgentUID 是 agent 工具子进程专用的 UID。
@@ -21,9 +25,14 @@ const (
 	// uid 1000、模式 0600 —— 用 1000 跑工具子进程，它照样读得走那份凭据，
 	// 降权形同虚设。
 	// 65534（nobody）是常见基础镜像里都存在的最后一个非特权 UID。
-	AgentUID = 65534
+	//
+	// 值来自 norma 的 tool/privdrop 而不是在这里另写一份：框架自己的内置工具
+	// （Bash / shell session / task / ripgrep / MCP stdio 子进程）也降权到同一个
+	// 身份，两边若是不同 UID，「reArtex 自建工具降了权、框架内置工具没降」
+	// 就成了一条静默的口子。
+	AgentUID = privdrop.AgentUID
 	// AgentGID 是 agent 工具子进程专用的 GID，与 AgentUID 同值。
-	AgentGID = 65534
+	AgentGID = privdrop.AgentGID
 )
 
 // CanDrop 报告当前进程有没有能力把子进程降权到 agent 身份。
