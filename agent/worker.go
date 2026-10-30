@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/internal/agentcred"
+	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -203,14 +205,25 @@ func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 // honor the proxy vars. ALL_PROXY is set too so a socks5 egress proxy (which curl
 // only reads from ALL_PROXY, not HTTP(S)_PROXY) works in the capture-off path.
 // Empty proxyAddr → nil (direct, unchanged env).
-func proxyEnv(proxyAddr, caCert string) []string {
+//
+// taskID 可选：给了就把出网身份令牌塞进代理 URL 的 userinfo。录制代理据此把这次
+// 出网归属到任务，才能按任务范围判定目的地（见 traffic.SignEgressTaskToken）。
+// 没给就没有身份 —— 那次出网会被记成「未归属」，不受任务范围校验。
+func proxyEnv(proxyAddr, caCert string, taskID ...int64) []string {
 	if proxyAddr == "" {
 		return nil
 	}
+	addr := proxyAddr
+	if len(taskID) > 0 && taskID[0] > 0 {
+		if u, err := url.Parse(proxyAddr); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			u.User = url.User(traffic.SignEgressTaskToken(taskID[0]))
+			addr = u.String()
+		}
+	}
 	env := []string{
-		"HTTP_PROXY=" + proxyAddr, "HTTPS_PROXY=" + proxyAddr,
-		"http_proxy=" + proxyAddr, "https_proxy=" + proxyAddr,
-		"ALL_PROXY=" + proxyAddr, "all_proxy=" + proxyAddr, // socks5 egress: curl reads only this
+		"HTTP_PROXY=" + addr, "HTTPS_PROXY=" + addr,
+		"http_proxy=" + addr, "https_proxy=" + addr,
+		"ALL_PROXY=" + addr, "all_proxy=" + addr, // socks5 egress: curl reads only this
 		"NODE_USE_ENV_PROXY=1", // Node 24+: honor HTTP(S)_PROXY in built-in fetch/http
 	}
 	if caCert != "" {
@@ -466,7 +479,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
+		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert, taskID),
 		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,

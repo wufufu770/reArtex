@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -30,6 +31,52 @@ import (
 
 const protocolVersion = "2025-06-18"
 const legacySSEProtocolVersion = "2024-11-05"
+
+// egressPolicy 是 MCP 客户端的出网策略：与 reArtex 自定义工具同一套 netguard
+// 策略类型、同一套判据（同样的段规则、同样的私网放行），只是逃生口独立。
+//
+// 为什么要独立逃生口：netguard 自己的规矩是「逃生口必须逐路独立」——给通知开的
+// 口子不能连带放开 agent 出网。MCP 客户端是平台侧的连接器，与 agent 工具同属
+// 「平台主动出网」，共用一个开关会让任何一处放开都连带放开全部。
+//
+// 为什么不另立一套更松的规则：出网只有一套判据才谈得上「已治理」。MCP 客户端
+// 过去是裸 http.Client（连拨号守卫都没有），等于在同一条出网链路上留了一个
+// 没有护栏的口子。
+var egressPolicy = netguard.Policy{
+	Name:              "MCP 出网",
+	AllowPrivate:      true,
+	EscapeEnv:         "ARTEX_MCP_EGRESS_ALLOW_LOCAL",
+	LoopbackEscapeEnv: "ARTEX_MCP_EGRESS_ALLOW_LOOPBACK",
+}
+
+// newHTTPClient 造一个受 netguard 保护的 HTTP 客户端。
+//
+// timeout=0 表示长连接（SSE 流）。insecure=true 时保留跳过证书校验：MCP 服务端
+// 普遍用自签证书，收紧 TLS 是另一件独立的事，不在这里夹带 —— 顺手改了会让大批
+// 现役 MCP 直接连不上，那不是本改动该造成的故障。
+func newHTTPClient(timeout time.Duration, insecure bool) *http.Client {
+	base := &http.Transport{}
+	if insecure {
+		base.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 刻意保留：MCP 自签证书是常态
+	}
+	hc := &http.Client{
+		Timeout:   timeout,
+		Transport: egressPolicy.Transport(base),
+		// 跨主机重定向会把 Authorization / X-API-Key 交给重定向目标，一律拒绝。
+		CheckRedirect: egressPolicy.CheckRedirect,
+	}
+	return hc
+}
+
+// doRequest 发起一次受治理的请求：先做字面主机预检，再交给受拨号守卫保护的客户端。
+func doRequest(hc *http.Client, req *http.Request) (*http.Response, error) {
+	if req.URL != nil {
+		if err := egressPolicy.CheckURLHost(req.URL.String()); err != nil {
+			return nil, err
+		}
+	}
+	return hc.Do(req)
+}
 
 // ToolName mirrors mcp.ToolName so remote tools share the mcp__server__tool scheme.
 func ToolName(server, name string) string { return "mcp__" + server + "__" + name }
@@ -101,10 +148,7 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{Timeout: 120 * time.Second}
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	}
+	hc := newHTTPClient(120*time.Second, insecure)
 	c := &Client{
 		server:   server,
 		url:      url,
@@ -126,10 +170,7 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{} // the SSE stream is intentionally long-lived.
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	}
+	hc := newHTTPClient(0, insecure) // the SSE stream is intentionally long-lived.
 	streamCtx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
@@ -140,7 +181,7 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	for k, v := range cleanHeaders {
 		req.Header.Set(k, v)
 	}
-	resp, err := hc.Do(req)
+	resp, err := doRequest(hc, req)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -404,7 +445,7 @@ func (c *Client) Close() error {
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
-	if resp, err := c.http.Do(req); err == nil {
+	if resp, err := doRequest(c.http, req); err == nil {
 		resp.Body.Close()
 	}
 	return nil
@@ -467,7 +508,7 @@ func (c *Client) roundTrip(ctx context.Context, body rpcRequest, expectResp bool
 		req.Header.Set("Mcp-Session-Id", sid)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := doRequest(c.http, req)
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +572,7 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := doRequest(c.http, req)
 	if err != nil {
 		return nil, err
 	}

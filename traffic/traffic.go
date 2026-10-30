@@ -34,7 +34,29 @@ import (
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
+	"github.com/satori/go.uuid"
 	_ "modernc.org/sqlite"
+)
+
+// egressColumns 是出网治理新增的两列：这条流量属于哪个任务、出网判定是什么。
+//
+// CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，所以旧库必须显式 ALTER。
+var egressColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"egress_task_id", `ALTER TABLE exchanges ADD COLUMN egress_task_id INTEGER NOT NULL DEFAULT 0`},
+	{"egress_decision", `ALTER TABLE exchanges ADD COLUMN egress_decision TEXT NOT NULL DEFAULT ''`},
+}
+
+// 出网判定的取值。
+const (
+	// egressDecisionAllow 是「在任务范围内放行」。
+	egressDecisionAllow = "allow"
+	// egressDecisionUnattributed 是「放行但未经范围校验」（请求没带任务身份）。
+	egressDecisionUnattributed = "unattributed"
+	// egressDecisionDeny 是「被任务范围拦下」。
+	egressDecisionDeny = "deny"
 )
 
 const indexSchema = `
@@ -49,7 +71,9 @@ CREATE TABLE IF NOT EXISTS exchanges (
   content_type TEXT,
   req_len      INTEGER,
   resp_len     INTEGER,
-  path         TEXT
+  path         TEXT,
+  egress_task_id INTEGER NOT NULL DEFAULT 0,
+  egress_decision TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ex_host ON exchanges(host);
 CREATE INDEX IF NOT EXISTS idx_ex_tmpl ON exchanges(host, url_template);
@@ -154,10 +178,10 @@ type scopeGateHolder struct{ gate ScopeGate }
 
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
-	dir   string
-	addr  string
-	db    *sql.DB
-	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
+	dir  string
+	addr string
+	db   *sql.DB
+	wmu  sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
 	// scope 是流量的范围门。未注入（nil）时所有读取按拒绝处理 —— 没有范围门就
 	// 意味着无法判断调用者有没有权限，那种情况下「放行」就是越权。
 	scope atomic.Pointer[scopeGateHolder]
@@ -192,6 +216,11 @@ type Traffic struct {
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
 	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
 	upstream atomic.Pointer[url.URL]
+	// egress 是出网目的地判定（写侧）。未注入时，带任务身份的请求一律拒绝 ——
+	// 判不出范围就没有授权边界，那种情况下「放行」就是越权。
+	egress atomic.Pointer[egressScopeHolder]
+	// egressCache 是「任务 → 目的地允许集」的短期缓存，避免每个请求打一次库。
+	egressCache egressHostsCache
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -248,6 +277,8 @@ func Open(dir, addr string) (*Traffic, error) {
 		_, tunnel := t.pass.Load(hostOnly(req.Host))
 		return !tunnel
 	})
+	// 出网准入闸：目的地不在任务范围内就不许走（见 egressGate）。
+	p.SetAuthProxy(t.egressGate)
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
 	return t, nil
@@ -305,6 +336,9 @@ func (t *Traffic) initIndex() error {
 	if _, err := conn.ExecContext(ctx, indexSchema); err != nil {
 		return err
 	}
+	if err := ensureEgressColumns(ctx, conn); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, ftsSchema); err != nil {
 		log.Printf("[traffic] 全文索引不可用，正文搜索将被禁用（元数据搜索不受影响）：%v", err)
 		return nil
@@ -320,6 +354,42 @@ func hostOnly(hostport string) string {
 		return h
 	}
 	return hostport
+}
+
+// ensureEgressColumns 给旧库补上出网治理的两列。
+//
+// SQLite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS，所以先查列在不在，再决定
+// 补不补；新装的库在 indexSchema 里已经带上了这两列，这里是 no-op。
+func ensureEgressColumns(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(exchanges)`)
+	if err != nil {
+		return fmt.Errorf("检查出网治理列: %w", err)
+	}
+	defer rows.Close()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("检查出网治理列: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("检查出网治理列: %w", err)
+	}
+	for _, c := range egressColumns {
+		if existing[c.name] {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("补出网治理列 %s: %w", c.name, err)
+		}
+	}
+	return nil
 }
 
 // ProxyAddr returns the address workers should set as HTTP(S)_PROXY. A bare
@@ -409,13 +479,102 @@ func (t *Traffic) DB() *sql.DB { return t.db }
 type sink struct {
 	mproxy.BaseAddon
 	t *Traffic
+	// mu 保护下面两张表：请求与响应可能在不同 goroutine 上碰到。
+	mu sync.Mutex
+	// tasks 记本次请求携带的任务身份（按 flow 索引，响应回来时取用）。
+	tasks map[*mproxy.Flow]int64
+	// tunnels 记 CONNECT 隧道的任务身份：隧道建立之后，内层请求不再带身份头，
+	// 靠它继承 —— 否则 HTTPS 流量的记录全是「未归属」，等于 HTTPS 流量没有归属。
+	// 按连接 id 索引：连接断开时（ClientDisconnected）才拿得到同一个键。
+	tunnels map[uuid.UUID]int64
+}
+
+// Requestheaders 在请求进入代理时就解出任务身份，并把身份头摘掉。
+//
+// 摘头的原因：身份令牌是能力凭据（拿到就能声称那个任务的身份），不能跟着
+// 请求转给目标，也不该落进流量抓取里。
+func (s *sink) Requestheaders(f *mproxy.Flow) {
+	if f == nil || f.Request == nil {
+		return
+	}
+	raw := f.Request.Raw()
+	if raw == nil {
+		return
+	}
+	taskID, attributed := egressTaskOf(raw)
+	if !attributed {
+		// CONNECT 隧道内的请求不带身份头，继承隧道建立时的身份。
+		if inherited := s.tunnelTask(f.ConnContext); inherited > 0 {
+			taskID, attributed = inherited, true
+		}
+	}
+	if attributed {
+		s.setFlowTask(f, taskID)
+		if raw.Method == http.MethodConnect {
+			s.setTunnelTask(f.ConnContext, taskID)
+		}
+	}
+	stripEgressIdentity(raw)
+}
+
+// ClientDisconnected 丢掉这条连接的隧道归属：连接没了，归属也没了。
+func (s *sink) ClientDisconnected(c *mproxy.ClientConn) {
+	if c == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tunnels, c.Id)
+}
+
+func (s *sink) setFlowTask(f *mproxy.Flow, taskID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tasks == nil {
+		s.tasks = map[*mproxy.Flow]int64{}
+	}
+	s.tasks[f] = taskID
+}
+
+func (s *sink) takeFlowTask(f *mproxy.Flow) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskID := s.tasks[f]
+	delete(s.tasks, f)
+	return taskID
+}
+
+func (s *sink) setTunnelTask(c *mproxy.ConnContext, taskID int64) {
+	if c == nil || c.ClientConn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tunnels == nil {
+		s.tunnels = map[uuid.UUID]int64{}
+	}
+	s.tunnels[c.ClientConn.Id] = taskID
+}
+
+func (s *sink) tunnelTask(c *mproxy.ConnContext) int64 {
+	if c == nil || c.ClientConn == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnels[c.ClientConn.Id]
 }
 
 func (s *sink) Response(f *mproxy.Flow) {
 	if f.Request == nil || f.Response == nil {
 		return
 	}
-	s.t.record(f)
+	taskID := s.takeFlowTask(f)
+	decision := egressDecisionUnattributed
+	if taskID > 0 {
+		decision = egressDecisionAllow
+	}
+	s.t.recordExchange(f, exchangeMeta{TaskID: taskID, Decision: decision})
 }
 
 // RequestError fires when a request through an established MITM tunnel fails. If
@@ -452,10 +611,23 @@ func proxyCausedErr(err error) bool {
 	return false
 }
 
+// exchangeMeta 是一次流量记录的出网归属与判定。
+type exchangeMeta struct {
+	// TaskID 是这条流量所属的任务（0 = 未归属）。
+	TaskID int64
+	// Decision 是出网判定（allow / unattributed / deny）。
+	Decision string
+}
+
 // record persists one exchange entirely in SQLite: metadata, bodies and the
 // full-text index. Nothing is written to a per-request directory — only bodies
 // above maxInlineBody spill to the content-addressed blob store.
 func (t *Traffic) record(f *mproxy.Flow) {
+	t.recordExchange(f, exchangeMeta{})
+}
+
+// recordExchange 记一条流量，并带上出网归属与判定。
+func (t *Traffic) recordExchange(f *mproxy.Flow, meta exchangeMeta) {
 	// The write lock covers blob + index writes, so DeleteHost (and its blob GC)
 	// can run under the same lock without racing a concurrent record.
 	t.wmu.Lock()
@@ -485,10 +657,10 @@ func (t *Traffic) record(f *mproxy.Flow) {
 
 	// path stays empty for db-resident exchanges; a non-empty path marks a legacy
 	// row whose bodies still live in the old on-disk tree (see Get).
-	res, err := tx.Exec(`INSERT OR REPLACE INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
-VALUES(?,?,?,?,?,?,?,?,?,?,'')`,
+	res, err := tx.Exec(`INSERT OR REPLACE INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path,egress_task_id,egress_decision)
+VALUES(?,?,?,?,?,?,?,?,?,?,'',?,?)`,
 		id, now.Unix(), host, method, tmpl, url, f.Response.StatusCode, ct,
-		len(f.Request.Body), len(f.Response.Body))
+		len(f.Request.Body), len(f.Response.Body), meta.TaskID, meta.Decision)
 	if err != nil {
 		log.Printf("[traffic] 记录 %s 失败（写索引）：%v", url, err)
 		return

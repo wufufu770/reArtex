@@ -14,6 +14,9 @@ import (
 )
 
 func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
+	// MCP 客户端现在走 netguard 出网策略，环回默认被拒（环回常是本机管理端口）。
+	// 本用例要连的是 httptest 起的本机服务，所以显式打开 MCP 侧的环回逃生口。
+	t.Setenv("ARTEX_MCP_EGRESS_ALLOW_LOOPBACK", "1")
 	var mu sync.Mutex
 	var stream http.ResponseWriter
 	var flusher http.Flusher

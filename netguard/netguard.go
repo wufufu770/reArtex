@@ -7,6 +7,7 @@
 package netguard
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -31,6 +32,17 @@ type Policy struct {
 	// 单独拆出来是因为这两段对渗透的含义相反：环回常是靶场（本机的 CTF lab、
 	// 本机起的目标），而元数据是实例凭据，开了就等于送出去。两者不该共用一个开关。
 	LoopbackEscapeEnv string
+	// AllowHostFunc 按「一次出网请求」判定目的地主机是否放行。
+	//
+	// 为什么需要它：Policy 原本只表达「哪些 IP 段能去」，而任务的授权范围是
+	// 「哪些主机名能去」—— 后者必须按请求解析（同一时刻不同任务的允许集不同），
+	// 塞不进一个静态的 IP 段谓词。加这个钩子而不是新造一套策略，是为了让
+	// 「同一个 Policy 类型」既能管段、也能管主机：出网只有一套策略，配置不同而已。
+	//
+	// ctx 是该次请求的上下文（携带任务身份等）；host 是不含端口的主机名。
+	// 返回非 nil 即拒绝，拒绝原因原样带出（调用方据此留痕）。
+	// nil = 不做主机名级判定（只走 IP 段规则），与既有行为一致。
+	AllowHostFunc func(ctx context.Context, host string) error
 }
 
 func envTruthy(name string) bool {
@@ -126,6 +138,12 @@ func (p Policy) CheckURLHost(rawURL string) error {
 	if host == "" {
 		return fmt.Errorf("[%s] URL 缺少主机名", p.Name)
 	}
+	return p.checkHostLiteral(host)
+}
+
+// checkHostLiteral 是主机名本身的段判定：IP 字面量走段规则，localhost 名字直接拒。
+// CheckURLHost 与 CheckHost 共用它，两条路径的判据才不会漂移。
+func (p Policy) checkHostLiteral(host string) error {
 	if ip := net.ParseIP(host); ip != nil {
 		if p.blockedIP(ip) {
 			return fmt.Errorf("[%s] 拒绝访问受限地址 %s", p.Name, ip)
@@ -136,6 +154,27 @@ func (p Policy) CheckURLHost(rawURL string) error {
 		return fmt.Errorf("[%s] 拒绝访问 %q（如确需访问本机服务，设置 %s=1）", p.Name, host, p.EscapeEnv)
 	}
 	return nil
+}
+
+// CheckHost 判定一次出网请求的目的地主机。
+//
+// 两段判据：先问 AllowHostFunc（按请求解析的允许集，例如任务 scope 派生的
+// 主机集），再走字面段规则（IP 字面量 / localhost）。任一段拒绝即拒绝。
+// 主机名缺失也拒绝 —— 判不出目的地就不放行。
+func (p Policy) CheckHost(ctx context.Context, host string) error {
+	if p.escaped() {
+		return nil
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("[%s] 出网请求缺少目的地主机名", p.Name)
+	}
+	if p.AllowHostFunc != nil {
+		if err := p.AllowHostFunc(ctx, host); err != nil {
+			return err
+		}
+	}
+	return p.checkHostLiteral(host)
 }
 
 // CheckRedirect 拒绝跨主机跳转：跨主机意味着凭据会被交给重定向目标。
