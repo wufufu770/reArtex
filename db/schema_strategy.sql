@@ -217,3 +217,32 @@ END $$;
 -- REFRESH ... CONCURRENTLY 需要唯一索引；没有它就只能非并发刷新。
 -- 物化视图被 DROP 时这个索引也一起没了 ⇒ 每次执行本文件都重建（IF NOT EXISTS 幂等）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_utility_id ON strategy_utility(strategy_id);
+
+-- ---------- L3 反向索引（不新建图引擎，只加索引） ----------
+--
+-- 为什么反查要落在 L3 这一层：策略的证据链指着一条 finding，而「这条漏洞是从
+-- 哪个 intent / fact / asset 来的」住在探索图里。finding 节点与 finding 行是
+-- 一对一的（findings.node_id），但**流量快照的绑定关系**只存在于
+-- finding_traffic_bindings —— 把它抄进节点 payload 并加索引，反查就从「文本
+-- 搜索」变成「索引查询」，且**不引入新图引擎**（Sir 2026-10-29 的明确边界）。
+
+-- finding → node：findings.node_id 当前【无索引】，反查会全表扫。
+-- ⚠️ 索引归属：findings 表由别的单元持有，但本文件由本单元拥有，
+-- EnsureStrategySchema 会应用它；schema 属主若愿意，可把它并进 db/schema.sql
+-- （两边都幂等，重复应用无副作用）。
+CREATE INDEX IF NOT EXISTS idx_findings_node
+    ON findings(node_id) WHERE node_id IS NOT NULL;
+
+-- node → finding：payload 里的 finding_id 走表达式 B-tree，等值查可命中。
+-- ⚠️ 用文本表达式而不是 (payload->>'finding_id')::bigint：payload 是 agent 可写
+-- 的 JSONB，非数字值会让 ::bigint 在**建索引时**直接抛错，把整次迁移打挂。
+-- 读取侧因此按文本比较（payload->>'finding_id' = $1::text）。
+CREATE INDEX IF NOT EXISTS idx_exploration_nodes_finding_ref
+    ON exploration_nodes ((payload->>'finding_id'))
+    WHERE kind = 'finding' AND payload ? 'finding_id';
+
+-- node → traffic 快照：数组用 GIN + @> containment 查。
+-- jsonb_path_ops 只支持 @>（包含），正是这里要的算子。
+CREATE INDEX IF NOT EXISTS idx_exploration_nodes_traffic_ref
+    ON exploration_nodes USING GIN ((payload->'traffic_ids') jsonb_path_ops)
+    WHERE kind = 'finding' AND payload ? 'traffic_ids';
