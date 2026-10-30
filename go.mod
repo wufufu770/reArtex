@@ -11,6 +11,7 @@ require (
 	github.com/lqqyt2423/go-mitmproxy v1.9.2
 	github.com/miekg/dns v1.1.72
 	github.com/projectdiscovery/dnsx v1.2.3
+	github.com/satori/go.uuid v1.2.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/net v0.58.0
 	golang.org/x/text v0.41.0
@@ -42,7 +43,6 @@ require (
 	github.com/projectdiscovery/utils v0.7.3 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
-	github.com/satori/go.uuid v1.2.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
