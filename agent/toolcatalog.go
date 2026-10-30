@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -31,6 +32,9 @@ type ToolSeed struct {
 // Grep/Bash）：它们每个 agent 都固定拥有、没有「绑定到谁」的取舍，且说明大多在 Prompt()
 // 里（本表只覆盖 Description()，会造成半覆盖误导）。不 seed → 无 DB 行 → ToolResolve
 // 原样放行、不覆盖，行为与从前一致。只有 artex 自己的领域工具入表可管。
+// 顾问型五件套（curator/verifier/redteam/creative/intent-normalizer）不在这张表里：
+// 它们的工具不是「代码里写死给它的一套」，而是按 db 层的绑定策略逐个工具判定
+// （白名单 + 拒绝优先），见 applyAdvisoryAgentBindings。
 func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
 	return map[string][]actool.CoreTool{
@@ -96,7 +100,87 @@ func BuiltinToolSeeds() []ToolSeed {
 			Agents: agents,
 		})
 	}
-	return out
+	out = append(out, emitStructuredIntentSeed)
+	return applyAdvisoryAgentBindings(out)
+}
+
+// emitStructuredIntentSeed 是「输出结构化意图」工具的目录条目。
+//
+// 它是 intent-normalizer 的唯一输出通道，必须在工具目录里占位：tools 表的行全部
+// 来自 BuiltinToolSeeds()，白名单里的名字若没有对应行，协调时只能跳过并记录，
+// agent 就永远拿不到工具。绑定不硬编码在这里——它由 db 层策略
+// （AdvisoryAgentToolPolicies）经 applyAdvisoryAgentBindings 追加，与另外几个
+// 顾问 agent 同一套机制。
+//
+// handler 属于执行侧接线（Phase 6）：目录占位只负责「绑得上、看得见」，不负责
+// 「调得动」——ToolResolve 的注入路径按 domainReg 查 handler，查不到就不注入，
+// 所以占位期间不会有任何 agent 拿到一个调不动的工具。
+var emitStructuredIntentSeed = ToolSeed{
+	Key:  "emit_structured_intent",
+	Desc: "把原始动作（shell 命令 / HTTP 请求 / 工具参数）转成结构化意图并提交。只做结构化拆分与标记，不执行、不改写语义、不判断 scope。",
+	Schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"structured_intent": map[string]any{
+				"type":        "object",
+				"description": "结构化意图本体",
+				"properties": map[string]any{
+					"action_type":        map[string]any{"type": "string", "description": "command_execution | http_request | tool_invocation | unparseable"},
+					"executable":         map[string]any{"type": "string", "description": "shell 主体 / http method / tool_key"},
+					"arguments":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "原样参数"},
+					"target_hint":        map[string]any{"type": "string", "description": "候选目标（不判断是否在 scope 内）"},
+					"shell_features":     map[string]any{"type": "object", "description": "管道/重定向/命令替换/后台/混淆的布尔标记"},
+					"body_digest":        map[string]any{"type": "string", "description": "http body 的哈希（仅 http 类型）"},
+					"raw_payload_digest": map[string]any{"type": "string", "description": "原始动作的哈希，用于审计"},
+				},
+				"required": []string{"action_type", "raw_payload_digest"},
+			},
+			"anomaly_flag":   map[string]any{"type": "boolean", "description": "是否发现异常（只标记，不拦截）"},
+			"anomaly_reason": map[string]any{"type": "string", "description": "异常原因（一句话，不含主观判断）"},
+			"source_agent":   map[string]any{"type": "string", "description": "发起该动作的 agent_key"},
+			"task_id":        map[string]any{"type": "string", "description": "任务 id"},
+		},
+		"required": []string{"structured_intent", "anomaly_flag", "source_agent"},
+	},
+}
+
+// applyAdvisoryAgentBindings 把顾问型 agent（curator/verifier/redteam/creative/
+// intent-normalizer）的
+// 工具绑定按策略追加进各工具的 agents 数组。
+//
+// 为什么在这里算：tools 表的 agents 列就是「这个工具给了谁」，而 BuiltinToolSeeds 是
+// 内置工具播种的唯一入口——绑定在这里算，才会在播种时随行落库。既有 agent 的绑定一个
+// 字节都不动（纯追加，既有条目顺序不变）。
+//
+// 为什么是「按名字」而不是「按工具对象」：策略库里那些工具（read_strategy_library、
+// submit_verdict…）此刻还没注册，没有工具对象可指认。等它们注册进目录，同一份策略
+// 会自动把它们绑上，不需要在这里再改一次。
+//
+// 策略本身在 db 层（db/config.go 的 AdvisoryAgentToolPolicies）：agent → db 是单向依赖，
+// 两边各留一份策略迟早漂移。拒绝优先由策略保证（Allows 内部先过 Denies）。
+func applyAdvisoryAgentBindings(seeds []ToolSeed) []ToolSeed {
+	for _, p := range db.AdvisoryAgentToolPolicies() {
+		for i := range seeds {
+			if !p.Allows(seeds[i].Key, "builtin") {
+				continue
+			}
+			if containsAgentKey(seeds[i].Agents, p.Agent) {
+				continue
+			}
+			seeds[i].Agents = append(seeds[i].Agents, p.Agent)
+		}
+	}
+	return seeds
+}
+
+// containsAgentKey 判断 agent key 数组里是否含某个 key。
+func containsAgentKey(keys []string, want string) bool {
+	for _, k := range keys {
+		if k == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolResolve, if set, post-processes an agent's fully-assembled tool list against
