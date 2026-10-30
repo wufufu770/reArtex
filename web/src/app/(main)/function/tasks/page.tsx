@@ -118,6 +118,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
@@ -778,12 +779,16 @@ export default function TasksPage() {
   );
 
   return (
-    <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
-      <TabsList className="mx-4 lg:mx-6">
-        <TabsTrigger value="current">当前任务</TabsTrigger>
-        <TabsTrigger value="archived">已归档</TabsTrigger>
-      </TabsList>
-      <TabsContent value="current">
+    <>
+      {/* 出网治理状态：放在任务列表之前，两个 tab 下都可见——它是平台级事实，
+          不是某个任务的属性。 */}
+      <EgressGovernanceNotice className="mx-4 lg:mx-6" />
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
+        <TabsList className="mx-4 lg:mx-6">
+          <TabsTrigger value="current">当前任务</TabsTrigger>
+          <TabsTrigger value="archived">已归档</TabsTrigger>
+        </TabsList>
+        <TabsContent value="current">
         <Card>
           <CardContent className="flex flex-col gap-4 px-0 pt-6">
             <div className="flex flex-wrap items-center gap-2 px-4 lg:px-6">
@@ -1012,7 +1017,8 @@ export default function TasksPage() {
       <TabsContent value="archived">
         <TaskArchivesPanel onChanged={load} />
       </TabsContent>
-    </Tabs>
+      </Tabs>
+    </>
   );
 }
 

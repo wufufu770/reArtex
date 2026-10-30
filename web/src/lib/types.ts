@@ -949,6 +949,19 @@ export interface Settings {
   notify_digest_interval_min?: number; // 汇总模式周期（分钟），默认 30
 }
 
+// ---- 出网治理状态（GET /api/settings/egress-governance）----
+
+// EgressGovernanceState 是后端给的出网治理契约。
+//
+// 后端把 governed 由「未覆盖通道清单是否为空」派生（清单非空 ⇒ governed=false），
+// 所以 UI 读到的 governed=true 必然意味着清单为空。前端仍然【不单读】 governed：
+// 渲染只认清单，见 lib/egress-governance.ts。
+export interface EgressGovernanceState {
+  governed: boolean;
+  // 未覆盖通道清单——逐条照后端给的字符串显示，前端不复制、不改写、不兜底成空数组。
+  uncovered_channels: string[];
+}
+
 // ---- 漏洞 IM 推送 ----
 
 // NotificationFilter 是渠道的过滤条件，字段全部可选，缺省即不过滤。

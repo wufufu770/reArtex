@@ -32,6 +32,7 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  EgressGovernanceState,
   EvidenceBodyPreview,
   ExplorationNodePage,
   ExplorationNodeQuery,
@@ -813,6 +814,9 @@ export const api = {
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  // 出网治理状态：未覆盖通道清单由后端给定，前端不复制也不兜底成空数组
+  // （空数组 = 没有未覆盖通道，兜底会把「读不到」说成「都管住了」）。
+  egressGovernance: () => get<EgressGovernanceState>(`/settings/egress-governance`),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
