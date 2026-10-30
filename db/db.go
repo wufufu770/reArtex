@@ -193,6 +193,12 @@ func Open(dsn string) (*DB, error) {
 		if err := d.seedBuiltins(); err != nil {
 			return fmt.Errorf("seed builtins: %w", err)
 		}
+		// 群组预算 DDL：与 db/schema.sql 并行应用（见 db/quota.go 的
+		// EnsureQuotaSchema）。预算表外键指向 chat_groups，因此它内部会先
+		// 补齐群聊 DDL。
+		if err := d.EnsureQuotaSchema(); err != nil {
+			return fmt.Errorf("apply quota schema: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
