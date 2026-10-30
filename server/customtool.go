@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -166,7 +164,12 @@ func (s *Server) pgTestCustomTool(w http.ResponseWriter, r *http.Request) {
 	case "command":
 		res, _ = s.runCommandTool(ctx, req.Exec, params, tc)
 	case "script":
-		res, _ = s.runScriptTool(ctx, "test", req.Exec, params, tc)
+		// host 侧试运行是平台自身的操作，不是 agent 调用：保留平台身份，
+		// 否则合法的脚本工具预览会因为写不进项目目录而失效。
+		res, _ = s.runScriptTool(ctx, scriptToolCall{
+			Key: "test", Exec: req.Exec, Params: params, TC: tc,
+			Privilege: privilegePlatform,
+		})
 	case "http":
 		res, _ = s.runHTTPTool(ctx, req.Exec, params, tc)
 	case "shell":
@@ -278,7 +281,10 @@ func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
 		case "command":
 			return s.runCommandTool(ctx, execRaw, params, tc)
 		case "script":
-			return s.runScriptTool(ctx, key, execRaw, params, tc)
+			return s.runScriptTool(ctx, scriptToolCall{
+				Key: key, Exec: execRaw, Params: params, TC: tc,
+				Privilege: privilegeAgent, // agent 调用路径：子进程降权到 agent 身份
+			})
 		case "http":
 			return s.runHTTPTool(ctx, execRaw, params, tc)
 		default:
@@ -347,105 +353,7 @@ func (s *Server) runCommandTool(ctx context.Context, execRaw json.RawMessage, pa
 	return actool.NewBash().Call(ctx, bashIn, tc)
 }
 
-// ---------- script(仅 Python):临时文件 + stdin JSON + env ----------
-
-func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
-	var spec scriptExec
-	_ = json.Unmarshal(execRaw, &spec)
-	if strings.TrimSpace(spec.Code) == "" {
-		return actool.Errorf("script code 为空"), nil
-	}
-	interp := s.pythonInterpreter()
-	if interp == "" {
-		return actool.Errorf("未配置且未检测到 python 解释器(在系统配置里设置)"), nil
-	}
-	workDir := s.m.dir
-	var sessionEnv []string
-	if tc != nil {
-		if tc.WorkingDir != "" {
-			workDir = tc.WorkingDir
-		}
-		sessionEnv = tc.Env
-	}
-	body, err := execPython(ctx, interp, key, spec.Code, params, workDir, sessionEnv, timeoutOr(spec.TimeoutMs, 120000))
-	if err != nil {
-		return actool.Errorf(err.Error()), nil
-	}
-	return actool.Text(actool.Capture(tc, body)), nil
-}
-
-// execPython writes the code to a temp .py under workDir/.tools, runs it via interp
-// with the params JSON on stdin + scalar params mirrored to TOOL_<NAME> env, and
-// returns combined stdout+stderr (with a timeout/exit note). Standalone + testable.
-func execPython(ctx context.Context, interp, key, code string, params map[string]any, workDir string, sessionEnv []string, timeout time.Duration) (string, error) {
-	toolsDir := filepath.Join(workDir, ".tools")
-	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
-		return "", err
-	}
-	f, err := os.CreateTemp(toolsDir, key+"-*.py")
-	if err != nil {
-		return "", err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if _, err := f.WriteString(code); err != nil {
-		f.Close()
-		return "", err
-	}
-	f.Close()
-
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	c := exec.CommandContext(runCtx, interp, tmp)
-	c.Dir = workDir
-	c.Env = append(toolScriptBaseEnv(), sessionEnv...) // 会话代理 env
-	for k, v := range params {                  // 标量参数镜像成 TOOL_<NAME>
-		if sv, ok := scalarStr(v); ok {
-			c.Env = append(c.Env, "TOOL_"+strings.ToUpper(k)+"="+sv)
-		}
-	}
-	pj, _ := json.Marshal(params)
-	c.Stdin = bytes.NewReader(pj) // 参数 JSON 走 stdin
-	out, err := c.CombinedOutput()
-	body := string(out)
-	if runCtx.Err() == context.DeadlineExceeded {
-		body += "\n... [超时终止] ..."
-	} else if err != nil {
-		body += "\n[exit: " + err.Error() + "]"
-	}
-	return body, nil
-}
-
 // ---------- http:原生请求 + 代理 ----------
-
-// toolScriptEnvAllowlist 是自定义脚本工具允许从宿主进程继承的环境变量。
-//
-// 用白名单而非黑名单：进程环境里可能存在本次未预料到的凭据（新增的 *_TOKEN、
-// CI 注入的变量、第三方 SDK 塞进来的），黑名单永远追不上新变量。
-var toolScriptEnvAllowlist = map[string]bool{
-	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
-	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "LANGUAGE": true, "TZ": true,
-	"TERM": true, "TMPDIR": true, "PWD": true, "HOSTNAME": true, "SHLVL": true,
-	"PYTHONPATH": true, "PYTHONHOME": true, "PYTHONUNBUFFERED": true,
-	"VIRTUAL_ENV": true, "PYTHONHASHSEED": true,
-	// 代理与 CA：会话 env 会覆盖同名项，这里给出缺省值。
-	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
-	"http_proxy": true, "https_proxy": true, "no_proxy": true, "all_proxy": true,
-	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
-	"REQUESTS_CA_BUNDLE": true, "CURL_CA_BUNDLE": true,
-}
-
-// toolScriptBaseEnv 返回白名单内的宿主环境变量。
-func toolScriptBaseEnv() []string {
-	out := make([]string, 0, len(toolScriptEnvAllowlist))
-	for _, kv := range os.Environ() {
-		k, _, ok := strings.Cut(kv, "=")
-		if ok && toolScriptEnvAllowlist[k] {
-			out = append(out, kv)
-		}
-	}
-	return out
-}
 
 func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec httpExec
