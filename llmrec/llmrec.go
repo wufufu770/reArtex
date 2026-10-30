@@ -185,11 +185,18 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				return
 			}
 			// Always track usage (cheap); accumulate text/thinking only for bodies.
-			// Anthropic (and the other providers) split token usage across events:
-			// message_start carries ONLY the input side (input + cache), message_delta
-			// ONLY the output. They must be FOLDED with Add — overwriting on delta
-			// would zero out the input already counted at start (mirrors the SDK's own
-			// llm.Accumulator; see norma/llm/accumulate.go).
+			// 用量折叠遵循上游契约（norma/llm/accumulate.go）：message_start 走
+			// llm.Usage.Add，message_delta 走 llm.Usage.MergeEcho —— 后者对**回显**
+			// 字段取大而不是求和。
+			//
+			// 契约规定 message_delta 可能回显 message_start 已报过的字段
+			//（norma/llm/types.go 的 MergeEcho 注释、norma/llm/anthropic_usage_echo_test.go
+			// 的回归用例）：对遵循 Anthropic 约定的 provider，同一输入侧在两个事件里
+			// 各出现一次 —— 求和会把它翻倍，逐字段取大不会。
+			//
+			// 对现役 MiniMax 端点两者结果相同（message_start 带全 0、全部用量只在
+			// message_delta，见 research-notes §27）—— 故此处取 MergeEcho 是为对齐
+			// 契约并防住回显型 provider，而非修现役的重复计数。
 			switch ev.Type {
 			case llm.SETextDelta:
 				if recordBodies {
@@ -205,7 +212,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				if ev.StopReason != "" {
 					stopReason = ev.StopReason
 				}
-				usage.Add(ev.Usage)
+				usage.MergeEcho(ev.Usage)
 			}
 			if !yield(ev, err) {
 				return
