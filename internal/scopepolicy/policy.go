@@ -18,6 +18,23 @@ const (
 	ScopePlatformOwned = "platform_owned"
 )
 
+// ScopeKinds 是 task_scope.kind 的【全部合法取值】—— 范围行的 kind 白名单。
+//
+// 为什么与 Policy.MaxAgentAddedKinds 分开：那是 agent 可以【自行扩范围】的子集，
+// 这里则是「哪些 kind 合法存在」的全集。两者不是同一件事：
+//
+//   - asset（按资产 id 声明范围）只在这里，不在 MaxAgentAddedKinds 里。
+//     它是宿主/操作者侧的授权决定（任务大厅勾选资产后发布），
+//     agent 不得自行把范围扩到某一条具体资产 —— 那等于自己挑授权边界。
+//   - 扩权条数上限（Policy.MaxAgentAddedScope）同样只管 agent 的自主扩权，
+//     不管操作者侧的声明（见 db.AddTaskScopeAsset）。
+//
+// 这里的取值必须与 db/schema.sql 里 task_scope_kind_check 的枚举一致 ——
+// DDL 拦得住「库里出现非法 kind」，代码拦得住「代码写出一个非法 kind」。
+var ScopeKinds = []string{
+	"company", "root_domain", "subdomain", "ip", "cidr", "icp", "keyword", "asset",
+}
+
 // Policy 是 scope 策略的代码常量。
 //
 // 扩权上限（MaxAgentAddedScope）与「范围内」判定（PlatformScopeMode）读的都是
