@@ -3,13 +3,13 @@
 package db
 
 import (
-	"os"
 	"context"
 	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -241,6 +241,27 @@ var builtinAgents = []builtinAgent{
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
 	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
+	// 顾问型五件套（策略库 / 职责分离阶段）：只【提议】、不【裁决】。它们不参与渗透编排循环，
+	// 经对话页/触发器驱动，与 auto/pentest 同属「assistant」类会话型 agent。
+	// 工具绑定由 db 层策略决定（见 config.go 的 AdvisoryAgentToolPolicies）：
+	// 只给只读与「自己的建议通道」工具，绝不给改写共享状态的工具。
+	{"curator", "策略仲裁", "assistant", "策略库仲裁者：依据冻结重放得分、canary 通过率变化、独立确认计数与机械重放证伪，给出 adopt/reject/defer 裁决，不写任何共享状态。", nil, false, nil},
+	{"verifier", "建议验证", "assistant", "建议性验证者：只读证据给出 PASS/FAIL/UNCERTAIN 建议，最终判定由确定性层做出，不改任何漏洞与策略状态。", nil, false, nil},
+	{"redteam", "证伪", "assistant", "证伪者：在任务 scope 内主动证伪已确认漏洞与高后验策略，只产出可机械重放的证伪记录，不产正面漏洞。", nil, true, nil},
+	{"creative", "新颖探索", "assistant", "新颖性探索者：提出与现有策略库距离足够远的新策略与场景特征候选，交由仲裁者裁决，不直接写策略库。", nil, false, nil},
+	// intent-normalizer（规整器）：worker 的原始动作 → 结构化意图，交给确定性闸门裁决。
+	// 它是职责分离链上唯一新增的 LLM 环节，因此工具面收得最紧：白名单里只有
+	// emit_structured_intent 一个工具（见 config.go 的 AdvisoryAgentToolPolicies）。
+	// 不给交互式 shell——它只转换，不动手。
+	{"intent_normalizer", "意图规整", "assistant", "结构化意图转换者：把 worker 的原始动作（shell 命令 / HTTP 请求 / 工具参数）转成结构化意图，交给确定性闸门裁决；不执行、不改写语义、不查 scope。", nil, false, nil},
+	//
+	// 以下三者是【确定性基础设施】，刻意不作为 agent 落库：
+	//   - policy-gate：它的裁决（scope、tier2 一致性、工具熔断、群组额度状态、anomaly 标记）
+	//     全是确定性检查，裁决顺序是短路规则表。它的规范写在 agent/prompts/policy-gate.md，
+	//     但那是【确定性闸门的规格】，不是 LLM 提示词——登记成 agent 等于让模型接手裁决，
+	//     违反「模型只提议，确定性层裁决」这条铁律。故：无提示词文件、无 agent 行、无工具绑定。
+	//   - executor：执行已批准的意图，同样是确定性代码。无提示词文件、无 agent 行、无工具绑定。
+	//   - auditor：审计执行结果，同样是确定性代码。无提示词文件、无 agent 行、无工具绑定。
 }
 
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).
@@ -311,6 +332,13 @@ ON CONFLICT (name) DO NOTHING`,
 	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
+	}
+	// 顾问 agent 的工具绑定策略在这里落到 tools 表：老库补绑白名单工具、收回被
+	// 硬拒绝的工具、白名单里尚未注册的工具跳过并记录。新库的工具行是服务端
+	// 稍后播的（tools 表在 db.Open 之后才被 server 播种），所以新库要等下一次
+	// 启动才补齐编排类工具的绑定；内置工具的绑定在播种那一刻就已按策略写入。
+	if err := d.seedAdvisoryAgentToolBindings(); err != nil {
+		return fmt.Errorf("seed advisory agent tool bindings: %w", err)
 	}
 	return nil
 }
