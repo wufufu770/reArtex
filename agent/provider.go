@@ -322,6 +322,15 @@ var transientQuotaLimit = regexp.MustCompile(`(?i)(?:\b(?:rpm|tpm|rpd|qps)\b|quo
 
 func IsQuotaExhaustedMessage(message string) bool {
 	message = strings.ToLower(message)
+	// 群组预算豁免：任务大厅的群组 token 预算用尽时，错误是**平台自己**抛出的，
+	// 与供应商额度无关。若不豁免，markers 里的「额度不足 / 额度已用尽」会把它
+	// 误判成供应商额度耗尽 → 当前 profile 被标 quota_exhausted 并切走，
+	// 既污染 task_llm_profiles（别的任务也失去这个供应商），也让群组预算的语义
+	// 与供应商额度混在一起。这道检查放在最前面：标记是平台自己注入的权威信号，
+	// 优先级高于任何供应商文案。
+	if llmrec.IsGroupQuotaMessage(message) {
+		return false
+	}
 	// Authentication/authorization and provider-side 5xx failures never rotate,
 	// even when a gateway happens to echo a quota-looking phrase in the body.
 	if nonFailoverHTTPStatus.MatchString(message) {
