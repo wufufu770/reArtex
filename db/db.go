@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/config"
@@ -60,6 +61,32 @@ func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(t
 // withSchemaMigrationLock pins the session-level lock to one checked-out
 // connection. Running pg_advisory_lock through *sql.DB is incorrect because a
 // later schema or unlock call may use a different pooled PostgreSQL session.
+// schemaApplied 记录某个【数据库】的 schema 与内置种子已经应用过。
+//
+// 键是数据库身份（host:port/库名），不是连接句柄 —— 同一个库可以被多个连接
+// 打开（每个测试实例自建 Manager 就是如此），按句柄记等于没记。
+//
+// 为什么值得记：schema 应用实测要 1 秒以上（首次 6 秒），而 db.Open 每个
+// 测试实例都会调一次 ⇒ 一个包里上百次 Open 就是两分多钟纯耗在重复建表上。
+// 实测 server 包因此跑到 553 秒，离 Go 默认的 600 秒包超时只差 47 秒 ——
+// 任何额外负载都会把它顶过超时线。
+//
+// 边界：memo 只在**进程内**有效。跨进程仍由 withSchemaMigrationLock 的
+// advisory lock 串行（那是给「两个进程同时起」准备的）；库被重建只发生在
+// 各包的 TestMain 里（早于任何 Open），所以 memo 不会陈旧。
+var schemaApplied sync.Map
+
+// databaseIdentity 从 DSN 取出数据库身份（host:port/库名）。
+//
+// 为什么按【库】而不是按连接记：见 schemaApplied 的说明。
+func databaseIdentity(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	return u.Host + u.Path
+}
+
 func withSchemaMigrationLock(ctx context.Context, sqlDB *sql.DB, action func(*sql.Conn) error) (err error) {
 	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
@@ -186,12 +213,17 @@ func Open(dsn string) (*DB, error) {
 	// pgx runs multi-statement Exec via the simple protocol when there are no args.
 	// Keep the dedicated lock connection checked out until both DDL and seeding
 	// finish so concurrent application instances cannot initialize out of order.
+	schemaKey := databaseIdentity(dsn)
 	err = withSchemaMigrationLock(context.Background(), sqlDB, func(conn *sql.Conn) error {
-		if err := applySchemaWithRetry(context.Background(), conn, time.Sleep); err != nil {
-			return fmt.Errorf("apply schema: %w", err)
-		}
-		if err := d.seedBuiltins(); err != nil {
-			return fmt.Errorf("seed builtins: %w", err)
+		// schema 与内置种子按【数据库】只做一次（见 schemaApplied 的说明）。
+		if _, done := schemaApplied.Load(schemaKey); !done {
+			if err := applySchemaWithRetry(context.Background(), conn, time.Sleep); err != nil {
+				return fmt.Errorf("apply schema: %w", err)
+			}
+			if err := d.seedBuiltins(); err != nil {
+				return fmt.Errorf("seed builtins: %w", err)
+			}
+			schemaApplied.Store(schemaKey, struct{}{})
 		}
 		// 群组预算 DDL：与 db/schema.sql 并行应用（见 db/quota.go 的
 		// EnsureQuotaSchema）。预算表外键指向 chat_groups，因此它内部会先

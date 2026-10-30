@@ -777,9 +777,31 @@ ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
 -- ⚠️ 必须【原地 DROP + 重建】，不能只追加一个新索引：CREATE ... IF NOT EXISTS 对同名
 -- 索引不会改定义，旧语句里的 uq_task_scope_v2 仍然按「去重键不含 asset_id」的旧定义
 -- 留在库里 ⇒ 同 task 下两个不同资产（domain/net/company/value 全为空、只差 asset_id）
--- 被它判为重复 ⇒ 第二个资产插不进去。所以先把旧索引删掉再按新定义重建。
-DROP INDEX IF EXISTS uq_task_scope;
-DROP INDEX IF EXISTS uq_task_scope_v2;
+-- 被它判为重复 ⇒ 第二个资产插不进去。
+--
+-- ⚠️⚠️ 但 DROP + CREATE **不能每次启动都无条件执行**：DROP INDEX 要拿表级锁，
+-- 而 db.Open 每个测试实例都会跑一遍本文件 ⇒ 无条件重建索引会把整包测试拖到超时
+-- （实测 server 包卡在 10 分钟超时，单跑却每次都过 ⇒ 并发才触发）。
+--
+-- 所以这里做成【一次性迁移】：先看库里那个索引的去重键含不含 asset_id ——
+-- 含了就什么都不做（不拿锁、不重建），不含才 DROP + 重建。重建完再启动，
+-- 后续每次启动都是零成本跳过。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname = 'uq_task_scope_v2'
+           AND indexdef NOT LIKE '%asset_id%'
+    ) THEN
+        DROP INDEX IF EXISTS uq_task_scope;
+        DROP INDEX IF EXISTS uq_task_scope_v2;
+        CREATE UNIQUE INDEX uq_task_scope_v2 ON task_scope(
+            task_id, kind, COALESCE(domain,''), COALESCE(net::text,''),
+            COALESCE(company_id,0), COALESCE(value,''), COALESCE(asset_id,0));
+    END IF;
+END $$;
+-- 兜底：索引压根不存在时按新定义建出来（上面那个分支只在「存在但定义旧」时才动）。
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
     task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''), COALESCE(asset_id,0));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
