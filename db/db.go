@@ -239,6 +239,13 @@ func Open(dsn string) (*DB, error) {
 		if err := d.EnsureStrategySchema(); err != nil {
 			return fmt.Errorf("apply strategy schema: %w", err)
 		}
+		// 职责分离链的 DDL：裁决留痕、待对抗复核队列、工具熔断状态。
+		//
+		// 为什么必须在这里接：不接 ⇒ 库里没有这三张表 ⇒ 闸门写裁决时运行期才报
+		// 「关系不存在」，而不是启动期就报出来。
+		if err := d.EnsureSoDSchema(); err != nil {
+			return fmt.Errorf("apply sod schema: %w", err)
+		}
 		// 任务拦截规则的 kind 枚举放宽（含命令级唯一索引）：在启动时补一次。
 		// 不能留在写路径上懒执行 —— 重建 CHECK 约束要拿这张热表的表级锁，
 		// 同库并发时互相排队。
