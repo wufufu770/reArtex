@@ -2177,5 +2177,10 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addTaskScope(),
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),
+		// 策略库（跨任务知识）：strategy_search 只给摘要；strategy_propose 只提议
+		// （写隔离态策略 + 待裁决提议）。strategy_get 拉的是正文，风险高于检索摘要，
+		// 故默认不绑给任何 agent（defaultUnbound），这里留着只是为了让目录能取到它
+		// 的描述与 schema。
+		t.strategySearch(), t.strategyGet(), t.strategyPropose(),
 	}
 }

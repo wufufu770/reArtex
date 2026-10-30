@@ -1253,6 +1253,11 @@ var advisoryGraphWriteTools = map[string]bool{
 	"create_mcp": true, "update_mcp": true, "delete_assets_by_host": true,
 	// 漏洞复测结论（server/finding_retests.go）
 	"record_finding_retest_result": true,
+	// 策略库提议（agent/strategy_tools.go）：它会往【跨任务共享】的 strategies 表
+	// 写一行隔离态策略 + 一条待裁决提议。归到「共享状态写」而不是「建议通道」：
+	// strategies 是全平台共享的表，写进去就是写进共享状态 ⇒ 顾问 agent 默认拿不到
+	// 它，要用必须显式放开。
+	"strategy_propose": true,
 }
 
 // advisoryAdvisoryWriteTools 是顾问 agent 自己的建议通道工具：写的是提议表，
