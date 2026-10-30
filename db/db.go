@@ -199,6 +199,14 @@ func Open(dsn string) (*DB, error) {
 		if err := d.EnsureQuotaSchema(); err != nil {
 			return fmt.Errorf("apply quota schema: %w", err)
 		}
+		// 策略库（L4）DDL：同样走独立幂等文件（db/schema_strategy.sql）。
+		//
+		// 为什么必须在这里接：策略表不接启动流程 ⇒ 库里没有这张表 ⇒
+		// 策略相关接口全在运行期才报「关系不存在」，而不是启动期就报出来。
+		// 失败即启动失败，不静默跳过。
+		if err := d.EnsureStrategySchema(); err != nil {
+			return fmt.Errorf("apply strategy schema: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
