@@ -192,3 +192,138 @@ func TestScopePolicyIsSingleSourceOfTruth(t *testing.T) {
 		t.Fatalf("assets.origin 缺失时平台范围必须为空，实际 %v", owned)
 	}
 }
+
+// scopeAssetDomain 读出资产的 domain。
+//
+// 为什么测试要自己查：fixture 只交出资产 id，而 host 口径的判定吃的是域名。
+func scopeAssetDomain(t *testing.T, d *DB, id int64) string {
+	t.Helper()
+	var domain string
+	if err := d.QueryRow(`SELECT COALESCE(domain,'') FROM assets WHERE id=$1`, id).Scan(&domain); err != nil {
+		t.Fatalf("读资产域名失败: %v", err)
+	}
+	return domain
+}
+
+// TestScopeHostInScope 钉住 host 口径的范围判定：范围内命中、范围外不命中、
+// 空/非法 host 不命中且不报错。
+func TestScopeHostInScope(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	fx := newScopeFixture(t, d)
+	inScopeHost := scopeAssetDomain(t, d, fx.inScope)
+	outsideHost := scopeAssetDomain(t, d, fx.outside)
+	otherHost := scopeAssetDomain(t, d, fx.otherTask)
+
+	ok, err := assets.ScopeHostInScope(fx.taskA, inScopeHost)
+	if err != nil {
+		t.Fatalf("范围判定出错: %v", err)
+	}
+	if !ok {
+		t.Fatalf("任务 A 范围内的资产 %q 必须判定为在范围内", inScopeHost)
+	}
+
+	for _, host := range []string{outsideHost, otherHost} {
+		ok, err := assets.ScopeHostInScope(fx.taskA, host)
+		if err != nil {
+			t.Fatalf("范围判定出错: %v", err)
+		}
+		if ok {
+			t.Fatalf("host %q 不在任务 A 的范围内，却判定为在范围内", host)
+		}
+	}
+
+	// root_domain 范围含其子域（成员关系，不是字面相等）。
+	ok, err = assets.ScopeHostInScope(fx.taskA, "api."+inScopeHost)
+	if err != nil || !ok {
+		t.Fatalf("root_domain 范围应含其子域 %q（err=%v）", "api."+inScopeHost, err)
+	}
+
+	// target_hint 是模型给的自由文本：URL 形态、带端口、带路径都要归一化后判定。
+	ok, err = assets.ScopeHostInScope(fx.taskA, "https://"+inScopeHost+":8443/path?q=1")
+	if err != nil {
+		t.Fatalf("范围判定出错: %v", err)
+	}
+	if !ok {
+		t.Fatalf("URL 形态的 target_hint 必须归一化后判定为在范围内: %q", inScopeHost)
+	}
+
+	// 空 / 非法 host ⇒ (false, nil)：不是范围内，也不是错误。
+	for _, host := range []string{"", "   ", "not a host!!"} {
+		ok, err := assets.ScopeHostInScope(fx.taskA, host)
+		if err != nil || ok {
+			t.Fatalf("host=%q 必须得到 (false, nil)，实际 (%v, %v)", host, ok, err)
+		}
+	}
+}
+
+// TestScopeDigestForTaskChangesWithScope 钉住范围摘要的两条性质：同样的范围
+// 给出同一个摘要；范围一变摘要必变 —— 后者是规整器缓存失效的依据。
+func TestScopeDigestForTaskChangesWithScope(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	fx := newScopeFixture(t, d)
+
+	before, err := assets.ScopeDigestForTask(fx.taskA)
+	if err != nil {
+		t.Fatalf("算范围摘要失败: %v", err)
+	}
+	again, err := assets.ScopeDigestForTask(fx.taskA)
+	if err != nil {
+		t.Fatalf("算范围摘要失败: %v", err)
+	}
+	if before != again {
+		t.Fatalf("同样的范围必须给出同一个摘要: %q vs %q", before, again)
+	}
+
+	// 加一条范围 ⇒ 摘要必须变。
+	extra := "extra-" + scopeAssetDomain(t, d, fx.inScope)
+	if err := d.Assets().upsertTaskScope(TaskScope{
+		TaskID: fx.taskA, Kind: "subdomain", Domain: extra,
+	}); err != nil {
+		t.Fatalf("追加范围失败: %v", err)
+	}
+	after, err := assets.ScopeDigestForTask(fx.taskA)
+	if err != nil {
+		t.Fatalf("算范围摘要失败: %v", err)
+	}
+	if after == before {
+		t.Fatal("范围变了摘要必须变 —— 否则范围收紧前生成的规整结果会被复用（范围旁路）")
+	}
+
+	// 别的任务的范围集合不同 ⇒ 摘要不同。
+	other, err := assets.ScopeDigestForTask(fx.taskB)
+	if err != nil || other == after {
+		t.Fatalf("两个任务的有效范围不同，摘要不应相同（err=%v）", err)
+	}
+}
+
+// TestScopeHostInScopeAgreesWithScopedAssetIDs 交叉钉住两处口径不漂移：凡是
+// ScopedAssetIDs 认作范围内的资产，它的 host 必须也被 ScopeHostInScope 认。
+//
+// 为什么这条断言只有这一个方向：host 口径可以比资产口径**宽**（一个子域没有
+// 对应资产行，但它落在 root_domain 范围里），但绝不能比它**窄** —— 窄了就等于
+// 同一份范围被两处读成两个意思。
+func TestScopeHostInScopeAgreesWithScopedAssetIDs(t *testing.T) {
+	d, assets, _ := testSetup(t)
+	defer d.Close()
+
+	fx := newScopeFixture(t, d)
+
+	for _, id := range []int64{fx.inScope, fx.otherTask, fx.outside} {
+		host := scopeAssetDomain(t, d, id)
+		inScope, err := assets.ScopedAssetIDs(fx.taskA, []int64{id})
+		if err != nil {
+			t.Fatalf("资产范围判定出错: %v", err)
+		}
+		hostOK, err := assets.ScopeHostInScope(fx.taskA, host)
+		if err != nil {
+			t.Fatalf("host 范围判定出错: %v", err)
+		}
+		if len(inScope) > 0 && !hostOK {
+			t.Fatalf("资产 %d（host=%q）在范围内，host 口径却说不在 —— 两处口径漂移了", id, host)
+		}
+	}
+}
