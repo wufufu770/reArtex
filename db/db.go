@@ -207,6 +207,12 @@ func Open(dsn string) (*DB, error) {
 		if err := d.EnsureStrategySchema(); err != nil {
 			return fmt.Errorf("apply strategy schema: %w", err)
 		}
+		// 任务拦截规则的 kind 枚举放宽（含命令级唯一索引）：在启动时补一次。
+		// 不能留在写路径上懒执行 —— 重建 CHECK 约束要拿这张热表的表级锁，
+		// 同库并发时互相排队。
+		if err := d.EnsureTaskInterceptSchema(); err != nil {
+			return fmt.Errorf("apply task intercept schema: %w", err)
+		}
 		return nil
 	})
 	if err != nil {

@@ -135,54 +135,83 @@ const TaskCommandRuleKind = "command_regex"
 // 重复执行后的最终状态一致。唯一索引保证「同一个任务 + 同一条 pattern」只有一行
 // ⇒ 安装动作天然幂等，并发安装也不会堆出重复行。
 const taskCommandRuleKindDDL = `
-DO $$
-DECLARE cname text;
-BEGIN
-  IF to_regclass('task_intercept_rules') IS NULL THEN
-    RETURN;
-  END IF;
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_task_intercept_command_unique
-      ON task_intercept_rules(task_id, kind, pattern)
-      WHERE kind = 'command_regex';
-  -- 已有约束若已经放行 'command_regex' 就别再动它：反复 DROP/ADD 会白白拿表级锁，
-  -- 还留下一个「约束暂时不存在」的窗口。
-  IF EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conrelid = 'task_intercept_rules'::regclass
-       AND contype = 'c'
-       AND pg_get_constraintdef(oid) LIKE '%command_regex%'
-  ) THEN
-    RETURN;
-  END IF;
-  FOR cname IN
-    SELECT conname FROM pg_constraint
-     WHERE conrelid = 'task_intercept_rules'::regclass
-       AND contype = 'c'
-       AND pg_get_constraintdef(oid) LIKE '%kind%'
-  LOOP
-    EXECUTE format('ALTER TABLE task_intercept_rules DROP CONSTRAINT %I', cname);
-  END LOOP;
-  ALTER TABLE task_intercept_rules
-    ADD CONSTRAINT task_intercept_rules_kind_check
-    CHECK (kind IN ('exact_domain','exact_ip','exact_url',
-                    'fuzzy_domain','fuzzy_ip','fuzzy_url',
-                    'cidr','command_regex'));
-END $$;
-`
+  DO $$
+  DECLARE cname text;
+  BEGIN
+    IF to_regclass('task_intercept_rules') IS NULL THEN
+      RETURN;
+    END IF;
+    -- 已有约束若已经放行 'command_regex' 就**立刻**返回，后面一概不做。
+    --
+    -- 为什么这个检查必须排在最前面：反复 DROP/ADD 会白白拿表级锁
+    -- （ACCESS EXCLUSIVE），而这张表是热表 ⇒ 同库并发时锁会排队，甚至互等。
+    -- 先看约束在不在，一眼就能判断「这次什么都不用做」。
+    IF EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conrelid = 'task_intercept_rules'::regclass
+         AND contype = 'c'
+         AND pg_get_constraintdef(oid) LIKE '%command_regex%'
+    ) THEN
+      RETURN;
+    END IF;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_intercept_command_unique
+        ON task_intercept_rules(task_id, kind, pattern)
+        WHERE kind = 'command_regex';
+    FOR cname IN
+      SELECT conname FROM pg_constraint
+       WHERE conrelid = 'task_intercept_rules'::regclass
+         AND contype = 'c'
+         AND pg_get_constraintdef(oid) LIKE '%kind%'
+    LOOP
+      EXECUTE format('ALTER TABLE task_intercept_rules DROP CONSTRAINT %I', cname);
+    END LOOP;
+    ALTER TABLE task_intercept_rules
+      ADD CONSTRAINT task_intercept_rules_kind_check
+      CHECK (kind IN ('exact_domain','exact_ip','exact_url',
+                      'fuzzy_domain','fuzzy_ip','fuzzy_url',
+                      'cidr','command_regex'));
+  END $$;
+  `
 
 // taskCommandRuleSchemaReady 记录某个连接已经补过 kind 约束。
 //
-// 键是底层 *sql.DB 指针 —— 每个测试包/实例各连各的库，互不干扰（与
-// db/sod.go 的 sodSchemaReady 同一手法）。
+// 键是底层 *sql.DB 指针。
+//
+// ⚠️ 这个 memo **不能**当作「约束已就位」的依据：同一个库可以被多个连接
+// 打开（每个测试自建 Manager 就是如此），指针不同 ⇒ memo 互不命中 ⇒ 每次
+// 都会重跑 DDL。而重跑 DDL 会拿这张热表的表级锁 ⇒ 同库并发时互相排队，
+// 表现为整包测试卡到超时。
+//
+// 所以真正的保证在 **db.Open**：那里统一补一次约束（见 EnsureTaskInterceptSchema）。
+// 这个 memo 只用于「同一个连接内不要重复执行」这一层便宜的优化。
 var taskCommandRuleSchemaReady sync.Map
+
+// EnsureTaskInterceptSchema 放宽任务拦截规则的 kind 枚举，并加命令级唯一索引。
+//
+// 在 db.Open 里调用（与 EnsureChatGroupSchema / EnsureQuotaSchema /
+//  EnsureStrategySchema 同范式）：DDL 只在进程启动时补一次，不在写路径上懒执行 ——
+// 写路径上懒执行会在同库并发时反复拿表级锁。
+//
+// 幂等：约束已放行 'command_regex' 时立刻返回，什么都不做。
+func (d *DB) EnsureTaskInterceptSchema() error {
+	if _, err := d.Exec(taskCommandRuleKindDDL); err != nil {
+		return fmt.Errorf("放宽任务拦截规则 kind 约束失败: %w", err)
+	}
+	return nil
+}
 
 // ensureCommandRuleKind 幂等补齐 kind 约束（含命令级唯一索引）。
 func (s *AssetStore) ensureCommandRuleKind() error {
 	if _, ok := taskCommandRuleSchemaReady.Load(s.db.DB); ok {
 		return nil
 	}
-	if _, err := s.db.Exec(taskCommandRuleKindDDL); err != nil {
-		return fmt.Errorf("放宽任务拦截规则 kind 约束失败: %w", err)
+	// 兜底：约束没就位时才补，且补的动作在 DDL 里先看约束在不在 ——
+	// 已经在就直接返回，不碰表锁。真正的保证在 db.Open（统一补一次）。
+	//
+	// 为什么写路径上不能无条件重跑 DDL：这张表是热表，重建 CHECK 约束要拿
+	// ACCESS EXCLUSIVE 表级锁；同库并发时互相排队，整包测试会卡到超时。
+	if err := s.db.EnsureTaskInterceptSchema(); err != nil {
+		return err
 	}
 	taskCommandRuleSchemaReady.Store(s.db.DB, struct{}{})
 	return nil
