@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/Autumn-27/artex/internal/scopepolicy"
 )
 
 // TaskScope is one row of a task's test scope — the coverage denominator and the
@@ -16,7 +19,7 @@ import (
 type TaskScope struct {
 	ID        int64  `json:"id"`
 	TaskID    int64  `json:"task_id"`
-	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr|icp|keyword
+	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr|icp|keyword|asset
 	CompanyID *int64 `json:"company_id,omitempty"`
 	// CompanyName is resolved for kind=company so callers can label a scope row
 	// without a second lookup. Empty when the row is not a company reference.
@@ -24,8 +27,11 @@ type TaskScope struct {
 	Domain      string `json:"domain,omitempty"`
 	Net         string `json:"net,omitempty"`
 	Value       string `json:"value,omitempty"`
-	Source      string `json:"source"`
-	Reason      string `json:"reason,omitempty"`
+	// AssetID points at the one concrete asset row when kind='asset'. Nil for
+	// every other kind — those carry their reference in Domain/Net/Value/CompanyID.
+	AssetID *int64 `json:"asset_id,omitempty"`
+	Source  string `json:"source"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // stripHostPort drops a trailing :port from a host:port / ip:port / [ipv6]:port
@@ -233,6 +239,59 @@ func (s *AssetStore) AddManualScope(taskID int64, kind, value, reason string) (T
 	return ts, nil
 }
 
+// ErrTaskScopeUnknownTask 表示任务不存在 —— 没有任务就没有可声明范围的对象。
+var ErrTaskScopeUnknownTask = errors.New("任务不存在")
+
+// ErrTaskScopeUnknownAsset 表示资产不存在 —— 声明一条永远匹配不到任何东西的
+// 范围行没有意义。
+var ErrTaskScopeUnknownAsset = errors.New("资产不存在")
+
+// AddTaskScopeAsset declares that a task may reference one specific asset.
+//
+// 这是【操作者侧】的授权声明（任务大厅勾选资产后发布），不是 agent 的自主扩权：
+// 因此既不受 scopepolicy.Policy.MaxAgentAddedScope（agent 扩权条数上限）约束，
+// 也不受 MaxAgentAddedKinds（agent 可自行扩的 kind 白名单）约束 —— 人工设范围
+// 是授权决定本身，不是「扩张预算」的一部分。落库 source='manual' ⇒ 同样不消耗
+// agent 的扩张预算。
+//
+// 语义：
+//   - task 不存在 ⇒ 报 ErrTaskScopeUnknownTask：没有任务就没有可声明范围的对象。
+//   - asset 不存在 ⇒ 报 ErrTaskScopeUnknownAsset：声明一条永远匹配不到任何东西的
+//     范围行，比直接报错更难排查。
+//   - 同一 task 重复声明同一 asset ⇒ 幂等（不报错、不重复落库）。
+//   - 同一 task 可声明多个不同 asset（唯一索引的去重键含 asset_id）。
+func (d *DB) AddTaskScopeAsset(taskID, assetID int64) error {
+	if taskID <= 0 {
+		return fmt.Errorf("需要 task_id")
+	}
+	if assetID <= 0 {
+		return fmt.Errorf("需要 asset_id")
+	}
+	var taskExists bool
+	if err := d.QueryRow(`SELECT EXISTS (SELECT 1 FROM tasks WHERE id=$1)`, taskID).Scan(&taskExists); err != nil {
+		return fmt.Errorf("校验任务是否存在失败: %w", err)
+	}
+	if !taskExists {
+		return fmt.Errorf("%w: %d", ErrTaskScopeUnknownTask, taskID)
+	}
+	var assetExists bool
+	if err := d.QueryRow(`SELECT EXISTS (SELECT 1 FROM assets WHERE id=$1)`, assetID).Scan(&assetExists); err != nil {
+		return fmt.Errorf("校验资产是否存在失败: %w", err)
+	}
+	if !assetExists {
+		return fmt.Errorf("%w: %d", ErrTaskScopeUnknownAsset, assetID)
+	}
+	// ON CONFLICT DO NOTHING 不带冲突目标 ⇒ 覆盖任意唯一冲突。去重键是表达式唯一
+	// 索引（带 COALESCE），带列名反而会被表达式索引卡住。
+	if _, err := d.Exec(`
+INSERT INTO task_scope(task_id, kind, asset_id, source, reason)
+VALUES ($1, 'asset', $2, 'manual', '任务大厅按资产发布')
+ON CONFLICT DO NOTHING`, taskID, assetID); err != nil {
+		return fmt.Errorf("写入任务资产范围失败: %w", err)
+	}
+	return nil
+}
+
 // parseTaskScope 把 (kind,value) 解析成一条 task_scope 行（不写库）。
 // company: value = company name or id (must already exist). root_domain/subdomain:
 // value = a domain. ip/cidr: value = an IP or CIDR (bare IP → /32,/128).
@@ -299,7 +358,10 @@ func (s *AssetStore) parseTaskScope(taskID int64, kind, value, reason, source st
 		}
 		ts.Value = parsed.Value
 	default:
-		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
+		if !slices.Contains(scopepolicy.ScopeKinds, kind) {
+			return ts, fmt.Errorf("不支持的 kind: %s（可用：%s）", kind, strings.Join(scopepolicy.ScopeKinds, "/"))
+		}
+		return ts, fmt.Errorf("kind=%s 不按文本值声明：按资产 id 声明范围请用 AddTaskScopeAsset(taskID, assetID)", kind)
 	}
 	return ts, nil
 }
@@ -319,7 +381,7 @@ func (s *AssetStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
 func (s *AssetStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
 SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
-       COALESCE(ts.net::text,''), COALESCE(ts.value,''), ts.source, COALESCE(ts.reason,'')
+       COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.asset_id,0), ts.source, COALESCE(ts.reason,'')
 FROM task_scope ts
 LEFT JOIN companies c ON c.id=ts.company_id
 WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
@@ -330,13 +392,16 @@ WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	out := []TaskScope{}
 	for rows.Next() {
 		var t TaskScope
-		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Source, &t.Reason); err != nil {
+		var cid, assetID int64
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &assetID, &t.Source, &t.Reason); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID
 		if cid > 0 {
 			t.CompanyID = &cid
+		}
+		if assetID > 0 {
+			t.AssetID = &assetID
 		}
 		out = append(out, t)
 	}
@@ -394,10 +459,11 @@ target AS (
     OR (ts.kind='root_domain' AND a.root_domain = ts.domain)
     OR (ts.kind='subdomain'   AND a.domain = ts.domain)
     OR (ts.kind IN ('ip','cidr') AND ts.net >>= try_inet(a.ip))
-    OR (ts.kind='icp' AND (
-         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
-         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
-       ))
+     OR (ts.kind='icp' AND (
+          lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
+          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
+        ))
+     OR (ts.kind='asset' AND a.id = ts.asset_id)
   )
 ),
 tested AS (

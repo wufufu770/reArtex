@@ -749,31 +749,43 @@ WHERE t.active_llm_profile_id IS NULL
 --     （root_domain→root_domain，subdomain/service/endpoint→subdomain(host)，ip→ip）；
 --     side-effect 派生的资产不入范围（钩子在 handler 顶层，派生在 db 层内部）。
 --   agent 填(source='agent')：add_task_scope 加 company/root_domain/subdomain/ip。
+--   人工填(source='manual')：任务大厅按资产 id 声明范围（kind='asset'）——见下。
 -- 覆盖度 = 匹配 active 行的 assets（分母）中，被 fact 节点锚定过的占比（分子）。
 CREATE TABLE IF NOT EXISTS task_scope (
     id          BIGSERIAL PRIMARY KEY,
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword')),
+    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','asset')),
     company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
     domain      TEXT,          -- root_domain / subdomain
     net         CIDR,          -- ip / cidr
     value       TEXT,          -- icp / keyword
+    -- 资产子图：大厅发布任务时按资产 id 声明范围。agent 的 list_assets 只认
+    -- task_scope，所以这是「选中资产对成员可见」的唯一途径。
+    asset_id    BIGINT REFERENCES assets(id) ON DELETE CASCADE,  -- kind='asset'
     source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','agent','manual')),
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 旧库升级：扩展任务范围，使其与企业范围的单文本框识别能力一致。
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
+-- 旧库升级：新增按资产 id 声明范围的列（约束名与新建库时一致：task_scope_asset_id_fkey）。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS asset_id BIGINT REFERENCES assets(id) ON DELETE CASCADE;
 ALTER TABLE task_scope DROP CONSTRAINT IF EXISTS task_scope_kind_check;
 ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
-    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword'));
+    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','asset'));
 -- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
+-- ⚠️ 必须【原地 DROP + 重建】，不能只追加一个新索引：CREATE ... IF NOT EXISTS 对同名
+-- 索引不会改定义，旧语句里的 uq_task_scope_v2 仍然按「去重键不含 asset_id」的旧定义
+-- 留在库里 ⇒ 同 task 下两个不同资产（domain/net/company/value 全为空、只差 asset_id）
+-- 被它判为重复 ⇒ 第二个资产插不进去。所以先把旧索引删掉再按新定义重建。
 DROP INDEX IF EXISTS uq_task_scope;
+DROP INDEX IF EXISTS uq_task_scope_v2;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v2 ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''));
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''), COALESCE(asset_id,0));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
+CREATE INDEX IF NOT EXISTS idx_ts_asset   ON task_scope(asset_id) WHERE kind = 'asset';
 
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录

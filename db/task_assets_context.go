@@ -35,6 +35,7 @@ target AS (
          lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
        ))
+    OR (ts.kind='asset' AND a.id = ts.asset_id)
   )
   JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 	UNION
@@ -84,6 +85,7 @@ target AS (
          lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
        ))
+    OR (ts.kind='asset' AND a.id = ts.asset_id)
   )
   JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 )`
@@ -93,7 +95,7 @@ target AS (
 func (s *AssetStore) ListTaskScopeWithSources(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`
 SELECT ts.id, ts.task_id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
-       COALESCE(ts.net::text,''), COALESCE(ts.value,''), ts.source, COALESCE(ts.reason,'')
+       COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.asset_id,0), ts.source, COALESCE(ts.reason,'')
 FROM task_scope ts
 JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 LEFT JOIN companies c ON c.id=ts.company_id
@@ -105,12 +107,16 @@ ORDER BY CASE WHEN ts.task_id=$1 THEN 0 ELSE 1 END, ts.id`, taskID)
 	out := []TaskScope{}
 	for rows.Next() {
 		var scope TaskScope
-		var companyID int64
-		if err := rows.Scan(&scope.ID, &scope.TaskID, &scope.Kind, &companyID, &scope.CompanyName, &scope.Domain, &scope.Net, &scope.Value, &scope.Source, &scope.Reason); err != nil {
+		var companyID, assetID int64
+		if err := rows.Scan(&scope.ID, &scope.TaskID, &scope.Kind, &companyID, &scope.CompanyName,
+			&scope.Domain, &scope.Net, &scope.Value, &assetID, &scope.Source, &scope.Reason); err != nil {
 			return nil, err
 		}
 		if companyID > 0 {
 			scope.CompanyID = &companyID
+		}
+		if assetID > 0 {
+			scope.AssetID = &assetID
 		}
 		out = append(out, scope)
 	}
@@ -221,6 +227,7 @@ context_assets AS (
          lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
          OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
        ))
+    OR (ts.kind='asset' AND a.id = ts.asset_id)
   )
   JOIN context_tasks ctx ON ctx.task_id=ts.task_id
 )
