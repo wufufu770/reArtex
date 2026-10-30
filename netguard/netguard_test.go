@@ -1,6 +1,8 @@
 package netguard
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -9,12 +11,12 @@ import (
 
 func TestAgentEgressBlocksSensitiveRanges(t *testing.T) {
 	blocked := []string{
-		"127.0.0.1",     // 环回：同机管理端口
-		"::1",           // IPv6 环回
+		"127.0.0.1",        // 环回：同机管理端口
+		"::1",              // IPv6 环回
 		"::ffff:127.0.0.1", // IPv4-mapped 绕过，还原后应判环回
 		"169.254.169.254",  // 云元数据，可读实例凭据
-		"0.0.0.0",         // 未指定
-		"224.0.0.1",       // 组播
+		"0.0.0.0",          // 未指定
+		"224.0.0.1",        // 组播
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -151,5 +153,55 @@ func TestLoopbackDeniedByDefault(t *testing.T) {
 	t.Setenv("ARTEX_AGENT_EGRESS_ALLOW_LOCAL", "")
 	if err := AgentEgress.dialControl("tcp", "127.0.0.1:8000", nil); err == nil {
 		t.Fatal("默认应拒绝环回")
+	}
+}
+
+// 允许集钩子是「按请求解析」的那一段：同一套 Policy 类型既能管 IP 段，也能管
+// 任务 scope 派生的主机名。钩子拒绝时必须连段规则一起短路 —— 不允许只放行段
+// 而放过允许集。
+func TestCheckHostUsesAllowHostFunc(t *testing.T) {
+	var seen string
+	p := Policy{
+		Name:         "测试出网",
+		AllowPrivate: true,
+		AllowHostFunc: func(_ context.Context, host string) error {
+			seen = host
+			if host == "blocked.example.com" {
+				return errors.New("目的地不在允许集内")
+			}
+			return nil
+		},
+	}
+	if err := p.CheckHost(context.Background(), "allowed.example.com"); err != nil {
+		t.Fatalf("允许集内的主机应放行: %v", err)
+	}
+	if seen != "allowed.example.com" {
+		t.Fatalf("钩子未收到目标主机: %q", seen)
+	}
+	if err := p.CheckHost(context.Background(), "blocked.example.com"); err == nil {
+		t.Fatal("允许集外的主机必须被拒")
+	}
+	// 段规则仍然生效：环回默认拒，即便允许集放行。
+	if err := p.CheckHost(context.Background(), "127.0.0.1"); err == nil {
+		t.Fatal("允许集不得绕过环回禁令")
+	}
+	// 判不出目的地就不放行。
+	if err := p.CheckHost(context.Background(), "  "); err == nil {
+		t.Fatal("缺少目的地主机名必须被拒")
+	}
+}
+
+// 逃生口必须能整体放开这一段：它本来就是「这条出网全不设防」的开关。
+func TestCheckHostEscapeHatch(t *testing.T) {
+	p := Policy{
+		Name: "测试出网",
+		AllowHostFunc: func(context.Context, string) error {
+			return errors.New("允许集拒绝")
+		},
+	}
+	t.Setenv("ARTEX_TEST_EGRESS_ALLOW_LOCAL", "1")
+	p.EscapeEnv = "ARTEX_TEST_EGRESS_ALLOW_LOCAL"
+	if err := p.CheckHost(context.Background(), "anything.example.com"); err != nil {
+		t.Fatalf("逃生口应整体放开: %v", err)
 	}
 }
