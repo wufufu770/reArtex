@@ -431,7 +431,24 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeI
 	}
 	var err error
 	out.Traffic, err = FindingTrafficTx(tx, out.FindingID)
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	// 回写 L3 反向索引的原料：finding id + 它绑定的流量快照 id。
+	//
+	// ⚠️ 必须在**同一个事务**里：否则会出现「漏洞已落库、节点还没回写」的窗口，
+	// 反向索引就静默漏掉一条证据，而且没有任何报错。
+	//
+	// 位置在 AddFindingTrafficTx **之后**：流量绑定先落库，这里才读得到
+	// snapshot_id（放在插入漏洞行之后立刻写，traffic_ids 会永远是空的）。
+	snapshotIDs := make([]string, 0, len(out.Traffic.Bindings))
+	for _, b := range out.Traffic.Bindings {
+		snapshotIDs = append(snapshotIDs, b.SnapshotID)
+	}
+	if err := linkNodeToFindingTx(tx, in.ExplorationID, out.NodeID, out.FindingID, snapshotIDs); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // RecordFinding is the atomic legacy/no-recorder path used by tools and tests.

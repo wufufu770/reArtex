@@ -2594,3 +2594,124 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
 	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
 }
+
+// =====================================================================
+// L3 反向索引：探索节点 ↔ finding
+//
+// L3 **不新建图引擎**：反向索引 = 节点 payload 上记引用 + 列上的表达式索引。
+// 读面（NodesForFinding）与写面（LinkNodeToFinding / linkNodeToFindingTx）
+// 都在这一节。
+// =====================================================================
+
+// linkNodeToFindingSQL 把 finding 引用与流量快照 id 写进节点 payload。
+//
+// ⚠️ finding_id 存成 **text**：payload 是 agent 可写的 JSONB，同一列上完全可能
+// 出现非数字值；索引表达式必须跟着用文本形态（db/schema_strategy.sql 的
+// idx_exploration_nodes_finding_ref）—— 用 ::bigint 的话非数字值会让建索引
+// 直接抛错，把整次迁移打挂。
+//
+// traffic_ids 取【并集】：|| 只在顶层合并，数组整体替换会把先前记下的快照 id
+// 抹掉（反向索引就此少一条证据）；并集既不重复记，也不丢。
+//
+// ⚠️ jsonb_typeof 那层保护不是防御性冗余：payload 由 agent 写，traffic_ids
+// 可能压根不是数组（agent 塞了个字符串进去）—— 直接 jsonb_array_elements_text
+// 会抛错，把漏洞落库整条拖挂。
+//
+// content_version 递增：payload 变了，节点内容就变了，折叠摘要的缓存正文必须
+// 失效（§5.3 的 content_version 语义）。
+const linkNodeToFindingSQL = `
+UPDATE exploration_nodes
+   SET payload = payload || jsonb_build_object(
+           'finding_id', $2::text,
+           'traffic_ids', (
+               SELECT COALESCE(jsonb_agg(DISTINCT e ORDER BY e), '[]'::jsonb)
+                 FROM jsonb_array_elements_text(
+                        CASE WHEN jsonb_typeof(payload->'traffic_ids') = 'array'
+                             THEN payload->'traffic_ids'
+                             ELSE '[]'::jsonb END
+                        || to_jsonb($3::text[])) AS t(e))),
+       content_version = content_version + 1
+ WHERE id = $1 AND exploration_id = $4`
+
+// normalizeTrafficIDs 去掉空串，并保证返回非 nil。
+//
+// 非 nil 是必需的：驱动把 nil slice 编码成 SQL NULL，to_jsonb(NULL::text[]) 会
+// 让 payload 里的 traffic_ids 变成 null（而不是数组），反查的 @> containment
+// 随即失效。
+func normalizeTrafficIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// LinkNodeToFinding 把 finding id 与它绑定的流量快照 id 记进 finding 节点的
+// payload，让 L3 的反向索引可以从任意 finding 反查到它的 intent / fact / asset。
+//
+// 为什么记在 payload 而不是加列：exploration_nodes.payload 已经是 JSONB，
+// 加列要动 db/schema.sql（别的单元持有）且要改 Node 结构；而 payload + 表达式
+// 索引足够，且**不引入新图引擎**（Sir 2026-10-29 的明确边界）。
+//
+// 幂等：payload || jsonb_build_object 是合并语义，重复调用不产生副作用
+// （traffic_ids 取并集：既不重复记，也不抹掉先前记下的）。
+//
+// 节点必须属于本探索：跨探索串引用会把别的任务的节点拉进本任务的图里。
+func (s *ExplorationStore) LinkNodeToFinding(nodeID, findingID int64, trafficIDs []string) error {
+	if nodeID <= 0 || findingID <= 0 {
+		return errors.New("节点与漏洞 id 必须都大于 0")
+	}
+	res, err := s.db.Exec(linkNodeToFindingSQL, nodeID, strconv.FormatInt(findingID, 10),
+		normalizeTrafficIDs(trafficIDs), s.expID)
+	if err != nil {
+		return fmt.Errorf("回写 finding 引用失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("节点不存在或不属于本探索: %d", nodeID)
+	}
+	return nil
+}
+
+// linkNodeToFindingTx 与 LinkNodeToFinding 同一套语义，但跑在调用方的事务里。
+//
+// 漏洞落库路径必须用它：回写若落在【另一个事务】里，就会出现「漏洞已落库、
+// 节点还没回写」的窗口 —— 反向索引静默漏掉一条证据，而且没有任何报错。
+func linkNodeToFindingTx(tx *sql.Tx, explorationID, nodeID, findingID int64, trafficIDs []string) error {
+	if nodeID <= 0 || findingID <= 0 {
+		return errors.New("节点与漏洞 id 必须都大于 0")
+	}
+	if _, err := tx.Exec(linkNodeToFindingSQL, nodeID, strconv.FormatInt(findingID, 10),
+		normalizeTrafficIDs(trafficIDs), explorationID); err != nil {
+		return fmt.Errorf("回写 finding 引用失败: %w", err)
+	}
+	return nil
+}
+
+// NodesForFinding 从一条 finding 反查回它的探索节点（走 payload 表达式索引）。
+//
+// ⚠️ 为什么要 join findings 复核：payload 是 agent 可写的 JSONB，agent 可以往
+// 任意节点里塞一个别人的 finding_id。只认 payload 就会把那种伪造行当成
+// 「这条漏洞的节点」返回 —— 反向索引指向一个不相干的节点。findings.node_id
+// 才是「这条漏洞就是这个节点」的权威事实。
+//
+// ⚠️ 范围：这里**不返回资产上下文**。节点的资产必须经范围注入的查询取
+// （AssetStore.ScopedAssetIDs / ScopeFragmentFor）—— 直接查 assets 全表会把
+// 范围外资产的存在性泄露出去，「这个 id 存在」本身就是情报。这是安全前提，
+// 不是性能选择。
+func (s *ExplorationStore) NodesForFinding(findingID int64) ([]*Node, error) {
+	if findingID <= 0 {
+		return nil, errors.New("漏洞 id 必须大于 0")
+	}
+	rows, err := s.db.Query(`
+SELECT `+nodeCols+` FROM exploration_nodes
+ WHERE exploration_id=$1 AND kind='finding'
+   AND id = (SELECT node_id FROM findings WHERE id=$2)
+   AND payload->>'finding_id' = $2::text`, s.expID, findingID)
+	if err != nil {
+		return nil, fmt.Errorf("按漏洞反查节点失败: %w", err)
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
