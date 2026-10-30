@@ -2,14 +2,14 @@
 
 package agentcred
 
-import "syscall"
+import (
+	"syscall"
+
+	"github.com/Autumn-27/norma/tool/privdrop"
+)
 
 // ProcAttr 返回把子进程降到 agent 身份的 SysProcAttr。
 //
-// NoSetGroups 保持 false：Go 会先 setgroups(0) 清空附属组，再 setgid/setuid，
-// 子进程才不会带着平台进程的组（root 组）残留。
-func ProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: AgentUID, Gid: AgentGID},
-	}
-}
+// 实现委托给 norma 的 tool/privdrop：框架内置工具与 reArtex 自建工具必须降权到
+// 同一个身份，否则框架那条执行路径就是静默的口子。
+func ProcAttr() *syscall.SysProcAttr { return privdrop.ProcAttr() }
