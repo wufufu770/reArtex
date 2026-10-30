@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +20,7 @@ func TestTaskCategoryBatchRoute(t *testing.T) {
 	defer m.Close()
 
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := New(testServerCtx(t), m, td, td, td)
 	h := s.Handler()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {

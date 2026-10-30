@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -18,7 +17,7 @@ func TestChatUnavailableReasonDistinguishesStates(t *testing.T) {
 	}
 	defer m.Close()
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := New(testServerCtx(t), m, td, td, td)
 
 	// Start from a clean profile table; other tests in the shared DB may have left rows.
 	existing, _ := m.pg.ListProfiles()
@@ -68,7 +67,7 @@ func TestResolveChatAgentHonoursConversationProfile(t *testing.T) {
 	}
 	defer m.Close()
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := New(testServerCtx(t), m, td, td, td)
 
 	// Force the global fallback to nil so a non-nil result can ONLY come from the
 	// conversation's own profile — this is exactly the situation the user hit
