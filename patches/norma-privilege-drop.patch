@@ -1,0 +1,323 @@
+norma v0.4.4 —— agent 工具子进程降权补丁（privilege drop）
+
+问题：容器里平台进程以 root 运行，norma 派生出去的 agent 工具子进程继承同样的
+身份 —— bash 命令、交互式 shell 会话、后台 task、ripgrep 搜索、MCP stdio server
+于是都能读走平台自己的 0600 凭据文件（docker secret 挂在 /run/secrets/pg_dsn，
+模式 0600 但对 root 全开）。agent 拿到连接串就能绕过全部应用层 scope 校验直连
+数据库。
+
+做法：新增 tool/privdrop 包，唯一持有降权用的 UID/GID（65534 / nobody）与
+SysProcAttr 的构造；上面五处 spawn 点在起子进程前把 cmd.SysProcAttr 设成它。
+非 root 部署没有 CAP_SETUID/CAP_SETGID，CanDrop() 为 false，此时保持平台身份
+不变，工具照常可用（绝不因为「降不了权」把工具整个跑不起来）。
+
+刻意不改的两处：tool/ripgrep.go 里 `npm install -g @vscode/ripgrep` 与
+`npm root -g` 是平台自身的准备动作（装搜索用的 rg 二进制），必须保持平台身份，
+补丁不碰它们。
+
+应用方式（作用在 norma 模块根目录，即 go.mod 所在目录）：
+    git apply -p1 patches/norma-privilege-drop.patch
+    # 或
+    patch -p1 < patches/norma-privilege-drop.patch
+
+目标版本：github.com/Autumn-27/norma v0.4.4。模块缓存是只读共享的，本补丁不
+改动它；仓库里由 scripts/prepare-norma.sh 复制到 third_party/norma 后再应用，
+third_party/ 是生成物（已 gitignore），可评审的产物是这份补丁本身。
+diff --git a/mcp/stdio.go b/mcp/stdio.go
+index 1f7e34a..d3885e9 100644
+--- a/mcp/stdio.go
++++ b/mcp/stdio.go
+@@ -5,6 +5,8 @@ import (
+ 	"io"
+ 	"os"
+ 	"os/exec"
++
++	"github.com/Autumn-27/norma/tool/privdrop"
+ )
+ 
+ // stdioCloser shuts down a spawned MCP server process and its pipes.
+@@ -31,6 +33,11 @@ func (s *stdioCloser) Close() error {
+ // applied on top of the parent process environment; pass nil for none.
+ func NewStdioClient(ctx context.Context, server, command string, env map[string]string, args ...string) (*Client, error) {
+ 	cmd := exec.Command(command, args...)
++	// Drop to the agent identity: with a root platform process the MCP server
++	// would inherit root and could read the platform's 0600 credential files.
++	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
++		cmd.SysProcAttr = attr
++	}
+ 	if len(env) > 0 {
+ 		cmd.Env = os.Environ()
+ 		for k, v := range env {
+diff --git a/tool/bash.go b/tool/bash.go
+index 7a407f9..2332c42 100644
+--- a/tool/bash.go
++++ b/tool/bash.go
+@@ -12,6 +12,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/Autumn-27/norma/permission"
++	"github.com/Autumn-27/norma/tool/privdrop"
+ )
+ 
+ // catastrophicBash matches a small set of irreversibly destructive commands
+@@ -158,6 +159,11 @@ func runBashSync(ctx context.Context, tc *ToolContext, command string, timeout t
+ 
+ 	shell, flags := shellCmd()
+ 	cmd := exec.CommandContext(cctx, shell, append(flags, command)...)
++	// Drop to the agent identity: with a root platform process the agent's shell
++	// would inherit root and could read the platform's 0600 credential files.
++	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
++		cmd.SysProcAttr = attr
++	}
+ 	if tc != nil {
+ 		cmd.Dir = tc.WorkingDir
+ 		cmd.Env = withEnv(tc.Env)
+diff --git a/tool/privdrop/privdrop.go b/tool/privdrop/privdrop.go
+new file mode 100644
+index 0000000..c71179a
+--- /dev/null
++++ b/tool/privdrop/privdrop.go
+@@ -0,0 +1,29 @@
++// Package privdrop defines the identity that agent-spawned child processes run
++// under, and the helper that drops a child to it.
++//
++// Why it exists: in the container the platform process runs as root (the base
++// image defaults to root), so agent-spawned children inherit that identity.
++// The platform's own credential files — a docker secret mounted at
++// /run/secrets/pg_dsn, mode 0600 but fully readable by root — are then readable
++// by the agent, and the agent holding the connection string can bypass every
++// application-layer scope check and talk to the database directly. Dropping
++// tool children to a dedicated unprivileged UID breaks that read path.
++//
++// Why 65534 (nobody): it is the last unprivileged UID that essentially every
++// base image ships. Not 0 — that is the platform process's own identity, so
++// dropping to it is no drop at all. Not 1000 — the mounted db credential file
++// in the container is owned by uid 1000 with mode 0600, so a child running as
++// 1000 still reads it and the drop is theatre.
++//
++// The UID/GID live here so that there is exactly one source of truth: the host
++// application derives its own agent identity from these constants instead of
++// redeclaring them.
++package privdrop
++
++const (
++	// AgentUID is the dedicated unprivileged UID for agent-spawned children.
++	AgentUID = 65534
++	// AgentGID is the dedicated unprivileged GID for agent-spawned children;
++	// it has the same value as AgentUID.
++	AgentGID = 65534
++)
+diff --git a/tool/privdrop/privdrop_linux.go b/tool/privdrop/privdrop_linux.go
+new file mode 100644
+index 0000000..478e354
+--- /dev/null
++++ b/tool/privdrop/privdrop_linux.go
+@@ -0,0 +1,27 @@
++//go:build linux
++
++package privdrop
++
++import (
++	"os"
++	"syscall"
++)
++
++// ProcAttr returns the SysProcAttr that drops a child to the agent identity.
++//
++// NoSetGroups stays false: Go clears the supplementary groups with
++// setgroups(0) before setgid/setuid, so the child does not keep the platform
++// process's groups (the root group) around.
++func ProcAttr() *syscall.SysProcAttr {
++	return &syscall.SysProcAttr{
++		Credential: &syscall.Credential{Uid: AgentUID, Gid: AgentGID},
++	}
++}
++
++// CanDrop reports whether this process can drop a child to the agent identity.
++//
++// setuid/setgid need CAP_SETUID/CAP_SETGID, so only root (or a process holding
++// both capabilities) can do it. A non-root deployment (desktop build, local
++// development) gets false — there the child keeps the platform identity, and
++// the tools must not stop working just because they cannot be dropped.
++func CanDrop() bool { return os.Geteuid() == 0 }
+diff --git a/tool/privdrop/privdrop_linux_test.go b/tool/privdrop/privdrop_linux_test.go
+new file mode 100644
+index 0000000..d775739
+--- /dev/null
++++ b/tool/privdrop/privdrop_linux_test.go
+@@ -0,0 +1,53 @@
++//go:build linux
++
++package privdrop
++
++import (
++	"os"
++	"testing"
++)
++
++// The drop has to land on a dedicated unprivileged UID: not 0 (the platform
++// process's own identity, so no drop at all) and not 1000 (the container's
++// mounted db credential file is owned by uid 1000 with mode 0600, so a child
++// running as 1000 still reads it).
++func TestAgentIdentityIsDedicatedNonPrivileged(t *testing.T) {
++	if AgentUID == 0 {
++		t.Fatal("AgentUID 不能是 0：那是平台进程自己的身份，降权等于没降")
++	}
++	if AgentUID == 1000 {
++		t.Fatal("AgentUID 不能是 1000：db 凭据文件(/run/secrets/pg_dsn)属主就是 1000，0600 挡不住它")
++	}
++	if AgentGID == 0 {
++		t.Fatal("AgentGID 不能是 0")
++	}
++	if AgentGID != AgentUID {
++		t.Fatalf("AgentGID(%d) 必须与 AgentUID(%d) 同值", AgentGID, AgentUID)
++	}
++}
++
++// On Linux the helper must hand back a credential carrying the agent identity,
++// otherwise the spawn sites would silently run their children as the platform
++// identity.
++func TestProcAttrCarriesAgentIdentity(t *testing.T) {
++	attr := ProcAttr()
++	if attr == nil {
++		t.Fatal("Linux 上 ProcAttr 不能是 nil：否则工具子进程仍以平台身份(root)运行")
++	}
++	if attr.Credential == nil {
++		t.Fatal("ProcAttr 必须带上 Credential，否则不会发生降权")
++	}
++	if attr.Credential.Uid != AgentUID {
++		t.Fatalf("Credential.Uid = %d，期望 %d", attr.Credential.Uid, AgentUID)
++	}
++	if attr.Credential.Gid != AgentGID {
++		t.Fatalf("Credential.Gid = %d，期望 %d", attr.Credential.Gid, AgentGID)
++	}
++}
++
++// The drop needs CAP_SETUID/CAP_SETGID, so it is only available to root.
++func TestCanDropTracksRoot(t *testing.T) {
++	if got, want := CanDrop(), os.Geteuid() == 0; got != want {
++		t.Fatalf("CanDrop() = %v，期望 %v", got, want)
++	}
++}
+diff --git a/tool/privdrop/privdrop_other.go b/tool/privdrop/privdrop_other.go
+new file mode 100644
+index 0000000..6874b81
+--- /dev/null
++++ b/tool/privdrop/privdrop_other.go
+@@ -0,0 +1,16 @@
++//go:build !linux
++
++package privdrop
++
++import "syscall"
++
++// ProcAttr returns nil on non-Linux platforms: dropping via setuid is Linux
++// semantics.
++//
++// The desktop builds (macOS/Windows) are not part of this isolation's threat
++// model — there is no "root platform inside a container + mounted credential
++// file" premise, so the platform identity is kept.
++func ProcAttr() *syscall.SysProcAttr { return nil }
++
++// CanDrop returns false on non-Linux platforms: there is no setuid drop there.
++func CanDrop() bool { return false }
+diff --git a/tool/privdrop/privdrop_other_test.go b/tool/privdrop/privdrop_other_test.go
+new file mode 100644
+index 0000000..aadc85c
+--- /dev/null
++++ b/tool/privdrop/privdrop_other_test.go
+@@ -0,0 +1,19 @@
++//go:build !linux
++
++package privdrop
++
++import "testing"
++
++// Off Linux there is no setuid drop: the helper must report "no drop" instead
++// of failing hard, so the spawn sites keep the platform identity.
++func TestProcAttrIsNilOffLinux(t *testing.T) {
++	if attr := ProcAttr(); attr != nil {
++		t.Fatalf("非 Linux 上 ProcAttr 必须是 nil，实际返回 %+v", attr)
++	}
++}
++
++func TestCanDropIsFalseOffLinux(t *testing.T) {
++	if CanDrop() {
++		t.Fatal("非 Linux 上 CanDrop 必须是 false")
++	}
++}
+diff --git a/tool/ripgrep.go b/tool/ripgrep.go
+index e372b8e..7860617 100644
+--- a/tool/ripgrep.go
++++ b/tool/ripgrep.go
+@@ -10,6 +10,8 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++
++	"github.com/Autumn-27/norma/tool/privdrop"
+ )
+ 
+ // Ripgrep integration: the Grep tool prefers the ripgrep binary when available
+@@ -146,6 +148,11 @@ func runWithRipgrep(rg string, r ripgrepReq, tc *ToolContext) (Result, bool) {
+ 	args = append(args, "-e", r.pattern, "--", target)
+ 
+ 	cmd := exec.Command(rg, args...)
++	// Drop to the agent identity: with a root platform process the agent's search
++	// would inherit root and could read the platform's 0600 credential files.
++	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
++		cmd.SysProcAttr = attr
++	}
+ 	cmd.Dir = dir
+ 	out, err := cmd.Output()
+ 	if err != nil {
+diff --git a/tool/shell_session.go b/tool/shell_session.go
+index bab0ee5..8e0f913 100644
+--- a/tool/shell_session.go
++++ b/tool/shell_session.go
+@@ -11,6 +11,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/Autumn-27/norma/tool/privdrop"
+ 	"github.com/hinshun/vt10x"
+ )
+ 
+@@ -313,6 +314,11 @@ func (m *Manager) openSession(command, workDir string, env []string, rows, cols
+ 	}
+ 	shell, flags := shellCmd()
+ 	cmd := exec.CommandContext(m.rootCtx, shell, append(flags, command)...)
++	// Drop to the agent identity: with a root platform process the agent's shell
++	// would inherit root and could read the platform's 0600 credential files.
++	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
++		cmd.SysProcAttr = attr
++	}
+ 	cmd.Dir = workDir
+ 	cmd.Env = withEnv(env)
+ 	ptmx, err := startPTY(cmd, rows, cols)
+diff --git a/tool/task.go b/tool/task.go
+index 9df0a3b..25e43ed 100644
+--- a/tool/task.go
++++ b/tool/task.go
+@@ -11,6 +11,8 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"time"
++
++	"github.com/Autumn-27/norma/tool/privdrop"
+ )
+ 
+ // Background task execution.
+@@ -329,6 +331,12 @@ func (m *Manager) Spawn(spec SpawnSpec) (*Task, error) {
+ 	}
+ 	shell, flags := shellCmd()
+ 	cmd := exec.CommandContext(m.rootCtx, shell, append(flags, spec.Command)...)
++	// Drop to the agent identity: with a root platform process the agent's shell
++	// would inherit root and could read the platform's 0600 credential files.
++	// Applied before setDetached, which only adds Setpgid to the same struct.
++	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
++		cmd.SysProcAttr = attr
++	}
+ 	cmd.Dir = spec.WorkingDir
+ 	cmd.Env = withEnv(spec.Env)
+ 	cmd.Stdout = f
