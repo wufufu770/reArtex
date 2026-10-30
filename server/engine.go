@@ -153,6 +153,23 @@ type Engine struct {
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
+
+	// ---------- 群组闸门（任务大厅）----------
+	//
+	// 三个回调都由 server 侧注入（默认实现见 NewEngine）：判据（群成员能不能用、
+	// 组内上限、额度状态）属于 server 侧的数据层，engine 自己不查群组表，
+	// 只问「这次能不能认领」。
+	//
+	// GroupConcurrencyLimit 报某个 task 所属群组的并发上限；ok=false 表示这个 task
+	// 没有群组 —— 平台的绝大多数任务都没有大厅 ⇒ 没有组内闸门 ⇒ 认领路径与从前
+	// 一模一样。
+	GroupConcurrencyLimit func(taskID int64) (int, bool)
+	// GroupRunningIntents 报某个 task 当前有多少个 intent 在执行（state='running'）。
+	// 它是组内并发上限的分母：一个群 = 一个 task = 一张探索图。
+	GroupRunningIntents func(taskID int64) (int, error)
+	// GroupDispatcherClaimable 判定当前 worker 是否应把这次认领让给 auto（分发者）。
+	// 返回 true = 让位（本次不认领）；false = 正常参与。
+	GroupDispatcherClaimable func(taskID int64, worker string) bool
 }
 
 type taskRuntime struct {
@@ -389,10 +406,18 @@ func (e *Engine) ActiveLLMCalls(taskID string) int64 {
 func (e *Engine) touch(taskID string) { e.lastAct.Store(taskID, time.Now().Unix()) }
 
 func NewEngine(m *Manager) *Engine {
-	return &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
+	e := &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
 		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
 		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
 		runtimes: map[string]*taskRuntime{}}
+	// 群组闸门的默认实现装在 manager 侧（manager.go）：判据（群成员能不能用、组内
+	// 上限、额度状态）都是 server 侧的数据层口径，engine 不查群组表。装配区
+	// （server.go 的 New）属别的单元的文件域，所以这里先按 manager 侧回调装上，
+	// server 侧随时可以用 SetGroupXxx 覆盖。
+	e.GroupConcurrencyLimit = m.GroupConcurrencyLimit
+	e.GroupRunningIntents = m.GroupRunningIntents
+	e.GroupDispatcherClaimable = m.groupDispatcherYields
+	return e
 }
 
 // registerWork records the cancel for the work currently running intentID.
@@ -723,6 +748,23 @@ func (e *Engine) SetAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worke
 func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
 	e.resolve = fn
 	e.resolveAuthoritative = true
+}
+
+// SetGroupConcurrencyLimit installs the per-group concurrency cap lookup.
+func (e *Engine) SetGroupConcurrencyLimit(fn func(taskID int64) (int, bool)) {
+	e.GroupConcurrencyLimit = fn
+}
+
+// SetGroupRunningIntents installs the running-intent counter used as the
+// per-group concurrency denominator.
+func (e *Engine) SetGroupRunningIntents(fn func(taskID int64) (int, error)) {
+	e.GroupRunningIntents = fn
+}
+
+// SetGroupDispatcherClaimable installs the dispatcher-fallback lookup: it
+// answers whether the current worker should yield to the dispatcher (auto).
+func (e *Engine) SetGroupDispatcherClaimable(fn func(taskID int64, worker string) bool) {
+	e.GroupDispatcherClaimable = fn
 }
 
 // snapshotFor returns the planner/worker a task should run on, from the task-router
@@ -1244,12 +1286,125 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 	}
 }
 
+// claimNext 认领一条意图。
+//
+// 两道闸门（顺序即仲裁顺序）：
+//  1. auto 的兜底闸门：auto 只在"组内没有可用成员"时才被放进认领路径；有可用
+//     成员时它是分发者，让位给成员。
+//  2. 组内并发上限 N：一个群同时最多 N 个 intent 在执行，超了就不再领新的
+//     （**不打断在途** —— 已认领的继续跑完，调低上限也不杀在途）。
+//
+// 全局任务槽位 M 不在这里判定：它在**任务准入**那一层（reconcileConcurrency，
+// task_concurrency_limit）——没有槽位的任务根本不会跑到认领这一步。两级并发因此
+// 是"先 M 后 N"：M 决定哪些群能开跑，N 决定一个群里能同时跑几个。
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
+	if !e.dispatcherMayClaim(t, name) {
+		return nil
+	}
+	if !e.groupCapAllowsClaim(t) {
+		return nil
+	}
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
-		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
+		if e.claimIntent(t, in.ID, name) {
 			return in
 		}
 	}
 	return nil
+}
+
+// dispatcherMayClaim 判定当前 worker 这次能不能参与认领。
+//
+// auto 的二重身份：auto 是**分发者**（派工），也是组里没人时的**兜底执行者**。
+//   - 组里有可用成员 ⇒ auto 让位（成员干活，它是分发者）；
+//   - 组里没有可用成员 ⇒ 放行 auto（它是唯一能让任务不停下来的执行者）。
+//
+// 判据在 server 侧（manager.go）：engine 不查群成员表。
+func (e *Engine) dispatcherMayClaim(t *Task, name string) bool {
+	if e.GroupDispatcherClaimable == nil {
+		return true
+	}
+	tid, ok := e.taskNumericID(t)
+	if !ok {
+		return true // task id 不是数字 ⇒ 不存在大厅（大厅按 task id 关联）⇒ 不设闸门
+	}
+	return !e.GroupDispatcherClaimable(tid, name)
+}
+
+// groupCapAllowsClaim 快速判定组内并发上限：还有空位才继续去认领。
+//
+// 这是**快路径**，不是权威判定：权威判定在 claimIntentWithinGroupCap 的事务里
+// （计数与认领同一条路径 ⇒ 并发认领不会都越过上限）。快路径的作用是"到顶了就别
+// 进候选循环"，省掉每个候选意图一次事务。数不出来时不在这里收紧：事务里数不出来
+// 会 fail closed（不认领）。
+func (e *Engine) groupCapAllowsClaim(t *Task) bool {
+	limit, hasGroup := e.groupConcurrencyLimit(t)
+	if !hasGroup || limit <= 0 {
+		return true
+	}
+	if e.GroupRunningIntents == nil {
+		return true
+	}
+	tid, ok := e.taskNumericID(t)
+	if !ok {
+		return true
+	}
+	running, err := e.GroupRunningIntents(tid)
+	if err != nil {
+		return true
+	}
+	return running < limit
+}
+
+// groupConcurrencyLimit 读这个 task 所属群组的并发上限；ok=false 表示没有群组。
+func (e *Engine) groupConcurrencyLimit(t *Task) (int, bool) {
+	if e.GroupConcurrencyLimit == nil {
+		return 0, false
+	}
+	tid, ok := e.taskNumericID(t)
+	if !ok {
+		return 0, false
+	}
+	return e.GroupConcurrencyLimit(tid)
+}
+
+// taskNumericID 把 task 的字符串 id 解析成数值 id（大厅/额度都按数值 id 关联）。
+func (e *Engine) taskNumericID(t *Task) (int64, bool) {
+	if t == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// claimIntent 认领一个意图（受群组并发上限约束）。
+//
+// 没有群组的 task（平台的绝大多数任务）走原路径：单条 CAS open→running，行为与
+// 从前完全一致。有群组的 task 走"带闸门的认领"：上限判定与认领在**同一个事务**
+// 里完成 ⇒ 两个并发认领不会都越过上限（原子性见 manager.claimIntentWithinGroupCap）。
+func (e *Engine) claimIntent(t *Task, intentID int64, name string) bool {
+	if _, hasGroup := e.groupConcurrencyLimit(t); !hasGroup {
+		claimed, err := t.Store.ClaimIntent(intentID, name)
+		if err != nil {
+			log.Printf("[worker %s] task %s 认领意图 #%d 失败: %v", name, t.ID, intentID, err)
+		}
+		return claimed
+	}
+	tid, ok := e.taskNumericID(t)
+	if !ok {
+		claimed, err := t.Store.ClaimIntent(intentID, name)
+		if err != nil {
+			log.Printf("[worker %s] task %s 认领意图 #%d 失败: %v", name, t.ID, intentID, err)
+		}
+		return claimed
+	}
+	claimed, err := e.m.claimIntentWithinGroupCap(tid, t.Store.ID(), intentID, name)
+	if err != nil {
+		log.Printf("[worker %s] task %s 认领意图 #%d 失败: %v", name, t.ID, intentID, err)
+		return false
+	}
+	return claimed
 }
