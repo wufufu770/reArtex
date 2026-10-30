@@ -53,3 +53,43 @@ func IsTier1ReadOnlyTool(key string) bool {
 	}
 	return false
 }
+
+// StrategyProposalTools 是【提议级】工具清单。
+//
+// 它们的审查成本必须**严格低于**直接写入类工具（如 add_intent）：提议只写隔离态
+// 策略 + 待裁决提议，不改任何 owner、不触发任何状态迁移。与 Phase 5 的
+// propose_intent 同一处置（design §2 Step 4）。
+//
+// ⚠️ 策略工具**不得**进 Tier1ReadOnlyTools：策略库跨任务、跨租户，读它不是
+// 「任务范围内的只读」⇒ 进 Tier 1 等于自动放行范围外读取。这条由本文件末尾的
+// init 守卫结构性拦住，不是靠约定。
+var StrategyProposalTools = []string{"strategy_propose"}
+
+// IsStrategyProposalTool 报告某个工具 key 是否属于提议级。
+func IsStrategyProposalTool(key string) bool {
+	for _, k := range StrategyProposalTools {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// strategyLibraryToolKeys 是策略库（L4）面向 agent 的工具 key 全集。
+//
+// 三个都要守住「不进 Tier 1」：它们读的是**跨任务、跨租户**的知识，
+// 自动放行等于让任何 agent 无需申请就把范围外的知识读走。
+var strategyLibraryToolKeys = []string{"strategy_search", "strategy_get", "strategy_propose"}
+
+// init 是「策略工具不入 Tier 1」的**结构性**守卫。
+//
+// 为什么是 panic 而不是一条测试：Tier 1 的语义是「自动通过、不消耗分类器调用」，
+// 一旦策略工具被写进那张清单，泄露就是【默认发生】而不是「可能发生」。用 panic
+// 把这条变成「写错就起不来」，比留一条会被人绕过的测试更硬。
+func init() {
+	for _, k := range strategyLibraryToolKeys {
+		if IsTier1ReadOnlyTool(k) {
+			panic("策略工具 " + k + " 不允许进 Tier1ReadOnlyTools：策略库跨任务、跨租户，读它不是「任务范围内的只读」")
+		}
+	}
+}

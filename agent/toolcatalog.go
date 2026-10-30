@@ -60,7 +60,10 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 //
 // goal_met：绕过逐个 prove_goal、直接从全局宣布【整个任务完成】,权重大且有误判风险,又与
 // 「prove_goal 标记最后一个目标 → 自动收官」重复,故默认不给任何 agent,需要时再手动绑。
-var defaultUnbound = map[string]bool{"goal_met": true}
+//
+// strategy_get：按 id 加载一条策略的【正文】。它把跨任务知识拉进上下文,风险高于检索
+// 摘要（strategy_search 只给摘要）⇒ 默认不给任何 agent,需要时再手动绑。
+var defaultUnbound = map[string]bool{"goal_met": true, "strategy_get": true}
 
 // BuiltinToolSeeds 把各 agent 的内置工具集去重合并成 seed 列表：同名工具（如 list_assets
 // 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则强制绑定为空。
@@ -101,7 +104,171 @@ func BuiltinToolSeeds() []ToolSeed {
 		})
 	}
 	out = append(out, emitStructuredIntentSeed)
+	out = append(out, advisoryStrategyToolSeeds...)
 	return applyAdvisoryAgentBindings(out)
+}
+
+// advisoryStrategyToolSeeds 是顾问型 agent（curator / verifier / redteam / creative）
+// 在策略库阶段要用的工具的目录占位。
+//
+// 为什么是「占位」而不是实现：这些工具的 handler 属于 curator 单元（裁决写与重放
+// 闸门那条线），本单元不实现 curator。占位只负责两件事：
+//   - tools 表里有这些 key ⇒ 顾问 agent 的绑定策略（db.AdvisoryAgentToolPolicies）
+//     不必再等「工具尚未注册」就能绑上；
+//   - 目录里看得见、能按 agent 勾选。
+//
+// 目录占位只负责「绑得上、看得见」，不负责「调得动」：ToolResolve 的注入路径按
+// domainReg 查 handler，查不到就不注入 ⇒ 占位期间不会有任何 agent 拿到一个调不动的
+// 工具。与 emit_structured_intent 同一处置。
+//
+// ⚠️ tools 表的播种是【首次插入才写】（SeedTool 用 DO NOTHING 保留用户的编辑）⇒
+// curator 单元落地真实 handler 时，参数 schema 需要用「恢复默认」或 UpsertToolForce
+// 覆盖本占位，否则占位的 schema 会一直生效。
+var advisoryStrategyToolSeeds = []ToolSeed{
+	{
+		Key:  "read_strategy_library",
+		Desc: "读策略库（已激活策略的摘要列表 / 单条详情）。只读，不改任何状态。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"strategy_id": map[string]any{"type": "integer", "description": "可选：只看某一条策略"},
+				"limit":       map[string]any{"type": "integer", "description": "最多返回多少条（默认 20）"},
+			},
+		},
+	},
+	{
+		Key:  "read_pending_contradictions",
+		Desc: "读待处理的证伪记录（pending_contradictions）。只读。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"limit": map[string]any{"type": "integer", "description": "最多返回多少条（默认 20）"},
+			},
+		},
+	},
+	{
+		Key:  "run_replay_eval",
+		Desc: "在冻结的重放语料上评估一份候选策略变更（可比性由确定性层判定，LLM 不参与打分）。只读，不写库。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"activation": map[string]any{"type": "object", "description": "候选激活条件（资产图谓词）"},
+				"milestones": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "候选里程碑"},
+			},
+			"required": []string{"activation"},
+		},
+	},
+	{
+		Key:  "submit_decision",
+		Desc: "提交一条裁决建议（写 curator_decisions）。只提议：真正的裁决由确定性层做。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"strategy_id": map[string]any{"type": "integer", "description": "涉及的策略 id"},
+				"decision":    map[string]any{"type": "string", "description": "建议的裁决（promote / retire / keep …）"},
+				"reason":      map[string]any{"type": "string", "description": "建议理由（必填）"},
+			},
+			"required": []string{"decision", "reason"},
+		},
+	},
+	{
+		Key:  "read_finding",
+		Desc: "读一条漏洞记录及其证据。只读。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"finding_id": map[string]any{"type": "integer", "description": "漏洞 id"},
+			},
+			"required": []string{"finding_id"},
+		},
+	},
+	{
+		Key:  "submit_verdict",
+		Desc: "提交一条验证结论（写 verification_verdicts）。只提议，判定由确定性层做。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"finding_id": map[string]any{"type": "integer", "description": "漏洞 id"},
+				"verdict":    map[string]any{"type": "string", "description": "结论（confirmed / refuted / inconclusive）"},
+				"reason":     map[string]any{"type": "string", "description": "结论依据（必填）"},
+			},
+			"required": []string{"finding_id", "verdict", "reason"},
+		},
+	},
+	{
+		Key:  "submit_contradiction",
+		Desc: "提交一条证伪记录（写 pending_contradictions）。只提议。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"strategy_id": map[string]any{"type": "integer", "description": "被证伪的策略 id"},
+				"finding_id":  map[string]any{"type": "integer", "description": "作为反证的漏洞 id（可选）"},
+				"reason":      map[string]any{"type": "string", "description": "证伪理由（必填）"},
+			},
+			"required": []string{"strategy_id", "reason"},
+		},
+	},
+	{
+		Key:  "propose_strategy",
+		Desc: "提议一条策略变更（写 strategy_proposals）。只提议：需裁决后才生效。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":     map[string]any{"type": "string", "description": "策略短名"},
+				"summary":  map[string]any{"type": "string", "description": "一句话描述"},
+				"reason":   map[string]any{"type": "string", "description": "为什么值得提议"},
+				"strategy_id": map[string]any{"type": "integer", "description": "改已有策略时填它的 id"},
+			},
+			"required": []string{"name", "summary", "reason"},
+		},
+	},
+	{
+		Key:  "propose_scenario_feature",
+		Desc: "提议一个场景特征（写 proposals）。只提议，需裁决后才生效。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":        map[string]any{"type": "string", "description": "特征短名"},
+				"description": map[string]any{"type": "string", "description": "特征描述"},
+				"reason":      map[string]any{"type": "string", "description": "为什么值得提议"},
+			},
+			"required": []string{"name", "description", "reason"},
+		},
+	},
+	{
+		Key:  "read_strategy_posterior",
+		Desc: "读策略的后验（效用 / 置信度 / 证据投票 / 观测次数）。只读。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"strategy_id": map[string]any{"type": "integer", "description": "策略 id"},
+			},
+			"required": []string{"strategy_id"},
+		},
+	},
+	{
+		Key:  "read_traffic_evidence",
+		Desc: "读流量证据（请求 / 响应快照）。只读。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"finding_id": map[string]any{"type": "integer", "description": "漏洞 id"},
+				"binding_id": map[string]any{"type": "integer", "description": "可选：某一段绑定"},
+			},
+			"required": []string{"finding_id"},
+		},
+	},
+	{
+		Key:  "read_asset_graph",
+		Desc: "读资产图（范围内的资产与关系）。只读。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task_id": map[string]any{"type": "integer", "description": "可选：任务 id（决定范围）"},
+				"q":       map[string]any{"type": "string", "description": "可选：关键字"},
+			},
+		},
+	},
 }
 
 // emitStructuredIntentSeed 是「输出结构化意图」工具的目录条目。

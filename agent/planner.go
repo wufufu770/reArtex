@@ -43,9 +43,13 @@ type Planner struct {
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
 	// session, but the shared store lets it record a serial exploit chain once and
-	// dispatch it step-by-step over rounds instead of front-loading it in parallel.
+	// dispatch it step-by-step across rounds instead of front-loading it in parallel.
 	todoMu sync.Mutex
 	todos  map[int64]*actool.TodoStore
+
+	// strategyContext 是「给 planner 注入哪些策略摘要」的回调（宿主侧装配）。
+	// nil = 不注入。
+	strategyContext func(taskID int64) string
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
@@ -99,6 +103,33 @@ func (p *Planner) SetWebSearch(o WebSearchOpts) { p.webSearch = o }
 // constraints get injected into the planner system prompt. Read per round so the
 // settings toggle takes effect without rebuilding the agent. nil = inject (default).
 func (p *Planner) SetConstraintInject(fn func() bool) { p.injectConstraints = fn }
+
+// SetStrategyContextProvider 装入「给 planner 注入哪些策略摘要」的回调。
+//
+// 为什么用回调注入而不是直接给 *db.DB：与 SetConstraintInject 同一范式 ——
+// 提示装配不直接依赖存储实现，测试可以塞一个假 provider。
+//
+// 返回的文本**只允许含摘要**（反模式 8：全库塞进上下文）。这条是结构性的：
+// provider 的返回值由宿主侧用 db.StrategySnapshotEntry（**没有 steps 字段**）
+// 渲染，注入路径拿不到策略正文。
+func (p *Planner) SetStrategyContextProvider(fn func(taskID int64) string) {
+	p.strategyContext = fn
+}
+
+// strategyContextBlock 返回注入 planner 态势的策略摘要块（空串 = 不注入）。
+//
+// 注入走的是**宿主侧**装配（不是 agent 工具调用）⇒ 不经工具门；它受的是
+// 「资产签名来自 scope 注入版查询」这条约束。
+func (p *Planner) strategyContextBlock(taskID int64) string {
+	if p.strategyContext == nil {
+		return ""
+	}
+	sc := strings.TrimSpace(p.strategyContext(taskID))
+	if sc == "" {
+		return ""
+	}
+	return "\n\n【可复用策略（仅摘要，正文需自行加载）】：" + sc
+}
 
 // wantConstraints reports whether constraint injection is enabled (default yes).
 func (p *Planner) wantConstraints() bool { return p.injectConstraints == nil || p.injectConstraints() }
@@ -380,6 +411,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
 	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	// 策略摘要：只注入摘要，不注入正文（反模式 8）。
+	situational += p.strategyContextBlock(taskID)
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
