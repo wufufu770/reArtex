@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/agentcred"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -273,12 +275,19 @@ func workerArtifactSpec(runDir string) string {
 // worker (intentID<=0 → task dir only). The "tasks/" segment groups per-task dirs
 // symmetrically with the chat agent's "sessions/<sessionID>". Best-effort mkdir — on
 // failure, writes fail the same way an unwritable CWD would.
+//
+// 目录属主交给 agent 身份：工具子进程降权到非特权 UID 后，仍要在自己的工作
+// 目录里写中间产物（规约要求「一律写到本次意图的专属工作目录」）。父目录保持
+// 平台属主 —— agent 只能写自己的任务目录，动不了别人的。
 func ensureRunDir(base string, taskID, intentID int64) string {
 	dir := filepath.Join(base, "tasks", strconv.FormatInt(taskID, 10))
 	if intentID > 0 {
 		dir = filepath.Join(dir, "i"+strconv.FormatInt(intentID, 10))
 	}
 	_ = os.MkdirAll(dir, 0o755)
+	if err := agentcred.ChownToAgent(dir); err != nil {
+		log.Printf("[agent] 工作目录 %s 归属 agent 身份失败: %v", dir, err)
+	}
 	return dir
 }
 
