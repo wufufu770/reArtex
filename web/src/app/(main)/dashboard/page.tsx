@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Progress } from "@/components/ui/progress";
+import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { api } from "@/lib/api";
 import type {
   Activity,
@@ -500,6 +501,9 @@ export default function DashboardPage() {
           <p className="text-xs text-muted-foreground">系统全局状态 · 实时刷新</p>
         </div>
       </div>
+
+      {/* ── 出网治理状态（置于统计卡之前：出网未完全受管时，必须先看见这件事）── */}
+      <EgressGovernanceNotice />
 
       {/* ── Row 1: 5 stat cards ── */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">

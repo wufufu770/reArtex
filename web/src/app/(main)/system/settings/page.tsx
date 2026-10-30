@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Settings } from "@/lib/types";
@@ -260,6 +261,10 @@ export default function SystemSettingsPage() {
         <h1 className="text-xl font-semibold tracking-tight">系统配置</h1>
         <p className="text-muted-foreground text-sm">全局运行时开关</p>
       </div>
+
+      {/* 出网治理状态：本页就是「流量捕获 / 全局代理 / 操作约束」这些出网相关配置的
+          所在地，所以出网到底管住了哪些通道、哪些没管住，放在这里最不容易被忽略。 */}
+      <EgressGovernanceNotice />
 
       {/* 多列而非 grid：网络搜索卡片比其余高数倍，且高度随所选后端变化（brave/tavily
           的 key 输入是条件渲染）。grid 会按最高的一张撑满整行、在旁边留下大片空白，
