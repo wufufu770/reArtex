@@ -22,7 +22,14 @@ func taskHallTestServer(t *testing.T) (*Server, *db.DB) {
 	}
 	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	// ctx 必须可取消：server.New 会起后台循环（notifier 的 Run 每 3 秒一轮、
+	// task-archive worker、reconcileConcurrency），它们靠 <-ctx.Done() 退出。
+	// 用 context.Background() 的话这些循环**永生**，在同一个包里跨用例存活，
+	// 继续对【共享的包级派生库】读写 —— 同包另一个用例的待投递行会被抢去分派，
+	// 表现为那个用例「没有任何进展」这类查不到原因的失败。
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s := New(ctx, m, td, td, td)
 	return s, m.pg
 }
 
