@@ -1431,18 +1431,6 @@ func (t *ToolSet) proposalDB() *db.DB {
 	return t.ts.DB()
 }
 
-// proposalAssetStore 给出提案路径要用的资产库句柄（nil = 不可用）。
-func (t *ToolSet) proposalAssetStore() *db.AssetStore {
-	if t.as != nil {
-		return t.as
-	}
-	d := t.proposalDB()
-	if d == nil {
-		return nil
-	}
-	return d.Assets()
-}
-
 // proposalGroup 取出本任务绑定的大厅（nil = 这个任务没有大厅）。
 func (t *ToolSet) proposalGroup(taskID int64) (*db.ChatGroup, error) {
 	d := t.proposalDB()
@@ -1491,7 +1479,12 @@ func (t *ToolSet) proposalAnchorsInScope(taskID int64, anchors []int64) error {
 	if len(anchors) == 0 {
 		return nil
 	}
-	as := t.proposalAssetStore()
+	as := t.as
+	if as == nil {
+		if d := t.proposalDB(); d != nil {
+			as = d.Assets()
+		}
+	}
 	if as == nil {
 		return errors.New("范围校验不可用：拿不到资产库句柄")
 	}

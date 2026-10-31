@@ -17,6 +17,11 @@
 // 「已拍板：5 个决策点」），不是以实现为准。实现与计划不一致的地方，
 // 用例按计划写，并在报告里点名。
 //
+// 【为什么一个用例函数只跑几轮仲裁】每一轮 RunOnce 都要刷一次 utility 物化
+// 视图并扫一遍全库，而 server 包的整套件本来就贴着 go test 的 10 分钟上限
+// （基线 464s）。⇒ 同一组行为共用一轮仲裁：既省时，又让「几条策略在同一轮里
+// 各自被裁决」这件事本身成为断言对象（这正是真实的仲裁场景）。
+//
 // 【测试隔离】每个用例造的东西都在用例结束时删掉（e2eCleanup）：
 //   - 策略行：留下会让后面用例的 RunOnce 扫到别人的隔离态策略；
 //   - 冻结语料：strategy_replay_corpus 是全库共享的，ReplayScore 读的是
@@ -171,6 +176,15 @@ func e2eSetColumn(t *testing.T, pg *db.DB, strategyID int64, column string, valu
 	}
 }
 
+// e2eAge 把策略的时间戳推到很久以前（构造「很老的策略」这一场景）。
+func e2eAge(t *testing.T, pg *db.DB, strategyID int64, days int) {
+	t.Helper()
+	if _, err := pg.Exec(`UPDATE strategies SET created_at=now()-$2::int * interval '1 day',
+		updated_at=now()-$2::int * interval '1 day' WHERE id=$1`, strategyID, days); err != nil {
+		t.Fatalf("改时间戳: %v", err)
+	}
+}
+
 // e2eState 读策略的当前状态。
 func e2eState(t *testing.T, pg *db.DB, strategyID int64) *db.Strategy {
 	t.Helper()
@@ -233,21 +247,22 @@ func e2eContainsID(ids []int64, want int64) bool {
 }
 
 // =====================================================================
-// 行为 1：晋级的三个条件是「与」关系 —— 装配后真的变成 active 吗？
+// 行为 1 + 2：晋级的三个条件是「与」关系；没有可比语料 ⇒ 不晋级
 // =====================================================================
 
-// TestCuratorE2EPromotionRequiresAllThreeConditions 钉住「三个条件全过才晋级」。
+// TestCuratorE2EPromotionEndToEnd 钉住晋级的三条件（行为 1）与保守默认（行为 2）。
 //
-// 四条隔离态策略（计划 Task 5 Step 1 的 A/B/C/D 四例）：
+// 六条隔离态策略在同一轮仲裁里被裁决（计划 Task 5 Step 1 的 A/B/C/D 四例 + 无语料例）：
 //
 //	A) 重放通过 + usage_count>=n + 里程碑命中 → **真的变成 active**；
 //	B) 重放通过 + 里程碑命中，但 usage_count<n   → 仍是 quarantined；
 //	C) 重放不通过（候选在语料上没命中）           → 仍是 quarantined；
-//	D) 重放通过 + usage_count 够，但没里程碑命中   → 仍是 quarantined。
+//	D) 重放通过 + usage_count 够，但没里程碑命中   → 仍是 quarantined；
+//	E) 观测次数够、里程碑命中，但**没有可比语料** → 仍是 quarantined。
 //
 // 断言的是**库里那一行的 state**（不是判定函数的返回值）—— 零件测试钉的是
 // 「判定说该晋级」，这里钉的是「晋级真的发生了，且只发生在该发生的那一条上」。
-func TestCuratorE2EPromotionRequiresAllThreeConditions(t *testing.T) {
+func TestCuratorE2EPromotionEndToEnd(t *testing.T) {
 	_, pg := taskHallTestServer(t)
 	sfx := e2eSuffix()
 
@@ -255,6 +270,8 @@ func TestCuratorE2EPromotionRequiresAllThreeConditions(t *testing.T) {
 	typeB := e2eAssetType(sfx, "b")
 	typeC := e2eAssetType(sfx, "c")
 	typeD := e2eAssetType(sfx, "d")
+	typeE := e2eAssetType(sfx, "e")
+	otherType := e2eAssetType(sfx, "other")
 
 	var strategies, corpusTasks []int64
 
@@ -286,6 +303,13 @@ func TestCuratorE2EPromotionRequiresAllThreeConditions(t *testing.T) {
 	e2eFreezeCorpus(t, pg, corpusTasks[len(corpusTasks)-1], typeD, []string{"m1"})
 	e2eAdopt(t, pg, dID, db.StrategyMinObservations, "m-other")
 
+	// E) 观测次数够、里程碑命中，但库里只有**另一种**资产类型的语料 ⇒ 没有可比案例。
+	corpusTasks = append(corpusTasks, int64(910105)+sfx%1000)
+	e2eFreezeCorpus(t, pg, corpusTasks[len(corpusTasks)-1], otherType, []string{"m1"})
+	eID := e2eStrategy(t, pg, fmt.Sprintf("e2e晋级E-%d", sfx), typeE, "m1")
+	strategies = append(strategies, eID)
+	e2eAdopt(t, pg, eID, db.StrategyMinObservations, "m1")
+
 	e2eCleanup(t, pg, strategies, nil, corpusTasks, nil)
 
 	rep := e2eRunCurator(t, pg)
@@ -299,78 +323,51 @@ func TestCuratorE2EPromotionRequiresAllThreeConditions(t *testing.T) {
 		{"B 观测次数不足", bID, db.StrategyQuarantined},
 		{"C 重放不通过", cID, db.StrategyQuarantined},
 		{"D 没里程碑命中", dID, db.StrategyQuarantined},
+		{"E 没有可比语料", eID, db.StrategyQuarantined},
 	}
 	for _, c := range cases {
-		got := e2eState(t, pg, c.id).State
-		if got != c.want {
-			t.Fatalf("%s: 库里状态 = %s, 期望 %s", c.name, got, c.want)
-		}
-		inReport := e2eContainsID(rep.Promoted, c.id)
-		if c.want == db.StrategyActive && !inReport {
-			t.Fatalf("%s: 晋级了却没出现在裁决报告的 Promoted 里：%+v", c.name, rep)
-		}
-		if c.want != db.StrategyActive && inReport {
-			t.Fatalf("%s: 没晋级却出现在裁决报告的 Promoted 里：%+v", c.name, rep)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got := e2eState(t, pg, c.id).State
+			if got != c.want {
+				t.Fatalf("库里状态 = %s, 期望 %s", got, c.want)
+			}
+			inReport := e2eContainsID(rep.Promoted, c.id)
+			if c.want == db.StrategyActive && !inReport {
+				t.Fatalf("晋级了却没出现在裁决报告的 Promoted 里：%+v", rep)
+			}
+			if c.want != db.StrategyActive && inReport {
+				t.Fatalf("没晋级却出现在裁决报告的 Promoted 里：%+v", rep)
+			}
+		})
 	}
 }
 
 // =====================================================================
-// 行为 2：没有可比冻结语料 ⇒ 不晋级（保守默认）
+// 行为 3 + 4 + 5：淘汰的两条腿（阈值取自常量）、最小观测前置、退役 ≠ 删除
 // =====================================================================
 
-// TestCuratorE2EPromotionRefusedWithoutComparableCorpus 钉住「没有可比语料 ⇒ 不晋级」。
+// TestCuratorE2ERetirementEndToEnd 钉住淘汰判据与退役语义。
 //
-// 这是保守默认：没有可比语料就没有判据，此时晋级等于凭空提权。
+// 五条在役策略在同一轮仲裁里被裁决：
 //
-// 场景：库里冻着**另一种**资产类型的语料 ⇒ 这条策略没有可比案例。
-// 观测次数够、里程碑也命中过 —— 只差「可比语料」这一条，仍旧不许晋级。
-func TestCuratorE2EPromotionRefusedWithoutComparableCorpus(t *testing.T) {
-	_, pg := taskHallTestServer(t)
-	sfx := e2eSuffix()
-
-	otherType := e2eAssetType(sfx, "other")
-	candidateType := e2eAssetType(sfx, "nocon")
-
-	var strategies, corpusTasks []int64
-	corpusTasks = append(corpusTasks, int64(910110)+sfx%1000)
-	e2eFreezeCorpus(t, pg, corpusTasks[0], otherType, []string{"m1"})
-
-	id := e2eStrategy(t, pg, fmt.Sprintf("e2e无语料晋级-%d", sfx), candidateType, "m1")
-	strategies = append(strategies, id)
-	e2eAdopt(t, pg, id, db.StrategyMinObservations, "m1")
-
-	e2eCleanup(t, pg, strategies, nil, corpusTasks, nil)
-
-	rep := e2eRunCurator(t, pg)
-
-	if got := e2eState(t, pg, id).State; got != db.StrategyQuarantined {
-		t.Fatalf("没有可比语料却晋级了：state = %s（期望 %s）", got, db.StrategyQuarantined)
-	}
-	if e2eContainsID(rep.Promoted, id) {
-		t.Fatalf("没有可比语料的策略出现在 Promoted 里：%+v", rep)
-	}
-}
-
-// =====================================================================
-// 行为 3 + 4：淘汰的两条腿，阈值取自常量；最小观测前置按 usage_count 计
-// =====================================================================
-
-// TestCuratorE2ERetirementLegsUseConstantThresholds 钉住淘汰判据的两条腿，
-// 并且**阈值取自 db 包的常量**（不是测试里写死的字面量）。
+//	① utility 腿：证据里只有 1 条 confirmed ⇒ utility = 1/n < τ_u ⇒ 退役；
+//	② confidence 腿：utility = 1.0（utility 腿不成立），confidence 严格低于
+//	   常量 ⇒ 退役；
+//	③ 两条腿都不成立：utility = 1.0 且 confidence = **恰好等于**常量 ⇒ 不退役；
+//	④ 观测次数不足（usage_count < n）且 utility = 0 ⇒ 不退役；
+//	⑤ 退役的那一条必须留下 retired_reason 与**整条证据链**。
 //
 // 为什么阈值必须读常量：常量是「单一真相源」（计划「已拍板」第 2 条）。
 // 若测试里写死 0.05 / -0.3，将来有人把常量调了，测试仍然绿 —— 门禁就失效了。
 // 本用例的**输入**全部由常量推导：
 //
-//	utility 腿：造 n 条证据（其中 1 条 confirmed）⇒ utility = 1/n，
-//	             n 由 τ_u 推导 ⇒ 1/n **严格小于** τ_u（τ_u 取任何值都成立）；
+//	utility 腿：n 由 τ_u 推导 ⇒ 1/n **严格小于** τ_u（τ_u 取任何值都成立）；
 //	confidence 腿：confidence = 常量 - 0.1 ⇒ 严格小于常量；
-//	都不成立：  utility = 1.0 且 confidence = **恰好等于**常量（判据是严格小于）。
+//	都不成立：  confidence = 恰好等于常量（判据是严格小于 ⇒ 不成立）。
 //
 // 「恰好等于常量」这一条是关键：它把「阈值就是常量」这件事钉死 ——
 // 若实现用了别的阈值，这一例会翻。
-func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
+func TestCuratorE2ERetirementEndToEnd(t *testing.T) {
 	_, pg := taskHallTestServer(t)
 	sfx := e2eSuffix()
 
@@ -382,7 +379,7 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 
 	var strategies, corpusTasks, findingIDs []int64
 
-	// —— utility 腿：证据里只有 1 条 confirmed ⇒ utility = 1/n < τ_u。——
+	// —— ① utility 腿：证据里只有 1 条 confirmed ⇒ utility = 1/n < τ_u。——
 	atU := e2eAssetType(sfx, "utilleg")
 	uID := e2eStrategy(t, pg, fmt.Sprintf("e2e淘汰utility腿-%d", sfx), atU, "m1")
 	strategies = append(strategies, uID)
@@ -402,7 +399,7 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 		}
 	}
 
-	// —— confidence 腿：utility = 1.0（utility 腿不成立），confidence 严格低于常量。——
+	// —— ② confidence 腿：utility = 1.0，confidence 严格低于常量。——
 	atC := e2eAssetType(sfx, "confleg")
 	cID := e2eStrategy(t, pg, fmt.Sprintf("e2e淘汰confidence腿-%d", sfx), atC, "m1")
 	strategies = append(strategies, cID)
@@ -416,7 +413,7 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 	}
 	e2eSetColumn(t, pg, cID, "confidence", db.StrategyConfidenceRetireThreshold-0.1)
 
-	// —— 两条腿都不成立：utility = 1.0，confidence 恰好等于常量。——
+	// —— ③ 两条腿都不成立：utility = 1.0，confidence 恰好等于常量。——
 	atN := e2eAssetType(sfx, "nolag")
 	nID := e2eStrategy(t, pg, fmt.Sprintf("e2e不淘汰-%d", sfx), atN, "m1")
 	strategies = append(strategies, nID)
@@ -430,8 +427,38 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 	}
 	e2eSetColumn(t, pg, nID, "confidence", db.StrategyConfidenceRetireThreshold)
 
-	// 三条都先置为在役态（晋级是裁决写，这里直接构造「在役」这一前提）。
-	for _, id := range []int64{uID, cID, nID} {
+	// —— ④ 观测次数不足：只被用过 n-1 次，utility = 0，confidence 压到极负。——
+	atM := e2eAssetType(sfx, "minobs")
+	mID := e2eStrategy(t, pg, fmt.Sprintf("e2e观测不足-%d", sfx), atM, "m1")
+	strategies = append(strategies, mID)
+	corpusTasks = append(corpusTasks, int64(910123)+sfx%1000)
+	e2eFreezeCorpus(t, pg, corpusTasks[len(corpusTasks)-1], atM, []string{"m1"})
+	e2eAdopt(t, pg, mID, db.StrategyMinObservations-1, "m1")
+	mf := e2eFinding(t, pg, db.FindingFalsePositive)
+	findingIDs = append(findingIDs, mf)
+	if err := pg.LinkStrategyEvidence(mID, "finding", strconv.FormatInt(mf, 10), "created_by", "sha256:m"); err != nil {
+		t.Fatalf("挂证据: %v", err)
+	}
+	e2eSetColumn(t, pg, mID, "confidence", -1.0)
+	// 检索次数拉满，但**从未被采纳**：usage_count 仍是 n-1。
+	e2eSetColumn(t, pg, mID, "retrieval_count", 500)
+
+	// —— ⑤ 退役留痕：与 ① 同型，但单独一条策略用来断言证据链。——
+	atK := e2eAssetType(sfx, "keepev")
+	kID := e2eStrategy(t, pg, fmt.Sprintf("e2e退役留痕-%d", sfx), atK, "m1")
+	strategies = append(strategies, kID)
+	corpusTasks = append(corpusTasks, int64(910124)+sfx%1000)
+	e2eFreezeCorpus(t, pg, corpusTasks[len(corpusTasks)-1], atK, []string{"m1"})
+	e2eAdopt(t, pg, kID, db.StrategyMinObservations, "m1")
+	kf := e2eFinding(t, pg, db.FindingFalsePositive)
+	findingIDs = append(findingIDs, kf)
+	if err := pg.LinkStrategyEvidence(kID, "finding", strconv.FormatInt(kf, 10), "validated_by", "sha256:k"); err != nil {
+		t.Fatalf("挂证据: %v", err)
+	}
+	e2eSetColumn(t, pg, kID, "confidence", 0.0)
+
+	// 五条都先置为在役态（晋级是裁决写，这里直接构造「在役」这一前提）。
+	for _, id := range []int64{uID, cID, nID, mID, kID} {
 		if ok, err := pg.PromoteStrategyToActive(id); err != nil || !ok {
 			t.Fatalf("置为 active（策略 %d）: %v", id, err)
 		}
@@ -443,7 +470,7 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 	if err := pg.RefreshStrategyUtility(); err != nil {
 		t.Fatalf("刷新 utility: %v", err)
 	}
-	for _, id := range []int64{uID, cID, nID} {
+	for _, id := range []int64{uID, cID, nID, mID, kID} {
 		dec, err := EvaluateRetirement(pg, *e2eState(t, pg, id))
 		if err != nil {
 			t.Fatalf("淘汰判定（策略 %d）: %v", id, err)
@@ -459,262 +486,277 @@ func TestCuratorE2ERetirementLegsUseConstantThresholds(t *testing.T) {
 
 	rep := e2eRunCurator(t, pg)
 
-	// utility 腿 ⇒ 退役。
-	if got := e2eState(t, pg, uID).State; got != db.StrategyRetired {
-		t.Fatalf("utility 低于 τ_u 却没有退役：state = %s（期望 %s）", got, db.StrategyRetired)
-	}
-	if !e2eContainsID(rep.Retired, uID) {
-		t.Fatalf("utility 腿退役的策略没出现在裁决报告的 Retired 里：%+v", rep)
-	}
-
-	// confidence 腿 ⇒ 退役。
-	if got := e2eState(t, pg, cID).State; got != db.StrategyRetired {
-		t.Fatalf("confidence 低于阈值却没有退役：state = %s（期望 %s）", got, db.StrategyRetired)
-	}
-	if !e2eContainsID(rep.Retired, cID) {
-		t.Fatalf("confidence 腿退役的策略没出现在裁决报告的 Retired 里：%+v", rep)
-	}
-
-	// 两条腿都不成立 ⇒ 不退役。
-	if got := e2eState(t, pg, nID).State; got != db.StrategyActive {
-		t.Fatalf("两条腿都不成立却被退役了：state = %s（期望 %s）", got, db.StrategyActive)
-	}
-	if e2eContainsID(rep.Retired, nID) {
-		t.Fatalf("两条腿都不成立的策略出现在 Retired 里：%+v", rep)
-	}
-}
-
-// TestCuratorE2ERetirementNeedsMinimumObservations 钉住最小观测前置。
-//
-//	① usage_count < n 时，即使 utility = 0（低于 τ_u）、confidence 被踩到极负，
-//	   也**不退役**；
-//	② 前置门数的是 **usage_count**，不是 retrieval_count —— 被检索 500 次却
-//	   从未被采纳的策略不算「有观测」。
-//
-// ② 是计划「已拍板」第 3 条与「风险与注意」里那条明写的口径：检索到 ≠ 用上了。
-func TestCuratorE2ERetirementNeedsMinimumObservations(t *testing.T) {
-	_, pg := taskHallTestServer(t)
-	sfx := e2eSuffix()
-
-	at := e2eAssetType(sfx, "minobs")
-	var strategies, corpusTasks, findingIDs []int64
-
-	id := e2eStrategy(t, pg, fmt.Sprintf("e2e观测不足-%d", sfx), at, "m1")
-	strategies = append(strategies, id)
-	corpusTasks = append(corpusTasks, int64(910130)+sfx%1000)
-	e2eFreezeCorpus(t, pg, corpusTasks[0], at, []string{"m1"})
-	// 只被用过 n-1 次 ⇒ 观测次数不足。
-	e2eAdopt(t, pg, id, db.StrategyMinObservations-1, "m1")
-	// 证据全是误报 ⇒ utility = 0（严格低于 τ_u）。
-	f := e2eFinding(t, pg, db.FindingFalsePositive)
-	findingIDs = append(findingIDs, f)
-	if err := pg.LinkStrategyEvidence(id, "finding", strconv.FormatInt(f, 10), "created_by", "sha256:m"); err != nil {
-		t.Fatalf("挂证据: %v", err)
-	}
-	// confidence 压到极负：两条腿都指向「该退役」—— 只剩观测前置这一道门。
-	e2eSetColumn(t, pg, id, "confidence", -1.0)
-	// 检索次数拉满，但**从未被采纳**：usage_count 仍是 n-1。
-	e2eSetColumn(t, pg, id, "retrieval_count", 500)
-
-	if ok, err := pg.PromoteStrategyToActive(id); err != nil || !ok {
-		t.Fatalf("置为 active: %v", err)
-	}
-
-	e2eCleanup(t, pg, strategies, findingIDs, corpusTasks, nil)
-
-	rep := e2eRunCurator(t, pg)
-
-	if got := e2eState(t, pg, id).State; got != db.StrategyActive {
-		t.Fatalf("观测次数不足却退役了：state = %s（期望 %s）", got, db.StrategyActive)
-	}
-	if e2eContainsID(rep.Retired, id) {
-		t.Fatalf("观测次数不足的策略出现在 Retired 里：%+v", rep)
-	}
-
-	// 口径核对：前置门读的是 usage_count。
-	s := e2eState(t, pg, id)
-	if s.UsageCount >= db.StrategyMinObservations {
-		t.Fatalf("用例前提不对：usage_count = %d（应 < %d）", s.UsageCount, db.StrategyMinObservations)
-	}
-	if s.RetrievalCount < 500 {
-		t.Fatalf("用例前提不对：retrieval_count = %d（应 ≥ 500）", s.RetrievalCount)
-	}
-}
-
-// =====================================================================
-// 行为 5：退役 ≠ 删除（留 retired_reason 与证据链）
-// =====================================================================
-
-// TestCuratorE2ERetiredStrategyKeepsReasonAndEvidence 钉住「退役 ≠ 删除」。
-//
-// 退役后：state='retired'、retired_reason 非空、retired_at 有值、
-// **证据链一条不少**、漏洞行也还在、策略行本身也还在。
-//
-// 为什么这条重要：反模式 5（用删除代替淘汰）会让「墓园可复活」失去前提，
-// 也会让复盘拿不到「它当初凭什么被留下」的证据。
-func TestCuratorE2ERetiredStrategyKeepsReasonAndEvidence(t *testing.T) {
-	_, pg := taskHallTestServer(t)
-	sfx := e2eSuffix()
-
-	at := e2eAssetType(sfx, "keepev")
-	var strategies, corpusTasks, findingIDs []int64
-
-	id := e2eStrategy(t, pg, fmt.Sprintf("e2e退役留痕-%d", sfx), at, "m1")
-	strategies = append(strategies, id)
-	corpusTasks = append(corpusTasks, int64(910140)+sfx%1000)
-	e2eFreezeCorpus(t, pg, corpusTasks[0], at, []string{"m1"})
-	e2eAdopt(t, pg, id, db.StrategyMinObservations, "m1")
-	f := e2eFinding(t, pg, db.FindingFalsePositive)
-	findingIDs = append(findingIDs, f)
-	if err := pg.LinkStrategyEvidence(id, "finding", strconv.FormatInt(f, 10), "validated_by", "sha256:k"); err != nil {
-		t.Fatalf("挂证据: %v", err)
-	}
-	e2eSetColumn(t, pg, id, "confidence", 0.0)
-	if ok, err := pg.PromoteStrategyToActive(id); err != nil || !ok {
-		t.Fatalf("置为 active: %v", err)
-	}
-
-	e2eCleanup(t, pg, strategies, findingIDs, corpusTasks, nil)
-
-	e2eRunCurator(t, pg)
-
-	s := e2eState(t, pg, id)
-	if s.State != db.StrategyRetired {
-		t.Fatalf("状态应为 %s，实际 %s", db.StrategyRetired, s.State)
-	}
-	if strings.TrimSpace(s.RetiredReason) == "" {
-		t.Fatalf("退役必须留下 retired_reason")
-	}
-	if s.RetiredAt == nil {
-		t.Fatalf("退役必须留下 retired_at")
-	}
-	// 策略行本身还在（是「退役」不是「删除」）。
-	var rowCount int
-	if err := pg.QueryRow(`SELECT count(*) FROM strategies WHERE id=$1`, id).Scan(&rowCount); err != nil {
-		t.Fatalf("数策略行: %v", err)
-	}
-	if rowCount != 1 {
-		t.Fatalf("策略行不见了 —— 退役被实现成了删除")
-	}
-	// 证据链一条不少。
-	links, err := pg.StrategyEvidence(id)
-	if err != nil {
-		t.Fatalf("读证据链: %v", err)
-	}
-	if len(links) == 0 {
-		t.Fatalf("退役后证据链被清空了 —— 退役 ≠ 删除")
-	}
-	found := false
-	for _, l := range links {
-		if l.RefType == "finding" && l.RefID == strconv.FormatInt(f, 10) {
-			found = true
+	t.Run("utility 腿退役", func(t *testing.T) {
+		if got := e2eState(t, pg, uID).State; got != db.StrategyRetired {
+			t.Fatalf("utility 低于 τ_u 却没有退役：state = %s（期望 %s）", got, db.StrategyRetired)
 		}
-	}
-	if !found {
-		t.Fatalf("退役后找不到那条漏洞证据：%+v", links)
-	}
-	// 漏洞行也还在（证据链指向的是活着的实体）。
-	var findingAlive int
-	if err := pg.QueryRow(`SELECT count(*) FROM findings WHERE id=$1`, f).Scan(&findingAlive); err != nil {
-		t.Fatalf("数漏洞行: %v", err)
-	}
-	if findingAlive != 1 {
-		t.Fatalf("证据指向的漏洞行不见了")
-	}
+		if !e2eContainsID(rep.Retired, uID) {
+			t.Fatalf("utility 腿退役的策略没出现在裁决报告的 Retired 里：%+v", rep)
+		}
+	})
+
+	t.Run("confidence 腿退役", func(t *testing.T) {
+		if got := e2eState(t, pg, cID).State; got != db.StrategyRetired {
+			t.Fatalf("confidence 低于阈值却没有退役：state = %s（期望 %s）", got, db.StrategyRetired)
+		}
+		if !e2eContainsID(rep.Retired, cID) {
+			t.Fatalf("confidence 腿退役的策略没出现在裁决报告的 Retired 里：%+v", rep)
+		}
+	})
+
+	t.Run("两条腿都不成立不退役", func(t *testing.T) {
+		if got := e2eState(t, pg, nID).State; got != db.StrategyActive {
+			t.Fatalf("两条腿都不成立却被退役了：state = %s（期望 %s）", got, db.StrategyActive)
+		}
+		if e2eContainsID(rep.Retired, nID) {
+			t.Fatalf("两条腿都不成立的策略出现在 Retired 里：%+v", rep)
+		}
+	})
+
+	t.Run("观测次数不足不退役", func(t *testing.T) {
+		if got := e2eState(t, pg, mID).State; got != db.StrategyActive {
+			t.Fatalf("观测次数不足却退役了：state = %s（期望 %s）", got, db.StrategyActive)
+		}
+		if e2eContainsID(rep.Retired, mID) {
+			t.Fatalf("观测次数不足的策略出现在 Retired 里：%+v", rep)
+		}
+		// 口径核对：前置门读的是 usage_count，不是 retrieval_count。
+		s := e2eState(t, pg, mID)
+		if s.UsageCount >= db.StrategyMinObservations {
+			t.Fatalf("用例前提不对：usage_count = %d（应 < %d）", s.UsageCount, db.StrategyMinObservations)
+		}
+		if s.RetrievalCount < 500 {
+			t.Fatalf("用例前提不对：retrieval_count = %d（应 ≥ 500）", s.RetrievalCount)
+		}
+	})
+
+	t.Run("退役保留理由与证据链", func(t *testing.T) {
+		s := e2eState(t, pg, kID)
+		if s.State != db.StrategyRetired {
+			t.Fatalf("状态应为 %s，实际 %s", db.StrategyRetired, s.State)
+		}
+		if strings.TrimSpace(s.RetiredReason) == "" {
+			t.Fatalf("退役必须留下 retired_reason")
+		}
+		if s.RetiredAt == nil {
+			t.Fatalf("退役必须留下 retired_at")
+		}
+		// 策略行本身还在（是「退役」不是「删除」）。
+		var rowCount int
+		if err := pg.QueryRow(`SELECT count(*) FROM strategies WHERE id=$1`, kID).Scan(&rowCount); err != nil {
+			t.Fatalf("数策略行: %v", err)
+		}
+		if rowCount != 1 {
+			t.Fatalf("策略行不见了 —— 退役被实现成了删除")
+		}
+		// 证据链一条不少。
+		links, err := pg.StrategyEvidence(kID)
+		if err != nil {
+			t.Fatalf("读证据链: %v", err)
+		}
+		if len(links) == 0 {
+			t.Fatalf("退役后证据链被清空了 —— 退役 ≠ 删除")
+		}
+		found := false
+		for _, l := range links {
+			if l.RefType == "finding" && l.RefID == strconv.FormatInt(kf, 10) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("退役后找不到那条漏洞证据：%+v", links)
+		}
+		// 漏洞行也还在（证据链指向的是活着的实体）。
+		var findingAlive int
+		if err := pg.QueryRow(`SELECT count(*) FROM findings WHERE id=$1`, kf).Scan(&findingAlive); err != nil {
+			t.Fatalf("数漏洞行: %v", err)
+		}
+		if findingAlive != 1 {
+			t.Fatalf("证据指向的漏洞行不见了")
+		}
+	})
 }
 
 // =====================================================================
-// 行为 6：唯一证人 pin —— 置位、解除、机械性、无模型、无年龄
+// 行为 6 + 7：唯一证人 pin 的机械性、无模型无年龄、复审队列只提示
 // =====================================================================
 
-// TestCuratorE2EPinPlacedAndReleasedOnlyMechanically 钉住 pin 的完整生命周期。
+// TestCuratorE2EPinEndToEnd 钉住 pin 的完整生命周期与复审队列的 advisory 性质。
 //
-//	① 置位：策略是某个 confirmed 漏洞的**唯一** validated_by 路径 ⇒ 被置位；
-//	② 不因年龄解除：把时间戳推到 900 天前，pin 依然保持（策略的价值与年龄无关）；
-//	③ 解除条件①：同一漏洞下出现指向**不同 url** 的新流量证据 ⇒ 解 pin；
-//	④ 解除条件②：漏洞状态不再是 confirmed ⇒ 解 pin。
+// 三条「唯一证人」策略 + 超过阈值的复审队列策略，在两轮仲裁里被裁决：
 //
-// ③④ 之外的一切都不解 pin —— 这是「机械判定」的正面含义。
-func TestCuratorE2EPinPlacedAndReleasedOnlyMechanically(t *testing.T) {
+//	第一轮：三条唯一证人策略被**置位**（其中两条已经「很老」）；
+//	第二轮：
+//	  - N1 出现了指向不同 url 的新流量证据 ⇒ 解 pin（条件①）；
+//	  - N2 的漏洞不再是 confirmed             ⇒ 解 pin（条件②）；
+//	  - N3 什么都没变（而且它很老）           ⇒ **pin 保持**（年龄不构成解除理由）；
+//	  - 复审队列里的 51 条一条都没被自动解除   ⇒ 队列只是提示。
+//
+// N1 与 N3 的对照是关键：两者都「很老」，唯一区别是 N1 出现了替代路径 ⇒
+// 解 pin 的原因是「出现了替代路径」，不是「它老了」。
+func TestCuratorE2EPinEndToEnd(t *testing.T) {
 	_, pg := taskHallTestServer(t)
 	sfx := e2eSuffix()
 
 	var strategies, findingIDs []int64
 	var snapshotIDs []string
 
-	// —— ① + ② + ③：唯一证人 → 置位；年龄不解；出现替代路径 → 解。——
+	// —— N1：唯一证人 + 有流量快照证据；很老；第二轮出现替代路径。——
 	at1 := e2eAssetType(sfx, "pin1")
-	strategy := e2eStrategy(t, pg, fmt.Sprintf("e2e唯一证人-%d", sfx), at1, "m1")
-	strategies = append(strategies, strategy)
-	finding := e2eFinding(t, pg, db.FindingConfirmed)
-	findingIDs = append(findingIDs, finding)
+	n1 := e2eStrategy(t, pg, fmt.Sprintf("e2e唯一证人替代路径-%d", sfx), at1, "m1")
+	strategies = append(strategies, n1)
+	f1 := e2eFinding(t, pg, db.FindingConfirmed)
+	findingIDs = append(findingIDs, f1)
 	snap1 := fmt.Sprintf("e2e-snap-%d-1", sfx)
 	snapshotIDs = append(snapshotIDs, snap1)
 	e2eSnapshot(t, pg, snap1, "http://e2e.invalid/"+at1)
-	e2eBindSnapshot(t, pg, finding, snap1)
-	if err := pg.LinkStrategyEvidence(strategy, "finding", strconv.FormatInt(finding, 10), "validated_by", "sha256:f1"); err != nil {
+	e2eBindSnapshot(t, pg, f1, snap1)
+	if err := pg.LinkStrategyEvidence(n1, "finding", strconv.FormatInt(f1, 10), "validated_by", "sha256:f1"); err != nil {
 		t.Fatalf("挂 finding 证据: %v", err)
 	}
-	if err := pg.LinkStrategyEvidence(strategy, "traffic_snapshot", snap1, "validated_by", "sha256:s1"); err != nil {
+	if err := pg.LinkStrategyEvidence(n1, "traffic_snapshot", snap1, "validated_by", "sha256:s1"); err != nil {
 		t.Fatalf("挂流量证据: %v", err)
 	}
+	e2eAge(t, pg, n1, 900)
 
-	// —— ④：漏洞不再是 confirmed ⇒ 解 pin。——
+	// —— N2：唯一证人；很老；第二轮漏洞状态变成 resolved。——
 	at2 := e2eAssetType(sfx, "pin2")
-	strategy2 := e2eStrategy(t, pg, fmt.Sprintf("e2e漏洞状态变-%d", sfx), at2, "m1")
-	strategies = append(strategies, strategy2)
-	finding2 := e2eFinding(t, pg, db.FindingConfirmed)
-	findingIDs = append(findingIDs, finding2)
+	n2 := e2eStrategy(t, pg, fmt.Sprintf("e2e唯一证人状态变-%d", sfx), at2, "m1")
+	strategies = append(strategies, n2)
+	f2 := e2eFinding(t, pg, db.FindingConfirmed)
+	findingIDs = append(findingIDs, f2)
+	snap2 := fmt.Sprintf("e2e-snap-%d-2", sfx)
+	snapshotIDs = append(snapshotIDs, snap2)
+	e2eSnapshot(t, pg, snap2, "http://e2e.invalid/"+at2)
+	e2eBindSnapshot(t, pg, f2, snap2)
+	if err := pg.LinkStrategyEvidence(n2, "finding", strconv.FormatInt(f2, 10), "validated_by", "sha256:f2"); err != nil {
+		t.Fatalf("挂 finding 证据: %v", err)
+	}
+	if err := pg.LinkStrategyEvidence(n2, "traffic_snapshot", snap2, "validated_by", "sha256:s2"); err != nil {
+		t.Fatalf("挂流量证据: %v", err)
+	}
+	e2eAge(t, pg, n2, 900)
+
+	// —— N3：唯一证人；很老；第二轮什么都不变 ⇒ pin 必须保持。——
+	at3 := e2eAssetType(sfx, "pin3")
+	n3 := e2eStrategy(t, pg, fmt.Sprintf("e2e唯一证人保持-%d", sfx), at3, "m1")
+	strategies = append(strategies, n3)
+	f3 := e2eFinding(t, pg, db.FindingConfirmed)
+	findingIDs = append(findingIDs, f3)
 	snap3 := fmt.Sprintf("e2e-snap-%d-3", sfx)
 	snapshotIDs = append(snapshotIDs, snap3)
-	e2eSnapshot(t, pg, snap3, "http://e2e.invalid/"+at2)
-	e2eBindSnapshot(t, pg, finding2, snap3)
-	if err := pg.LinkStrategyEvidence(strategy2, "finding", strconv.FormatInt(finding2, 10), "validated_by", "sha256:f2"); err != nil {
+	e2eSnapshot(t, pg, snap3, "http://e2e.invalid/"+at3)
+	e2eBindSnapshot(t, pg, f3, snap3)
+	if err := pg.LinkStrategyEvidence(n3, "finding", strconv.FormatInt(f3, 10), "validated_by", "sha256:f3"); err != nil {
 		t.Fatalf("挂 finding 证据: %v", err)
 	}
-	if err := pg.LinkStrategyEvidence(strategy2, "traffic_snapshot", snap3, "validated_by", "sha256:s3"); err != nil {
+	if err := pg.LinkStrategyEvidence(n3, "traffic_snapshot", snap3, "validated_by", "sha256:s3"); err != nil {
 		t.Fatalf("挂流量证据: %v", err)
 	}
+	e2eAge(t, pg, n3, 900)
+
+	// —— 复审队列：超过阈值的 pinned 策略。——
+	queueIDs := make([]int64, 0, db.StrategyPinQueueThreshold+1)
+	for i := 0; i <= db.StrategyPinQueueThreshold; i++ {
+		id := e2eStrategy(t, pg, fmt.Sprintf("e2e复审队列-%d-%d", sfx, i),
+			e2eAssetType(sfx, fmt.Sprintf("q%d", i)), "m1")
+		if ok, err := pg.ApplyStrategyPin(id, true); err != nil || !ok {
+			t.Fatalf("置 pin: %v", err)
+		}
+		queueIDs = append(queueIDs, id)
+	}
+	strategies = append(strategies, queueIDs...)
 
 	e2eCleanup(t, pg, strategies, findingIDs, nil, snapshotIDs)
 
-	// 第一轮：两条都应当被置位。
-	e2eRunCurator(t, pg)
-	if !e2eState(t, pg, strategy).Pinned {
-		t.Fatalf("唯一证人策略没有被置位")
+	// 第一轮：三条唯一证人策略被置位；复审队列条目生成。
+	rep1 := e2eRunCurator(t, pg)
+	for _, id := range []int64{n1, n2, n3} {
+		if !e2eState(t, pg, id).Pinned {
+			t.Fatalf("唯一证人策略 %d 没有被置位", id)
+		}
 	}
-	if !e2eState(t, pg, strategy2).Pinned {
-		t.Fatalf("唯一证人策略没有被置位")
+	if len(rep1.PinQueue) == 0 {
+		t.Fatalf("pinned 策略超过阈值（%d）却没有生成复审队列条目", db.StrategyPinQueueThreshold)
 	}
-
-	// ② 年龄不构成解除理由。
-	if _, err := pg.Exec(`UPDATE strategies SET created_at=now()-interval '900 days',
-		updated_at=now()-interval '900 days' WHERE id=$1`, strategy); err != nil {
-		t.Fatalf("改时间戳: %v", err)
+	inQueue := 0
+	for _, id := range queueIDs {
+		if e2eContainsID(rep1.PinQueue, id) {
+			inQueue++
+		}
 	}
-	e2eRunCurator(t, pg)
-	if !e2eState(t, pg, strategy).Pinned {
-		t.Fatalf("pin 被按年龄解除了 —— 策略的价值与年龄无关")
-	}
-
-	// ③ 同一漏洞下出现指向不同 url 的新流量证据 ⇒ 解 pin。
-	snap2 := fmt.Sprintf("e2e-snap-%d-2", sfx)
-	snapshotIDs = append(snapshotIDs, snap2)
-	e2eSnapshot(t, pg, snap2, "http://e2e.invalid/other-"+at1)
-	e2eBindSnapshot(t, pg, finding, snap2)
-	e2eRunCurator(t, pg)
-	if e2eState(t, pg, strategy).Pinned {
-		t.Fatalf("出现指向不同 url 的新流量证据后 pin 没有解除")
+	if inQueue != len(queueIDs) {
+		t.Fatalf("复审队列只收了 %d / %d 条本用例的策略", inQueue, len(queueIDs))
 	}
 
-	// ④ 漏洞不再是 confirmed ⇒ 解 pin。
-	if _, err := pg.Exec(`UPDATE findings SET status=$2 WHERE id=$1`, finding2, db.FindingResolved); err != nil {
+	// 第二轮：N1 出现替代路径；N2 的漏洞不再是 confirmed；N3 什么都不变。
+	snapAlt := fmt.Sprintf("e2e-snap-%d-alt", sfx)
+	snapshotIDs = append(snapshotIDs, snapAlt)
+	e2eSnapshot(t, pg, snapAlt, "http://e2e.invalid/other-"+at1)
+	e2eBindSnapshot(t, pg, f1, snapAlt)
+	if _, err := pg.Exec(`UPDATE findings SET status=$2 WHERE id=$1`, f2, db.FindingResolved); err != nil {
 		t.Fatalf("改 finding 状态: %v", err)
 	}
-	e2eRunCurator(t, pg)
-	if e2eState(t, pg, strategy2).Pinned {
-		t.Fatalf("finding 不再 confirmed 后 pin 没有解除")
-	}
+	rep2 := e2eRunCurator(t, pg)
+
+	t.Run("出现替代路径则解 pin", func(t *testing.T) {
+		if e2eState(t, pg, n1).Pinned {
+			t.Fatalf("出现指向不同 url 的新流量证据后 pin 没有解除")
+		}
+		if !e2eContainsID(rep2.Unpinned, n1) {
+			t.Fatalf("解 pin 的策略没出现在裁决报告的 Unpinned 里：%+v", rep2)
+		}
+	})
+
+	t.Run("漏洞不再 confirmed 则解 pin", func(t *testing.T) {
+		if e2eState(t, pg, n2).Pinned {
+			t.Fatalf("finding 不再 confirmed 后 pin 没有解除")
+		}
+	})
+
+	t.Run("年龄不构成解 pin 理由", func(t *testing.T) {
+		if !e2eState(t, pg, n3).Pinned {
+			t.Fatalf("pin 被按年龄解除了 —— 策略的价值与年龄无关")
+		}
+	})
+
+	t.Run("复审队列只提示不自动放行", func(t *testing.T) {
+		for _, id := range queueIDs {
+			if !e2eState(t, pg, id).Pinned {
+				t.Fatalf("pin %d 被自动解除了 —— 队列只提示，不自动放行", id)
+			}
+		}
+		for _, id := range rep2.Unpinned {
+			for _, mine := range queueIDs {
+				if mine == id {
+					t.Fatalf("复审队列里的 pin %d 出现在自动解 pin 列表里", id)
+				}
+			}
+		}
+		// 「读队列」本身不改变任何状态。
+		before, err := pg.CountPinnedStrategies()
+		if err != nil {
+			t.Fatalf("数被 pin 的策略: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := pg.PinnedStrategies(200); err != nil {
+				t.Fatalf("读复审队列: %v", err)
+			}
+		}
+		after, err := pg.CountPinnedStrategies()
+		if err != nil {
+			t.Fatalf("数被 pin 的策略: %v", err)
+		}
+		if before != after {
+			t.Fatalf("读复审队列改变了 pin 的数量：%d → %d", before, after)
+		}
+		// 逐条再确认一次：读队列之后每一条 pin 都还在（纯读）。
+		for _, id := range queueIDs {
+			if !e2eState(t, pg, id).Pinned {
+				t.Fatalf("读复审队列之后 pin %d 消失了 —— 读队列必须是纯读", id)
+			}
+		}
+	})
 }
 
 // TestCuratorE2EPinDecisionHasNoModelAndNoAgeInput 钉住「解除判定不经过模型、
@@ -781,7 +823,7 @@ func TestCuratorE2EPinDecisionHasNoModelAndNoAgeInput(t *testing.T) {
 // 断言三层：
 //  1. 群里**两个不同的成员**解析到的是同一份快照（策略集合与版本逐条相同）；
 //  2. 快照的版本号就是策略生成那一刻的版本；
-//  3. 策略后来升了版，**快照不动** —— 快照是冻结的那一份，不是每轮重算的。
+//  3. 策略后来升了版，**快照不动** —— 快照是冻结的那一份，不是每轮重算。
 //
 // 第 3 条是「同版本」的硬保证：每轮重算会让 planner 看到的策略集漂移，
 // 与「组内同版本」直接冲突（计划里明确写了快照在任务启动时生成一次并复用）。
@@ -892,85 +934,6 @@ func TestCuratorE2EGroupMembersShareSameStrategyVersion(t *testing.T) {
 		if e.StrategyID == strategyID && e.Version != versionA {
 			t.Fatalf("快照跟着策略升版了（%d → %d）—— 快照必须是冻结的那一份，否则组内成员会看到不同版本",
 				versionA, e.Version)
-		}
-	}
-}
-
-// =====================================================================
-// 行为 7：pin 复审队列只提示、不自动放行
-// =====================================================================
-
-// TestCuratorE2EPinReviewQueueIsAdvisoryOnly 钉住复审队列**只提示**。
-//
-// 计划「已拍板」第 4 条：队列永远只是 advisory —— 超过阈值时生成条目，
-// 但**没有任何一条 pin 被自动解除**；「读队列」这个动作也不改变任何状态。
-//
-// 为什么这条是硬要求：自动解 pin 会砸掉漏洞报告的**可复现性** ——
-// 当通往某个漏洞的唯一已知路径被放行，报告就再也复现不出来。
-func TestCuratorE2EPinReviewQueueIsAdvisoryOnly(t *testing.T) {
-	_, pg := taskHallTestServer(t)
-	sfx := e2eSuffix()
-
-	ids := make([]int64, 0, db.StrategyPinQueueThreshold+1)
-	for i := 0; i <= db.StrategyPinQueueThreshold; i++ {
-		id := e2eStrategy(t, pg, fmt.Sprintf("e2e复审队列-%d-%d", sfx, i),
-			e2eAssetType(sfx, fmt.Sprintf("q%d", i)), "m1")
-		if ok, err := pg.ApplyStrategyPin(id, true); err != nil || !ok {
-			t.Fatalf("置 pin: %v", err)
-		}
-		ids = append(ids, id)
-	}
-
-	e2eCleanup(t, pg, ids, nil, nil, nil)
-
-	rep := e2eRunCurator(t, pg)
-
-	if len(rep.PinQueue) == 0 {
-		t.Fatalf("pinned 策略超过阈值（%d）却没有生成复审队列条目", db.StrategyPinQueueThreshold)
-	}
-	inQueue := 0
-	for _, id := range ids {
-		if e2eContainsID(rep.PinQueue, id) {
-			inQueue++
-		}
-	}
-	if inQueue != len(ids) {
-		t.Fatalf("复审队列只收了 %d / %d 条本用例的策略", inQueue, len(ids))
-	}
-	// 队列里的 pin 一条都不许被自动解除。
-	for _, id := range ids {
-		if !e2eState(t, pg, id).Pinned {
-			t.Fatalf("pin %d 被自动解除了 —— 队列只提示，不自动放行", id)
-		}
-	}
-	for _, id := range rep.Unpinned {
-		for _, mine := range ids {
-			if mine == id {
-				t.Fatalf("复审队列里的 pin %d 出现在自动解 pin 列表里", id)
-			}
-		}
-	}
-
-	// 「读队列」本身不改变任何状态。
-	before, err := pg.CountPinnedStrategies()
-	if err != nil {
-		t.Fatalf("数被 pin 的策略: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		if _, err := pg.PinnedStrategies(200); err != nil {
-			t.Fatalf("读复审队列: %v", err)
-		}
-	}
-	after, err := pg.CountPinnedStrategies()
-	if err != nil {
-		t.Fatalf("数被 pin 的策略: %v", err)
-	}
-	if before != after {
-		t.Fatalf("读复审队列改变了 pin 的数量：%d → %d", before, after)
-	}
-	for _, id := range ids {
-		if !e2eState(t, pg, id).Pinned {
-			t.Fatalf("读复审队列之后 pin %d 消失了 —— 读队列必须是纯读", id)
 		}
 	}
 }
