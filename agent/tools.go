@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -57,7 +58,14 @@ type ToolSet struct {
 	cs              *db.CompanyStore // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// memberAgentKey 是【调用者的成员身份】（群成员的 agent key，如 pentest/reporter）。
+	//
+	// 为什么不用 worker 字段当成员身份：worker 是执行器名（work#N / planner / human），
+	// 标识「哪一次执行」；群成员名册与提案配额都按【成员身份】算。
+	//
+	// 空 = 没有注入成员身份 ⇒ 提案路径的成员闸门 fail-closed（拒绝）。
+	memberAgentKey string
+	taskID         int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -240,6 +248,13 @@ func (t *ToolSet) ListWorkerTracesTool() actool.CoreTool   { return t.listWorker
 func (t *ToolSet) SearchWorkerTracesTool() actool.CoreTool { return t.searchAllWorkerTraces() }
 func (t *ToolSet) NodeDetailTool() actool.CoreTool         { return t.nodeDetail() }
 func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() }
+
+// ProposeIntentTool exposes the member-side proposal tool to the server side.
+//
+// 群成员会话要拿到它，必须有一条【任务绑定】的工具集：目录里那份是 task-less 的
+// （见 server/assembly.go 的 buildDomainReg），在它上面提案工具会明确拒绝 ——
+// 没有任务就没有群、没有范围、没有配额。
+func (t *ToolSet) ProposeIntentTool() actool.CoreTool { return toolProposeIntent(t) }
 
 // SetEnrich wires the async enrichment engine (DNS/HTTP auto-completion).
 func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
@@ -1262,6 +1277,275 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 		})
 }
 
+// memberIntentQuota 是单个成员【在途】（open）意图条数上限。
+//
+// 为什么需要它：一个不停发现线索的成员会把 frontier 淹掉，规划者的主路线被饿死。
+// 配额让「提议」有上限 —— 提议不是无限的。
+//
+// 为什么是代码常量而不是配置项：安全边界必须是代码常量（DB 规则行可被删、
+// settings 可被热改 —— 见 guard/shortcircuit.go 的同一条理由）。
+const memberIntentQuota = 3
+
+// proposeIntentDesc 是 propose_intent 的模型侧说明。
+const proposeIntentDesc = "【提议一条探索方向】写进本任务的 frontier，供规划者裁决。\n" +
+	"★它只是「提议」：不改任何归属、不触发任何状态迁移、不进规划者的主路线 —— 与 add_intent（直接写入）不是一回事。\n" +
+	"★护栏（全部是确定性判定）：必须是本任务大厅的成员；绑定的资产必须在本任务范围内；同一个目标不重复提；每个成员在途的意图有上限。"
+
+// toolProposeIntent 让群组成员【提议】一条意图。
+//
+// 为什么是【新工具】而不是在群组里放开 add_intent：
+//   - add_intent 的授权面与语义【逐字不变】（规划者/主 agent 直接写 frontier）；
+//   - 本工具只授予「在本任务图上写一条 open 的、origin='member' 的意图」这一件事；
+//   - 它是【提议】：不改任何 owner、不触发任何状态迁移；
+//   - 审查成本低于 add_intent：它【不继承】add_intent 的任何分级/审批钩子。
+//
+// 五道确定性闸门（缺一不可；没有模型参与、没有主观判断）：
+//  1. 任务上下文 —— 没有任务就没有群、没有范围、没有配额，一律拒。
+//  2. 群组成员身份 —— 调用者必须是本任务所绑定群组的成员；非成员直接拒。
+//  3. 范围守卫 —— 锚点资产必须全在本任务范围内（共享判定，越界整单拒绝）。
+//  4. 去重 —— 本任务已有一条同（归一化后）摘要的 open 意图 ⇒ 不重复创建。
+//  5. 配额 —— 群组额度状态放行，且该成员在途意图未达上限。
+func toolProposeIntent(ts *ToolSet) actool.CoreTool {
+	schema := obj(map[string]any{
+		"summary":   str("一句话描述这个探索方向：做什么+为什么。"),
+		"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向针对哪些【目标资产 id】（list_assets 返回的资产 id，不是探索节点 id）。只能填本任务范围内的资产。"},
+		"priority":  intp("优先级 0-10，默认5"),
+	}, "summary")
+	if ts == nil {
+		return writeTool("propose_intent", proposeIntentDesc, schema,
+			func(context.Context, json.RawMessage) (actool.Result, error) {
+				return actool.Errorf("propose_intent 需要任务上下文（探索图）：当前 agent 不在某个任务内运行，该工具不可用。"), nil
+			})
+	}
+	return ts.writeExpTool("propose_intent", proposeIntentDesc, schema, ts.proposeIntent)
+}
+
+// proposeIntent 是 propose_intent 的实现：五道闸门 + 一次写入。
+func (t *ToolSet) proposeIntent(_ context.Context, in json.RawMessage) (actool.Result, error) {
+	var a struct {
+		Summary  string            `json:"summary"`
+		AssetIDs []json.RawMessage `json:"asset_ids"`
+		Priority int               `json:"priority"`
+	}
+	_ = json.Unmarshal(in, &a)
+
+	// 闸门 1：任务上下文。
+	taskID := t.scopeTaskID()
+	if taskID <= 0 {
+		return actool.Errorf("propose_intent 需要任务上下文：当前不在某个任务内运行，无法确定提案该写进哪张探索图。"), nil
+	}
+	summary := strings.TrimSpace(a.Summary)
+	if summary == "" {
+		return actool.Errorf("summary 不能为空：提案要说清要探索或验证什么。"), nil
+	}
+	creator := t.proposerIdentity()
+
+	// 闸门 2：群组成员身份。
+	group, err := t.proposalGroup(taskID)
+	if err != nil {
+		return actool.Errorf(fmt.Sprintf("读群组失败：%v", err)), nil
+	}
+	if group == nil {
+		return actool.Errorf("本任务没有任务大厅：只有大厅成员才能提议意图。"), nil
+	}
+	member, err := t.isProposalGroupMember(group.ID, creator)
+	if err != nil {
+		return actool.Errorf(fmt.Sprintf("读群成员失败：%v", err)), nil
+	}
+	if !member {
+		return actool.Errorf("你不是本任务大厅的成员，不能提议意图。"), nil
+	}
+
+	anchors := pidList(a.AssetIDs)
+	uniq := make([]int64, 0, len(anchors))
+	seen := make(map[int64]bool, len(anchors))
+	for _, id := range anchors {
+		if !seen[id] {
+			seen[id] = true
+			uniq = append(uniq, id)
+		}
+	}
+	anchors = uniq
+
+	// 闸门 3：范围守卫。
+	if err := t.proposalAnchorsInScope(taskID, anchors); err != nil {
+		return actool.Errorf(err.Error()), nil
+	}
+
+	// 闸门 4：去重。
+	if id, found, err := t.ts.FindOpenIntentBySummary(summary); err != nil {
+		return actool.Errorf(fmt.Sprintf("查重失败：%v", err)), nil
+	} else if found {
+		return actool.Text(fmt.Sprintf("已有同目标意图 #%d，未重复创建", id)), nil
+	}
+
+	// 闸门 5：配额。
+	if err := t.proposalQuotaAllows(group.ID, creator); err != nil {
+		return actool.Errorf(err.Error()), nil
+	}
+
+	priority := a.Priority
+	if priority == 0 {
+		priority = 5
+	}
+	payload := map[string]any{"summary": summary}
+	if len(anchors) > 0 {
+		payload["asset_ids"] = anchors
+	}
+	id, err := t.ts.AddIntentInScopeWithCreator(taskID, payload, priority, anchors, "member", creator)
+	if err != nil {
+		return actool.Errorf(fmt.Sprintf("写入提案失败：%v", err)), nil
+	}
+	// 血缘：顶层提案挂到任务起点 origin fact —— 与 add_intent 同一条规则
+	//（「每个意图都连到 fact 节点」从创建路径上被强制）。
+	if origin, _ := t.ts.OriginFactID(); origin > 0 {
+		_ = t.ts.Link(origin, db.RelDerivedFrom, id)
+	}
+	return actool.Text(fmt.Sprintf("intent proposal created: %d", id)), nil
+}
+
+// proposerIdentity 返回【提案者身份】：群成员的 agent key。
+//
+// 为什么不能只认 worker 字段：worker 是【执行器名】（work#N / planner / human），
+// 标识「哪一次执行」；群成员名册与配额都按【成员身份】算 —— 一个成员多开几个
+// 执行器不该绕过配额。memberAgentKey 由成员会话注入；没注入时回退到 worker
+// （与 server 侧 groupUsableMemberDecision 的 `mem.AgentKey == worker` 同一口径）。
+func (t *ToolSet) proposerIdentity() string {
+	if t.memberAgentKey != "" {
+		return t.memberAgentKey
+	}
+	return strings.TrimSpace(t.worker)
+}
+
+// SetMemberAgentKey 记录【调用者的成员身份】（群成员的 agent key）。
+//
+// 成员会话按 agent key 注入；没有注入身份的调用者拿不到提案权（成员闸门
+// fail-closed）。
+func (t *ToolSet) SetMemberAgentKey(key string) { t.memberAgentKey = strings.TrimSpace(key) }
+
+// proposalDB 给出提案路径要的数据库句柄（nil = 不可用）。
+func (t *ToolSet) proposalDB() *db.DB {
+	if t == nil || t.ts == nil {
+		return nil
+	}
+	return t.ts.DB()
+}
+
+// proposalAssetStore 给出提案路径要用的资产库句柄（nil = 不可用）。
+func (t *ToolSet) proposalAssetStore() *db.AssetStore {
+	if t.as != nil {
+		return t.as
+	}
+	d := t.proposalDB()
+	if d == nil {
+		return nil
+	}
+	return d.Assets()
+}
+
+// proposalGroup 取出本任务绑定的大厅（nil = 这个任务没有大厅）。
+func (t *ToolSet) proposalGroup(taskID int64) (*db.ChatGroup, error) {
+	d := t.proposalDB()
+	if d == nil {
+		return nil, nil
+	}
+	g, err := d.GroupByTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("按任务查群组失败: %w", err)
+	}
+	return g, nil
+}
+
+// isProposalGroupMember 判定 agentKey 是不是该群的成员。
+//
+// 名册以 chat_group_members 为准；role 只表达分工（dispatcher/member/observer），
+// **不表达权限**（见 db/chat_group.go）⇒ 在名册里就是成员。
+func (t *ToolSet) isProposalGroupMember(groupID int64, agentKey string) (bool, error) {
+	d := t.proposalDB()
+	if d == nil {
+		return false, nil
+	}
+	members, err := d.ChatGroupMembers(groupID)
+	if err != nil {
+		return false, fmt.Errorf("读群成员失败: %w", err)
+	}
+	for _, m := range members {
+		if m.AgentKey == agentKey {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// proposalAnchorsInScope 判定提案要绑的资产是否全在本任务范围内。
+//
+// 判定只走平台唯一的范围入口（db.AssetStore.ScopedAssetIDs → ScopeFragmentFor），
+// 这里不重写任何范围 SQL：范围规则只有一处，工具面与平台 API 面不会漂移。
+//
+// 整单拒绝：任何一个锚点越界 ⇒ 整条提案不写。错误文案不区分「不存在」与
+// 「不在范围内」⇒ 拒绝不构成存在性探测器（与 db.ErrAnchorOutOfScope 同一套约定）。
+//
+// 第二条判定是系统资产拦截规则（与 add_intent 同一套）：提案也要过它 ——
+// 否则成员就能把被拦截的系统资产当成可探索目标提上来，绕开 add_intent 的闸门。
+func (t *ToolSet) proposalAnchorsInScope(taskID int64, anchors []int64) error {
+	if len(anchors) == 0 {
+		return nil
+	}
+	as := t.proposalAssetStore()
+	if as == nil {
+		return errors.New("范围校验不可用：拿不到资产库句柄")
+	}
+	allowed, err := as.ScopedAssetIDs(taskID, anchors)
+	if err != nil {
+		return fmt.Errorf("范围校验失败: %w", err)
+	}
+	if len(allowed) != len(anchors) {
+		return db.ErrAnchorOutOfScope
+	}
+	hits, err := as.CheckAssetsIntercept(taskID, anchors)
+	if err != nil {
+		return fmt.Errorf("资产拦截校验失败: %w", err)
+	}
+	if len(hits) > 0 {
+		var b strings.Builder
+		b.WriteString("提案绑定的资产未通过测试范围校验：")
+		for _, h := range hits {
+			fmt.Fprintf(&b, "\n - %s", h.Describe())
+		}
+		return errors.New(b.String())
+	}
+	return nil
+}
+
+// proposalQuotaAllows 判定这条提案是否还在配额内。
+//
+// 两条判定，同一个闸门：
+//  1. 群组额度状态：draining / parked ⇒ 整组不再开新活
+//     （db.QuotaStateDeniesNewCalls）。查不出来 ⇒ 按拒绝处理（fail closed）——
+//     查不出来不等于没有限制。
+//  2. 成员在途意图条数：达到 memberIntentQuota ⇒ 先完成已有意图再提新的。
+func (t *ToolSet) proposalQuotaAllows(groupID int64, creator string) error {
+	d := t.proposalDB()
+	if d == nil {
+		return errors.New("配额校验不可用：拿不到数据库句柄")
+	}
+	state, err := d.GroupQuotaState(groupID)
+	if err != nil {
+		return fmt.Errorf("群组额度状态查不出来: %w", err)
+	}
+	if db.QuotaStateDeniesNewCalls(state) {
+		return fmt.Errorf("群组额度状态为 %s，不再接纳新的提案", state)
+	}
+	n, err := t.ts.CountOpenIntentsByCreator(creator)
+	if err != nil {
+		return fmt.Errorf("统计在途意图失败: %w", err)
+	}
+	if n >= memberIntentQuota {
+		return fmt.Errorf("你在途意图已达上限（%d 条），先完成已有意图", memberIntentQuota)
+	}
+	return nil
+}
+
 func (t *ToolSet) listGoals() actool.CoreTool {
 	return t.readExpTool("list_goals", "列出本任务的目标节点及其状态（open/met），用于判断是否达成。",
 		obj(map[string]any{}),
@@ -2163,6 +2447,10 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
+		// propose_intent：提议级的意图写入（origin='member'）。它与 add_intent 同族但
+		// 不是一回事 —— 审查更轻、护栏更严（成员/范围/去重/配额），不改任何归属。
+		// 放在这里是为了让它进目录（tools 表据此登记，绑定到群成员 agent key）。
+		toolProposeIntent(t),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
