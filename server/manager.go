@@ -1357,6 +1357,47 @@ func (m *Manager) TaskStatus(id string) string {
 	return ""
 }
 
+// taskIsTerminal reports whether the task has reached a terminal status, judged
+// from PG (the persisted truth, not the in-memory handle).
+//
+// 这是「被终止的意图能不能重开」的判据，与额度阻塞重开那条路径
+// （ReplaceTaskLLMProfiles → pgdb.IsTerminal(pt.Status)）同源：读不到任务行时
+// 按【已终态】处理，那条路径读不到任务也是直接返回、不重开。
+func (m *Manager) taskIsTerminal(id string) bool {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return true
+	}
+	pt, err := m.pg.GetTask(n)
+	if err != nil || pt == nil {
+		return true
+	}
+	return pgdb.IsTerminal(pt.Status)
+}
+
+// ReopenStoppedIntent re-opens a stopped intent so it can be claimed again.
+//
+// 与自动重开同一条边界：任务已进终态时不重开（那里没有 worker 会跑，重开只会造
+// 一条死状态）。要连终态任务一起复活，走 UI 的「重跑意图」——那条路会把任务重新
+// admit 回运行态。
+func (s *Server) ReopenStoppedIntent(taskID, intentID int64) (bool, error) {
+	task, ok := s.m.Task(strconv.FormatInt(taskID, 10))
+	if !ok {
+		return false, fmt.Errorf("任务不存在")
+	}
+	if s.m.taskIsTerminal(task.ID) {
+		return false, fmt.Errorf("任务已结束，无法重开意图")
+	}
+	reopened, err := task.Store.ReopenIntent(intentID)
+	if err != nil {
+		return false, fmt.Errorf("重开意图 %d: %w", intentID, err)
+	}
+	if reopened {
+		task.Notify()
+	}
+	return reopened, nil
+}
+
 // StampTaskFirstRun stamps first_run_at + deadline_at on the first real run (idempotent
 // in DB) and mirrors deadline_at on the live handle. Returns the deadline unix (0 = 不限).
 func (m *Manager) StampTaskFirstRun(id string) (int64, error) {

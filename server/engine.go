@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -76,6 +77,33 @@ const (
 	steerQueueMax          = 10
 )
 
+// KillSettleGrace is how long a killed work is given to land its conclusions
+// before the run is torn down. A hard cancel loses whatever the agent had in
+// context but had not yet written back (see the wrap-up semantics in
+// agent/wrapup.go): the SDK only enters its settlement phase when a *budget*
+// is exhausted — a cancelled parent context is an immediate abort with no
+// write-back window at all. So a kill first hands the worker a settle prompt
+// and only cancels once this grace has passed.
+//
+// 宽限期是【有界】的：到期必取消，一次 kill 最多让这条 work 多活这么久。
+const KillSettleGrace = 30 * time.Second
+
+// killSettlePrompt is the notice a killed work receives so it writes back what
+// it already found instead of dropping it on the floor. 它只对【本次执行】有意
+// 义（所以不落库：落库会在下一次重跑时变成一条过期的「即将终止」）。
+const killSettlePrompt = "【收尾通知】本次执行即将终止。请立即把已经确认的事实、资产与漏洞写回" +
+	"（report_finding / insert_assets / record_fact），不要启动新的探测或新的命令。"
+
+// steerPayloadKind marks the durable nodes that carry steering messages. The
+// graph's other hint nodes are human/strategic hints; they must never be
+// mistaken for a steering message (and vice versa).
+const steerPayloadKind = "steer"
+
+// steerScanLimit bounds how many hint nodes one steering read walks. Hints are
+// few (the planner itself reads 50), so the bound keeps a pathological graph
+// from turning a single delivery into an unbounded scan.
+const steerScanLimit = 200
+
 var errWorkControlConflict = errors.New("work control conflict")
 
 // retryableWorkerModelError excludes errors already handled by the task router.
@@ -136,6 +164,10 @@ type Engine struct {
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
 
+	// killSettleGrace is the grace a killed work gets to land its conclusions
+	// before it is torn down. Defaults to KillSettleGrace; tests shorten it.
+	killSettleGrace time.Duration
+
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
@@ -182,6 +214,12 @@ type workExecution struct {
 	cancel context.CancelCauseFunc
 	done   chan error
 	action string // user action: pause | cancel
+	// task is the task this work belongs to. It is nil for a handle that is not
+	// backed by a running worker: there is nobody to settle and nowhere to persist.
+	task *Task
+	// finished is closed once the worker returned. A pending kill grace waits on
+	// it, so a work that settled on its own is never cancelled afterwards.
+	finished chan struct{}
 }
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
@@ -409,7 +447,7 @@ func NewEngine(m *Manager) *Engine {
 	e := &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
 		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
 		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
-		runtimes: map[string]*taskRuntime{}}
+		runtimes: map[string]*taskRuntime{}, killSettleGrace: KillSettleGrace}
 	// 群组闸门的默认实现装在 manager 侧（manager.go）：判据（群成员能不能用、组内
 	// 上限、额度状态）都是 server 侧的数据层口径，engine 不查群组表。装配区
 	// （server.go 的 New）属别的单元的文件域，所以这里先按 manager 侧回调装上，
@@ -423,8 +461,35 @@ func NewEngine(m *Manager) *Engine {
 // registerWork records the cancel for the work currently running intentID.
 func (e *Engine) registerWork(intentID int64, cancel context.CancelCauseFunc) {
 	e.workMu.Lock()
-	e.work[intentID] = &workExecution{cancel: cancel, done: make(chan error, 1)}
+	e.work[intentID] = &workExecution{cancel: cancel, done: make(chan error, 1), finished: make(chan struct{})}
 	e.workMu.Unlock()
+}
+
+// registerWorkForTask is registerWork plus the task binding: the kill path needs
+// the task to know there is a worker worth settling, so the binding is installed
+// together with the handle — a kill landing in between would find no task and
+// skip the settle window.
+func (e *Engine) registerWorkForTask(intentID int64, t *Task, cancel context.CancelCauseFunc) {
+	e.workMu.Lock()
+	e.work[intentID] = &workExecution{cancel: cancel, done: make(chan error, 1), finished: make(chan struct{}), task: t}
+	e.workMu.Unlock()
+}
+
+// markWorkSettled flags the live work as finished: the worker returned, so a
+// pending kill grace must not cancel it any more (and the grace wait can end
+// early instead of burning the whole window).
+func (e *Engine) markWorkSettled(intentID int64) {
+	e.workMu.Lock()
+	defer e.workMu.Unlock()
+	run := e.work[intentID]
+	if run == nil {
+		return
+	}
+	select {
+	case <-run.finished:
+	default:
+		close(run.finished)
+	}
 }
 
 // detachWork removes the live control handle once Execute has returned. complete
@@ -517,6 +582,9 @@ func transitionIntentState(store *db.ExplorationStore, intentID int64, expected,
 // SteerWork queues a mid-run course-correction for the work running intentID (the
 // planner's steer_work tool). The worker delivers it before its next tool call and
 // re-plans — no kill. Errors if no work is currently running that intent.
+//
+// 消息同时留一份【持久化副本】：内存队列在进程崩溃或 work 收场（detachWork 会清掉
+// 它）时会丢消息，落库的那份由下一次执行捡回。
 func (e *Engine) SteerWork(intentID int64, msg string) error {
 	if strings.TrimSpace(msg) == "" {
 		return fmt.Errorf("纠偏消息不能为空")
@@ -526,18 +594,51 @@ func (e *Engine) SteerWork(intentID int64, msg string) error {
 		return fmt.Errorf("纠偏消息过长（%d 字符，上限 %d）", n, steerMsgMaxRunes)
 	}
 	e.workMu.Lock()
-	running := e.work[intentID] != nil
+	run := e.work[intentID]
 	e.workMu.Unlock()
-	if !running {
+	if run == nil {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
+	// 队列满了就别落库：留一条永远等不到交付的副本，只会在下次执行时变成一条
+	// 迟到的纠偏。
+	if err := e.checkSteerRoom(intentID); err != nil {
+		return err
+	}
+	// 先落库再入队：进程在两步之间崩掉时消息还在库里等下次执行捡回；反过来
+	// （先入队后落库）那一步崩掉就直接丢了。
+	if err := e.persistSteer(run.task, intentID, msg); err != nil {
+		// 落库失败只记日志：本次投递走内存通道，不受影响。
+		log.Printf("[steer] intent #%d 纠偏消息落库失败（本次仍会投递）: %v", intentID, err)
+	}
+	if err := e.enqueueSteer(intentID, msg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkSteerRoom reports whether the in-memory queue of intentID still has room.
+func (e *Engine) checkSteerRoom(intentID int64) error {
 	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
 	if len(e.steerBox[intentID]) >= steerQueueMax {
-		e.steerMu.Unlock()
-		return fmt.Errorf("意图 %d 的纠偏队列已满（上限 %d 条），worker 消费不过来", intentID, steerQueueMax)
+		return steerQueueFullErr(intentID)
+	}
+	return nil
+}
+
+// steerQueueFullErr 统一的「纠偏队列已满」错误文案。
+func steerQueueFullErr(intentID int64) error {
+	return fmt.Errorf("意图 %d 的纠偏队列已满（上限 %d 条），worker 消费不过来", intentID, steerQueueMax)
+}
+
+// enqueueSteer appends a steering message to the in-memory queue of intentID.
+func (e *Engine) enqueueSteer(intentID int64, msg string) error {
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	if len(e.steerBox[intentID]) >= steerQueueMax {
+		return steerQueueFullErr(intentID)
 	}
 	e.steerBox[intentID] = append(e.steerBox[intentID], msg)
-	e.steerMu.Unlock()
 	return nil
 }
 
@@ -556,6 +657,125 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 		e.steerBox[intentID] = q[1:]
 	}
 	return msg, true
+}
+
+// persistSteer stores a steering message durably so it survives a crash and
+// is picked up by the next round of the targeted work.
+//
+// 复用图上的 hint 节点（exploration_nodes kind='hint'）：不新建表、不新建队列。
+// payload 带 kind='steer' 与 intent_id，用来把「纠偏」与「人挂的战略提示」分开；
+// state='active' = 还没交付，交付后置 'consumed'。
+func (e *Engine) persistSteer(t *Task, intentID int64, msg string) error {
+	if t == nil || t.Store == nil {
+		return fmt.Errorf("没有任务上下文，纠偏消息无法落库")
+	}
+	if n := len([]rune(msg)); n > steerMsgMaxRunes {
+		return fmt.Errorf("纠偏消息过长（%d 字符，上限 %d）", n, steerMsgMaxRunes)
+	}
+	pending, err := e.LoadPendingSteers(t, intentID)
+	if err != nil {
+		return err
+	}
+	// 待投递条数按同一个上限封顶：崩溃后重跑最多补投这么多条纠偏。
+	if len(pending) >= steerQueueMax {
+		return fmt.Errorf("意图 %d 的待投递纠偏已满（上限 %d 条）", intentID, steerQueueMax)
+	}
+	payload := map[string]any{
+		"summary":   steerPayloadKind,
+		"text":      msg,
+		"intent_id": intentID,
+		"kind":      steerPayloadKind,
+	}
+	_, err = t.Store.AddNode(db.KindHint, payload, 0, "active", steerPayloadKind, nil)
+	return err
+}
+
+// LoadPendingSteers reads the durable steering messages for a work, oldest
+// first (the worker consumes them in the order they were written).
+func (e *Engine) LoadPendingSteers(t *Task, intentID int64) ([]string, error) {
+	if t == nil || t.Store == nil {
+		return nil, fmt.Errorf("没有任务上下文，纠偏消息无法读取")
+	}
+	nodes, err := t.Store.ListByKind(db.KindHint, steerScanLimit)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, n := range nodes {
+		text, ok := steerPayloadOf(n, intentID)
+		if !ok {
+			continue
+		}
+		out = append(out, text)
+	}
+	// ListByKind 是「新→旧」，投递要「先来先到」⇒ 反转成旧→新。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// steerPayloadOf extracts the steering text of a hint node, if it is an
+// undelivered steering message for intentID.
+func steerPayloadOf(n *db.Node, intentID int64) (string, bool) {
+	if n == nil || n.State != "active" || len(n.Payload) == 0 {
+		return "", false
+	}
+	var p map[string]any
+	if err := json.Unmarshal(n.Payload, &p); err != nil {
+		return "", false
+	}
+	if k, _ := p["kind"].(string); k != steerPayloadKind {
+		return "", false
+	}
+	if id, _ := p["intent_id"].(float64); int64(id) != intentID {
+		return "", false
+	}
+	text, _ := p["text"].(string)
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// consumeSteer marks the durable copy of a delivered steering message consumed,
+// so the next round does not deliver it a second time.
+func (e *Engine) consumeSteer(t *Task, intentID int64, msg string) error {
+	if t == nil || t.Store == nil {
+		return nil
+	}
+	nodes, err := t.Store.ListByKind(db.KindHint, steerScanLimit)
+	if err != nil {
+		return err
+	}
+	var target *db.Node
+	for _, n := range nodes { // 新→旧 ⇒ 最后命中的是最旧的一条
+		text, ok := steerPayloadOf(n, intentID)
+		if !ok || text != msg {
+			continue
+		}
+		target = n
+	}
+	if target == nil {
+		return nil
+	}
+	return t.Store.SetNodeState(target.ID, "consumed")
+}
+
+// replayPendingSteers re-queues the steering messages that outlived their work
+// (crash or detach), so the next run of that intent picks them up.
+func (e *Engine) replayPendingSteers(t *Task, intentID int64) {
+	pending, err := e.LoadPendingSteers(t, intentID)
+	if err != nil {
+		log.Printf("[steer] task %s 读取待投递纠偏失败: %v", t.ID, err)
+		return
+	}
+	for _, msg := range pending {
+		if err := e.enqueueSteer(intentID, msg); err != nil {
+			log.Printf("[steer] task %s 意图 #%d 补投纠偏失败: %v", t.ID, intentID, err)
+			return
+		}
+	}
 }
 
 // steerHooks wraps the guard's hook runner so the planner can steer a running work:
@@ -612,13 +832,19 @@ func isThinkingOnlyTurn(messages []llm.Message) bool {
 
 func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
 	if msg, ok := h.drain(); ok {
-		return true, "【规划者实时纠偏】" + msg +
-			"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
+		return true, steerDeliveryText(msg), nil
 	}
 	if h.inner != nil {
 		return h.inner.PreToolUse(ctx, name, input)
 	}
 	return false, "", nil
+}
+
+// steerDeliveryText 包装一条排队的即时指令。措辞是通用的：规划者的纠偏与终止前的
+// 收尾通知走同一条通道，正文自带出处。
+func steerDeliveryText(msg string) string {
+	return "【实时指令】" + msg +
+		"\n（这是对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）"
 }
 
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
@@ -654,8 +880,16 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 	return false, []string{emptyTurnNudge}, ""
 }
 
-// KillWork cancels the in-flight work running intentID (planner's kill_work tool).
-// The work's agent-core session honors ctx cancellation and aborts promptly.
+// KillWork terminates the in-flight work running intentID (planner's kill_work tool).
+//
+// 收尾优先（不丢已得结论）：硬取消会丢掉 worker 上下文里已识别、但还没落库的东西
+// —— SDK 的收尾提示只在【预算耗尽】时注入，父上下文被取消是硬中断，没有写回窗口
+// （见 agent/wrapup.go 的收尾语义）。所以这里先给 worker 投递一条收尾通知，让它在
+// 下一个工具调用边界把结论写回，宽限期到了再真正取消。
+//
+// 宽限期是【有界】的：到期必取消，一次 kill 最多让这条 work 多活 e.killSettleGrace
+// （生产 = KillSettleGrace），不会永远挂着。worker 若在宽限期内自己收场（结论已落库、
+// 意图已结算），取消动作会被跳过 —— 那是更好的结果。
 func (e *Engine) KillWork(intentID int64) error {
 	e.workMu.Lock()
 	run := e.work[intentID]
@@ -663,8 +897,75 @@ func (e *Engine) KillWork(intentID int64) error {
 	if run == nil {
 		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
 	}
-	run.cancel(agent.AbortKilledByPlanner)
+	// 背后没有 worker 的句柄（没有任务上下文）无从收尾：直接取消。
+	if run.task == nil {
+		run.cancel(agent.AbortKilledByPlanner)
+		return nil
+	}
+	// 先投递收尾通知（走与纠偏同一条通道：worker 在下一个工具调用边界取走它）。
+	// 这条通知只对本次执行有意义，所以不落库——落库会在下一次重跑时变成一条过期的
+	// 「即将终止」。
+	if err := e.enqueueSteer(intentID, killSettlePrompt); err != nil {
+		log.Printf("[kill] intent #%d 无法投递收尾通知: %v", intentID, err)
+	}
+	go e.cancelAfterSettleGrace(intentID, run)
 	return nil
+}
+
+// cancelAfterSettleGrace cancels a killed work once the settle grace expires,
+// unless the work finished on its own first.
+func (e *Engine) cancelAfterSettleGrace(intentID int64, run *workExecution) {
+	timer := time.NewTimer(e.killSettleGrace)
+	defer timer.Stop()
+	select {
+	case <-run.finished:
+		return // 宽限期内自己收场了：结论已落库，不必再取消
+	case <-timer.C:
+	}
+	e.workMu.Lock()
+	defer e.workMu.Unlock()
+	select {
+	case <-run.finished:
+		return // 竞态：worker 恰好在到点瞬间返回
+	default:
+	}
+	if e.work[intentID] != run {
+		return // 已经 detach：没有可取消的句柄了
+	}
+	run.cancel(agent.AbortKilledByPlanner)
+}
+
+// reopenStoppedIntent puts a stopped intent back on the frontier so a worker
+// can claim it again.
+//
+// 边界与「额度阻塞重开」完全一致（server/manager.go 的 ReplaceTaskLLMProfiles）：
+// 任务已进终态（done/failed/timeout）时不重开——那里没有 worker 会跑，重开只会
+// 把一条永远不会被执行的意图留在 open 状态（死状态）。
+func (e *Engine) reopenStoppedIntent(t *Task, intentID int64) bool {
+	if t == nil {
+		return false
+	}
+	if e.isTaskTerminal(t) {
+		return false
+	}
+	reopened, err := t.Store.ReopenIntent(intentID)
+	if err != nil {
+		log.Printf("[engine] task %s 意图 #%d 重开失败: %v", t.ID, intentID, err)
+		return false
+	}
+	return reopened
+}
+
+// isTaskTerminal reports whether the task has reached a terminal status.
+//
+// 判据与「额度阻塞重开」那条路径同源（PG 的 tasks.status）：读不到任务行时按
+// 【已终态】处理——那条路径读不到任务也是直接返回、不重开，这里保持同一边界
+// （宁可少重开，不要在死任务上造一条没人执行的意图）。
+func (e *Engine) isTaskTerminal(t *Task) bool {
+	if t == nil || e.m == nil {
+		return true
+	}
+	return e.m.taskIsTerminal(t.ID)
 }
 
 // Broadcaster exposes the engine's live activity pub/sub (used by the SSE handler).
@@ -1045,7 +1346,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
-	e.registerWork(intent.ID, workCancel)
+	e.registerWorkForTask(intent.ID, t, workCancel)
+	// 补投上次没交付完的纠偏：它们在库里（崩溃/收场都没丢），这次执行接着给。
+	e.replayPendingSteers(t, intent.ID)
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID
@@ -1059,8 +1362,17 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
-		inner:  t.Guard.Hooks(),
-		drain:  func() (string, bool) { return e.drainSteer(iid) },
+		inner: t.Guard.Hooks(),
+		drain: func() (string, bool) {
+			msg, ok := e.drainSteer(iid)
+			if ok {
+				// 交付过的那条落库副本标为已消费：否则下次执行会再投一遍。
+				if err := e.consumeSteer(t, iid, msg); err != nil {
+					log.Printf("[steer] task %s 意图 #%d 标记纠偏已消费失败: %v", t.ID, iid, err)
+				}
+			}
+			return msg, ok
+		},
 		nudges: &atomic.Int64{},
 		limit:  e.emptyTurnNudgeLimit(),
 		label:  label,
@@ -1101,6 +1413,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// pause cancels the task ctx (ectx) instead. Checking workCtx.Err() AFTER
 	// unregister would always be true (unregister cancels it) → every completed
 	// work would be wrongly marked stopped.
+	e.markWorkSettled(intent.ID) // worker 已返回：宽限期的取消动作就此打住
 	workCause := context.Cause(workCtx)
 	killed := workCtx.Err() != nil && ectx.Err() == nil
 	action, completeWork := e.detachWork(intent.ID)
@@ -1176,6 +1489,13 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
+		// 被终止的意图默认可续跑：任务还没进终态时把它放回 frontier，让下一个
+		// worker 接手（它会从上次的 transcript 接着跑，不必从头再来）。
+		// 任务已终态时不重开：那里没有 worker 会跑，重开只会造一条死状态——
+		// 与「额度阻塞重开」用的是同一条边界（server/manager.go）。
+		if e.reopenStoppedIntent(t, intent.ID) {
+			log.Printf("[worker %s] task %s 意图 #%d 已重开，等待下一个 worker 接手", name, t.ID, intent.ID)
+		}
 		t.Notify()
 		return true
 	}
