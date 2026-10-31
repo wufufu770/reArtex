@@ -609,3 +609,182 @@ func TestFindingNodeWriteBackIsAtomicWithFinding(t *testing.T) {
 		t.Fatalf("回写必须与调用方事务同生共死：回滚后仍读到 finding_id=%q", after)
 	}
 }
+
+// TestNormalizeIntentSummary pins 去重的归一化口径：小写 + 空白折叠。
+//
+// 口径变了 = 去重的判定变了，所以它必须被钉死：大小写与连续空白不同的两个摘要
+// 归一化后必须逐字相同，否则「两个成员各提一次同一个线索」就绕过了去重。
+func TestNormalizeIntentSummary(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Test  SQL Injection  in /api/user", "test sql injection in /api/user"},
+		{"test sql injection in /api/user", "test sql injection in /api/user"},
+		{"  \tSQL Injection\n ", "sql injection"},
+		{"SQL Injection", "sql injection"},
+		{"   ", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeIntentSummary(c.in); got != c.want {
+			t.Errorf("NormalizeIntentSummary(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestFindOpenIntentBySummary pins 去重探针：摘要归一化后相同 ⇒ 命中同一条意图。
+//
+// 两个成员各自注意到同一个线索，是自治变成重复劳动的最常见方式 —— 没有这道
+// 探针，frontier 会被同一条线索的多个副本淹掉。
+func TestFindOpenIntentBySummary(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("intent-dedup", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	s := d.Exploration(expID)
+
+	id, err := s.AddIntent(map[string]any{"summary": "Test  SQL Injection  in /api/user"}, 5, nil, "member")
+	if err != nil {
+		t.Fatalf("add intent: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected an intent id")
+	}
+	// 大小写与空白不同 → 仍应命中同一条
+	found, ok, err := s.FindOpenIntentBySummary("test sql injection in /api/user")
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if !ok || found != id {
+		t.Fatalf("find = (%d, %v), want (%d, true)", found, ok, id)
+	}
+	// 不相关的摘要 → 不命中
+	_, ok, err = s.FindOpenIntentBySummary("completely different lead")
+	if err != nil {
+		t.Fatalf("find other: %v", err)
+	}
+	if ok {
+		t.Fatal("must not match a different summary")
+	}
+	// 已收尾（不再 open）的意图不算「在途」：探针只认 open 的那条
+	if err := s.SetNodeState(id, "done"); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err = s.FindOpenIntentBySummary("test sql injection in /api/user")
+	if err != nil {
+		t.Fatalf("find closed: %v", err)
+	}
+	if ok {
+		t.Fatal("已收尾的意图不应再命中去重探针")
+	}
+}
+
+// TestCountOpenIntentsByCreator pins 配额的分母：按创建者、数在途（open）的意图。
+//
+// planner 写的意图没有 created_by ⇒ 不计入任何成员的配额：配额限的是
+// 「成员自治的发散」，不是规划者自己的产出。
+func TestCountOpenIntentsByCreator(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("intent-quota", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	s := d.Exploration(expID)
+
+	for _, creator := range []string{"pentest", "pentest", "worker", "worker"} {
+		if _, err := s.AddIntentWithCreator(map[string]any{"summary": "lead " + creator}, 5, nil, "member", creator); err != nil {
+			t.Fatalf("add intent: %v", err)
+		}
+	}
+	if _, err := s.AddIntent(map[string]any{"summary": "planner lead"}, 5, nil, "planner"); err != nil {
+		t.Fatalf("add planner intent: %v", err)
+	}
+
+	for creator, want := range map[string]int{"pentest": 2, "worker": 2, "planner": 0} {
+		n, err := s.CountOpenIntentsByCreator(creator)
+		if err != nil {
+			t.Fatalf("count %s: %v", creator, err)
+		}
+		if n != want {
+			t.Fatalf("CountOpenIntentsByCreator(%q) = %d, want %d", creator, n, want)
+		}
+	}
+	// 空创建者 = 无人认领 ⇒ 计数为 0，且不报错
+	if n, err := s.CountOpenIntentsByCreator(""); err != nil || n != 0 {
+		t.Fatalf("CountOpenIntentsByCreator(\"\") = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestAddIntentWithCreatorRecordsCreatorInPayload pins 创建者的落点：
+// 在 payload['created_by']，不在 owner。
+//
+// owner 是【归属】：ClaimIntent 认领时把它覆盖成认领者的名字 —— 创建者写在那儿
+// 就查不出来了，配额也就无从算起。
+func TestAddIntentWithCreatorRecordsCreatorInPayload(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("intent-creator", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	s := d.Exploration(expID)
+
+	id, err := s.AddIntentWithCreator(map[string]any{"summary": "成员线索"}, 5, nil, "member", "pentest")
+	if err != nil {
+		t.Fatalf("add intent: %v", err)
+	}
+	node, err := s.GetNode(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(node.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["created_by"] != "pentest" {
+		t.Fatalf("payload['created_by'] = %v, want pentest", payload["created_by"])
+	}
+	if node.Owner != "" {
+		t.Fatalf("创建者不得写进 owner（owner 归认领者）：owner = %q", node.Owner)
+	}
+	if node.Origin != "member" || node.State != "open" {
+		t.Fatalf("origin/state = %q/%q, want member/open", node.Origin, node.State)
+	}
+
+	// 认领之后 owner 变成认领者，created_by 仍在 —— 两条记录互不覆盖。
+	ok, err := s.ClaimIntent(id, "work#1")
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	node, err = s.GetNode(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Owner != "work#1" {
+		t.Fatalf("owner = %q, want work#1", node.Owner)
+	}
+	if err := json.Unmarshal(node.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["created_by"] != "pentest" {
+		t.Fatalf("认领后 payload['created_by'] = %v, want pentest", payload["created_by"])
+	}
+}

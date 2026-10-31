@@ -277,6 +277,111 @@ func (s *ExplorationStore) AddIntentInScope(taskID int64, payload map[string]any
 	return s.AddNodeInScope(taskID, "intent", payload, priority, "open", origin, anchors)
 }
 
+// NormalizeIntentSummary 归一化意图摘要，供去重比较。
+//
+// 为什么必须归一化：两个成员各自注意到同一个线索时，用词与空白几乎不可能逐字相同
+// （"Test  SQL Injection  in /api/user" vs "test sql injection in /api/user"）。
+// 不归一化的话，去重只在【逐字相同】时生效 —— 而逐字相同恰恰是最不可能发生的那种。
+//
+// 口径：转小写 + 首尾空白裁掉 + 连续空白折叠成单个空格。
+//
+// 为什么是代码常量（而不是配置项）：归一化口径变了 = 去重的判定变了，
+// 属于安全边界的语义，必须写在代码里。
+func NormalizeIntentSummary(summary string) string {
+	s := strings.ToLower(strings.TrimSpace(summary))
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
+// FindOpenIntentBySummary 找出本任务里与给定摘要（归一化后）相同的 open 意图。
+//
+// 它是成员意图的去重探针：两个成员各自注意到同一个线索，是自治变成重复劳动的
+// 最常见方式 —— 没有这道闸门，frontier 会被同一条线索的多个副本淹掉，
+// 规划者的主路线被挤到后面。
+//
+// 为什么比较【归一化后】的摘要：见 NormalizeIntentSummary。
+//
+// 为什么 SQL 粗筛 + Go 复核两道：SQL 侧用与 Go 侧同一套口径做粗筛（去空白 + 小写），
+// 它是【超集】（宁可多给候选，不会漏）；Go 侧再用 NormalizeIntentSummary 复核原始
+// 摘要，判定只在这一处 —— 两端口径漂移时最多多扫几行，不会漏判。
+func (s *ExplorationStore) FindOpenIntentBySummary(summary string) (int64, bool, error) {
+	norm := NormalizeIntentSummary(summary)
+	if norm == "" {
+		return 0, false, nil
+	}
+	rows, err := s.db.Query(`
+SELECT id, coalesce(payload->>'summary','') FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='open'
+  AND regexp_replace(lower(coalesce(payload->>'summary','')), '[[:space:]]+', '', 'g') = $2
+ORDER BY id ASC`, s.expID, strings.ReplaceAll(norm, " ", ""))
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return 0, false, err
+		}
+		if NormalizeIntentSummary(raw) == norm {
+			return id, true, nil
+		}
+	}
+	return 0, false, rows.Err()
+}
+
+// CountOpenIntentsByCreator 数这个创建者名下【在途】（state='open'）的意图条数。
+//
+// 创建者存在 payload->>'created_by'（不是 owner：owner 是【归属】，
+// ClaimIntent 认领时把它覆盖成认领者的名字，创建者与归属是两件事）。
+//
+// 「在途」= open：意图被认领（running）或收尾（done）之后就不再占用配额 ——
+// 配额限的是【同时挂着多少条没接手的提案】，不是历史累计。
+func (s *ExplorationStore) CountOpenIntentsByCreator(creator string) (int, error) {
+	if creator == "" {
+		return 0, nil
+	}
+	var n int
+	err := s.db.QueryRow(`
+SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='open'
+  AND payload->>'created_by' = $2`, s.expID, creator).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// markIntentCreator 把创建者写进 payload，返回同一个 map。
+//
+// 为什么创建者不写进 owner 列：owner 是归属，ClaimIntent 认领时把它写成认领者的
+// 名字（work#N）—— 创建者被覆盖之后就查不出「这条意图是谁提的」，配额也就无从算起。
+//
+// 为什么不复制一份 map：payload 由调用方现造、随即被序列化进节点，就地写最少一次分配；
+// 复制反而会让「写完之后 payload 里有没有 created_by」在两处行为不一致。
+func markIntentCreator(payload map[string]any, creator string) map[string]any {
+	if creator != "" {
+		payload["created_by"] = creator
+	}
+	return payload
+}
+
+// AddIntentWithCreator 写一条 open 意图，并记录创建者。
+//
+// ⚠️ 这是【宿主/UI 的显式入口】：与 AddIntent 同一套语义（不判锚点范围）。
+// agent / 子任务可达的那条写路径必须用 AddIntentInScopeWithCreator
+// （锚点先判范围，见该函数的说明）—— 否则范围外资产 id 会落进共享图。
+func (s *ExplorationStore) AddIntentWithCreator(payload map[string]any, priority int, anchors []int64, origin, creator string) (int64, error) {
+	return s.AddIntent(markIntentCreator(payload, creator), priority, anchors, origin)
+}
+
+// AddIntentInScopeWithCreator 是 AddIntentWithCreator 的 agent 可达版本：
+// 锚点先判范围（共享判定），越界即整单拒绝；创建者记在 payload->>'created_by'。
+func (s *ExplorationStore) AddIntentInScopeWithCreator(taskID int64, payload map[string]any, priority int, anchors []int64, origin, creator string) (int64, error) {
+	return s.AddIntentInScope(taskID, markIntentCreator(payload, creator), priority, anchors, origin)
+}
+
 // AddGoal writes a goal node (state open).
 func (s *ExplorationStore) AddGoal(payload map[string]any, origin string) (int64, error) {
 	return s.AddNode("goal", payload, 0, "open", origin, nil)
