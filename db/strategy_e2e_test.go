@@ -13,12 +13,90 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 )
+
+// strategyE2EBaseDSN 记住进程启动时的 ARTEX_PG_DSN（包初始化时读一次）。
+//
+// 为什么必须自己记一份 —— 实测的链条（整包跑时复现，不是偶发）：
+//  1. db.DSN() 读入连接串后会**把它从进程环境里抹掉**（防 agent 敲一条 env 就读出
+//     数据库口令，见 db/db.go 的注释）；
+//  2. 本包**第一个**用到库的用例（db/activity_page_test.go 之类）调过 DSN() 之后，
+//     环境变量里就没有连接串了 —— 它只活在包级缓存里；
+//  3. db/pgdsn_env_test.go 的用例把缓存清空（dsnCached = ""），而它自己用
+//     t.Setenv 记下的「原值」正是**已经被消费掉的空值** ⇒ 清理时还原回来的还是空。
+//
+// ⇒ 排在它后面的数据库用例既没有缓存也没有环境变量 ⇒ 拿不到连接串、被 skip 掉。
+// 本文件自己把连接串兜回来，模式与 db/strategies_test.go 的 strategyTestDSN 一致。
+var strategyE2EBaseDSN = os.Getenv("ARTEX_PG_DSN")
+
+// strategyE2EDerivedDB 是 internal/testdb.Setup("db") 派生的库名。
+//
+// 命名规则在 internal/testdb/testdb.go（"artex_test_" + 包名）。这里只用它来
+// **重建连接串**，不重建库 —— 重建会把本包自己的库删掉。
+const strategyE2EDerivedDB = "artex_test_db"
+
+// strategyE2EDSN 取本包派生测试库的连接串。
+//
+// 三条硬约束：
+//  1. **只认派生库**：返回的连接串必定指向 artex_test_db。环境变量被消费掉之后
+//     db.DSN() 会落到「配置文件里的数据库」上 —— 那可能是**开发/生产库**，往里写
+//     数据不可接受 ⇒ 命中非派生库就当它不可用，改走派生路径。
+//  2. **不重建库**：只重建连接串。重建会把本包自己的库删掉。
+//  3. **确认库还在**：派生路径要 ping 一下；ping 不通就跳过（而不是拿一个连不上的
+//     连接串去跑用例）。
+//
+// 退出时把缓存与环境变量还原成原样 ⇒ 其余用例的行为不变。
+func strategyE2EDSN(t *testing.T) string {
+	t.Helper()
+	if dsn, _, err := DSN(); err == nil && dsn != "" {
+		if u, perr := url.Parse(dsn); perr == nil && u.Path == "/"+strategyE2EDerivedDB {
+			return dsn
+		}
+		// 指向的不是派生库（多半是配置文件里的开发库）⇒ 不用它。
+	}
+	base := strategyE2EBaseDSN
+	if base == "" {
+		t.Skipf("没有数据库配置（ARTEX_PG_DSN 未设置，且派生库连接串无法重建）—— 跳过")
+	}
+	u, perr := url.Parse(base)
+	if perr != nil {
+		t.Skipf("没有数据库配置（%v）—— 跳过", perr)
+	}
+	// 库名强制落在派生库上：起手式里带的库名（开发库 / 生产库）一律不认。
+	u.Path = "/" + strategyE2EDerivedDB
+	if q := u.Query(); q.Get("dbname") != "" {
+		q.Del("dbname")
+		u.RawQuery = q.Encode()
+	}
+	conn, perr := sql.Open("pgx", u.String())
+	if perr == nil {
+		perr = conn.Ping()
+		_ = conn.Close()
+	}
+	if perr != nil {
+		t.Skipf("派生测试库不可用（%v）—— 跳过", perr)
+	}
+	prevCached, prevSource := dsnCached, dsnSource
+	_ = os.Setenv("ARTEX_PG_DSN", u.String())
+	dsnCached, dsnSource = "", ""
+	t.Cleanup(func() {
+		dsnCached, dsnSource = prevCached, prevSource
+		_ = os.Unsetenv("ARTEX_PG_DSN")
+	})
+	dsn, _, err := DSN()
+	if err != nil {
+		t.Skipf("没有数据库配置（%v）—— 跳过", err)
+	}
+	return dsn
+}
 
 // strategyE2ESuffix 给用例生成互不撞的标识后缀（纳秒级）。
 //
@@ -103,7 +181,7 @@ func strategyE2EStrategy(t *testing.T, d *DB, category string) int64 {
 //
 // 另外断言快照表**没有正文列** —— 注入路径拿不到 steps，这是结构性保证。
 func TestStrategyE2ETaskSnapshotIsSharedAndFrozen(t *testing.T) {
-	d, err := Open(testDSN(t))
+	d, err := Open(strategyE2EDSN(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -220,7 +298,7 @@ func strategyE2EHas(entries []StrategySnapshotEntry, strategyID int64) bool {
 // 另外钉住条件更新的守卫：**被 pin 的策略不参与任何自动淘汰** ——
 // 这一条写在 WHERE 子句里（`AND pinned=false`），是并发下的硬保证。
 func TestStrategyE2EAutoRetireKeepsRowsAndRefusesPinned(t *testing.T) {
-	d, err := Open(testDSN(t))
+	d, err := Open(strategyE2EDSN(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
