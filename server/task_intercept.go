@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -92,6 +93,11 @@ func (s *Server) taskInterceptCreateRule(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 判定闸门：命令级规则（安全控制）只由平台的证据保全策略安装，通用 CRUD 不给入口。
+	if err := guardTaskInterceptRuleCreate(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err := validateTaskInterceptRuleReq(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -124,6 +130,15 @@ func (s *Server) taskInterceptUpdateRule(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 判定闸门：命令级规则是安全控制，改写它等于拆掉它（改 kind / 停用 / 换正则）。
+	if err := guardTaskInterceptRuleCreate(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := s.guardTaskInterceptRuleMutate(pg.Assets(), taskID, ruleID); err != nil {
+		writeTaskInterceptRuleError(w, err)
+		return
+	}
 	if err := validateTaskInterceptRuleReq(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -149,6 +164,11 @@ func (s *Server) taskInterceptDeleteRule(w http.ResponseWriter, r *http.Request)
 	ruleID, ok := pathInt(r, "rid")
 	if !ok || ruleID <= 0 {
 		writeErr(w, 400, "bad rule id")
+		return
+	}
+	// 判定闸门：删除命令级规则 = 拆掉安全控制。
+	if err := s.guardTaskInterceptRuleMutate(pg.Assets(), taskID, ruleID); err != nil {
+		writeTaskInterceptRuleError(w, err)
 		return
 	}
 	deleted, err := pg.Assets().DeleteTaskInterceptRule(taskID, ruleID)
@@ -181,9 +201,29 @@ func (s *Server) taskInterceptToggleRule(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 判定闸门：停用命令级规则 = 拆掉安全控制；启用（加固）放行。
+	if err := s.guardTaskInterceptRuleToggle(pg.Assets(), taskID, ruleID, req.Enabled); err != nil {
+		writeTaskInterceptRuleError(w, err)
+		return
+	}
 	if err := pg.Assets().ToggleTaskInterceptRule(taskID, ruleID, req.Enabled); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "enabled": req.Enabled})
+}
+
+// writeTaskInterceptRuleError 把判定拒绝映射成 HTTP 状态码。
+//
+// 规则不存在 ⇒ 404；判定拒绝（命令级规则受保护）⇒ 400；
+// 规则读不到（fail closed）⇒ 500（拒绝，但那是服务端故障）。
+func writeTaskInterceptRuleError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errTaskInterceptRuleNotFound):
+		writeErr(w, 404, err.Error())
+	case errors.Is(err, errTaskCommandRuleProtected):
+		writeErr(w, 400, err.Error())
+	default:
+		writeErr(w, 500, err.Error())
+	}
 }
