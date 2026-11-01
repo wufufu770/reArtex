@@ -100,7 +100,16 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	// （internal/sod.ManagedScopeOf），不在装配期 ⇒ 非 worker 路径（planner /
 	// mainagent / chat）不会去索要一把没人铸的凭证。
 	for i, t := range out {
-		out[i] = enforceToolPolicy(guardPanic(sod.WrapExecutor(t, sod.ExecutorTokens(), sod.GatedTool(t.Name()))))
+		// ⚠️ 凭证表传 nil：执行器因此在【调用时】现读进程级单例，而不是在装配时
+		// 把它快照下来。
+		//
+		// 为什么不能快照：工具装配与装链的先后顺序不是承诺。若装配早于装链，
+		// 快照到的就是 nil ⇒ 那个执行器永久握着一张空表 ⇒ 受管路径上的每一次
+		// 调用都被拒（fail-closed，不漏放行，但整条链静默瘫掉，日志上看不出是
+		// 「表没装」而不是「链没批」）。链重建（换新表）也是同一个病。
+		//
+		// 现读单例把「装配顺序」这个变量彻底去掉：执行器与链永远读同一张表。
+		out[i] = enforceToolPolicy(guardPanic(sod.WrapExecutor(t, nil, sod.GatedTool(t.Name()))))
 	}
 	return out, def, cleanup
 }

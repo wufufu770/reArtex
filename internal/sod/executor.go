@@ -57,6 +57,23 @@ func ResetExecutorTokensForTest() {
 	executorTokens.Store(nil)
 }
 
+// ResetExecutorTokens 清掉进程内的执行器凭证表。
+//
+// **生产可用**（不是测试专用）：宿主在**要装一条新链**时调用它 —— 因为链换了，
+// 铸凭证的表就换了，而执行器必须跟着换，否则新链铸的凭证永远查不到 ⇒ 每一个被
+// 批准的动作都被执行器拒（fail-closed，不漏放行，但整条链瘫了）。
+//
+// 为什么需要它、而不是让 SetExecutorTokens 直接覆盖：SetExecutorTokens 的
+// 「首次写入生效」是防「半装好的链」的安全语义（两张互相不认的凭证表比没有更
+// 危险）。但那条语义在「链被**重建**」这个场景下会变成故障：执行器握着旧表、
+// 链握着新表 ⇒ 谁也认不出谁。
+//
+// 所以拆成两个入口：默认路径仍走 SetExecutorTokens（首次写入生效，防半成品），
+// 只有宿主明确要重建链时才显式 ResetExecutorTokens —— 意图可见、可审计。
+func ResetExecutorTokens() {
+	executorTokens.Store(nil)
+}
+
 // ExecutorGate 是执行器装饰器：执行前消费一次性凭证。
 //
 // ⚠️ 它是链的**另一半**：链负责「批准」，执行器负责「**证明这次执行就是被
@@ -134,11 +151,35 @@ func (g *ExecutorGate) Call(ctx context.Context, in json.RawMessage, tc *actool.
 	if !managed {
 		return g.inner.Call(ctx, in, tc)
 	}
-	if g.tokens == nil {
+	// 凭证表**不快照**，每次调用现读单例。
+	//
+	// 为什么：装配发生在【工具装配时】，装链发生在【server 启动时】—— 两者的先后
+	// 顺序不是承诺。若装配早于装链，装配那一刻读到的单例是 nil ⇒ 这个执行器会
+	// **永久**持着一张空表 ⇒ 受管路径上的每一次调用都被拒（fail-closed，不漏放行，
+	// 但整条链静默瘫掉，而且日志上看不出是「表没装」而不是「链没批」）。
+	//
+	// 链重建（换了一张新表）也是同一个病：已装配好的执行器握着旧表，新链铸的凭证
+	// 在新表 ⇒ 互相认不出。
+	//
+	// 现读单例把「装配顺序」这个变量彻底去掉：执行器与链永远读同一张表。
+	store := g.tokens
+	if store == nil {
+		store = ExecutorTokens()
+	}
+	if store == nil {
+		log.Printf("[sod] 执行器拒绝：凭证表未装配（task=%d agent=%q tool=%q）—— 本次调用未经链批准", run.TaskID, run.AgentKey, g.inner.Name())
 		return actool.Errorf("执行凭证存储未装配：本次调用未经 SoD 链批准，拒绝执行"), nil
 	}
 	digest := CanonicalDigest(in)
-	if !g.tokens.Take(digest, run.TaskID, AgentKeyFromContext(ctx), g.inner.Name()) {
+	if !store.Take(digest, run.TaskID, AgentKeyFromContext(ctx), g.inner.Name()) {
+		// ⚠️ 为什么必须记日志：执行器拒绝是**静默**的（错误只回到工具结果里，
+		// 不进日志）⇒ 运维看到「工具莫名其妙被拒」却查不到原因。而这里有四种
+		// 互斥原因（凭证表不对 / 载荷摘要不符 / 四元组不匹配 / 已被消费过），
+		// 处置方式完全不同 ⇒ 必须把**哪个维度不匹配**记出来。
+		//
+		// 只记维度与摘要，绝不记载荷原文（原始载荷只允许以摘要 + 脱敏预览入库）。
+		log.Printf("[sod] 执行器拒绝：凭证缺失或不匹配（task=%d agent=%q tool=%q digest=%s）—— 本次调用未经链批准",
+			run.TaskID, AgentKeyFromContext(ctx), g.inner.Name(), digest)
 		return actool.Errorf("执行凭证缺失或不匹配：本次调用未被 SoD 链批准，拒绝执行"), nil
 	}
 	return g.inner.Call(ctx, in, tc)
