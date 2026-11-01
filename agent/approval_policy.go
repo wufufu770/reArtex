@@ -54,6 +54,170 @@ func IsTier1ReadOnlyTool(key string) bool {
 	return false
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 / Tier 3 清单（设计 §1 的逐行映射）
+// ---------------------------------------------------------------------------
+//
+// 下面这些清单与上面那份 Tier 1 清单是同一件事的三个面：**分层判定读的就是它们**。
+// 判定器在 agent/tier_judge.go，它【读】本文件的清单，不另抄一份 —— 抄一份就会出现
+// 「清单说安全、判定读另一份」这种无人变红的漂移。
+//
+// 设计 §1 的逐行映射（原文照抄，便于审计）：
+//
+//	Tier 2 —— scope 内结构化写，条件自动通过
+//	  动作 | ① report_finding（锚定 scope 内资产）；② 写 open 状态的 intent；
+//	        ③ 追加 fact / hint；④ 写 mailbox 消息
+//	  明确不含 | 改变 intent owner、触发任何状态迁移（done/met/fixed/retired/active 等）
+//
+//	Tier 3 —— 高风险 / scope 外 / 裁决写
+//	  动作 | ① 写范围外资产；② 改变 intent owner、把策略标 active、把 finding 标
+//	        verified 等裁决写；③ 出网操作（Bash 出网、MCP transport、录制代理目的地）；
+//	        ④ AddAgentScope / AddAutoScope 扩权请求本身
+//
+// 「进清单 ≠ 自动放行」：Tier 2 是【条件】自动通过，条件不满足就是 Tier 3；
+// Tier 3 之外的工具一律按 fail closed 落到 Tier 3（不在自动放行清单里）。
+
+// intentStateOpen 是「开放的意图」状态。Tier 2 只认它（设计 §1 Tier 2 ②）。
+const intentStateOpen = "open"
+
+// tier2WriteKind 是 Tier 2 候选动作的种类。
+type tier2WriteKind int
+
+const (
+	// tier2Finding 是「锚定 scope 内资产的漏洞登记」（设计 §1 ①）。
+	tier2Finding tier2WriteKind = iota
+	// tier2Intent 是「写 open 状态的 intent」（设计 §1 ②）。
+	tier2Intent
+	// tier2Fact 是「追加 fact」（设计 §1 ③）。
+	tier2Fact
+	// tier2Hint 是「追加 hint」（设计 §1 ③）。
+	tier2Hint
+	// tier2Mailbox 是「写 mailbox 消息」（设计 §1 ④）。
+	tier2Mailbox
+)
+
+// tier2MailboxWriteToolKey 是 mailbox 写工具的 key（设计 §1 Tier 2 ④）。
+//
+// 该工具由 Phase 3 Task 2 落地（message_group，见
+// /home/analyst/.omo/plans/2026-10-28-task-hall-phase3-implementation.md Task 2）；
+// 本清单先按计划把 key 钉住 —— 工具落地后同名，不会漂移。
+const tier2MailboxWriteToolKey = "message_group"
+
+// tier2WriteKinds 是 Tier 2 的候选动作清单（设计 §1 Tier 2 行的四个动作）。
+//
+//	① report_finding  —— 漏洞登记（锚定 scope 内资产）
+//	② add_intent      —— 写 open 状态的 intent
+//	  propose_intent  —— 同上（群成员的隔离提议：写的也是一条 open 的 intent）
+//	③ record_fact     —— 追加 fact
+//	  add_hint        —— 追加 hint
+//	④ message_group   —— 写 mailbox 消息
+//
+// 「候选」二字是认真的：进了这张清单【不等于】自动放行 —— Tier 2 是【条件】自动通过，
+// 条件不满足就是 Tier 3（见 agent/tier_judge.go 的 judgeTier2）。
+var tier2WriteKinds = map[string]tier2WriteKind{
+	"report_finding":         tier2Finding,
+	"add_intent":             tier2Intent,
+	"propose_intent":         tier2Intent,
+	"record_fact":            tier2Fact,
+	"add_hint":               tier2Hint,
+	tier2MailboxWriteToolKey: tier2Mailbox,
+}
+
+// tier3EgressTools 是【出网工具】清单（设计 §4.1：出网一律 Tier 3）。
+//
+//	Bash       —— 可执行任意命令（含 curl 出网、直调平台 API 的写入口）。netguard 只
+//	              覆盖自定义工具，Bash 不在其中（§4.1「出网治理不完整」），而且 §2.1(a)
+//	              的绕过路径正是「不走 report_finding，用 Bash curl 调平台 API 写 finding」。
+//	web_search —— 搜索后端直连（§5 列出的未覆盖通道之一）。
+//
+// MCP 工具不在这张清单里：它们的 key 是运行期拼出来的（mcp__<server>__<tool>），
+// 按前缀判才追得上注册进来的 MCP —— 见 tier3MCPToolPrefix。
+var tier3EgressTools = []string{"Bash", "web_search"}
+
+// tier3MCPToolPrefix 是 MCP 工具 key 的前缀。
+//
+// MCP 工具的 key 由 mcphttp.ToolName(server, name) 拼成（mcphttp/client.go:82；
+// SDK 侧同名函数 third_party/norma/mcp/mcp.go:21）—— 这里钉的是同一个前缀。
+//
+// 为什么 MCP 一律 Tier 3（设计 §4.1.1）：
+//   - transport 是裸 http.Client + InsecureSkipVerify（mcphttp/client.go:104,129），
+//     不受 netguard 约束 ⇒ 它就是出网；
+//   - 工具描述是运行期外部抓取、不在 ARTex DB 里 ⇒ 分类器看到的只是【当次抓到的描述】，
+//     对这条路径的判断只能算「建议」。
+var tier3MCPToolPrefix = "mcp__"
+
+// tier3ScopeExpansionTools 是【扩权请求】工具（设计 §1 Tier 3 ④ / §2.4 硬约束 2）。
+//
+//	add_task_scope    —— 直接改本任务的授权边界（db/task_scope.go 的 AddAgentScope）。
+//	add_company_scope —— 改公司级资产范围（会把整个公司名下的资产树拉进来）。
+//	insert_assets     —— 登记资产会触发自动扩 scope（db/task_scope.go 的 AddAutoScope）。
+//
+// 为什么 insert_assets 也在里面：设计 §2.4 的「先取证后报告」合法路径 = 先登记再报告，
+// 而登记动作【本身】就是一次扩权请求 —— 「扩权请求本身在 Tier 3 → 分类器审 + 留痕」
+// （§2.4 硬约束 2）。它的扩张幅度已被 ScopePolicy.MaxAgentAddedScope /
+// MaxAgentAddedKinds 限死（db/task_scope.go 的 checkAgentScopeBudget / checkAgentScopeKind），
+// 所以「合法路径存在，但扩张幅度有上限，且每次扩张可审计」。
+//
+// 当前口径是【一律 Tier 3】（fail closed）：宁可多审一次扩权，也不给「先把范围扩出去
+// 再回头把范围外资产当合法」的绕行留缝。
+var tier3ScopeExpansionTools = []string{"add_task_scope", "add_company_scope", "insert_assets"}
+
+// tier3StateChangeTools 是【会触发状态迁移】的工具（设计 §1 Tier 2 明确不含任何状态迁移）。
+//
+//	prove_goal —— 把目标标 met（§1 明确点名 'met'）。
+//	kill_work  —— 把意图标 stopped（§1 的「等」覆盖它）。
+//	goal_met   —— 直接宣布整个任务完成（且本来就默认不绑定：toolcatalog.go 的 defaultUnbound）。
+var tier3StateChangeTools = []string{"prove_goal", "kill_work", "goal_met"}
+
+// tier3CrossTaskWriteTools 是【跨任务写】的工具。
+//
+//	add_task_hint —— 把提示写进【别的任务】的图（server/orchestration.go 注册）。
+//	                 那不是「本任务范围内的结构化写」，而是往别人家的图里写 ⇒ 不在 Tier 2。
+var tier3CrossTaskWriteTools = []string{"add_task_hint"}
+
+// tier3LocalFileTools 是 SDK 的本地文件工具（norma 的 actool.DefaultTools）。
+//
+// Claude Code 的口径是「项目内文件编辑 = Tier 2」（设计 §0），但 reArtex 的 §1 把 Tier 2
+// 重新定义成【scope 内结构化写】，那四类动作里没有文件编辑 ⇒ 文件工具不自动放行。
+//
+// 为什么 Read/LS/Glob/Grep 也不在 Tier 1：Tier 1 的准入条件是「读面范围隔离已被
+// TestTier1ReadOnlyToolsNoScopeLeak 证明」，而这些工具读的是【宿主文件系统】，不是
+// 任务范围内的平台数据 —— 那道证明对它们不成立。
+var tier3LocalFileTools = []string{"Read", "Write", "Edit", "MultiEdit", "LS", "Glob", "Grep", "Sleep"}
+
+// tier3StrategyLibraryAdvisoryTools 是策略库的顾问型占位工具（toolcatalog.go 的
+// advisoryStrategyToolSeeds 里的那批）。
+//
+// 它们是策略库【面】上的工具：读的是跨任务、跨租户的知识，写的是 curator 的全局队列。
+// 策略库面一律 Tier 3 —— approval_policy.go 的 init 守卫只挡「策略工具进 Tier 1」，
+// 这张清单回答的是「它们落在哪一层」。
+var tier3StrategyLibraryAdvisoryTools = []string{
+	"read_strategy_library",
+	"read_pending_contradictions",
+	"run_replay_eval",
+	"read_finding",
+	"read_strategy_posterior",
+	"read_traffic_evidence",
+	"read_asset_graph",
+	"submit_decision",
+	"submit_verdict",
+	"submit_contradiction",
+	"propose_strategy",
+	"propose_scenario_feature",
+}
+
+// tier3AdjudicationStates 是【裁决写】的目标状态（设计 §4.2：终态迁移）。
+//
+//	verified —— finding 标 verified
+//	fixed    —— finding 标 fixed
+//	retired  —— 策略标 retired
+//	active   —— 策略标 active
+//
+// 这些写【不经分类器】，只走宿主侧写面（curator 进程或 DB role）：Anthropic 生产流量
+// 的 FNR 是 17%，独立压力测试在 Tier 3 仍有 70.3% FNR ⇒ 分类器不能作为高后果决策的
+// 唯一防线（设计 §4.2）。
+var tier3AdjudicationStates = []string{"verified", "fixed", "retired", "active"}
+
 // StrategyProposalTools 是【提议级】工具清单。
 //
 // 它们的审查成本必须**严格低于**直接写入类工具（如 add_intent）：提议只写隔离态
