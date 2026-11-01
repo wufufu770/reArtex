@@ -340,3 +340,63 @@ func TestTierOfEveryTier3CategoryIsReachable(t *testing.T) {
 		}
 	}
 }
+
+// TestTierOfScopeInIsStampedUniformly 钉住结论里的 ScopeIn 口径。
+//
+// 计划（Phase 3 Task 6）的 TierOf 签名要求结论带 scopeIn ⇒ 审计留痕时能记下
+// 「Tier 2 且在范围内」，而不必回头查调用方传进来的那个 scope 判定。
+//
+// 口径只有一条：调用方**真的判过**（Assessed）且**全部引用的资产都在范围内**
+// （AssetInScope）⇒ true。「没判定过」⇒ false —— 把「不知道」当成「在范围内」
+// 正是范围旁路本身。
+func TestTierOfScopeInIsStampedUniformly(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope ScopeVerdict
+		want  bool
+	}{
+		{"判过且全部在范围内", ScopeVerdict{Assessed: true, AssetInScope: true}, true},
+		{"判过但不在范围内", ScopeVerdict{Assessed: true, AssetInScope: false}, false},
+		{"没判定过", ScopeVerdict{Assessed: false, AssetInScope: false}, false},
+		{"没判定过但 AssetInScope 为真（自相矛盾 ⇒ 按没判过处理）", ScopeVerdict{Assessed: false, AssetInScope: true}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := TierOfAction(TierAction{
+				ToolKey: "report_finding",
+				Args:    json.RawMessage(`{"asset_ids":[1],"summary":"x"}`),
+				Scope:   c.scope,
+			})
+			if got.ScopeIn != c.want {
+				t.Fatalf("ScopeIn = %v，期望 %v（结论 %+v）", got.ScopeIn, c.want, got)
+			}
+		})
+	}
+}
+
+// TestTierOfScopeInOnTier2FindingAnchoredInScope 钉住「锚定 scope 内资产的漏洞
+// 登记 ⇒ Tier 2 且 ScopeIn=true」这条最典型的路径。
+func TestTierOfScopeInOnTier2FindingAnchoredInScope(t *testing.T) {
+	got := TierOfAction(TierAction{
+		ToolKey: "report_finding",
+		Args:    json.RawMessage(`{"asset_ids":[1],"summary":"x"}`),
+		Scope:   ScopeVerdict{Assessed: true, AssetInScope: true},
+	})
+	if got.Tier != Tier2 {
+		t.Fatalf("层级 = %v，期望 Tier 2（结论 %+v）", got.Tier, got)
+	}
+	if !got.ScopeIn {
+		t.Fatalf("ScopeIn = false，期望 true（结论 %+v）", got)
+	}
+}
+
+// TestTierOfScopeInFalseWhenUnassessed 钉住「没做 scope 判定 ⇒ 不许报在范围内」。
+//
+// 这是本条最容易被误改的地方：一旦把口径改成「调用方说在就在」，没判定过的写就会
+// 被记成「在范围内」⇒ 审计留痕失真。
+func TestTierOfScopeInFalseWhenUnassessed(t *testing.T) {
+	got := TierOf("report_finding", json.RawMessage(`{"asset_ids":[1],"summary":"x"}`))
+	if got.ScopeIn {
+		t.Fatalf("没做 scope 判定却报了 ScopeIn=true（结论 %+v）", got)
+	}
+}

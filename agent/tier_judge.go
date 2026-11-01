@@ -150,6 +150,15 @@ type TierVerdict struct {
 	// HostOnly 为真时：这次写【不经分类器】，只允许发生在宿主侧写面（设计 §4.2：
 	// 分类器不能作为高后果决策的唯一防线）。
 	HostOnly bool
+	// ScopeIn：这次写引用的资产**全部**落在本任务有效 scope 内。
+	//
+	// 为什么结论里要带它（计划的 TierOf 签名也要求这个量）：调用方拿到的结论
+	// 必须能回答「这次写是不是落在授权范围内」，而不必回头去查它自己传进来的那个
+	// scope 判定 —— 尤其在审计留痕时：只记「Tier 2」不够，得记「Tier 2 且在范围内」。
+	//
+	// 口径：**只有真的判过（Assessed）且全部在范围内（AssetInScope）才为 true**。
+	// 「没判定过」⇒ false（fail closed）—— 不许把「不知道」当成「在范围内」。
+	ScopeIn bool
 	// Reason 是一句话理由（中文），审计与 UI 直接用。
 	Reason string
 }
@@ -182,6 +191,23 @@ func tier2Verdict(reason string) TierVerdict {
 //
 // 条件没被证明满足就落到 Tier 3（fail closed）：report_finding 没有 scope 判定结论时
 // 【不能】判 Tier 2 —— 「不在有效 scope 内」与「没判定过」都按不放行处理。
+//
+// ⚠️ 返回类型与计划原文（Phase 3 Task 6：`func TierOf(toolKey string, args []byte)
+// (tier int, scopeIn bool)`）**刻意不同**，不是随手写的：
+//
+// 计划的签名只带「层级 + scope 判定结论」两项 ⇒ 它**无法表达「裁决写」**（改
+// intent owner、把策略标 active、把 finding 标 verified）。而 auto-permission-tiers
+// §4.2 对裁决写的处置是「**不经分类器**，走 host-only 写面」⇒ 结论里必须能带上
+// 「这是裁决写、必须走 host-only」这层信息。
+//
+// 若按计划签名实现 ⇒ 裁决写会被压成「Tier 3 + scope 判定结论」⇒ 调用方无从
+// 区分「普通 Tier 3 出网操作」（走分类器审查）与「裁决写」（**绝不能**走分类器，
+// 因为 Anthropic 生产流量 FNR 17%、独立压力测试 Tier 3 仍 70.3% FNR ⇒ 分类器不能
+// 作为高后果决策的唯一防线）⇒ 裁决写会被送进概率性分类器 ⇒ 正是设计要防的事。
+//
+// ⇒ 这里返回 TierVerdict（多带 Category / HostOnly / Reason），并保留
+// TierOfAction 作为最全入口（可显式传入写语义）。需要计划那两个标量时用
+// TierVerdict.Tier 与 TierVerdict.ScopeIn。
 func TierOf(toolKey string, args []byte) TierVerdict {
 	return TierOfAction(TierAction{ToolKey: toolKey, Args: args})
 }
@@ -190,6 +216,18 @@ func TierOf(toolKey string, args []byte) TierVerdict {
 //
 // 纯函数：同一个入参永远得到同一个结论。
 func TierOfAction(a TierAction) TierVerdict {
+	v := tierOfActionDecide(a)
+	// ScopeIn 在这里【统一盖章】，而不是逐分支各填各的。
+	//
+	// 为什么统一：逐分支填 ⇒ 哪个分支忘了填，它那儿的 ScopeIn 就是 false ⇒ 调用方
+	// 分不清「真不在 scope 内」与「这项信息没填」⇒ 审计里两者长得一样 ⇒ 无法排查。
+	// 统一口径是「调用方判过且全部在范围内」⇒ 每一处的含义完全一致。
+	v.ScopeIn = a.Scope.Assessed && a.Scope.AssetInScope
+	return v
+}
+
+// tierOfActionDecide 是判定本体（不含 ScopeIn 盖章）。
+func tierOfActionDecide(a TierAction) TierVerdict {
 	// ① 写语义【优先于】工具 key：裁决写 / 状态迁移 / 出网 / 扩权与「这个 key 属于哪张
 	//    清单」无关。顺序反了就会出现「一个 Tier 2 工具顺带改了归属 ⇒ 被当成普通结构化
 	//    写放行」—— 正是设计 §1 想堵的那类绕过。
