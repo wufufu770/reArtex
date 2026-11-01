@@ -1,0 +1,306 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/sod"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/llm"
+)
+
+// sodIntentToolKey 是意图规整器唯一的输出通道（tools 表里的那一行）。
+//
+// 为什么单独记一个常量：规整器不是「随便一个带 schema 的工具」都能当 ——
+// 它必须**恰好**是那个让模型调用后产出结构化意图的工具。名字写错 ⇒
+// 规整器拿到别的 schema ⇒ 模型调了别的工具 ⇒ 规整不合规 ⇒ 每次调用被拒。
+const sodIntentToolKey = "emit_structured_intent"
+
+// sodReviewIntentMaxBytes 是交给 redteam 的结构化意图正文长度上限（字节）。
+//
+// 为什么截断：needs_review 的材料要进 agent 会话，而会话上下文是共享预算；
+// 一份超长结构化意图会把 redteam 的上下文挤掉。截断只影响「人看的细节」，
+// 不影响判定依据 —— 载荷摘要、原因码、异常标记都在消息的前半段。
+const sodReviewIntentMaxBytes = 1024
+
+// sodChainSlot 持有进程级唯一的 SoD 链。
+//
+// 为什么必须是【单例】而不是「装一个」：链内部持有一次性执行凭证表
+// （TokenStore）。凭证由链铸、由执行器消费，两边必须是**同一张表** —— 链铸的
+// 凭证绑 (载荷摘要, task_id, source_agent, tool_name)，执行器用同一组四元组查表。
+// 同一进程里装两条链 ⇒ 两条链各自的凭证表互不相通 ⇒ 执行器只在其中一张表里
+// 找得到 ⇒ 被批准的动作全部被拒。所以这里是「只装一次」的语义。
+var sodChainSlot struct {
+	mu    sync.Mutex
+	chain *sod.Chain
+}
+
+// RegisterSoDChain 安装 SoD 链。**只允许安装一次**（第二次返回错误）。
+//
+// 为什么第二次必须失败而不是覆盖：见 sodChainSlot 的说明 —— 覆盖式安装会让
+// 先装好的链与新链各铸各的凭证，执行器只认其中一张表 ⇒ 已批准的动作被拒。
+// 所以第二次安装返回错误，且**不动**已装好的链（调用方拿到的仍是第一条链）。
+//
+// 顺带在这里把凭证存储发布给执行器（sod.SetExecutorTokens）：链铸凭证、执行器
+// 消费凭证，两边必须是同一个 TokenStore。发布必须发生在链**装好之后** ——
+// 反过来（先发布后装链）的话，一次失败的安装会把执行器指向一张没人铸凭证的
+// 空表 ⇒ 执行器一律拒绝，而宿主以为链已经装好了。
+func RegisterSoDChain(deps sod.ChainDeps) error {
+	sodChainSlot.mu.Lock()
+	defer sodChainSlot.mu.Unlock()
+	if sodChainSlot.chain != nil {
+		return fmt.Errorf("SoD 链已安装，不允许重复安装")
+	}
+	// inner 留空：宿主给的 hook runner 由 WrapHookRunner 派生视图时注入。
+	sodChainSlot.chain = sod.NewChain(nil, deps)
+	if deps.Tokens != nil {
+		// 链铸、执行器消费 —— 同一个表。少这一步则每一次被批准的动作都会在
+		// 执行器侧查不到凭证而被拒（fail-closed，但链等于瘫了）。
+		sod.SetExecutorTokens(deps.Tokens)
+	}
+	return nil
+}
+
+// WrapHookRunner 把已安装的 SoD 链套在宿主给的 hook runner 外层。
+//
+// 未安装 ⇒ 原样返回（既有行为不变，没启用 SoD 的部署不受任何影响）。
+// 安装 ⇒ 返回一个「先调 inner、再跑链」的装饰器。
+//
+// 顺序（重要，不可调换）：链是【装饰器】—— 它第一件事是问 inner（guard 的
+// 短路表 / 拦截规则 / 人工 ask），inner 不拦才跑规整 + 闸门。⇒ 链看到的入参
+// 是 inner 可能改写后的**最终**字节，凭证绑定的字节 == 真正会执行的字节
+// （TOCTOU 口径：审批时看到的字节必须等于执行时跑的字节）。
+//
+// 实现用 internal/sod 的 Chain.Wrap：它派生一个**共享同一份 deps**、只换一个
+// inner 的视图 —— 于是凭证表、闸门、缓存、审计器全都还是同一个，不存在第二份状态。
+func WrapHookRunner(inner harness.HookRunner) harness.HookRunner {
+	sodChainSlot.mu.Lock()
+	chain := sodChainSlot.chain
+	sodChainSlot.mu.Unlock()
+	if chain == nil {
+		return inner
+	}
+	return chain.Wrap(inner)
+}
+
+// SoDChainInstalled 报告链是否已安装（测试与 /api/health 用）。
+func SoDChainInstalled() bool {
+	sodChainSlot.mu.Lock()
+	defer sodChainSlot.mu.Unlock()
+	return sodChainSlot.chain != nil
+}
+
+// installSoDChain 组装依赖并注册。**由编排任务在 server 启动时调用一次。**
+//
+// 失败一律返回中文错误并**不装链**：任何必需件缺失时，宁可「这条路径上没有链」
+// （宿主行为保持原样，装配方自己决定要不要因此停服），也不要装一条半成品链
+// —— 半成品链的表现是「每次工具调用都被拒」或「链根本没接到受管路径上」，
+// 两者都比「没有链」更难排查。
+//
+// 组装顺序是有讲究的：先取提示词与工具 schema（缺了就一定跑不起来），再确认
+// 有可用的规整模型，最后才建链。⇒ 报出来的错总是最贴近根因的那一条。
+func (s *Server) installSoDChain() error {
+	if s == nil || s.m == nil {
+		return fmt.Errorf("SoD 链装配失败：服务器未初始化")
+	}
+	pg := s.m.pg
+	if pg == nil {
+		return fmt.Errorf("SoD 链装配失败：数据库未就绪，无法判定授权范围")
+	}
+	assets := s.m.assets
+	if assets == nil {
+		return fmt.Errorf("SoD 链装配失败：资产库未就绪，无法判定授权范围")
+	}
+
+	prompt, err := sodNormalizerPrompt(pg)
+	if err != nil {
+		return err
+	}
+	schema, err := sodIntentToolSchemaFromDB(pg)
+	if err != nil {
+		return err
+	}
+	if err := sodNormalizerProfileReady(pg); err != nil {
+		return err
+	}
+
+	// 规整器：提示词 + schema + 模型 provider 三者齐备才建得出来。
+	// profileID 传 0 ⇒ 由 provider 解析器在调用时取活动/默认 profile
+	//（与 server/intercept.go 的裁判模型装配同一口径）。
+	norm, err := sod.NewNormalizer(s.sodProviderFunc(), 0, prompt, schema)
+	if err != nil {
+		return fmt.Errorf("SoD 链装配失败：%w", err)
+	}
+
+	// 一次性执行凭证表：链铸、执行器消费。RegisterSoDChain 会在链装好之后
+	// 把同一个表发布给执行器（sod.SetExecutorTokens）。
+	tokens := sod.NewTokenStore()
+
+	deps := sod.ChainDeps{
+		Normalizer:   norm,
+		Gate:         sod.NewGate(assets, pg),
+		Tokens:       tokens,
+		Auditor:      sod.NewAuditor(pg),
+		Cache:        sod.NewCache(sodpolicy.NormalizerCacheMaxEntries, norm.PromptDigest()),
+		Assets:       assets,
+		DB:           pg,
+		NotifyReview: s.sodNotifyReview,
+		AgentKeyOf:   sod.AgentKeyFromContext,
+	}
+	if err := RegisterSoDChain(deps); err != nil {
+		return fmt.Errorf("SoD 链装配失败：%w", err)
+	}
+	return nil
+}
+
+// sodNormalizerPrompt 取规整器提示词正文：DB 优先，回落内置。
+//
+// 为什么 DB 优先：提示词是页面上可编辑的，管理员改过就该以改后的为准。
+// 为什么回落内置：agent 行可能还没播种（新建库、或提示词被清空）——
+// 内置正文是编译期随二进制分发的，最后一道兜底。
+// 两处都没有 ⇒ 装配失败（没有提示词的规整器必然输出不合规 ⇒ 每次调用被拒）。
+func sodNormalizerPrompt(pg *db.DB) (string, error) {
+	ag, err := pg.GetAgentByKey(sodpolicy.NormalizerAgentKey)
+	if err != nil {
+		return "", fmt.Errorf("SoD 链装配失败：读取规整 agent 失败：%w", err)
+	}
+	if ag != nil {
+		body, err := pg.CurrentPrompt(ag.ID)
+		if err != nil {
+			return "", fmt.Errorf("SoD 链装配失败：读取规整提示词失败：%w", err)
+		}
+		if strings.TrimSpace(body) != "" {
+			return body, nil
+		}
+	}
+	body, ok := agent.BuiltinPromptBody(sodpolicy.NormalizerAgentKey)
+	if !ok || strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("SoD 链装配失败：规整器提示词缺失（DB 与内置均无 %q 的提示词）", sodpolicy.NormalizerAgentKey)
+	}
+	return body, nil
+}
+
+// sodIntentToolSchemaFromDB 从 tools 表取 emit_structured_intent 的 schema。
+func sodIntentToolSchemaFromDB(pg *db.DB) (llm.ToolSchema, error) {
+	tools, err := pg.ListTools()
+	if err != nil {
+		return llm.ToolSchema{}, fmt.Errorf("SoD 链装配失败：读取工具目录失败：%w", err)
+	}
+	return sodIntentToolSchema(tools)
+}
+
+// sodIntentToolSchema 从工具目录里挑出 emit_structured_intent 那一行，转成
+// 规整器要的 llm.ToolSchema。
+//
+// 为什么必须取到那一行：规整器靠这个 schema 让模型**调用**工具来产出结构化
+// 意图；schema 缺失 ⇒ 模型没有可调用的工具 ⇒ 规整必然不合规 ⇒ 每次调用被拒。
+// 所以行缺失时直接报错（fail closed），**绝不**拿空 schema 蒙混过关。
+//
+// 为什么拆成纯函数：工具目录是 DB 里的行，但「挑哪一行、缺了怎么办」这条
+// 口径必须能脱离数据库被验证 —— 否则这条 fail-closed 只能靠真库跑得到。
+func sodIntentToolSchema(tools []*db.Tool) (llm.ToolSchema, error) {
+	for _, t := range tools {
+		if t == nil || t.Key != sodIntentToolKey {
+			continue
+		}
+		input := map[string]any{}
+		if len(t.Schema) > 0 {
+			if err := json.Unmarshal(t.Schema, &input); err != nil {
+				return llm.ToolSchema{}, fmt.Errorf("SoD 链装配失败：工具 %q 的 schema 不是合法 JSON：%w", sodIntentToolKey, err)
+			}
+		}
+		if len(input) == 0 {
+			return llm.ToolSchema{}, fmt.Errorf("SoD 链装配失败：工具 %q 的 schema 为空", sodIntentToolKey)
+		}
+		return llm.ToolSchema{Name: t.Key, Description: t.Description, InputSchema: input}, nil
+	}
+	return llm.ToolSchema{}, fmt.Errorf("SoD 链装配失败：工具目录里没有 %q，规整器无法产出结构化意图", sodIntentToolKey)
+}
+
+// sodNormalizerProfileReady 检查有没有可用的规整模型。
+//
+// 为什么在装配期就检查：没有模型 ⇒ 规整器每次都不可用 ⇒ 链每次都按
+// normalizer_unavailable 拒绝 ⇒ 整条工具链瘫掉。让人在启动时就看到
+// 「没配模型」，比让人在第一次工具调用时看到一堆莫名其妙的拒绝要早得多。
+//
+// 这里只查「有没有活动/默认 profile」；profile 的密钥等细节由调用期的
+// provider 解析器兜底（解析不到 ⇒ 规整器不可用 ⇒ 链按失败关闭拒绝）。
+func sodNormalizerProfileReady(pg *db.DB) error {
+	p, err := pg.ActiveProfile()
+	if err != nil {
+		return fmt.Errorf("SoD 链装配失败：读取活动 LLM profile 失败：%w", err)
+	}
+	if p == nil || p.ID <= 0 {
+		return fmt.Errorf("SoD 链装配失败：未配置可用的规整模型（活动/默认 LLM profile）")
+	}
+	return nil
+}
+
+// sodProviderFunc 解析规整器的模型 provider。
+//
+// 形态照抄 server/intercept.go 的 Reviewer 装配：profileID==0 ⇒ 用活动/默认
+// profile；解析不到 ⇒ 返回 ok=false ⇒ 规整器不可用 ⇒ 链按失败关闭拒绝。
+// 为什么不在这里缓存 provider：provider 由 Server 侧的 provider 缓存统一管
+// （providerForProfile），这里只做「profile id → provider」的解析。
+func (s *Server) sodProviderFunc() sod.ProviderFunc {
+	return func(profileID int64) (llm.Provider, bool) {
+		if profileID == 0 {
+			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
+				profileID = p.ID
+			}
+		}
+		if profileID == 0 {
+			return nil, false
+		}
+		prov, _, ok := s.providerForProfile(profileID)
+		if !ok || prov == nil {
+			return nil, false
+		}
+		return prov, true
+	}
+}
+
+// sodNotifyReview 把 needs_review 的复核材料交给 redteam。
+//
+// 为什么要交给**对抗者**：needs_review 交回给提出者复核等于自证（见
+// sodpolicy.RedteamAgentKey 的说明）。入队由审计器完成（sod_adversarial_review_pending），
+// 这里只负责「即时触发」那条腿 —— 让 redteam 立刻去证伪，而不是等轮询。
+//
+// best-effort：拉不起 redteam 不能影响链的裁决 —— 裁决早已发生、材料也已入队，
+// redteam 迟一点到照样能取到。
+func (s *Server) sodNotifyReview(ctx context.Context, item *db.AdversarialReviewItem) {
+	if s == nil || s.m == nil || s.ctx == nil || item == nil {
+		return
+	}
+	taskID := int64(0)
+	if item.TaskID != nil {
+		taskID = *item.TaskID
+	}
+	msg := fmt.Sprintf(
+		"SoD 链裁决 needs_review：工具=%s，来源 agent=%s，原因码=%s，异常=%v，载荷摘要=%s。结构化意图=%s。请在任务授权范围内对该意图证伪。",
+		item.ToolName,
+		item.SourceAgent,
+		item.ReasonCode,
+		item.AnomalyFlag,
+		item.PayloadDigest,
+		truncateSoDReviewIntent(item.StructuredIntent),
+	)
+	s.StartTriggeredRun(sodpolicy.RedteamAgentKey, "SoD 复核 · "+item.ToolName, msg, taskID, false, "", "")
+}
+
+// truncateSoDReviewIntent 截断交给 redteam 的结构化意图正文。
+func truncateSoDReviewIntent(intent json.RawMessage) string {
+	if len(intent) == 0 {
+		return "{}"
+	}
+	if len(intent) <= sodReviewIntentMaxBytes {
+		return string(intent)
+	}
+	return string(intent[:sodReviewIntentMaxBytes]) + "…(截断)"
+}

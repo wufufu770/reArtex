@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
@@ -221,7 +222,28 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
+		// 对抗复核队列的访问面。适配器把 db 的表形状挡在 agent 包之外 ——
+		// agent 只认「读队列 / 结案」这两个动作，不认表名与列名。
+		// 不注入时那两个工具会返回中文错误而不是崩，但 redteam 也就永远查不到队列。
+		agent.SodReviewStore = sodReviewStore{pg: m.pg}
 		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		// SoD 链：先绑定运行上下文读法，再装链。
+		//
+		// 为什么必须绑定读法：链铸的凭证与执行器查的凭证都靠四元组里的 agent_key
+		// 对齐，而 agent_key 来自 agent.RunInfo（worker 路径独有）⇒ 必须有一处
+		// 把 RunInfo 翻译成 SoD 的运行上下文。没绑定 ⇒ 链与执行器都读到空上下文 ⇒
+		// 受管判定恒为「不受管」⇒ 闸门整条链形同虚设（工具照跑，只是不裁决）。
+		//
+		// 为什么绑在装链**之前**：读法是进程级的全局，先绑后装 ⇒ 链一装好就是
+		// 完整可用的，不存在「链已就位但读法还没到位」的中间态。
+		//
+		// 为什么装不上就 log.Fatalf 而不是打日志跳过：链装不上 = 确定性闸门不存在
+		// = 所有工具调用都不受管 ⇒ 那是**比没有这个特性更危险**的状态（制造虚假
+		// 安全感）。宁可启动失败，让部署方看到明确原因。
+		sod.SetContextReader(agent.SodContextReader)
+		if err := s.installSoDChain(); err != nil {
+			log.Fatalf("[sod] 安装 SoD 链失败: %v", err)
+		}
 		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)

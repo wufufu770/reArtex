@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 
 	actool "github.com/Autumn-27/norma/tool"
+
+	"github.com/Autumn-27/artex/internal/sod"
 )
 
 // DeferredInfo carries the deferred-tools wiring an agent needs to build its
@@ -72,8 +74,33 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = ToolResolve(ctx, agentKey, out)
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	// 装饰顺序（由外到内）是刻意定的，不是随手写的：
+	//
+	//   enforceToolPolicy → guardPanic → 执行器 → 真实工具
+	//
+	// 为什么 enforceToolPolicy 在最外层：工具层（Stage-1 权限）的绝对拒绝权必须
+	// 完整保留 —— 策略拒了就不该再问链「批不批」，更不该出现「链批了所以放行」。
+	//
+	// 为什么执行器在最内层：它是**最后一道**闸门，位置贴着真实调用 ⇒ 凭证检查
+	// 发生在「真的要执行了」的那一刻；上面任何一层拒绝都在它之前发生，不会出现
+	// 「工具已被策略拒绝却还去消费凭证」的副作用。
+	//
+	// 为什么摘要口径不会因顺序漂移：链在 PreToolUse hook 里对入参字节算摘要，
+	// 执行器对同一份入参字节算摘要 ⇒ 两边算的是**同一个** CanonicalDigest。装饰器
+	// 只透传入参，不改字节 ⇒ 顺序怎么排都不影响摘要一致。
+	//
+	// 为什么用 GatedTool(t.Name()) 而不是一律套上：放行清单（本地只读 / 平台只读 /
+	// 纯记账）里的工具不进链 —— 它们不改状态、不外发、不派生进程，裁决它们只会
+	// 给每次调用凭空加 1~4 秒的规整延迟。清单外的**全部**工具都套上 ⇒ 未登记的
+	// 新工具（MCP 任意名、自定义工具任意 key）默认被管住。
+	//
+	// 为什么执行器装在这里（所有 agent 共用的 AugmentTools）而不是只装 worker：
+	// AugmentTools 是工具装配的唯一收口 ⇒ 装在这里才能保证「模型提议 ⇒ 确定性层
+	// 裁决 ⇒ 执行器验凭证」这条链没有旁路。受管与否在**运行期**由 ctx 判定
+	// （internal/sod.ManagedScopeOf），不在装配期 ⇒ 非 worker 路径（planner /
+	// mainagent / chat）不会去索要一把没人铸的凭证。
 	for i, t := range out {
-		out[i] = enforceToolPolicy(guardPanic(t))
+		out[i] = enforceToolPolicy(guardPanic(sod.WrapExecutor(t, sod.ExecutorTokens(), sod.GatedTool(t.Name()))))
 	}
 	return out, def, cleanup
 }

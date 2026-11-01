@@ -1362,7 +1362,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
-		inner: t.Guard.Hooks(),
+		inner: WrapHookRunner(t.Guard.Hooks()),
 		drain: func() (string, bool) {
 			msg, ok := e.drainSteer(iid)
 			if ok {
