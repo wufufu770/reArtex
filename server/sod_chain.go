@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 
@@ -126,8 +127,21 @@ func (s *Server) installSoDChain() error {
 	if err != nil {
 		return err
 	}
+	// 缺 LLM profile 不是「装配缺件」，只影响运行期。
+	//
+	// 规整器的 provider 是**调用期**解析的（internal/sod.NewNormalizer 只要求
+	// provider 函数非 nil），所以缺 profile 的真实后果是：链每次调用都解析不到
+	// 模型 ⇒ 按 normalizer_unavailable fail-closed 拒绝 ⇒ **不漏放行**。
+	//
+	// 为什么不能因此 log.Fatalf（整个 server 起不来）：① 链装不上时连诊断界面
+	// 都没有，运维只能看进程崩溃日志；② 它会把不依赖模型的用例一起打挂（例如
+	// Phase 0 的读面隔离验收测试 TestTier1ReadOnlyToolsNoScopeLeak —— 那个
+	// 测试要起一个 server，却与「有没有配模型」毫无关系）。
+	//
+	// 真正的缺件是提示词与 schema —— 缺了必然每次调用被拒且无从修复，那两条
+	// 仍然硬失败（见上）。
 	if err := sodNormalizerProfileReady(pg); err != nil {
-		return err
+		log.Printf("[sod] %v（链仍会装上：受管路径上的工具调用将按 fail-closed 被拒）", err)
 	}
 
 	// 规整器：提示词 + schema + 模型 provider 三者齐备才建得出来。
@@ -237,7 +251,7 @@ func sodNormalizerProfileReady(pg *db.DB) error {
 		return fmt.Errorf("SoD 链装配失败：读取活动 LLM profile 失败：%w", err)
 	}
 	if p == nil || p.ID <= 0 {
-		return fmt.Errorf("SoD 链装配失败：未配置可用的规整模型（活动/默认 LLM profile）")
+		return fmt.Errorf("未配置可用的规整模型（活动/默认 LLM profile）")
 	}
 	return nil
 }
