@@ -1,0 +1,61 @@
+# 「干净实例」专用覆盖：新版本从一个空库起，绝不吸收旧 docker 实例的任何内容。
+#
+# 为什么需要这一个文件（2026-11-02，Sir 明确要求）：
+#   「不要把以前已经在本机上的 docker 的 reartex 合并到你现在在做的 reartex」
+#
+# 现状的问题：docker-compose.dev.yml **没有定义卷** ⇒ 基础 compose 的 `pgdata:`
+# 由 project 名派生 ⇒ 用 `-p artexdev` 起实例时，compose 会复用**旧开发实例的卷**
+# `artexdev_pgdata` ⇒ 新版本会直接跑在旧库上（旧 schema、旧种子、旧提示词、旧
+# 任务、旧发现、旧策略数据都在）⇒ 那正是「把旧实例合并进新版本」。
+#
+# 本文件怎么解决：
+#   · 用法带 `-p artexdev2` ⇒ compose 自动新建卷 `artexdev2_pgdata` ⇒ **全新空库**
+#     （连 `artexdev_pgdata` 这个名字都不会碰到）。
+#   · 端口换成 19787/19788 ⇒ 旧的 artexdev 实例（18787/18788）继续跑，互不冲突。
+#   · 网段换成 172.30.0.0/16 ⇒ 与旧的 172.20.0.0/16 不重叠。
+#   · 基础 compose 里的 `pgdata:` 卷**不要在这里覆盖名字** —— 覆盖成固定名字
+#     反而会让两个实例抢同一个卷。project 名不同 ⇒ 卷名天然不同。
+#
+# 旧的 artexdev 实例与它的卷**原封不动保留**（不 down、不 -v、不删），随时可回退
+# 对照；两者之间不做任何数据搬运。
+#
+# 用法（必须三个 -f 顺序，且必须带 -p artexdev2）：
+#   docker compose -p artexdev2 \
+#     -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.fresh.yml \
+#     up -d
+services:
+  artex:
+    image: artex-dev:local
+    build:
+      context: .
+    # ⚠️ compose 对列表型字段是【合并】不是【覆盖】！基础 compose 的 ports 是
+    # ["8787:8787", "127.0.0.1:8788:8788"] ⇒ 追加而不替换的话，新实例会去抢
+    # 【现役正在用的】8787/8788 ⇒ 必须用 !override 整体替换（Compose ≥ v2.24）。
+    #
+    # 端口选 19787/19788：18787/18788 已被旧的 artexdev 实例占用（它还在跑）。
+    ports: !override
+      - "127.0.0.1:19787:8787"
+      - "127.0.0.1:19788:8788"
+    environment:
+      ARTEX_LLM_PROVIDER: "${ARTEX_LLM_PROVIDER:-}"
+      ARTEX_LLM_MODEL: "${ARTEX_LLM_MODEL:-}"
+      ARTEX_LLM_BASE_URL: "${ARTEX_LLM_BASE_URL:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    # 仅开发实例：保留 CAP_SYS_ADMIN，便于 Phase 0 Task 4 的 Layer 2a
+    # （mount namespace 隔离 / unshare -m）可执行。现役 compose 一律不加。
+    cap_add:
+      - SYS_ADMIN
+    # 仅开发实例：解除 AppArmor 对 `mount(2)` 的封禁。
+    # 实测（2026-10-29）：宿主 AppArmor=enabled，容器内 profile = docker-default
+    # (enforce)，它**禁止 mount** ⇒ mount namespace 里遮蔽 /run/secrets 在默认策略
+    # 下根本跑不起来（bind / tmpfs 全部 EPERM）。对照实验证实：仅放开 apparmor
+    # （seccomp 保持默认）后，`unshare -m` + `mount --bind` / `mount -t tmpfs` 均可执行。
+    # 现役一律不加（见隔离方案 §1 红线 R7）。
+    security_opt:
+      - apparmor=unconfined
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
