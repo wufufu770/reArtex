@@ -976,6 +976,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)
 	mux.HandleFunc("GET /api/intercept/judge/usage", s.interceptJudgeUsage) // 兜底审批累计 token 用量
 
+	// 策略库（L4）operator API。
+	// 裁决写只在宿主侧发生：人工裁决必须写明理由 + 操作人，进 audit_events
+	// 哈希链；pin 复审队列只读（只提示、不自动解）。
+	mux.HandleFunc("GET /api/strategies", s.strategyList)
+	mux.HandleFunc("GET /api/strategies/{id}", s.strategyGet)
+	mux.HandleFunc("GET /api/strategy-proposals", s.strategyProposalList)
+	mux.HandleFunc("POST /api/strategy-proposals/{pid}/decide", s.strategyProposalDecide)
+	mux.HandleFunc("POST /api/strategies/{id}/pin", s.strategyPinSet)
+	mux.HandleFunc("POST /api/strategies/{id}/retire", s.strategyRetire)
+	mux.HandleFunc("GET /api/strategy-pin-queue", s.strategyPinQueue)
+	mux.HandleFunc("POST /api/strategies/refresh-utility", s.strategyRefreshUtility)
+
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
 	// no-embed build the webui handler just 404s (run `next dev` separately).
