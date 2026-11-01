@@ -1268,6 +1268,14 @@ var advisoryAdvisoryWriteTools = map[string]bool{
 	// emit_structured_intent：intent-normalizer 的唯一输出通道（结构化意图）。
 	// 它写的是「规整后的动作」，不是平台状态——判定仍由确定性闸门做。
 	"emit_structured_intent": true,
+	// 对抗复核队列（needs_review）是 redteam 自己的通道：它读队列、结案，
+	// 写的是「我对这条被拦下的调用查清没有」——不是平台共享状态机。
+	//
+	// 为什么【读】工具也归在写这一类：这两个工具构成同一条通道的两端
+	// （读队列 → 结案），而 redteam 的策略是 DenyWrite=true。读端若被算成
+	// 纯只读，读的能力面就会被别的 agent 以「只读工具」的名义顺带拿走，
+	// 两条通道的两端就分属两个 agent 了。
+	"list_adversarial_review_pending": true, "submit_adversarial_review_result": true,
 }
 
 // advisoryScopeQueryTools 是「查 scope」的工具 key。
@@ -1363,6 +1371,10 @@ func AdvisoryAgentToolPolicies() []AdvisoryAgentToolPolicy {
 				"read_strategy_posterior", // 策略库阶段注册
 				"read_finding",            // 策略库阶段注册
 				"read_traffic_evidence",   // 策略库阶段注册
+				// 对抗复核队列（needs_review）：redteam 是这条队列的【唯一】消费者
+				// ——读它、结案它。两条一起给，避免出现「只会读不会结案」或反之的
+				// 半截状态。
+				"list_adversarial_review_pending", "submit_adversarial_review_result",
 				// 平台已有的等价只读工具
 				"list_findings",                                 // ← read_finding
 				"traffic_search", "traffic_get", "traffic_blob", // ← read_traffic_evidence

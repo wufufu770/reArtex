@@ -105,7 +105,35 @@ func BuiltinToolSeeds() []ToolSeed {
 	}
 	out = append(out, emitStructuredIntentSeed)
 	out = append(out, advisoryStrategyToolSeeds...)
+	out = append(out, sodReviewToolSeeds...)
 	return applyAdvisoryAgentBindings(out)
+}
+
+// sodReviewToolSeeds 是「对抗复核队列」两个工具的目录条目。
+//
+// 为什么要在目录里占位：tools 表的行全部来自 BuiltinToolSeeds()，白名单里的名字
+// 若没有对应行，协调时只能跳过并记录，redteam 就永远拿不到工具。
+//
+// Agents 字段与 db 层策略（AdvisoryAgentToolPolicies 里的 redteam 白名单）写的是
+// 同一件事：前者是播种进 tools 表的默认绑定，后者是每次启动时协调绑定的事实来源。
+// 两处必须一致——applyAdvisoryAgentBindings 只做追加，不会把这里已写的条目搬走。
+//
+// schema 复用 agent/sod_tools.go 里的同一份定义（不是另抄一遍）：目录行里的
+// schema 会覆盖模型看到的入参说明，两处各写一份必然漂移，而漂移的后果是
+// 「模型以为能传的参数」与「代码里实际读的参数」不是一回事。
+var sodReviewToolSeeds = []ToolSeed{
+	{
+		Key:  "list_adversarial_review_pending",
+		Desc: "读【对抗复核队列】（needs_review）：职责分离链把可疑的工具调用拦在这里，等你（证释者）判断。只读，不改任何状态。",
+		Schema: sodReviewListSchema,
+		Agents: []string{"redteam"},
+	},
+	{
+		Key:  "submit_adversarial_review_result",
+		Desc: "结案一条【对抗复核队列】里的复核项：给出结论与依据，把它从待查队列里清掉。status 只能是 resolved（已查清）或 dismissed（无需追查）。",
+		Schema: sodReviewSubmitSchema,
+		Agents: []string{"redteam"},
+	},
 }
 
 // advisoryStrategyToolSeeds 是顾问型 agent（curator / verifier / redteam / creative）
