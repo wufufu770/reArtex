@@ -3,10 +3,59 @@ package sod
 import (
 	"context"
 	"encoding/json"
+	"log"
+	"sync/atomic"
 
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
+
+// executorTokens 是进程内唯一的执行器凭证表。
+//
+// 为什么用 atomic.Pointer 而不是普通变量 + 锁：读方在每次工具调用时都要读它，
+// 而写方只在启动时装配一次 ⇒ 无锁读是热路径上唯一合理的形态。
+var executorTokens atomic.Pointer[TokenStore]
+
+// SetExecutorTokens 设置进程内唯一的执行器凭证表（由 server 装配时调用一次）。
+//
+// ⚠️ **首次写入生效**：第一次传入非 nil 的表之后，后续调用一律被忽略（只记
+// 日志）。为什么不是「后写覆盖」：凭证表被换掉意味着「链铸的凭证」与「执行器
+// 查的表」不再是同一张 ⇒ 每一个被批准的动作都在执行器侧查不到凭证 ⇒ 全被拒
+// （fail-closed，但链等于瘫了）。半装好的链绝不能出现两张互相不认的表。
+//
+// 传 nil 不算数：nil 表示「没装配」，把它写进单例等于把执行器指向空指针 ⇒
+// 受管路径上拒绝一切，而宿主以为表已经装好了。
+func SetExecutorTokens(s *TokenStore) {
+	if s == nil {
+		log.Printf("[sod] 执行器凭证表未装配，忽略本次设置")
+		return
+	}
+	if executorTokens.CompareAndSwap(nil, s) {
+		return
+	}
+	log.Printf("[sod] 执行器凭证表已存在，忽略本次设置（首次写入生效）")
+}
+
+// ExecutorTokens 读执行器凭证表（未装配 ⇒ nil）。
+//
+// 为什么 agent 侧的装饰器从这里读：agent 包的工具装配是共用代码（worker /
+// planner / mainagent / chat），没有地方塞一个 TokenStore 参数 ⇒ 只能从
+// 进程级单例读。链那一侧由宿主把同一张表直接传进 ChainDeps.Tokens。
+func ExecutorTokens() *TokenStore {
+	return executorTokens.Load()
+}
+
+// ResetExecutorTokensForTest 清空进程级执行器凭证表。**仅供测试复位。**
+//
+// 为什么需要它：单例是进程级的，而同一测试包里的用例共享一个进程 ⇒ 不复位
+// 的话「未装配」这个前置条件会随执行顺序漂移，用例之间互相依赖。
+//
+// ⚠️ **生产代码不许调用**：复位之后下一次 SetExecutorTokens 会装进**另一张**
+// 表 ⇒ 链铸的凭证与执行器查的表不再是同一张 ⇒ 被批准的动作全被拒。复位只
+// 在测试进程里有意义（那里没有「正在跑的链」）。
+func ResetExecutorTokensForTest() {
+	executorTokens.Store(nil)
+}
 
 // ExecutorGate 是执行器装饰器：执行前消费一次性凭证。
 //
@@ -72,16 +121,24 @@ func (g *ExecutorGate) CheckPermissions(ctx context.Context, in json.RawMessage,
 // 第二次拿同一个凭证 ⇒ 查不到 ⇒ 拒绝 ⇒ **重放失败**。
 //
 // ⚠️ 递归防护：ctx 带 re-entrancy 标记（规整器自己的模型调用）⇒ 直连。
+//
+// ⚠️ 非受管路径（ctx 里没有 SoD 运行上下文）⇒ 直连，**不索要凭证**：
+// 装饰器装在所有 agent 的工具上，而链只挂在 worker 上 —— 在没有链的路径上
+// 索要凭证等于索要一把没人铸的钥匙 ⇒ chat / planner / mainagent 的每一次
+// 工具调用都会被拒 ⇒ 平台瘫掉。
 func (g *ExecutorGate) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
 	if InReentrancy(ctx) {
+		return g.inner.Call(ctx, in, tc)
+	}
+	run, managed := ManagedScopeOf(ctx)
+	if !managed {
 		return g.inner.Call(ctx, in, tc)
 	}
 	if g.tokens == nil {
 		return actool.Errorf("执行凭证存储未装配：本次调用未经 SoD 链批准，拒绝执行"), nil
 	}
-	run := currentRunContext(ctx)
 	digest := CanonicalDigest(in)
-	if !g.tokens.Take(digest, run.TaskID, run.AgentKey, g.inner.Name()) {
+	if !g.tokens.Take(digest, run.TaskID, AgentKeyFromContext(ctx), g.inner.Name()) {
 		return actool.Errorf("执行凭证缺失或不匹配：本次调用未被 SoD 链批准，拒绝执行"), nil
 	}
 	return g.inner.Call(ctx, in, tc)

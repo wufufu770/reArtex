@@ -90,6 +90,22 @@ func currentRunContext(ctx context.Context) RunContext {
 	return RunContext{}
 }
 
+// AgentKeyFromContext 从运行上下文里取当前 agent key。
+//
+// **为什么它是单一真相源**：执行凭证绑的是四元组 (载荷摘要, task_id,
+// source_agent, tool_name)，链用它铸凭证、执行器用它查表。两边只要有一边
+// 读法不同（一个从运行上下文读、另一个从别处读），凭证就永远查不到 ⇒ 每一个
+// 被批准的动作都被执行器拒（fail-closed，但链等于瘫了）。
+//
+// 所以宿主装配时必须写 `AgentKeyOf: sod.AgentKeyFromContext` —— 链与执行器
+// 于是从**同一个** ctx 里取**同一个**原值。
+//
+// ⚠️ 返回的是**原值**（不修剪空白）：执行器那边就是拿这个原值查表的，
+// 链这边若擅自修剪，两端就会差一个空白 ⇒ 一样查不到。
+func AgentKeyFromContext(ctx context.Context) string {
+	return currentRunContext(ctx).AgentKey
+}
+
 // Chain 是 SoD 链本体：实现 harness.HookRunner。
 //
 // 它是【装饰器】：先问 inner（guard），inner 不 block 才跑链。
@@ -127,6 +143,26 @@ type ChainDeps struct {
 // NewChain 构造链。inner 为 nil 时链独立工作（测试用）。
 func NewChain(inner harness.HookRunner, deps ChainDeps) *Chain {
 	return &Chain{inner: inner, deps: deps}
+}
+
+// Wrap 返回一个绑定了指定 inner 的链视图：deps 共享（同一份凭证表/规整器/闸门），
+// inner 独立。
+//
+// 为什么需要它：链是**进程级单例**，但 inner（宿主的 guard）是**每任务**的 ——
+// 每个任务有自己的 guard。宿主于是持有唯一一条链，按任务派生视图：视图共享
+// 同一份 deps（同一张凭证表、同一份规整器、同一道闸门、同一份缓存、同一个
+// 审计器），只换一个 inner。
+//
+// ⚠️ 共享必须是**同一张凭证表**（同一指针），不是副本：链铸凭证、执行器消费
+// 凭证，两边必须落在同一张表里，否则被批准的动作在执行器侧查不到凭证 ⇒
+// 全部被拒（fail-closed，但链等于瘫了）。
+//
+// Wrap(nil) 是合法的：返回的视图 inner 为空，等价于 NewChain(nil, c.deps)。
+func (c *Chain) Wrap(inner harness.HookRunner) *Chain {
+	if c == nil {
+		return NewChain(inner, ChainDeps{})
+	}
+	return &Chain{inner: inner, deps: c.deps}
 }
 
 // chainCall 是一次工具调用在链内的上下文（把一串参数收成一个值对象）。
@@ -177,9 +213,12 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 
 	run := currentRunContext(ctx)
-	agentKey := strings.TrimSpace(c.deps.AgentKeyOf(ctx))
-	if agentKey == "" {
-		agentKey = strings.TrimSpace(run.AgentKey)
+	// agent 分量必须与执行器查表时用的**逐字节相同**：执行器取的是运行上下文
+	// 里的原值，所以这里也不修剪、不改写 —— 修剪会让两端差一个空白 ⇒
+	// 凭证查不到 ⇒ 被批准的动作全被拒。
+	agentKey := c.deps.AgentKeyOf(ctx)
+	if strings.TrimSpace(agentKey) == "" {
+		agentKey = run.AgentKey
 	}
 	call := chainCall{
 		toolName:       name,
