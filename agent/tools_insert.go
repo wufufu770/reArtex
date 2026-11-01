@@ -687,10 +687,15 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 // deduped by name (mainagent order wins). Used by the server to build a registry
 // for injecting domain tools into agents (Auto, custom) that don't own a per-task
 // ToolSet. The caller provides real stores; tools are callable at taskID=0 scope.
+//
+// 它还包含【不属于任何执行 agent 基础工具集】的顾问型工具（当前只有对抗复核队列
+// 这两个）：redteam 是 chat 型 agent（role=assistant），它没有自己的 ToolSet，
+// 工具全靠 tools 表的绑定 + 本注册表注入 —— 不在这里就够不着。
 func (t *ToolSet) AllDomainTools() []actool.CoreTool {
 	seen := map[string]bool{}
 	var out []actool.CoreTool
 	all := append(append(t.MainAgentTools(), t.PlannerTools()...), t.WorkerTools()...)
+	all = append(all, t.listAdversarialReviewPending(), t.submitAdversarialReviewResult())
 	for _, tool := range all {
 		if !seen[tool.Name()] {
 			seen[tool.Name()] = true
