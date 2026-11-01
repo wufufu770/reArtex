@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -23,6 +24,13 @@ type Scheduler struct {
 	s    *Server
 	pg   *db.DB
 	tick time.Duration
+
+	// curatorRunning 保证同一时刻只有一轮 curator 在跑。
+	//
+	// 为什么需要：curator 的水位在跑**完之后**才写（崩重启要能立刻再跑一轮）
+	// ⇒ 5 秒 tick 期间可能重复判定「该跑」。没有这层互斥，两轮 curator 会并发
+	// 跑全库淘汰，而裁决写必须串行（auto-permission-tiers §4.2）。
+	curatorRunning atomic.Bool
 }
 
 const (
@@ -115,6 +123,12 @@ func (sc *Scheduler) init() {
 }
 
 func (sc *Scheduler) step() {
+	// curator 每小时跑一次（小时级水位）：策略晋级 / 淘汰是**重裁决**（刷 utility
+	// 物化视图 + 扫一遍全库），不能挂在 5 秒 tick 的同步路径上 ⇒ 异步跑。
+	//
+	// 放在 step() 最前面：step() 在「一个 trigger 都没有」时会提前返回，curator
+	// 不能被这个提前返回挡掉（否则没配 trigger 时策略永远不晋级）。
+	sc.dispatchStrategyCurator()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return
@@ -128,6 +142,30 @@ func (sc *Scheduler) step() {
 	sc.fireTaskTimeouts(triggers)
 	sc.fireToolCalls(triggers)
 	sc.fireTaskCreates(triggers)
+}
+
+// dispatchStrategyCurator 判定是否该跑 curator，并在**独立 goroutine** 里跑。
+//
+// 为什么异步：curator 一轮要刷 utility 物化视图 + 扫一遍全库策略。同步挂在
+// 5 秒 tick 上会把 tick 拖慢到秒级 ⇒ 触发器派发全部滞后。
+//
+// 水位判断有两道：这里判一次（省掉绝大多数 tick 的 goroutine 开销），
+// runStrategyCurator → RunCuratorIfDue 里再判一次（真正写水位的那道闸）。
+func (sc *Scheduler) dispatchStrategyCurator() {
+	if sc == nil || sc.pg == nil {
+		return
+	}
+	if !sc.shouldRunCurator() {
+		return
+	}
+	// 互斥：同一时刻只允许一轮 curator 在跑（裁决写必须串行）。
+	if !sc.curatorRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer sc.curatorRunning.Store(false)
+		sc.runStrategyCurator()
+	}()
 }
 
 // fireIntervals fires triggers whose interval has elapsed since last_fire.
