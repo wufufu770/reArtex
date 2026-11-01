@@ -281,7 +281,13 @@ func sodNormalizerProfileReady(pg *db.DB) error {
 		return fmt.Errorf("SoD 链装配失败：读取活动 LLM profile 失败：%w", err)
 	}
 	if p == nil || p.ID <= 0 {
-		return fmt.Errorf("未配置可用的规整模型（活动/默认 LLM profile）")
+		// DB 里没有活动 profile ⇒ 还有 env 兜底这条（与 engine 同一口径：
+		// server.go 的 loadLLMConfig → agent.FromEnv）。有 env 配置时规整器照样能用，
+		// 此时报「未配置」就是误报 ⇒ 而误报会让运维以为链没装好。
+		if _, ok := agent.FromEnv(); ok {
+			return nil
+		}
+		return fmt.Errorf("未配置可用的规整模型（活动/默认 LLM profile，也没有 env 兜底）")
 	}
 	return nil
 }
@@ -300,7 +306,21 @@ func (s *Server) sodProviderFunc() sod.ProviderFunc {
 			}
 		}
 		if profileID == 0 {
-			return nil, false
+			// DB 里没有活动 profile ⇒ 退到 engine 已经装好的全局 provider
+			// （它可能是从 env 兜底来的，见 server.go 的 loadLLMConfig →
+			// agent.FromEnv 那条）。
+			//
+			// 为什么必须同口径：engine 能用模型、链却报「未配置可用的规整模型」
+			// ⇒ 链对**每一次**工具调用都 fail-closed 拒绝 ⇒ 整条链瘫掉，而排查时
+			// 看到的是「链没装好」这种误导性现象（实际是链与 engine 用了两套模型
+			// 解析口径）。
+			//
+			// 为什么复用 s.llmProv 而不是另造一个 provider：另造 ⇒ 两份 provider
+			// 各带各的限流器 ⇒ 实际请求速率是配置的两倍。
+			s.cfgMu.Lock()
+			prov := s.llmProv
+			s.cfgMu.Unlock()
+			return prov, prov != nil
 		}
 		prov, _, ok := s.providerForProfile(profileID)
 		if !ok || prov == nil {
