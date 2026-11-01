@@ -234,7 +234,18 @@ func TestSoDInstallSoDChainFailsClosedWithoutIntentToolSchema(t *testing.T) {
 		t.Fatalf("删除工具行失败：%v", err)
 	}
 
+	// ⚠️ 顺序很关键：tools 表的行全部来自 BuiltinToolSeeds() ⇒ server 启动时会
+	// 【重新播种】emit_structured_intent ⇒ 删行必须放在 New() **之后**，否则删掉的
+	// 行会被播种补回来 ⇒ 装链反而成功 ⇒ 断言落到「已安装」而不是「缺工具」。
+	//
+	// 同理，New() 里已经装好了一条链 ⇒ 必须先清掉链槽位，下面才能验证
+	// 「装配失败 ⇒ 不留下已安装的链」这条断言（链是进程级单例）。
 	s := New(testServerCtx(t), m, t.TempDir(), t.TempDir(), t.TempDir())
+	resetSoDChainSlot(t)
+	if _, err := m.pg.Exec(`DELETE FROM tools WHERE key=$1`, sodIntentToolKey); err != nil {
+		t.Fatalf("删除工具行失败：%v", err)
+	}
+
 	err = s.installSoDChain()
 	if err == nil {
 		t.Fatal("工具目录缺少 emit_structured_intent 时不应装配成功")
