@@ -9,6 +9,13 @@
 #   3) 上游 Dockerfile 仍可照常用于正式发布；本文件只是开发期的等价替代。
 #
 # 与上游 Dockerfile 的差异：**只有这一层** —— 替换预编译二进制与 skills。
+#
+# ⚠️ 刻意不写 `# syntax=docker/dockerfile:1`：那一行会让 buildkit 去拉
+# docker/dockerfile:1 这个 frontend 镜像，而本机的 registry 加速器
+# （docker.1ms.run）拉它会 EOF ⇒ 构建在解析 Dockerfile 之前就失败。
+# 不写 syntax 行时 buildkit 用**自带的** frontend ⇒ 零拉取。
+# 本文件用到的 Dockerfile 特性只有 FROM/ARG/COPY/RUN ⇒ 内置 frontend 完全够用。
+# （上游 Dockerfile 仍保留它自己的 syntax 行 —— 本文件是开发期的等价替代。）
 FROM ghcr.io/wufufu770/reartex:v0.4.1
 ARG TARGETARCH
 ARG ARTEX_BINARY_VERSION=""
