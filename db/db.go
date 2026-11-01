@@ -239,6 +239,17 @@ func Open(dsn string) (*DB, error) {
 		if err := d.EnsureStrategySchema(); err != nil {
 			return fmt.Errorf("apply strategy schema: %w", err)
 		}
+		// 策略库的第二批表（strategy_proposals / strategy_usage /
+		// strategy_replay_corpus / task_strategy_snapshot）的 DDL。
+		//
+		// 为什么必须在启动时接：它们的 DDL 写在 Go 字符串常量里（访问层就近定义），
+		// 于是它们原本是**懒执行**的 —— 只有第一次用到该表时才建。懒执行的坏处是
+		// 「库里没有这张表」这件事只在运行期的某个接口上暴露，而不是启动期 ⇒
+		// 排障时看到的是「关系不存在」这种底层报错，而不是「启动期就报出来」。
+		// 幂等（CREATE TABLE IF NOT EXISTS）⇒ 重复调用无副作用。
+		if err := d.EnsureStrategySnapshotSchema(); err != nil {
+			return fmt.Errorf("apply strategy snapshot schema: %w", err)
+		}
 		// 职责分离链的 DDL：裁决留痕、待对抗复核队列、工具熔断状态。
 		//
 		// 为什么必须在这里接：不接 ⇒ 库里没有这三张表 ⇒ 闸门写裁决时运行期才报
