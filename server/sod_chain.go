@@ -173,6 +173,19 @@ func (s *Server) installSoDChain() error {
 	// 把同一个表发布给执行器（sod.SetExecutorTokens）。
 	tokens := sod.NewTokenStore()
 
+	// 装新链之前先把执行器的凭证表作废。
+	//
+	// 为什么必须：执行器的凭证表是**进程级单例**且「首次写入生效」。若进程里已经
+	// 装过一条链（老表），现在又装一条新链（新表），SetExecutorTokens 会因为
+	// 「不是首次」而**忽略**新表 ⇒ 执行器握着老表、链握着新表 ⇒ 新链铸的凭证
+	// 在执行器侧永远查不到 ⇒ 每一个被批准的动作都被拒（fail-closed，不漏放行，
+	// 但整条链瘫了，而且日志上看不出原因）。
+	//
+	// 为什么这里重置是安全的：能走到这一行，说明上面的幂等短路没有命中 ⇒ 链槽位
+	// 是空的 ⇒ 进程里当前没有在用的链 ⇒ 老表是上一次装链留下的残骸，作废它
+	// 不会影响任何在用的东西。
+	sod.ResetExecutorTokens()
+
 	deps := sod.ChainDeps{
 		Normalizer:   norm,
 		Gate:         sod.NewGate(assets, pg),

@@ -32,6 +32,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
+	"github.com/Autumn-27/artex/internal/testdb"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -195,15 +197,30 @@ func newSoDWiringFixture(t *testing.T) *sodWiringFixture {
 	}
 }
 
-// sodWiringServer 起一个真 Server，并把进程级 SoD 链单例先清空。
-//
-// 为什么要清空：链是【进程级单例】，只允许装一次（server/sod_chain.go 的
-// RegisterSoDChain），而 server.New 每次都会装链 ⇒ 同一个测试进程里起第二个
-// server 会撞上「已安装」，server.New 直接 log.Fatalf 退出整个测试进程。所以这里
-// 先摘掉上一个用例留下的链，让每个用例都拿到【自己那条】链。
 func sodWiringServer(t *testing.T) (*Server, *db.DB) {
 	t.Helper()
 	sodWiringDetachChain(t)
+	// 本用例断言的是「链裁没裁决、凭证被没被消费」⇒ 它对库里的残留状态极其敏感：
+	// server 包的所有用例共用**一个**派生库（server/testmain_test.go 的
+	// testdb.Setup("server") 是【每包一个】，不是【每用例一个】）⇒ 前一个用例留下的
+	// 拦截规则、profile、意图都会渗进来（前一个用例留下的 deny 规则会拒掉本用例的
+	// Bash，症状是「链明明批了、工具却报 error」，极具误导性）。
+	//
+	// 所以这里自带一个独立库：表是干净的、规则是空的、profile 是没有的 ⇒ 测到的
+	// 就是链自己的行为。代价是多派生一个库（internal/testdb 命名 artex_test_sodwiring）。
+	dsn, release, err := testdb.Setup("sodwiring")
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	prevDSN := os.Getenv("ARTEX_PG_DSN")
+	if err := os.Setenv("ARTEX_PG_DSN", dsn); err != nil {
+		release()
+		t.Fatalf("设置测试 DSN 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("ARTEX_PG_DSN", prevDSN)
+		release()
+	})
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
