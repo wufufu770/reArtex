@@ -170,6 +170,25 @@ type Engine struct {
 
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
+	// strategyProvider 是「给 planner 注入策略摘要」的宿主侧回调（装配一次，全局共用）。
+	//
+	// 为什么存成字段而不是每次现造：provider 是无状态闭包，装一次即可；每次现造
+	// 会让 planner.strategyContext 每轮被改写一次。
+	strategyProvider func(taskID int64) string
+	// strategyWired 记住「这个 planner 已经装过策略上下文回调」（planner 指针 -> struct{}）。
+	//
+	// 为什么记：planner.strategyContext 是普通字段，每写一次就是一次写；与超时
+	// 收尾那一轮（另一个 goroutine 读同一字段）并发时构成数据竞争。装一次就够
+	// ⇒ 每个 planner 只写一次。
+	strategyWired sync.Map
+
+	// replayFrozen 记住「这个任务的重放语料已冻结」（任务 id -> struct{}）。
+	//
+	// 为什么要有这层记账：任务进终态后 worker 循环仍在空转（每秒一轮），没有它
+	// 就会每秒重算一次资产签名 + usage + findings ⇒ 白烧数据库。冻结本身是幂等的
+	// （ON CONFLICT DO NOTHING），这里只是省掉重复劳动。
+	replayFrozen sync.Map
+
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
 	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
 	deadline     sync.Map // taskID -> int64 unix, 绝对截止时刻(首次运行时盖章;0/缺省=不限)
@@ -455,6 +474,9 @@ func NewEngine(m *Manager) *Engine {
 	e.GroupConcurrencyLimit = m.GroupConcurrencyLimit
 	e.GroupRunningIntents = m.GroupRunningIntents
 	e.GroupDispatcherClaimable = m.groupDispatcherYields
+	// 策略上下文注入的宿主侧回调：装一次，之后每个 planner 都拿同一个 provider
+	// （组内同版本快照 ⇒ 同一份摘要）。
+	e.strategyProvider = e.strategyContextProvider()
 	return e
 }
 
@@ -968,6 +990,116 @@ func (e *Engine) isTaskTerminal(t *Task) bool {
 	return e.m.taskIsTerminal(t.ID)
 }
 
+// ---------- 策略库（L4）的宿主侧接线 ----------
+
+// strategyContextProvider 造出「给 planner 注入策略摘要」的宿主侧回调。
+//
+// 口径（计划 Task 6 Step 4）：
+//   - 快照按 task_id 存 ⇒ 组内成员天然用同一份策略版本（design §3.3）；
+//   - 快照**生成一次并复用**，不是每轮重算（每轮重算会让 planner 看到的策略集
+//     漂移，且与「组内同版本」冲突）；
+//   - 只渲染摘要（name + summary + utility），**绝不渲染 steps** —— steps 是命令
+//     模板，进了上下文就等于「把可执行产物塞进上下文」（反模式 8）。
+//     结构性保证：渲染入参 db.StrategySnapshotEntry **没有 steps 字段** ⇒ 注入
+//     路径拿不到策略正文。
+func (e *Engine) strategyContextProvider() func(taskID int64) string {
+	return func(taskID int64) string {
+		if e == nil || e.m == nil || e.m.pg == nil || taskID <= 0 {
+			return ""
+		}
+		entries, err := e.m.pg.EnsureTaskStrategySnapshot(taskID)
+		if err != nil {
+			log.Printf("[strategy] 生成任务 %d 的策略快照失败: %v", taskID, err)
+			return ""
+		}
+		return agent.RenderStrategySummaries(entries)
+	}
+}
+
+// wireStrategyContext 给 planner 装上策略摘要注入回调（宿主侧，只装一次）。
+func (e *Engine) wireStrategyContext(pl *agent.Planner) {
+	if e == nil || pl == nil || e.strategyProvider == nil {
+		return
+	}
+	if _, loaded := e.strategyWired.LoadOrStore(pl, struct{}{}); loaded {
+		return // 已装过
+	}
+	pl.SetStrategyContextProvider(e.strategyProvider)
+}
+
+// attributeSubTaskOutcome 给这个任务跑一轮子任务级归因，并把结论路由成待裁决的提议。
+//
+// 归因器**只写 usage / evidence / proposal，绝不写 strategies.state** —— 晋级是
+// 裁决写，只能在宿主侧发生（auto-permission-tiers §4.2）。这里只把归因器接到
+// 生产路径上，不动它的任何判据。
+//
+// 归因失败**不打断**意图结算：归因是旁路（诊断 + 提议），失败只少一条提议，
+// 不该让一次已经跑完的 worker 变成失败。
+func (e *Engine) attributeSubTaskOutcome(taskID int64) {
+	if e == nil || e.m == nil || e.m.pg == nil || taskID <= 0 {
+		return
+	}
+	attrs, err := AttributeSubTasks(e.m.pg, taskID)
+	if err != nil {
+		log.Printf("[strategy] 任务 %d 的子任务归因失败: %v", taskID, err)
+		return
+	}
+	ids, err := ProposeFromAttributions(e.m.pg, taskID, attrs)
+	if err != nil {
+		log.Printf("[strategy] 任务 %d 的归因提议路由失败: %v", taskID, err)
+		return
+	}
+	if len(ids) > 0 {
+		log.Printf("[strategy] 任务 %d 归因出 %d 条待裁决提议", taskID, len(ids))
+	}
+}
+
+// freezeReplayCorpus 冻结这个任务的重放语料（一次性、可重入）。
+//
+// 为什么在【任务】终态冻结而不是【意图】终态：语料是「一次运行的世界快照」，
+// 只有整个任务跑完（或被收尾）时这个世界才是定格的；按意图冻会得到半截世界的
+// 语料，重放闸门拿它比就没有意义（计划 Task 4 Step 6）。
+//
+// 冻结失败要能重试 ⇒ 记账只在成功后落。
+func (e *Engine) freezeReplayCorpus(taskID string) {
+	if e == nil || e.m == nil || e.m.pg == nil {
+		return
+	}
+	numeric, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || numeric <= 0 {
+		return
+	}
+	if _, loaded := e.replayFrozen.LoadOrStore(taskID, struct{}{}); loaded {
+		return // 已冻过
+	}
+	if err := freezeTaskReplayCorpus(e.m.pg, numeric); err != nil {
+		e.replayFrozen.Delete(taskID)
+		log.Printf("[strategy] 任务 %s 冻结重放语料失败: %v", taskID, err)
+		return
+	}
+	log.Printf("[strategy] 任务 %s 的重放语料已冻结", taskID)
+}
+
+// freezeTaskReplayCorpus 写一条重放语料案例：资产签名 + 命中的里程碑 + 漏洞结局。
+//
+// 冻结 = 不可变：FreezeReplayCorpus 走 ON CONFLICT DO NOTHING ⇒ 第二次冻结不
+// 覆盖已有案例（计划 Task 4 Step 5）。
+func freezeTaskReplayCorpus(pg *db.DB, taskID int64) error {
+	sig, err := pg.Assets().TaskAssetSignature(taskID)
+	if err != nil {
+		return fmt.Errorf("算任务资产签名失败: %w", err)
+	}
+	milestones, err := TaskReplayMilestones(pg, taskID)
+	if err != nil {
+		return err
+	}
+	outcomes, err := TaskReplayOutcomes(pg, taskID)
+	if err != nil {
+		return err
+	}
+	return pg.FreezeReplayCorpus(taskID, sig, milestones, outcomes)
+}
+
 // Broadcaster exposes the engine's live activity pub/sub (used by the SSE handler).
 func (e *Engine) Broadcaster() *Broadcaster { return e.bc }
 
@@ -1174,6 +1306,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if planner == nil {
 			return // idle until LLM configured
 		}
+		// 策略上下文注入：宿主侧装配（计划 Task 6 Step 4）。
+		//
+		// 为什么在这里装：planner 实例由宿主侧构造（server/task_llm.go），但**注入
+		// 装配**是宿主侧的责任 —— agent 包不该知道策略库在哪。引擎是 planner
+		// 轮次的入口 ⇒ 在这里装，planner 每轮都拿到同一个 provider。
+		e.wireStrategyContext(planner)
 		if e.IsPaused(t.ID) {
 			return // user-paused: don't plan
 		}
@@ -1205,6 +1343,8 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				} else if won {
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
 						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
+					// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
+					e.freezeReplayCorpus(t.ID)
 				}
 			}
 			return // goalless 分支永不进入 planner.Plan
@@ -1240,6 +1380,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
 			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
 				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
+			} else {
+				// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
+				e.freezeReplayCorpus(t.ID)
 			}
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
@@ -1296,6 +1439,12 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
+			// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
+			//
+			// 这是对【所有】终态路径的兜底：引擎里直接写终态的地方只覆盖 done，
+			// 超时收尾（engine_timeout.go 的 settleTask）走的是另一条路。任务终态后
+			// worker 循环仍在空转，这里正好是引擎观察到终态的那一刻。
+			e.freezeReplayCorpus(t.ID)
 			if sleepCtx(ctx, 1000*time.Millisecond) {
 				return
 			}
@@ -1525,6 +1674,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
+	// 子任务级归因：意图落到终态时归因一次（计划 Task 4 Step 6）。
+	//
+	// 为什么挂在【意图】终态而不是每个工具步骤：归因是按子任务聚合的，逐工具
+	// 归因会把一次成功碎成十几个「命中」，于是「一次成功 = 通用能力」（反模式 10）。
+	//
+	// 为什么失败子任务（blocked / exhausted）也归因：失败子任务只写 usage
+	// （outcome='miss'），**不写 strategy_evidence、不改 strategies 任何列** ——
+	// 这道闸门焊在归因器内部（db.ApplyStrategyVotes 只认 outcome='hit' 的使用明细）。
+	e.attributeSubTaskOutcome(wTaskID)
 	return true
 }
 
