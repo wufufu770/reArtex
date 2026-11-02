@@ -45,3 +45,24 @@ func RunInfoFrom(ctx context.Context) RunInfo {
 	}
 	return RunInfo{}
 }
+
+// egressTaskID 统一「本次运行的任务身份」口径，供出网范围判定使用。
+//
+// 为什么要有这个函数：planner / 主 agent 从函数参数拿到 taskID，chat agent 没有这个
+// 参数（纯对话会话本就不属于任何任务），只能从 ctx 的 RunInfo 取。两套取法散在三个
+// 调用点里，容易漏掉一个 —— 漏掉的后果是那个角色的出网**不带身份**，于是录制代理
+// 按「未归属」放行，它就不再受任务范围校验（这正是 egress_governance.go 清单里
+// 「只有 worker 带了令牌」那条的成因）。
+//
+// 取值优先级：
+//   - 显式参数 taskID > 0 ⇒ 用它（任务内的运行）。
+//   - 否则看 ctx 的 RunInfo.TaskID：群聊成员会话带着任务身份（一个群绑一个任务），
+//     纯独立聊天会话没有任务 ⇒ 返回 0 ⇒ 不带令牌 ⇒ 属「未归属的出网」。
+//
+// 返回 0 时**不要**伪造身份：没有任务就没有范围边界，装一个假身份比不带更危险。
+func egressTaskID(ctx context.Context, taskID int64) int64 {
+	if taskID > 0 {
+		return taskID
+	}
+	return RunInfoFrom(ctx).TaskID
+}

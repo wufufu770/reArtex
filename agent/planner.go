@@ -456,12 +456,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		DeepSeekSearchAPIKey:  p.webSearch.DeepSeekAPIKey,
 		DeepSeekSearchModel:   p.webSearch.DeepSeekModel,
 		WebSearchProxy:        p.webSearch.Proxy,
-		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
-		ToolOutputDir:         cmdOutDir(taskDir),
-		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:           maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
-		Compaction:            compactionConfig(p.compactionWindow()),
+		// 带 taskID ⇒ 子进程出网带任务身份 ⇒ 录制代理能按任务范围判定目的地。
+		// 不带的话 planner 的出网属于「未归属」，不受范围校验（见 egress_governance.go）。
+		BashEnv:       proxyEnv(p.proxyAddr, p.proxyCACert, egressTaskID(ctx, taskID)), // Bash 子命令默认走代理+信任 CA
+		WorkingDir:    taskDir,                                                         // 本任务工作目录 <workDir>/tasks/<taskID>
+		ToolOutputDir: cmdOutDir(taskDir),
+		MaxTurns:      p.maxTurns, // 0 = unlimited (configurable in agent management)
+		MaxDuration:   maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		Compaction:    compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、

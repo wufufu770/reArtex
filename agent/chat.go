@@ -37,7 +37,7 @@ type ChatAgent struct {
 	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
-	groupMailbox GroupMailbox // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
+	groupMailbox   GroupMailbox // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -189,12 +189,15 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
 		DeepSeekSearchModel:   ws.DeepSeekModel,
 		WebSearchProxy:        ws.Proxy,
-		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
-		WorkingDir:            sessionWorkDir,
-		MaxTurns:              maxTurns,
-		MaxDuration:           maxDuration,
-		Compaction:            compactionConfig(c.window),
-		Todos:                 actool.NewTodoStore(),
+		// 任务身份从 ctx 的 RunInfo 取：群聊成员会话带着 TaskID（群绑一个任务），
+		// 纯独立聊天会话没有任务（TaskID=0）⇒ 不带令牌 ⇒ 属「未归属的出网」，
+		// 按既有语义放行并留痕，而不是伪装成有任务范围。
+		BashEnv:     proxyEnv(c.proxyAddr, c.proxyCACert, egressTaskID(ctx, 0)), // Bash 子命令默认走代理+信任 CA
+		WorkingDir:  sessionWorkDir,
+		MaxTurns:    maxTurns,
+		MaxDuration: maxDuration,
+		Compaction:  compactionConfig(c.window),
+		Todos:       actool.NewTodoStore(),
 		// large tool output spills to cmd-output/ under the session dir.
 		// 截断上限用 SDK 默认(tool.Capture 的 30000 字符)。
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),
