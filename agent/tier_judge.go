@@ -9,7 +9,7 @@ import (
 // 本文件是【自动权限分层】的判定器：给定「一次动作」，回答它落在哪一层。
 //
 // 真相源（只读，本文件不改它）：
-//   - /home/analyst/.omo/plans/2026-10-29-auto-permission-tiers.md §1（三层定义）、§2（Tier 2
+//   - .omo/plans/2026-10-29-auto-permission-tiers.md §1（三层定义）、§2（Tier 2
 //     的一致性校验）、§4（出网与裁决写）
 //   - agent/approval_policy.go —— 分层清单的【唯一】真相源（Tier 1 + Tier 2/3 清单都在
 //     那里）。本文件【读它】，不另抄一份：抄一份就会出现「清单说安全、判定读另一份」

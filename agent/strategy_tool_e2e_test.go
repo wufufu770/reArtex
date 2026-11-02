@@ -7,7 +7,7 @@
 //     承诺还成不成立：检索结果里是不是只有 active、注入文本里是不是没有正文、
 //     提议是不是写不出 active、strategy_get 是不是默认谁都不给。
 //
-// 【口径来源】断言以计划为准（/home/analyst/.omo/plans/
+// 【口径来源】断言以计划为准（.omo/plans/
 // 2026-10-29-task-hall-phase6-implementation.md 的 Task 6 与「风险与注意」）。
 //
 // 【测试隔离】每个用例造的东西都在用例结束时删掉（唯一名 + 显式清理），

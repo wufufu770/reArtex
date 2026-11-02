@@ -7,7 +7,7 @@
 //   - 自动退役是迁移原语：写 state / retired_reason / retired_at，
 //     **保留**策略行与证据链，并且**拒绝**动被 pin 的策略。
 //
-// 【口径来源】断言以计划为准（/home/analyst/.omo/plans/
+// 【口径来源】断言以计划为准（.omo/plans/
 // 2026-10-29-task-hall-phase6-implementation.md 的 Task 6 Step 4 与
 // Task 5 Step 4/5）。
 package db

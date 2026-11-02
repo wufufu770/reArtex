@@ -2,7 +2,7 @@ package agent
 
 // 本文件是【自动权限分层】里 Tier 1 判定的唯一真相源。
 //
-// 分层模型（见 /home/analyst/.omo/plans/2026-10-29-auto-permission-tiers.md §1）：
+// 分层模型（见 .omo/plans/2026-10-29-auto-permission-tiers.md §1）：
 //
 //	Tier 1 —— 安全只读工具，自动通过（不消耗分类器调用）
 //	Tier 2 —— 范围内的结构化写，条件自动通过
@@ -99,7 +99,7 @@ const (
 // tier2MailboxWriteToolKey 是 mailbox 写工具的 key（设计 §1 Tier 2 ④）。
 //
 // 该工具由 Phase 3 Task 2 落地（message_group，见
-// /home/analyst/.omo/plans/2026-10-28-task-hall-phase3-implementation.md Task 2）；
+// .omo/plans/2026-10-28-task-hall-phase3-implementation.md Task 2）；
 // 本清单先按计划把 key 钉住 —— 工具落地后同名，不会漂移。
 const tier2MailboxWriteToolKey = "message_group"
 
