@@ -80,6 +80,14 @@ import type {
   SSProject,
   SSTask,
   Stats,
+  Strategy,
+  StrategyDecision,
+  StrategyDetail,
+  StrategyPinDecision,
+  StrategyPinQueue,
+  StrategyProposal,
+  StrategyProposalDecision,
+  StrategyState,
   Task,
   TaskArchive,
   TaskArchivePage,
@@ -970,6 +978,43 @@ export const api = {
   // 改额度/状态。理由必填：额度与状态都是授权决定，没有理由事后追不回来。
   setTaskHallQuota: (id: number, input: { budget_tokens?: number; state?: string; reason: string }) =>
     put<{ quota: TaskHallQuota; audited: boolean }>(`/task-hall/groups/${id}/quota`, input),
+
+  // ---- 策略库（L4）----
+  // 策略列表。state 白名单："" | quarantined | active | retired | tombstone；
+  // 越界后端回 400（"state 只能是 …"），所以这里只透传页面选出来的值。
+  strategies: (state?: StrategyState) =>
+    get<{ strategies: Strategy[] | null }>(`/strategies${state ? `?state=${encodeURIComponent(state)}` : ""}`).then(
+      (r) => arr(r.strategies),
+    ),
+  // 策略详情：本体 + 证据链。404 = 策略不存在。
+  strategy: (id: number) => get<StrategyDetail>(`/strategies/${id}`),
+  // 提议列表。status 不传 = 只看待裁决的（后端默认就是 pending）。
+  strategyProposals: (status?: string) =>
+    get<{ proposals: StrategyProposal[] | null }>(
+      `/strategy-proposals${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ).then((r) => arr(r.proposals)),
+  // 裁决一条提议。⚠️ approved ≠ 生效：生效还要过 curator 的三条件。
+  // reason / actor 都必填（后端缺一个就回 400），裁决进 audit_events 哈希链。
+  decideStrategyProposal: (id: number, input: StrategyProposalDecision) =>
+    post<{ ok: boolean; id: number; status: string }>(`/strategy-proposals/${id}/decide`, input),
+  // 人工置位 / 解除 pin。pinned 必填（缺字段会被后端当成「解除唯一证人」），
+  // reason / actor 也必填 —— 解 pin 是能断掉漏洞报告可复现性的动作。
+  setStrategyPinned: (id: number, input: StrategyPinDecision) =>
+    post<{ ok: boolean; id: number; pinned: boolean; changed: boolean; note?: string }>(`/strategies/${id}/pin`, input),
+  // 人工退役。退役 ≠ 删除：后端写 state=retired + retired_reason，行与证据链都留着。
+  retireStrategy: (id: number, input: StrategyDecision) =>
+    post<{ ok: boolean; id: number; state: string }>(`/strategies/${id}/retire`, input),
+  // pin 复审队列。⚠️ advisory_only：这个队列**只读**，绝不自动解 pin。
+  strategyPinQueue: () =>
+    get<{
+      queue: Strategy[] | null;
+      pinned_count: number;
+      threshold: number;
+      review_required: boolean;
+      advisory_only: boolean;
+    }>("/strategy-pin-queue").then((r): StrategyPinQueue => ({ ...r, queue: arr(r.queue) })),
+  // 刷新 utility 物化视图（权威 utility 在视图里，策略表上的那一列只是缓存）。
+  refreshStrategyUtility: () => post<{ ok: boolean }>("/strategies/refresh-utility", {}),
 
   // ---- LLM ----
   getLLM: () =>

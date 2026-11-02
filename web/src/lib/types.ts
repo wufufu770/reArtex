@@ -1713,3 +1713,131 @@ export interface TaskHallQuota {
   // remaining 可能为负（实际用量可能超过估算）。
   remaining_tokens: number;
 }
+
+// ---- 策略库（L4）----
+//
+// 一条策略 = 一份「怎么打这类目标」的可读说明书：激活条件 / 步骤 / 前置条件 /
+// 工具需求 / 里程碑 / 已知失败模式。
+//
+// ⚠️ **策略正文是参考文本，不是可执行产物**：Phase 6 没有自动执行通道，UI 也不
+// 提供「执行这条策略」这种入口 —— 策略只被人读、被引用。
+// 字段与后端 db.Strategy（db/strategies.go:63-93）一一对应。
+export type StrategyState = "quarantined" | "active" | "retired" | "tombstone";
+
+// Strategy 是策略库（L4）的一条策略。
+export interface Strategy {
+  id: number;
+  // company_id 为空 = 平台级策略（库里是 NULL）。
+  company_id?: number;
+  name: string;
+  summary: string;
+  // 下面八个 jsonb 列是策略正文。形状随写入方而变（对象 / 数组 / 标量都可能），
+  // 所以按「不透明 JSON」处理，页面上按原样展开显示。
+  activation?: unknown;
+  steps?: unknown;
+  preconditions?: unknown;
+  tool_requirements?: unknown;
+  success_criteria?: unknown;
+  failure_modes?: unknown;
+  parameters?: unknown;
+  applies_to?: unknown;
+  state: StrategyState;
+  // confidence / utility / run_utility 都是 0..1 的实数。⚠️ utility 的**权威值**
+  // 在 strategy_utility 物化视图里，策略表上的这一列只是缓存。
+  confidence: number;
+  utility: number;
+  run_utility: number;
+  usage_count: number;
+  hit_count: number;
+  miss_count: number;
+  retrieval_count: number;
+  // pinned = 唯一证人标记：被 pin 的策略是通往某个漏洞的唯一已知路径。
+  pinned: boolean;
+  version: number;
+  valid_from: string;
+  invalid_at?: string;
+  expired_at?: string;
+  // retired_at / retired_reason 只在人工退役后有值 —— 退役 ≠ 删除（行与证据链都还在）。
+  retired_at?: string;
+  retired_reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// StrategyEvidence 是策略的一条证据引用（证据链 = 策略的出处）。
+// 没有它，一条策略就只是「凭空提权」的主张。
+export interface StrategyEvidence {
+  // ref_type ∈ finding | traffic_snapshot | activity | tool_call | run。
+  ref_type: string;
+  // ref_id 是裸 id（TEXT，不是 BIGINT）。
+  ref_id: string;
+  // content_digest 是原始证据的摘要 —— 证据本体仍在 findings / activity 等表里。
+  content_digest: string;
+  // role ∈ created_by | validated_by | contradicted_by。
+  role: string;
+  created_at: string;
+}
+
+// StrategyDetail 是 GET /api/strategies/{id} 的响应：策略本体 + 证据链。
+export interface StrategyDetail {
+  strategy: Strategy;
+  evidence: StrategyEvidence[];
+}
+
+export type StrategyProposalStatus = "pending" | "approved" | "rejected" | "superseded";
+
+// StrategyProposal 是「agent 提议、宿主裁决」的那一层。
+export interface StrategyProposal {
+  id: number;
+  // route=create_new 时 strategy_id 可能指向一条还不存在的策略。
+  strategy_id: number;
+  // route ∈ edit_existing | create_new | retire。
+  route: string;
+  // payload 是提议的变更内容（形状随 route 而变）。
+  payload: unknown;
+  status: StrategyProposalStatus;
+  // reason = 提议时写的理由；decided_reason = 裁决时写的理由。
+  reason: string;
+  decided_reason: string;
+  created_by: string;
+  decided_by: string;
+  decided_at?: string;
+  created_at: string;
+}
+
+// StrategyPinQueue 是 GET /api/strategy-pin-queue 的响应。
+//
+// ⚠️ **advisory_only = true**：这个队列只提示、**绝不自动解 pin** ——
+// 自动解 pin 会砸掉漏洞报告的可复现性。解 pin 只能由人显式做
+// （POST /api/strategies/{id}/pin）。
+export interface StrategyPinQueue {
+  queue: Strategy[];
+  pinned_count: number;
+  // threshold 是「该让人看一眼了」的堆积阈值（后端与 curator 用同一个常量）。
+  threshold: number;
+  // review_required 只表示「堆积过线」，不代表任何自动动作。
+  review_required: boolean;
+  advisory_only: boolean;
+}
+
+// StrategyDecision 是人工裁决的载荷：**理由 + 操作人都必填**。
+// 后端对缺字段直接 400（"人工退役必须写明理由" / "…必须写明操作人"），
+// 且这一笔会进 audit_events 哈希链 —— 事后能查「谁做的、为什么」。
+export interface StrategyDecision {
+  reason: string;
+  actor: string;
+}
+
+// StrategyPinDecision 是 pin 置位 / 解除的载荷。
+// ⚠️ pinned 是**必填** boolean：后端用指针区分「缺字段」与「显式 false」，
+// 少了这个区分，一次漏字段的请求会被当成「解除唯一证人」。
+export interface StrategyPinDecision extends StrategyDecision {
+  pinned: boolean;
+}
+
+// StrategyProposalDecision 是提议裁决的载荷。
+// ⚠️ approved 只表示「人批了」，**不等于策略生效** —— 生效还要过 curator 的
+// 三条件（重放闸门 + 观测数 + 里程碑命中）。
+export interface StrategyProposalDecision extends StrategyDecision {
+  status: "approved" | "rejected";
+}
