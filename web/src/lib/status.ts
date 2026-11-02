@@ -175,6 +175,69 @@ const evidenceRole: Record<string, StatusMeta> = {
   contradicted_by: { label: "反证", tone: "red" },
 };
 
+// SoD（职责分离）裁决三态（后端 internal/sodpolicy.Verdict*）。
+//
+// ⚠️ needs_review **不是** approve 的同义词：needs_review 的工具调用同样被
+// block，它只是「证据不足以拒，但值得让对抗者（redteam）证伪」。所以这一态
+// 用 amber（待办）而不是 green（放行）。
+const sodVerdict: Record<string, StatusMeta> = {
+  approve: { label: "放行", tone: "green" },
+  deny: { label: "拒绝", tone: "red" },
+  needs_review: { label: "待证伪", tone: "amber" },
+};
+
+// 自动权限分层（后端 agent.Tier*）。Tier3 = 高风险 / scope 外 / 裁决写。
+const sodTier: Record<string, StatusMeta> = {
+  Tier1: { label: "Tier1 安全只读", tone: "green" },
+  Tier2: { label: "Tier2 范围内写", tone: "blue" },
+  Tier3: { label: "Tier3 高风险", tone: "red" },
+};
+
+// 层类别（后端 agent.TierCategory）。egress 用 amber：出网治理本身不完整，
+// 这一类动作的放行判断不能被读成「出网已被管住」。
+const sodTierCategory: Record<string, StatusMeta> = {
+  safe_read: { label: "安全只读", tone: "slate" },
+  scoped_write: { label: "范围内结构化写", tone: "blue" },
+  out_of_scope: { label: "范围外", tone: "red" },
+  adjudication: { label: "裁决写", tone: "violet" },
+  state_change: { label: "状态变更", tone: "amber" },
+  egress: { label: "出网", tone: "amber" },
+  scope_expansion: { label: "扩权", tone: "rose" },
+  proposal: { label: "提议", tone: "blue" },
+  unlisted: { label: "未登记工具", tone: "amber" },
+};
+
+// 裁决原因码（后端 internal/sodpolicy.Reason*）。
+//
+// 为什么「查不出来」的那几个用 slate 而不是 red：它们不是「越界」的确定结论，
+// 是「查不出来 ⇒ fail closed 拒绝」。两者在事后排查时的含义不同，不能混成一个
+// 「红」。
+const sodReason: Record<string, StatusMeta> = {
+  scope_ok: { label: "范围通过", tone: "green" },
+  all_checks_passed: { label: "全检查通过", tone: "green" },
+  tier2_not_applicable: { label: "不涉及 Tier2", tone: "green" },
+  out_of_scope: { label: "越界 · 目标不在范围", tone: "red" },
+  tool_circuit_open: { label: "工具熔断中", tone: "red" },
+  quota_exhausted: { label: "群组额度耗尽", tone: "amber" },
+  tier2_inconsistent: { label: "Tier2 证据不一致", tone: "amber" },
+  anomaly_flagged: { label: "异常标记 · 待证伪", tone: "violet" },
+  scope_check_unavailable: { label: "范围检查不可用", tone: "slate" },
+  tool_health_unavailable: { label: "工具健康不可查", tone: "slate" },
+  quota_check_unavailable: { label: "额度状态不可查", tone: "slate" },
+  tier2_check_unavailable: { label: "Tier2 检查不可查", tone: "slate" },
+  normalizer_unavailable: { label: "意图规整器不可用", tone: "slate" },
+  normalizer_malformed: { label: "规整输出不合法", tone: "slate" },
+  execution_token_invalid: { label: "执行凭证无效", tone: "slate" },
+};
+
+// 工具熔断状态（后端 internal/sodpolicy.Circuit*）。
+// open = 闸门此刻拒绝这个工具的一切调用；half_open = 放行一次试探。
+const sodCircuit: Record<string, StatusMeta> = {
+  closed: { label: "closed · 放行", tone: "green" },
+  open: { label: "open · 拒绝一切调用", tone: "red" },
+  half_open: { label: "half_open · 放行一次试探", tone: "amber" },
+};
+
 const maps = {
   intent,
   task,
@@ -193,6 +256,11 @@ const maps = {
   proposal,
   proposalRoute,
   evidenceRole,
+  sodVerdict,
+  sodTier,
+  sodTierCategory,
+  sodReason,
+  sodCircuit,
 } as const;
 
 export type StatusDomain = keyof typeof maps;
