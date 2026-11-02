@@ -142,6 +142,39 @@ const role: Record<string, StatusMeta> = {
   observer: { label: "旁观", tone: "slate" },
 };
 
+// 策略状态机（后端 db.StrategyActive 等四个常量）。
+// quarantined 是隔离态：新策略一律先进隔离态，晋级要过 curator 的三条件。
+// retired 是人工退役（≠ 删除，行与证据链都还在）；tombstone 是硬 TTL 到了的终态。
+const strategy: Record<string, StatusMeta> = {
+  quarantined: { label: "隔离中", tone: "amber" },
+  active: { label: "在役", tone: "green" },
+  retired: { label: "已退役", tone: "slate" },
+  tombstone: { label: "已墓碑", tone: "neutral" },
+};
+
+// 策略提议状态（后端 db.StrategyProposalStatus）。
+// ⚠️ approved 只表示「人批了」，不等于策略生效 —— 生效还要过 curator 的三条件。
+const proposal: Record<string, StatusMeta> = {
+  pending: { label: "待裁决", tone: "amber" },
+  approved: { label: "已批准", tone: "green" },
+  rejected: { label: "已驳回", tone: "red" },
+  superseded: { label: "已被取代", tone: "slate" },
+};
+
+// 提议的变更路由（后端 db.StrategyRoute*）。
+const proposalRoute: Record<string, StatusMeta> = {
+  edit_existing: { label: "改现有策略", tone: "blue" },
+  create_new: { label: "新建策略", tone: "violet" },
+  retire: { label: "退役策略", tone: "amber" },
+};
+
+// 证据角色（后端 db.strategyEvidenceRoles）：这条证据是支持、还是反驳这条策略。
+const evidenceRole: Record<string, StatusMeta> = {
+  created_by: { label: "来源", tone: "slate" },
+  validated_by: { label: "佐证", tone: "green" },
+  contradicted_by: { label: "反证", tone: "red" },
+};
+
 const maps = {
   intent,
   task,
@@ -156,6 +189,10 @@ const maps = {
   group,
   quota,
   role,
+  strategy,
+  proposal,
+  proposalRoute,
+  evidenceRole,
 } as const;
 
 export type StatusDomain = keyof typeof maps;
