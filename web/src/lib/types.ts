@@ -1623,3 +1623,93 @@ export interface InterceptExecution {
   seq: number;
   items: Activity[];
 }
+
+// ---- 任务大厅（群聊） ----
+//
+// 一个大厅 = 一个 task + 一个大厅会话（agent_key='auto'，分发者）+ N 个成员会话。
+// 字段与后端 db.ChatGroup / db.ChatGroupMember / db.ChatGroupMessage / db.GroupQuota 一一对应。
+
+// TaskHallGroup 是群组本体。
+export interface TaskHallGroup {
+  id: number;
+  task_id: number;
+  // task_exploration_id 是该群 task 的探索图 id：成员会话注入任务上下文时要用。
+  task_exploration_id: number;
+  // conversation_id 是大厅会话（分发者在这里接待人）。
+  conversation_id: number;
+  name: string;
+  status: string; // draft | active | draining | parked | resuming | closed | failed
+  concurrency_limit: number;
+  plan_id?: number;
+  budget_tokens?: number;
+  drained_at?: string;
+  parked_at?: string;
+  resumed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// TaskHallMember 是群成员：agent key + 它自己的会话 + 大厅内的分工。
+// role 只表达分工（dispatcher/member/observer），不表达权限。
+export interface TaskHallMember {
+  group_id: number;
+  agent_key: string;
+  conversation_id?: number;
+  role: string;
+  joined_at: string;
+}
+
+// TaskHallGroupDetail 是群详情：群本体 + 成员 + 群内禁列表 + 消息箱计数。
+export interface TaskHallGroupDetail extends TaskHallGroup {
+  members: TaskHallMember[];
+  // disabled_tools 是**禁列表**：出现的 key 就是被禁用的（表里没有 enabled 列 ⇒ 只能收紧）。
+  disabled_tools: Record<string, boolean>;
+  message_count: number;
+}
+
+// TaskHallRow 是 /task-hall/tasks 的一行：一个已发布的大厅（带成员与额度上限）。
+export interface TaskHallRow {
+  task_id: number;
+  group_id: number;
+  name: string;
+  status: string;
+  conversation_id: number;
+  concurrency_limit: number;
+  budget_tokens?: number;
+  members: TaskHallMember[];
+  created_at: string;
+}
+
+// TaskHallMessage 是群消息箱（mailbox）里的一条消息。
+// 注意这里**没有** owner/assignee：意图归属的唯一权威是 exploration_nodes.owner。
+export interface TaskHallMessage {
+  id: number;
+  group_id: number;
+  from_agent: string; // "human" = 人插话
+  to_agent: string; // "" = 广播给全群
+  kind: string; // note | request | answer | finding | escalation
+  body: string;
+  task_id?: number;
+  intent_id?: number;
+  finding_id?: number;
+  status: string; // unread | read | acked | blocked
+  // blocked_reason 非空 = 这条消息在投递前被拦下（落库留痕，但不进接收方上下文）。
+  blocked_reason?: string;
+  claims_authorization?: boolean;
+  created_at: string;
+  read_at?: string;
+}
+
+// TaskHallQuota 是群预算的当前读数（操作面与对账用）。
+export interface TaskHallQuota {
+  group_id: number;
+  state: string; // active | draining | parked
+  budget_tokens: number;
+  period_kind: string; // 目前只有 daily（自然日，Asia/Shanghai）
+  period_key: string; // 形如 2026-10-30
+  // consumed = 本周期已结算的 token；reserved = 在途预扣占住的 token。
+  consumed_tokens: number;
+  reserved_tokens: number;
+  // remaining 可能为负（实际用量可能超过估算）。
+  remaining_tokens: number;
+}

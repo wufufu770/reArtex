@@ -88,6 +88,10 @@ import type {
   TaskCategory,
   TaskConstraint,
   TaskGoal,
+  TaskHallGroupDetail,
+  TaskHallMessage,
+  TaskHallQuota,
+  TaskHallRow,
   TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
@@ -110,6 +114,21 @@ import type {
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("artex_token");
+}
+
+// ApiError 带 HTTP 状态码。
+//
+// 为什么需要它：有的后端用 404 表达「这个东西存在但没配置」（例：群组没配额度
+// 时 GET /task-hall/groups/{id}/quota 回 404），而不是「读不到」。没有状态码时
+// 只能靠错误文案猜，猜错就把「没配」报成「挂了」。
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
@@ -142,7 +161,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Keep the status-based fallback for empty or non-JSON error responses.
     }
-    throw new Error(message);
+    throw new ApiError(r.status, message);
   }
   if (r.status === 204) return undefined as T;
   return r.json();
@@ -829,8 +848,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -908,6 +926,50 @@ export const api = {
   },
   stopChat: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/chat/stop`, {}),
   gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
+
+  // ---- 任务大厅（群聊）----
+  // 大厅列表。/task-hall/tasks 带出成员与额度上限，/task-hall/groups 只有群本体，
+  // 两个接口列的是同一批群（都读 chat_groups），这里用带成员的那个。
+  taskHallTasks: () =>
+    get<{ tasks: TaskHallRow[] | null }>("/task-hall/tasks").then((r) =>
+      arr(r.tasks).map((row) => ({ ...row, members: arr(row.members) })),
+    ),
+  taskHallGroup: (id: number) => get<TaskHallGroupDetail>(`/task-hall/groups/${id}`),
+  // 建群：一个 task 至多一个大厅，重复建会被后端判 409。
+  createTaskHallGroup: (input: { task_id: number; name: string; members: string[]; concurrency_limit: number }) =>
+    post<TaskHallGroupDetail>("/task-hall/groups", input),
+  taskHallMessages: (id: number) =>
+    get<{ messages: TaskHallMessage[] | null }>(`/task-hall/groups/${id}/messages`).then((r) => arr(r.messages)),
+  // 人往群里插话。from_agent 由后端写死成 "human"；被准入规则拦下的消息照样返回，
+  // 状态与拦截原因在响应里（status / blocked_reason）。
+  postTaskHallMessage: (id: number, input: { to_agent?: string; body: string; kind?: string; intent_id?: number }) =>
+    post<TaskHallMessage>(`/task-hall/groups/${id}/messages`, input),
+  // 群内工具禁列表：出现的 key 就是被禁用的（表里没有 enabled 列 ⇒ 只能收紧）。
+  taskHallDisabledTools: (id: number) =>
+    get<{ disabled_tools: Record<string, boolean> | null }>(`/task-hall/groups/${id}/disabled-tools`).then(
+      (r) => r.disabled_tools ?? {},
+    ),
+  disableTaskHallTool: (id: number, toolKey: string) =>
+    post<{ ok: boolean; disabled_tools: Record<string, boolean> }>(`/task-hall/groups/${id}/disabled-tools`, {
+      tool_key: toolKey,
+    }),
+  enableTaskHallTool: (id: number, toolKey: string) =>
+    del<{ ok: boolean; disabled_tools: Record<string, boolean> }>(
+      `/task-hall/groups/${id}/disabled-tools/${encodeURIComponent(toolKey)}`,
+    ),
+  // 额度读数。群组没配预算时后端回 404 —— 那是「未配置」这个状态，不是故障，
+  // 所以这里兜成 null，不把「没配」报成「读失败」。
+  taskHallQuota: async (id: number): Promise<TaskHallQuota | null> => {
+    try {
+      return await get<TaskHallQuota>(`/task-hall/groups/${id}/quota`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+  // 改额度/状态。理由必填：额度与状态都是授权决定，没有理由事后追不回来。
+  setTaskHallQuota: (id: number, input: { budget_tokens?: number; state?: string; reason: string }) =>
+    put<{ quota: TaskHallQuota; audited: boolean }>(`/task-hall/groups/${id}/quota`, input),
 
   // ---- LLM ----
   getLLM: () =>

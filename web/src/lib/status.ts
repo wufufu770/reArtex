@@ -109,6 +109,39 @@ const delivery: Record<string, StatusMeta> = {
   skipped: { label: "已跳过", tone: "neutral" },
 };
 
+// 群消息箱状态。blocked = 投递前被拦下（落库留痕，但不进接收方上下文）。
+const message: Record<string, StatusMeta> = {
+  unread: { label: "未读", tone: "amber" },
+  read: { label: "已读", tone: "blue" },
+  acked: { label: "已确认", tone: "green" },
+  blocked: { label: "被拦截", tone: "red" },
+};
+
+// 群组（任务大厅）状态。draining/parked 是拒绝态：不再发起新的模型调用。
+const group: Record<string, StatusMeta> = {
+  draft: { label: "草稿", tone: "slate" },
+  active: { label: "运行中", tone: "blue" },
+  draining: { label: "收尾中", tone: "amber" },
+  parked: { label: "已冻结", tone: "red" },
+  resuming: { label: "恢复中", tone: "blue" },
+  closed: { label: "已关闭", tone: "neutral" },
+  failed: { label: "失败", tone: "red" },
+};
+
+// 群预算状态（后端 db.QuotaState）。draining/parked 都拒绝新的模型调用。
+const quota: Record<string, StatusMeta> = {
+  active: { label: "正常", tone: "green" },
+  draining: { label: "收尾中", tone: "amber" },
+  parked: { label: "已冻结", tone: "red" },
+};
+
+// 群内分工。role 只表达分工，不表达权限。
+const role: Record<string, StatusMeta> = {
+  dispatcher: { label: "分发者", tone: "violet" },
+  member: { label: "成员", tone: "blue" },
+  observer: { label: "旁观", tone: "slate" },
+};
+
 const maps = {
   intent,
   task,
@@ -119,6 +152,10 @@ const maps = {
   audit,
   node,
   delivery,
+  message,
+  group,
+  quota,
+  role,
 } as const;
 
 export type StatusDomain = keyof typeof maps;
