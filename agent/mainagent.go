@@ -141,7 +141,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
 		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   m.proxyAddr,
+		WebFetchProxy:   egressProxyURL(m.proxyAddr, egressTaskID(ctx, taskID)),
 		WebFetchCACert:  m.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。

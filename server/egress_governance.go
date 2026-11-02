@@ -33,10 +33,24 @@ type EgressGovernanceState struct {
 // 这份清单是代码事实，不是配置项：每一条都对应一条代码路径上确实存在的缺口，
 // 写在这里是为了让「已治理」这句话永远无法被说出口。
 var egressUncoveredChannels = []string{
-	// web_fetch / web_search 走的是 SDK 自己拼的 http.Client，既不装 netguard 的
-	// 拨号守卫，也不吃 agent 子进程的 http_proxy（那个变量只对 Bash 子进程
-	// 生效）；即使它们经录制代理出去，也没有任务身份，同样不受任务范围校验。
-	"web_fetch / web_search：不走 netguard transport，也不吃 agent 子进程的 http_proxy（经录制代理时同样没有任务身份，不受任务范围校验）",
+	// web_search 走的是独立的出口代理（socks5 / 全局代理），不是录制代理 ⇒ 请求
+	// 既不装 netguard 的拨号守卫，也不带任务身份 ⇒ 不受任务范围校验。
+	//
+	// 为什么不能照 web_fetch 那样处理：web_fetch 的代理是 http/https 录制代理，
+	// 可以把身份令牌塞进 URL 的 userinfo；而 web_search 的出口常是 socks5，
+	// socks5 的 userinfo 是另一套认证（塞进去会把代理弄坏，见
+	// TestProxyEnvKeepsSocks5ProxyIntact）。改走录制代理也不可行：搜索服务商的
+	// 域名不在任务资产范围里，会被范围判定拒掉 ⇒ 工具直接不可用。要真正覆盖它，
+	// 需要先引入「范围豁免清单」（平台基础设施类主机的白名单），那是独立的一项改造。
+	"web_search：走独立出口代理（socks5/全局代理），不经录制代理也不带任务身份，不受任务范围校验（要覆盖需先引入范围豁免清单）",
+	// web_fetch 现在带任务身份经录制代理出去（agent 包的 egressProxyURL），所以
+	// 它本身已受范围校验。但 SDK 在代理连接层出错（连接被拒/重置/TLS 协议错）时会
+	// 直连重试一次，那条路径不经代理 ⇒ 不经范围判定。
+	//
+	// 注意：范围拒绝本身不会触发它 —— 代理返回的是 HTTP 状态码，而 SDK 的
+	// 「像代理故障」判定只匹配传输层错误（eof / connection reset / proxyconnect /
+	// tls: 等），不匹配状态码。
+	"web_fetch 的直连兜底：SDK 在代理连接层出错时会直连重试一次，该路径不经范围判定（范围拒绝本身不会触发它）",
 	// MCP 服务端自己发出的请求（它去访问的目标）不经过本平台任何出网策略。
 	"MCP 的外部通道：MCP 服务端自己发出的请求不由本平台的出网策略管辖（平台只管自己发往 MCP 的那一下）",
 	// 宿主/容器进程自身的出网（平台服务、依赖拉取、镜像更新等）没有任务上下文。
