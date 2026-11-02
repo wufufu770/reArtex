@@ -57,6 +57,10 @@ jobs:
         with:
           name: web-dist
           path: server/webui/dist
+      # 与 ci.yml 同一个理由：go.mod 的 replace 指向 ./third_party/norma，那份树是
+      # gitignore 的生成物，干净克隆里没有 ⇒ build.sh 的 go build 会失败。
+      - name: Prepare local norma tree
+        run: bash scripts/prepare-norma.sh
       - name: Build and package with build.sh
         env:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
