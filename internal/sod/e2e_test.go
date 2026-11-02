@@ -33,6 +33,9 @@ type sodE2EOptions struct {
 	anomaly bool
 	// innerBlock 让宿主给的 hook runner 拦截（链应当先问 inner）。
 	innerBlock bool
+	// innerUpdated 让宿主给的 hook runner 返回**改写后**的入参（链必须按
+	// 改写后的那份字节算摘要 —— 那才是执行器真正会跑的那份）。
+	innerUpdated []byte
 }
 
 // sodE2E 是搭好的一条受管路径。
@@ -118,7 +121,7 @@ func sodE2EChain(t *testing.T, d *db.DB, taskID int64, host string, opts sodE2EO
 			onReview()
 		},
 	})
-	return base.Wrap(&fakeHookRunner{block: opts.innerBlock, message: "guard 拦截"}), tokens, tool
+	return base.Wrap(&fakeHookRunner{block: opts.innerBlock, message: "guard 拦截", updated: opts.innerUpdated}), tokens, tool
 }
 
 // sodE2EIntentJSON 造一份合规的规整输出（可带异常标记）。

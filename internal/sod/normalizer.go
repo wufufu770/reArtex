@@ -194,9 +194,14 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 		return NormalizerResult{}, fmt.Errorf("%w: 模型调用了 %s，契约要求 %s", ErrNormalizerMalformed, uses[0].Name, n.schema.Name)
 	}
 
-	var out NormalizerResult
-	if err := json.Unmarshal(uses[0].Input, &out); err != nil {
+	var raw normalizerToolOutput
+	if err := json.Unmarshal(uses[0].Input, &raw); err != nil {
 		return NormalizerResult{}, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
+	}
+	out := NormalizerResult{
+		StructuredIntent: raw.StructuredIntent,
+		AnomalyFlag:      raw.AnomalyFlag,
+		AnomalyReason:    raw.AnomalyReason,
 	}
 	if out.StructuredIntent.ActionType == "" {
 		// ⚠️ 这一条同时覆盖两种失败：① JSON 里没有 structured_intent；
@@ -229,6 +234,29 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 	out.SourceAgent = in.SourceAgent
 	out.TaskID = in.TaskID
 	return out, nil
+}
+
+// normalizerToolOutput 是**模型工具入参**的解码目标。
+//
+// 为什么不是 NormalizerResult：NormalizerResult 同时扮演两个角色 ——
+// ①「模型工具入参的形状」；②「规整器的产出」。这两个角色的字段类型并不一致：
+// tools 表的 emit_structured_intent 行把 task_id 声明成 **string**（提示词的
+// 输出模板也是 `"task_id": "<id>"`），而 NormalizerResult 把它声明成 int64。
+// 模型遵守 schema 给出 "task_id":"7" ⇒ json.Unmarshal 整包失败 ⇒ 一次完全
+// 合法的工具调用被判成 normalizer_malformed，SoD 链对每一次调用都拒绝。
+//
+// 所以解码目标只列**代码真正要用的字段**：structured_intent（要校验）、
+// anomaly_flag / anomaly_reason（要落审计与闸门）。task_id / source_agent
+// 不在其中 —— 它们本来就是「模型说了不算」的字段（Normalize 末尾用规整器
+// 自己的上下文覆盖），模型给成字符串、数字还是干脆不给，都不改变任何裁决。
+//
+// ⚠️ 这**不是**放宽校验：structured_intent 的每一条校验（action_type 已知、
+// raw_payload_digest 在、目标线索在、unparseable 拒）一条都没少。放开的只是
+// 一个代码根本不用、且类型由外部（tools 表）决定的元数据字段。
+type normalizerToolOutput struct {
+	StructuredIntent StructuredIntent `json:"structured_intent"`
+	AnomalyFlag      bool             `json:"anomaly_flag"`
+	AnomalyReason    string           `json:"anomaly_reason"`
 }
 
 // rawPayloadForPrompt 把原始载荷放进提示词输入。
