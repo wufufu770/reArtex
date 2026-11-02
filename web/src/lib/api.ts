@@ -17,6 +17,7 @@ import type {
   AssetInterceptRule,
   AssetInterceptRuleInput,
   Audit,
+  AuditChainVerification,
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
@@ -77,6 +78,9 @@ import type {
   Severity,
   SkillCall,
   SkillItem,
+  SodCircuit,
+  SodDecision,
+  SodReviewItem,
   SSProject,
   SSTask,
   Stats,
@@ -1015,6 +1019,72 @@ export const api = {
     }>("/strategy-pin-queue").then((r): StrategyPinQueue => ({ ...r, queue: arr(r.queue) })),
   // 刷新 utility 物化视图（权威 utility 在视图里，策略表上的那一列只是缓存）。
   refreshStrategyUtility: () => post<{ ok: boolean }>("/strategies/refresh-utility", {}),
+
+  // ---- SoD 链（职责分离）----
+  // 决策账本。task_id 是任务的**数字 id**（= Task.id 转数字，后端就是数字主键）。
+  // ⚠️ 读不出来时后端回 500（fail closed）—— 前端不把失败读成「没有决策」。
+  sodDecisions: (opts?: { taskId?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.taskId !== undefined && Number.isFinite(opts.taskId)) q.set("task_id", String(opts.taskId));
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const suffix = q.toString();
+    return get<{
+      decisions: SodDecision[] | null;
+      count: number;
+      limit: number;
+      tier_note: string;
+    }>(`/sod/decisions${suffix ? `?${suffix}` : ""}`).then((r) => ({
+      decisions: arr(r.decisions),
+      count: r.count ?? 0,
+      limit: r.limit ?? 0,
+      tier_note: r.tier_note ?? "",
+    }));
+  },
+  // 对抗复核队列。⚠️ advisory_only：这张队列交给 redteam 证伪，**不是**人工
+  // 审批队列（人工审批走 intercept_pending），本页不提供任何裁决动作。
+  sodReviewQueue: (opts?: { taskId?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.taskId !== undefined && Number.isFinite(opts.taskId)) q.set("task_id", String(opts.taskId));
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const suffix = q.toString();
+    return get<{
+      queue: SodReviewItem[] | null;
+      count: number;
+      limit: number;
+      status: string;
+      advisory_only: boolean;
+      human_approval_queue: boolean;
+      consumer: string;
+      purpose: string;
+      note: string;
+    }>(`/sod/review-queue${suffix ? `?${suffix}` : ""}`).then((r) => ({
+      queue: arr(r.queue),
+      count: r.count ?? 0,
+      limit: r.limit ?? 0,
+      status: r.status ?? "",
+      advisory_only: r.advisory_only !== false,
+      human_approval_queue: r.human_approval_queue === true,
+      consumer: r.consumer ?? "",
+      purpose: r.purpose ?? "",
+      note: r.note ?? "",
+    }));
+  },
+  // 全部工具的熔断状态。列表只含「出过事」的工具（没出事的没有行）。
+  sodCircuits: () =>
+    get<{ circuits: SodCircuit[] | null; count: number; states: Record<string, number>; note: string }>(
+      "/sod/circuit",
+    ).then((r) => ({
+      circuits: arr(r.circuits),
+      count: r.count ?? 0,
+      states: r.states ?? {},
+      note: r.note ?? "",
+    })),
+  // 单个工具的熔断状态。没有行 ⇒ closed（还没出过事），不是「查不到」。
+  sodCircuit: (toolKey: string) =>
+    get<{ circuit: SodCircuit }>(`/sod/circuit/${encodeURIComponent(toolKey)}`).then((r) => r.circuit),
+  // 审计链校验。⚠️ 断链是**结论**（200 + intact=false），不是接口坏了 ——
+  // 所以这里不把 intact=false 当异常抛出去。
+  auditChain: () => get<AuditChainVerification>("/audit/chain"),
 
   // ---- LLM ----
   getLLM: () =>

@@ -1841,3 +1841,133 @@ export interface StrategyPinDecision extends StrategyDecision {
 export interface StrategyProposalDecision extends StrategyDecision {
   status: "approved" | "rejected";
 }
+
+// ---- SoD 链（职责分离）----
+//
+// 三个只读观测面（决策账本 / 对抗复核队列 / 工具熔断）+ 审计链校验。
+// 字段与后端 server/sod_api.go 的 DTO 一一对应。
+export type SodVerdict = "approve" | "deny" | "needs_review";
+
+// SodTier 是自动权限分层（后端 agent.Tier*）。
+export type SodTier = "Tier1" | "Tier2" | "Tier3";
+
+// SodCircuitState 是工具熔断的三态（后端 internal/sodpolicy.Circuit*）。
+export type SodCircuitState = "closed" | "open" | "half_open";
+
+// SodDecision 是决策账本的一行 —— 一次裁决的完整留痕。
+export interface SodDecision {
+  id: number;
+  // task_id / conversation_id 缺省 = 这条裁决不挂在某个任务 / 会话上。
+  task_id?: number;
+  conversation_id?: number;
+  source_agent: string;
+  tool_name: string;
+  verdict: SodVerdict;
+  reason_code: string;
+  // payload_digest / intent_digest / token_digest / scope_digest 是摘要，
+  // 原始载荷**永不入库**。
+  payload_digest: string;
+  payload_preview: string;
+  intent_digest: string;
+  token_digest: string;
+  scope_digest: string;
+  // anomaly_flag = 意图规整器标记了异常（是复核，不是拒绝）。
+  anomaly_flag: boolean;
+  anomaly_reason: string;
+  // checks 是闸门记下的各道检查结论（不透明 JSON，按原样展示）。
+  checks: unknown;
+  cache_hit: boolean;
+  latency_ms: number;
+  created_at: string;
+  // 分层信息是**读时推导**的（原始载荷不入库 ⇒ 推导值是下界，不是真值）。
+  tier: SodTier | "";
+  tier_category: string;
+  // tier_host_only = 这一层只走宿主侧写面，不经分类器。
+  tier_host_only: boolean;
+  // tier_scope_in 为 null = 账本里没有范围结论（未判定），与「判定为不在范围」不同。
+  tier_scope_in: boolean | null;
+  tier_reason: string;
+  tier_derived: boolean;
+}
+
+// SodDecisionLedger 是 GET /api/sod/decisions 的响应。
+export interface SodDecisionLedger {
+  decisions: SodDecision[];
+  count: number;
+  limit: number;
+  // tier_note 是后端写明的语义声明：分层是读时推导值，真值只可能更高。
+  tier_note: string;
+}
+
+// SodReviewItem 是对抗复核队列的一项 —— 交给 redteam 证伪的 flagged 调用。
+export interface SodReviewItem {
+  id: number;
+  task_id?: number;
+  conversation_id?: number;
+  source_agent: string;
+  tool_name: string;
+  payload_digest: string;
+  payload_preview: string;
+  anomaly_flag: boolean;
+  anomaly_reason: string;
+  reason_code: string;
+  structured_intent: unknown;
+  // status ∈ pending | claimed | …（表自己的状态机，值来自 db.SoDReview*）。
+  status: string;
+  claimed_by: string;
+  resolution: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// SodReviewQueue 是 GET /api/sod/review-queue 的响应。
+//
+// ⚠️ **advisory_only = true / human_approval_queue = false**：这张队列交给
+// 对抗者（redteam）证伪，**不是**人工审批队列；人工审批走 intercept_pending。
+export interface SodReviewQueue {
+  queue: SodReviewItem[];
+  count: number;
+  limit: number;
+  status: string;
+  advisory_only: boolean;
+  human_approval_queue: boolean;
+  // consumer = 谁消费这张队列（redteam）；purpose = 消费目的是什么。
+  consumer: string;
+  purpose: string;
+  note: string;
+}
+
+// SodCircuit 是一个工具的熔断状态。
+export interface SodCircuit {
+  tool_key: string;
+  // state 是闸门此刻实际执行的**有效状态**；recorded_state 是行里的原始值
+  // （开路超期后按 half_open 处理，两个都要给）。
+  state: SodCircuitState;
+  recorded_state: string;
+  // present = 表里真有这一行（false = 这个工具还没出过事 ⇒ closed）。
+  present: boolean;
+  fail_count: number;
+  opened_at?: string;
+  reason: string;
+  updated_at?: string;
+}
+
+// SodCircuitList 是 GET /api/sod/circuit 的响应。
+export interface SodCircuitList {
+  circuits: SodCircuit[];
+  count: number;
+  // states 是按有效状态统计的条数。
+  states: Record<string, number>;
+  note: string;
+}
+
+// AuditChainVerification 是 GET /api/audit/chain 的响应。
+//
+// ⚠️ 断链不是接口故障：后端照样回 200，用 intact=false + broken_at_seq 表达
+// 「链被改过」这个**结论**。
+export interface AuditChainVerification {
+  intact: boolean;
+  // broken_at_seq = 第一处断裂的位置（0 = 没有断裂）。
+  broken_at_seq: number;
+  error?: string;
+}
