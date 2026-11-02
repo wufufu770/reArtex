@@ -1,8 +1,13 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -46,6 +51,198 @@ func (s *Server) RegisterTaskHallGroupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/task-hall/groups/{id}/disabled-tools", s.getTaskHallGroupDisabledTools)
 	mux.HandleFunc("POST /api/task-hall/groups/{id}/disabled-tools", s.postTaskHallGroupDisabledTool)
 	mux.HandleFunc("DELETE /api/task-hall/groups/{id}/disabled-tools/{tool}", s.deleteTaskHallGroupDisabledTool)
+	mux.HandleFunc("PUT /api/task-hall/groups/{id}/status", s.putChatGroupState)
+}
+
+// chatGroupStateTransitions 是群组状态的迁移表（**代码常量**，不读 DB 规则行）。
+//
+// 为什么是代码常量：状态机是安全边界（它决定一个群还能不能领新活），DB 规则行
+// 可被改可被删 ⇒ 边界必须留在代码里（同 db/quota.go 的额度状态机同款纪律）。
+//
+// 迁移语义取自既有的两处口径，不是这里新发明的：
+//   - server/manager.go：只有 active / resuming 的群还有活可派 ⇒ 其余状态都
+//     是「不开新活」；
+//   - db/schema_chat_group.sql 的注释：draining / parked / resuming 这套状态机
+//     由「额度 / 排空」单元实现 ⇒ 它与 db/quota.go 的额度状态机是同一套。
+var chatGroupStateTransitions = map[string][]string{
+	"draft":    {"active", "closed", "failed"},
+	"active":   {"draining", "parked", "resuming", "closed", "failed"},
+	"resuming": {"active", "draining", "parked", "closed", "failed"},
+	"draining": {"active", "resuming", "parked", "closed", "failed"},
+	"parked":   {"active", "resuming", "draining", "closed", "failed"},
+	// closed / failed 是终态：回退等于让操作者绕过「这个群到此为止」的决定。
+	"closed": {},
+	"failed": {},
+}
+
+// chatGroupStateQuota 把群组状态映射成对应的额度状态。
+//
+// 为什么必须一一对应：群组状态与额度状态是**两道独立的闸门** —— 认领新意图看
+// 前者，发起模型调用看后者（server/manager.go 的 groupUsableMemberDecision 两
+// 道都查）。两道闸门给出的答案必须一致：群说「在跑」而额度说「冻结」就是自相
+// 矛盾（认领了却调不动模型）。
+//
+// closed / failed 映射到 parked（冻结）是本单元的推断：死掉的群不该再花钱。
+// 方向是安全的（只收紧，不放宽）。
+func chatGroupStateQuota(status string) (db.QuotaState, bool) {
+	switch status {
+	case "active", "resuming", "draft":
+		return db.QuotaStateActive, true
+	case "draining":
+		return db.QuotaStateDraining, true
+	case "parked", "closed", "failed":
+		return db.QuotaStateParked, true
+	default:
+		return "", false
+	}
+}
+
+// setChatGroupStateReq 是改群状态的请求体。
+type setChatGroupStateReq struct {
+	// Status 是目标状态：draft/active/draining/parked/resuming/closed/failed。
+	Status string `json:"status"`
+	// Reason 是变更理由。必填 —— 群的开关是授权决定，没有理由的变更事后追不回来。
+	Reason string `json:"reason"`
+}
+
+// putChatGroupState 改群组状态（暂停 / 恢复 / 排空 / 停放 / 关闭）。
+//
+// 【为什么群状态与额度状态要一起改】
+//
+//	两道闸门独立生效：认领新意图看群状态，发起模型调用看额度状态。只改一道
+//	就会出现「群说在跑、额度说冻结」这种自相矛盾的状态（表现是认领了却调不动
+//	模型）。所以每次迁移都把额度状态对齐到映射表里的那一档。
+//
+// 【顺序：先群状态、后额度】
+//
+//	万一额度同步失败，留在「群已冻结、额度还 active」—— 这是安全方向（群不再
+//	开新活 ⇒ 没有新的模型调用），而反过来（额度冻了、群还在跑）会让人以为群
+//	还活着。失败会如实报 500，不假装成功。
+func (s *Server) putChatGroupState(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	groupID, ok := pathInt(r, "id")
+	if !ok || groupID <= 0 {
+		writeErr(w, 400, "群组 id 不合法")
+		return
+	}
+	var req setChatGroupStateReq
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, "请求体解析失败")
+		return
+	}
+	status := strings.TrimSpace(req.Status)
+	if _, known := chatGroupStateTransitions[status]; !known {
+		writeErr(w, 400, "群组状态只能是 draft/active/draining/parked/resuming/closed/failed")
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		writeErr(w, 400, "必须给出变更理由")
+		return
+	}
+	group, err := pg.GetChatGroup(groupID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if group == nil {
+		writeErr(w, 404, "群组不存在")
+		return
+	}
+	if !chatGroupStateCanMove(group.Status, status) {
+		writeErr(w, 409, "群组当前状态是 "+group.Status+"，不能迁移到 "+status)
+		return
+	}
+	if err := setChatGroupStatus(pg, groupID, status); err != nil {
+		writeErr(w, 500, "改群组状态失败: "+err.Error())
+		return
+	}
+	quotaSynced := true
+	if quotaState, has := chatGroupStateQuota(status); has {
+		// 没有额度行时额度闸门不参与判定（db.GroupQuotaState 的契约：零值 =
+		// 未设 = 不拒绝）⇒ 不必建行 —— 建一个 0 额度的行反而会把所有模型调用
+		// 都拒掉。
+		if err := pg.SetGroupQuotaState(groupID, quotaState); err != nil {
+			if !errors.Is(err, db.ErrQuotaNoBudget) {
+				writeErr(w, 500, "同步群组额度状态失败: "+err.Error())
+				return
+			}
+			quotaSynced = false
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"group_id":    groupID,
+		"from":        group.Status,
+		"to":          status,
+		"remote_addr": r.RemoteAddr,
+	})
+	// 先落变更再追审计：追审计失败时变更已经发生，硬要回滚会与「预算正在被
+	// 并发预扣」打架 ⇒ 如实回报 audited=false（与额度接口同款处置）。
+	audited := true
+	if _, err := pg.AppendAuditEvent(db.AuditEvent{
+		Actor:    "operator",
+		ToolName: "group_state",
+		Action:   "group_state_set",
+		Reason:   reason,
+		Payload:  payload,
+	}); err != nil {
+		audited = false
+		log.Printf("[audit] 追加群组状态变更审计失败 group=%d status=%s: %v", groupID, status, err)
+	}
+	detail, err := s.taskHallGroupDetail(pg, groupID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"group":        detail,
+		"status":       status,
+		"audited":      audited,
+		"quota_synced": quotaSynced,
+	})
+}
+
+// chatGroupStateCanMove 报告这条迁移是否被允许。
+func chatGroupStateCanMove(from, to string) bool {
+	for _, allowed := range chatGroupStateTransitions[from] {
+		if allowed == to {
+			return true
+		}
+	}
+	return false
+}
+
+// setChatGroupStatus 写群组状态与对应的时间戳列。
+//
+// 为什么在 server 层直接写 SQL：db 层没有这个写入原语，而 db/chat_group.go 是
+// 别的单元的文件域。状态机本身是**代码常量**（见 chatGroupStateTransitions），
+// 不读 DB 规则行 ⇒ 在哪一层执行都是同一张表、同一套规则。
+func setChatGroupStatus(pg *db.DB, groupID int64, status string) error {
+	if err := pg.EnsureChatGroupSchema(); err != nil {
+		return fmt.Errorf("应用群聊 schema 失败: %w", err)
+	}
+	now := time.Now()
+	var drainedAt, parkedAt, resumedAt *time.Time
+	switch status {
+	case "draining":
+		drainedAt = &now
+	case "parked":
+		parkedAt = &now
+	case "active", "resuming":
+		resumedAt = &now
+	}
+	if _, err := pg.Exec(`UPDATE chat_groups
+SET status=$2,
+    drained_at=COALESCE($3, drained_at),
+    parked_at=COALESCE($4, parked_at),
+    resumed_at=COALESCE($5, resumed_at)
+WHERE id=$1`, groupID, status, drainedAt, parkedAt, resumedAt); err != nil {
+		return fmt.Errorf("写群组状态失败: %w", err)
+	}
+	return nil
 }
 
 // WireGroupMailbox 把群消息箱句柄接到 agent 侧：群成员会话每轮收取未读群消息。

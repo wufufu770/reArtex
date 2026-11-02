@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Autumn-27/norma/harness"
@@ -87,6 +88,66 @@ func resolveWrapupTurns(agentKey string) int {
 	return WrapupTurnsDefault(agentKey)
 }
 
+// settlementProbingTools 是所有角色共用的探测面清单。
+//
+// 为什么需要清单：收尾提示词说「不要再启动新动作」，但提示词不是门禁 —— 探测类
+// 工具（MCP / WebFetch / Write / Edit / shell）还在模型可见的工具面里，agent
+// 就能在收尾期继续开新活。harness 按工具名精确过滤（harness/query.go 的
+// filterToolSchemas），所以这里给出一张清单，收尾期它就真的看不见了。
+//
+// 写回类工具**刻意不禁**：收尾期的全部意义就是把已确认的结论落库，禁掉
+// report_finding / insert_assets / record_fact 等于「收尾期不许写回」——
+// 那不是收尾，是丢结论。
+//
+// 清单是代码常量而不是配置项：收尾期的门禁属于「不许开新活」这条安全边界，
+// 放进后台配置就等于让任何能改配置的人给自己解禁。
+var settlementProbingTools = []string{
+	"Bash", "WebFetch", "Write", "Edit", "MultiEdit",
+	"shell_open", "shell_send", "web_search",
+}
+
+// settlementDisabledTools 按 agent key 给出收尾期必须**藏起来**的工具清单。
+var settlementDisabledTools = map[string][]string{
+	"worker":    append([]string(nil), settlementProbingTools...),
+	"mainagent": append([]string(nil), settlementProbingTools...),
+	"planner": append(append([]string(nil), settlementProbingTools...),
+		// planner 收尾期不得再生成新意图：此时派出去的意图也不会再被执行
+		// （任务要么到点、要么本轮步数用尽），发了只是白写一条。
+		"add_intent"),
+}
+
+// SettlementDisabledTools 返回某角色在收尾期应禁用的工具名清单。
+//
+// 未登记的 agent key（自定义 agent）走保守默认：**所有**探测面都藏起来，写回
+// 类工具留着。默认取保守值而不是取空，是因为「不知道这个角色干什么」时，
+// 放任探测面 = 收尾期继续开新活。
+func SettlementDisabledTools(agentKey string) []string {
+	if list, ok := settlementDisabledTools[agentKey]; ok {
+		return append([]string(nil), list...)
+	}
+	return append([]string(nil), settlementProbingTools...)
+}
+
+// mergeToolLists 拼接两份工具名清单：保持顺序、去重（大小写不敏感）。
+//
+// 去重是必要的：默认清单里已经有 Bash 时，调用方再传 ["Bash"] 不该让清单里
+// 出现两个 Bash（harness 按名字过滤，出现几次都一样，但清单要能被人读）。
+func mergeToolLists(base, extra []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, list := range [][]string{base, extra} {
+		for _, t := range list {
+			k := strings.ToLower(t)
+			if t == "" || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // wrapupSettlement builds the settlement config for an agent's run. Prompt and the
 // turn budget are admin-editable per agent; disabled tools are code-owned policy so
 // a user can't edit away the "stop probing" guardrail. Resolved fresh each run
@@ -94,9 +155,26 @@ func resolveWrapupTurns(agentKey string) int {
 func wrapupSettlement(agentKey string, disabledTools []string) *harness.Settlement {
 	return &harness.Settlement{
 		Prompt:        resolveWrapup(agentKey),
-		DisabledTools: disabledTools,
+		DisabledTools: mergeToolLists(SettlementDisabledTools(agentKey), disabledTools),
 		MaxTurns:      resolveWrapupTurns(agentKey),
 	}
+}
+
+// QuotaWrapupPrompt 是群组额度逼近上限时注入收尾阶段的**咨询式**提示。
+//
+// 为什么是咨询式而不是硬切：硬切（直接停掉 run）会把上下文里已得出但还没
+// 落库的结论一起丢掉 —— 额度花完了不等于结论该扔。平台的做法是告诉 agent
+// 还剩多少、请它在本轮内把已经确认的东西写回，再停止开新活。
+//
+// 为什么必须带**剩余额度**的数字：agent 无从自己知道预算还剩多少（预算账在
+// 平台侧），不给数字它就不知道该收多紧；只写「额度预警」等于没预警。
+func QuotaWrapupPrompt(remainingTokens, totalTokens int64) string {
+	if remainingTokens < 0 {
+		remainingTokens = 0
+	}
+	return fmt.Sprintf(
+		"【额度预警】本群组剩余额度约 %d token（总额度 %d）。请在本轮内收尾：把已经确认的事实与漏洞立刻写回（report_finding / insert_assets / record_fact），不要启动新的探测或新的命令。",
+		remainingTokens, totalTokens)
 }
 
 // ---------- 任务级超时收尾词（见 docs/任务级超时与收尾设计.md）----------
@@ -157,7 +235,7 @@ func wrapupSettlementForTask(agentKey string, disabledTools []string, clamped bo
 	perRun := resolveWrapup(agentKey)
 	st := &harness.Settlement{
 		Prompt:        perRun, // 兜底(也是非 clamped 时两种 reason 的取值)
-		DisabledTools: disabledTools,
+		DisabledTools: mergeToolLists(SettlementDisabledTools(agentKey), disabledTools),
 		MaxTurns:      resolveWrapupTurns(agentKey),
 	}
 	if clamped {
