@@ -77,8 +77,21 @@ func truncateUTF8(b []byte, maxBytes int) string {
 		return string(b)
 	}
 	cut := b[:maxBytes]
-	// 最后一个字节若是 UTF-8 续字节（0b10xxxxxx），说明切在了字符中间 ⇒ 回退。
-	for len(cut) > 0 && !utf8.RuneStart(cut[len(cut)-1]) {
+	// 回退到【最后一个完整字符】的边界。
+	//
+	// 为什么不能只看「最后一个字节是不是起始字节」：那样只能识别「切在了字符
+	// 中间且其后紧跟续字节」，却识别不了「切在了字符中间、其后紧跟下一个字符的
+	// 起始字节」—— 后者会停在**半个字符**上（合法的多字节序列被截成残缺）⇒ 写进
+	// PostgreSQL 时报 `invalid byte sequence for encoding "UTF8"` ⇒ **整条裁决
+	// 记录写不进账本**（审计链断裂）。真机实测就是这么抓到的。
+	//
+	// DecodeLastRune 对「不完整的尾部字节」返回 (RuneError, 1)，对合法的 U+FFFD
+	// 返回 (RuneError, 3) ⇒ 用 size==1 区分「残缺」与「本来就是这个字符」。
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRune(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
 		cut = cut[:len(cut)-1]
 	}
 	return string(cut)
