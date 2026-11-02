@@ -49,7 +49,15 @@ escaped_path=$(printf '%s' "$MODULE_PATH" | awk '{
 	print s
 }')
 SRC_DIR="$GOMODCACHE/$escaped_path@$VERSION"
-[ -d "$SRC_DIR" ] || fail "模块缓存里没有 ${MODULE_PATH}@${VERSION}（期望目录：$SRC_DIR）；先执行 'go mod download ${MODULE_PATH}@${VERSION}'"
+if [ ! -d "$SRC_DIR" ]; then
+	# 模块缓存里没有就自己取。注意这里必须带显式版本：go.mod 的 replace 指向
+	# ./third_party/norma，而那个目录此刻还不存在 ⇒ 不带版本的模块解析会先撞上
+	# 「replacement directory does not exist」。带显式版本的下载按上游原版取，不受
+	# replace 影响（CI 的干净环境里缓存是空的，这一步是必需的）。
+	printf 'prepare-norma: 模块缓存里没有 %s@%s，正在下载…\n' "$MODULE_PATH" "$VERSION" >&2
+	go mod download "${MODULE_PATH}@${VERSION}" >&2 || fail "下载 ${MODULE_PATH}@${VERSION} 失败"
+fi
+[ -d "$SRC_DIR" ] || fail "模块缓存里仍然没有 ${MODULE_PATH}@${VERSION}（期望目录：$SRC_DIR）"
 
 # 从原版重新复制：补丁永远是打在干净的一份上，避免上一次留下的半成品。
 rm -rf "$TARGET_DIR"
