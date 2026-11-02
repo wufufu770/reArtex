@@ -395,3 +395,179 @@ func TestStrategyToolGetIsNotBoundToAnyAgentByDefault(t *testing.T) {
 		t.Fatalf("strategy_propose 一个 agent 都没绑（断言失去信息量）")
 	}
 }
+
+// =====================================================================
+// 行为 12：提议级的审查成本严格低于直接写入级
+// =====================================================================
+
+// TestStrategyProposeIsLighterThanAddIntent 钉住「提议级比直接写入级更轻」。
+//
+// 断言的关系（口径见 auto-permission-tiers §1 / §4.2 与 Phase 6 Task 6
+// 「把「提议级比直接写入级更轻」这件事在 strategy_propose 上落实 + 钉住」）：
+//
+//	提议路径（隔离提议写）        ⇒ Tier 2，类别 = 提议级，审查成本 ReviewProposal
+//	直接写路径（同一工具写裁决态）  ⇒ Tier 3 裁决写（host-only），审查成本 ReviewAdjudication
+//	add_intent（直接写）            ⇒ Tier 2 结构化写，审查成本 ReviewScopedWrite
+//
+// 为什么「提议」比「直接写」轻是可论证的，而不是修辞：提议只写**隔离态**记录
+// （一条 quarantined 策略 + 一条 pending 提议）⇒ 写面不落进共享图、被裁决之前
+// 没有任何 agent 会读它 ⇒ 它的一致性校验面严格更小（不需要 scope 判定：提议不
+// 写任何资产；不需要归属判定：提议结构上不改归属）。直接写（add_intent）落进
+// 共享探索图、立刻被规划者看见 ⇒ 必须过 scope / 归属 / 状态三道判定。
+func TestStrategyProposeIsLighterThanAddIntent(t *testing.T) {
+	// ① 提议级声明存在（否则下面整条比较都是空谈）。
+	if !IsStrategyProposalTool("strategy_propose") {
+		t.Fatal("strategy_propose 不在提议级工具清单里")
+	}
+	// ② 提议级 ≠ 只读：策略库跨任务、跨租户，读它不是「任务范围内的只读」
+	//    ⇒ 进 Tier 1 等于自动放行范围外读取（设计 §1 Tier 1 的硬前提）。
+	if IsTier1ReadOnlyTool("strategy_propose") {
+		t.Fatal("strategy_propose 进了 Tier 1：策略库跨任务、跨租户，自动放行等于放行范围外读取")
+	}
+
+	// ③ 提议路径的分层结论：不严于 Tier 2，且带提议级标记。
+	proposal := TierOfAction(TierAction{
+		ToolKey: "strategy_propose",
+		Args:    json.RawMessage(`{"name":"e2e-提议","summary":"e2e 提议摘要"}`),
+		Write:   WriteSemantics{Proposal: true},
+	})
+	wantTier(t, "策略提议（隔离提议写）", proposal, Tier2)
+	wantCategory(t, "策略提议（隔离提议写）", proposal, CategoryProposal)
+	if !proposal.IsProposal() {
+		t.Fatalf("提议级结论必须带 Proposal 标记：%+v", proposal)
+	}
+
+	// ④ 同一工具的**直接写路径**（试图写裁决态 active）⇒ Tier 3 裁决写。
+	direct := TierOfAction(TierAction{
+		ToolKey: "strategy_propose",
+		Args:    json.RawMessage(`{"name":"e2e-提议","summary":"e2e 提议摘要","state":"active"}`),
+		Write:   WriteSemantics{Proposal: true},
+	})
+	wantTier(t, "策略的直接写（试图写 active）", direct, Tier3)
+	if !direct.HostOnly {
+		t.Fatalf("把策略标 active 是裁决写，必须走 host-only 写面（%s）", direct.Reason)
+	}
+
+	// ⑤ add_intent（直接写）的分层结论没有被动过 —— Phase 6 明确「不动
+	//    add_intent / propose_intent 的分级与审批钩子」。
+	addIntent := TierOfAction(TierAction{
+		ToolKey: "add_intent",
+		Args:    json.RawMessage(`{"summary":"挖登录"}`),
+	})
+	wantTier(t, "add_intent（直接写）", addIntent, Tier2)
+
+	// ⑥ 正题：提议级的审查成本**严格低于** add_intent。
+	if proposal.ReviewCost() >= addIntent.ReviewCost() {
+		t.Fatalf("提议级的审查成本必须严格低于 add_intent：proposal=%d add_intent=%d（%s）",
+			proposal.ReviewCost(), addIntent.ReviewCost(), proposal.Reason)
+	}
+	// ⑦ 并且严格低于同一工具的直接写路径。
+	if proposal.ReviewCost() >= direct.ReviewCost() {
+		t.Fatalf("提议级的审查成本必须严格低于同一工具的直接写：proposal=%d direct=%d",
+			proposal.ReviewCost(), direct.ReviewCost())
+	}
+}
+
+// =====================================================================
+// 行为 13：检索与注入都只带摘要，绝不带正文
+// =====================================================================
+
+// TestStrategySearchReturnsSummaryNotBody 钉住「检索结果与注入上下文都只带摘要」。
+//
+// 三层断言（每一层都对应一条真实路径）：
+//  1. **结构层**：db.StrategySnapshotEntry **没有** steps 字段 ⇒ 注入路径拿不到正文；
+//  2. **检索面**：strategy_search 的返回文本里有 summary，**没有** steps 正文，
+//     且返回的 JSON 里根本没有正文字段（steps / activation / preconditions /
+//     success_criteria / tool_requirements / failure_modes / parameters）；
+//  3. **注入面**：planner 真正注入的那段文本里有 summary、没有 steps 正文。
+//
+// 为什么这条是硬的（计划「风险与注意」明写）：steps 是命令模板，一旦进了
+// 上下文就等于「把可执行产物塞进上下文」（反模式 8），而本阶段**没有**任何
+// 执行前的拦截关口 —— 塞进去就是塞进去了。
+func TestStrategySearchReturnsSummaryNotBody(t *testing.T) {
+	fx := newStrategyToolFixture(t)
+	sfx := strategyToolSuffix()
+
+	const marker = "SEARCHONLYSTEPBODY"
+	summary := fmt.Sprintf("e2e 检索摘要 %d", sfx)
+	id, err := fx.db.CreateStrategy(&db.Strategy{
+		Name:       fmt.Sprintf("e2e-检索摘要-%d", sfx),
+		Summary:    summary,
+		Steps:      json.RawMessage(fmt.Sprintf(`["curl -X POST https://$TARGET/$PATH --tag %s"]`, marker)),
+		Activation: json.RawMessage(fmt.Sprintf(`{"category":[%q]}`, fx.category)),
+	})
+	if err != nil {
+		t.Fatalf("建策略: %v", err)
+	}
+	t.Cleanup(func() { _, _ = fx.db.Exec(`DELETE FROM strategies WHERE id=$1`, id) })
+	if ok, err := fx.db.PromoteStrategyToActive(id); err != nil || !ok {
+		t.Fatalf("置为 active: %v", err)
+	}
+
+	// ① 结构层：快照条目类型里没有 steps 字段。
+	if _, has := reflect.TypeOf(db.StrategySnapshotEntry{}).FieldByName("Steps"); has {
+		t.Fatalf("db.StrategySnapshotEntry 带 Steps 字段 ⇒ 注入路径可能把正文带进上下文")
+	}
+
+	// ② 检索面：返回文本里有 summary、没有 steps 正文。
+	out := strategyToolCall(t, strategyToolByName(t, fx.tools, "strategy_search"), map[string]any{})
+	if !strings.Contains(out, summary) {
+		t.Fatalf("检索结果里没有策略的 summary：%s", out)
+	}
+	if strings.Contains(out, marker) {
+		t.Fatalf("检索结果里出现了 steps 正文（%s）：%s", marker, out)
+	}
+	var parsed struct {
+		Strategies []map[string]json.RawMessage `json:"strategies"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("解析检索结果失败: %v（原文 %s）", err, out)
+	}
+	if len(parsed.Strategies) == 0 {
+		t.Fatalf("检索结果是空的（在役策略没被召回）：%s", out)
+	}
+	// 返回的条目里只允许摘要类字段。
+	for _, item := range parsed.Strategies {
+		for key := range item {
+			switch key {
+			case "id", "name", "summary", "utility", "version":
+			default:
+				t.Fatalf("检索结果里出现了正文字段 %q：%s", key, out)
+			}
+		}
+	}
+
+	// ③ 注入面：planner 真正注入的那段文本。
+	entries, err := fx.db.EnsureTaskStrategySnapshot(fx.task.ID)
+	if err != nil {
+		t.Fatalf("生成任务策略快照: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("快照是空的：在役策略没被召回")
+	}
+	rendered := RenderStrategySummaries(entries)
+	if !strings.Contains(rendered, summary) {
+		t.Fatalf("渲染结果里没有策略的 summary：%s", rendered)
+	}
+	if strings.Contains(rendered, marker) {
+		t.Fatalf("渲染结果里出现了 steps 正文（%s）：%s", marker, rendered)
+	}
+	p := NewPlanner(nil, "e2e-model", t.TempDir(), nil, 10, 3)
+	p.SetStrategyContextProvider(func(taskID int64) string {
+		es, err := fx.db.EnsureTaskStrategySnapshot(taskID)
+		if err != nil {
+			return ""
+		}
+		return RenderStrategySummaries(es)
+	})
+	injected := p.strategyContextBlock(fx.task.ID)
+	if injected == "" {
+		t.Fatalf("planner 没有拿到策略注入块")
+	}
+	if !strings.Contains(injected, summary) {
+		t.Fatalf("注入文本里没有策略的 summary：%s", injected)
+	}
+	if strings.Contains(injected, marker) {
+		t.Fatalf("注入文本里出现了 steps 正文（%s）：%s", marker, injected)
+	}
+}

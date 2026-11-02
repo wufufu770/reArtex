@@ -26,6 +26,12 @@ import (
 //     通过（自证合法），强来源校验形同虚设（设计 §2.4 实现红线）。所以「这个资产在不在
 //     有效 scope 内」必须由调用方作为【入参】给，而不是分类器自己去查。
 //  3. 纯函数才能被穷举单测：几百个组合一次性钉死，不依赖库、不依赖模型、不依赖网。
+//
+// allow: SIZE_OK —— 分层模型（Tier / TierCategory / ScopeVerdict / WriteSemantics /
+// TierAction / TierVerdict）与它的判定分支必须待在一起：把结论类型与判定它的
+// 判定器拆开，会让「结论长什么样」与「结论怎么来的」分居两个文件 ⇒ 读判定器
+// 的人拿不到完整口径。与 db/quota.go 同一条理由（状态常量与预算/周期/预扣/
+// 结算放在一个文件里）。
 
 // Tier 是自动权限分层的层级。
 //
@@ -88,9 +94,62 @@ const (
 	CategoryEgress TierCategory = "egress"
 	// CategoryScopeExpansion 是 Tier 3：扩权请求本身。
 	CategoryScopeExpansion TierCategory = "scope_expansion"
+	// CategoryProposal 是 Tier 2 的一种：提议级写入（隔离态记录，不影响他人行为）。
+	CategoryProposal TierCategory = "proposal"
 	// CategoryUnlisted 是 Tier 3：不在自动放行清单里（fail closed）。
 	CategoryUnlisted TierCategory = "unlisted"
 )
+
+// ReviewCost 是这次动作的【审查成本】序数。数字越小越轻。
+//
+// 为什么层级之外还要它：Tier 只说「哪一层」，不说「这一层里谁更轻」。而
+// 「提议级的审查成本严格低于直接写入级」这条规则要求的正是【层内的轻重序】
+// —— 提议与直接写可以落在同一层（都是 Tier 2），但它们的审查成本不同。
+type ReviewCost int
+
+const (
+	// ReviewAutoPass：自动通过，不调分类器（Tier 1）。
+	ReviewAutoPass ReviewCost = 1
+	// ReviewProposal：提议级的一致性校验（Tier 2 的提议类）。
+	ReviewProposal ReviewCost = 2
+	// ReviewScopedWrite：scope 内结构化写的一致性校验（Tier 2 的直接写类）。
+	ReviewScopedWrite ReviewCost = 3
+	// ReviewClassifier：分类器审查（Tier 3 的非裁决类）。
+	ReviewClassifier ReviewCost = 4
+	// ReviewAdjudication：裁决写，不经分类器，走 host-only 写面（Tier 3 的裁决类）。
+	ReviewAdjudication ReviewCost = 5
+)
+
+// ReviewCost 返回这次动作的审查成本。
+//
+// 口径（从轻到重）：
+//   - 谁都不用看 ⇒ ReviewAutoPass；
+//   - 一个确定性守卫 + 写面落在隔离记录里（被裁决前没人读它）⇒ ReviewProposal；
+//   - 一个确定性守卫 + 写面落在共享图里（别的 agent 立刻会看见）⇒ ReviewScopedWrite；
+//   - 交给概率性分类器 ⇒ ReviewClassifier；
+//   - 交给宿主侧写面 / 人 ⇒ ReviewAdjudication（最重：设计 §4.2 说分类器在
+//     Tier 3 仍有 70.3% 假阴性率 ⇒ 高后果决策不能只靠它）。
+//
+// 判不出来（TierUnknown）落在 ReviewClassifier —— 宁可算重，不许算轻。
+func (v TierVerdict) ReviewCost() ReviewCost {
+	switch {
+	case v.HostOnly:
+		return ReviewAdjudication
+	case v.Tier == Tier1:
+		return ReviewAutoPass
+	case v.Tier == Tier2 && v.Category == CategoryProposal:
+		return ReviewProposal
+	case v.Tier == Tier2:
+		return ReviewScopedWrite
+	default:
+		return ReviewClassifier
+	}
+}
+
+// IsProposal 报告这次动作是不是【提议级】写入。
+//
+// 判据是结论的类别（单一真相源）而不是另开一个布尔位 —— 两处判据迟早会漂移。
+func (v TierVerdict) IsProposal() bool { return v.Category == CategoryProposal }
 
 // ScopeVerdict 是【调用方】给出的 scope 判定结论。
 //
@@ -127,6 +186,13 @@ type WriteSemantics struct {
 	Egress bool
 	// ClaimsAuthorization = 这次 mailbox 消息自称携带「已批准」。
 	ClaimsAuthorization bool
+	// Proposal = 这次写是一条【提议级】记录：隔离态、不改 owner、不触发任何状态
+	// 迁移、被裁决之前不影响任何 agent 的行为。
+	//
+	// 为什么由调用方声明而不是判定器猜：判定器是纯函数，它看不到这次写到底写了
+	// 什么（那是副作用发生点才知道的事）—— 「这次写真的是个隔离提议」只能由
+	// 副作用发生点声明。没声明 ⇒ 不是提议级 ⇒ Tier 3（fail closed）。
+	Proposal bool
 }
 
 // TierAction 是一次待分层动作的【全部输入】。
@@ -228,7 +294,16 @@ func TierOfAction(a TierAction) TierVerdict {
 
 // tierOfActionDecide 是判定本体（不含 ScopeIn 盖章）。
 func tierOfActionDecide(a TierAction) TierVerdict {
-	// ① 写语义【优先于】工具 key：裁决写 / 状态迁移 / 出网 / 扩权与「这个 key 属于哪张
+	// ① 提议级写走自己的判定分支（见 judgeProposalWrite）。
+	//
+	// 为什么放在最前面：提议级是【被证明才成立】的资格，而资格成立时它要争取的
+	// 正是「比直接写更轻」的结论 ⇒ 它的判据必须自己闭合，不能被直接写的判据
+	// 截胡。fail closed 由 judgeProposalWrite 内部逐条保证。
+	if a.Write.Proposal {
+		return judgeProposalWrite(a)
+	}
+
+	// ② 写语义【优先于】工具 key：裁决写 / 状态迁移 / 出网 / 扩权与「这个 key 属于哪张
 	//    清单」无关。顺序反了就会出现「一个 Tier 2 工具顺带改了归属 ⇒ 被当成普通结构化
 	//    写放行」—— 正是设计 §1 想堵的那类绕过。
 	if a.Write.IntentOwner != "" {
@@ -246,27 +321,32 @@ func tierOfActionDecide(a TierAction) TierVerdict {
 			"扩权请求本身 ⇒ Tier 3，分类器审 + 留痕（设计 §1 Tier 3 ④ / §2.4 硬约束 2）")
 	}
 
-	// ② Tier 1：读 approval_policy.go 的【唯一一份】清单（不另抄一份）。
+	// ③ Tier 1：读 approval_policy.go 的【唯一一份】清单（不另抄一份）。
 	if IsTier1ReadOnlyTool(a.ToolKey) {
 		return TierVerdict{Tier: Tier1, Category: CategorySafeRead,
 			Reason: "Tier 1 安全只读工具：自动通过，不消耗分类器调用（设计 §1）"}
 	}
 
-	// ③ Tier 2 候选 + 条件。
+	// ④ Tier 2 候选 + 条件。
 	if kind, ok := tier2WriteKinds[a.ToolKey]; ok {
 		return judgeTier2(a, kind)
 	}
 
-	// ④ Tier 3 的显式名单。
+	// ⑤ Tier 3 的显式名单。
 	if v, ok := judgeTier3ByKey(a.ToolKey); ok {
 		return v
 	}
 
-	// ⑤ 默认 Tier 3（fail closed）：只有被证明安全的工具/动作才自动放行
+	// ⑥ 默认 Tier 3（fail closed）：只有被证明安全的工具/动作才自动放行
 	//    （设计 §5：不制造虚假安全感）。
 	return tier3Verdict(CategoryUnlisted,
 		"不在自动放行清单里：只有被证明安全的工具/动作才自动放行（设计 §5 不制造虚假安全感）")
 }
+
+// 提议级分支 judgeProposalWrite 的实现在 agent/strategy_proposal_guard.go ——
+// 它是本文件里**唯一**一条依赖具体面（策略库面）的分支，其余分支（事实 / 意图 /
+// 邮箱 / 出网 / 扩权）都是与面无关的通用分层规则。把面相关的分支搬到面自己的
+// 文件里，通用判定器就重新变成「与面无关」的了。
 
 // judgeTier2 判定一个 Tier 2 候选动作的【条件】是否满足。
 //
@@ -417,6 +497,25 @@ func argsString(args json.RawMessage, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// argsPresentKeys 报告入参里出现了哪些给定的顶层字段名。
+//
+// 只看【存在性】、不看值：提议级的门是「这个字段根本不该出现在提议的入参里」
+// —— 出现一个状态字段（哪怕它的值是 null）就说明调用方在试图声明状态，而不是
+// 在提议。值语义由 argsString 另判。
+func argsPresentKeys(args json.RawMessage, keys ...string) []string {
+	m := argsObject(args)
+	if m == nil {
+		return nil
+	}
+	var hit []string
+	for _, k := range keys {
+		if _, ok := m[k]; ok {
+			hit = append(hit, k)
+		}
+	}
+	return hit
 }
 
 // referencedAssetIDs 取入参里引用的资产 id（asset_ids 数组 + asset_id 单值）。
