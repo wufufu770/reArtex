@@ -209,17 +209,38 @@ func (w *Worker) SetWebSearch(o WebSearchOpts) { w.webSearch = o }
 // taskID 可选：给了就把出网身份令牌塞进代理 URL 的 userinfo。录制代理据此把这次
 // 出网归属到任务，才能按任务范围判定目的地（见 traffic.SignEgressTaskToken）。
 // 没给就没有身份 —— 那次出网会被记成「未归属」，不受任务范围校验。
+// egressProxyURL 给代理地址带上任务身份令牌。
+//
+// 为什么需要它：录制代理靠 Proxy-Authorization 头里的令牌识别请求属于哪个任务
+// （traffic/egress.go 的 egressTaskOf）。不带令牌 ⇒ 请求被判为「未归属」⇒
+// 按既有语义放行并留痕 ⇒ **不受任务范围校验**。凡是要经代理出网的通道，
+// 都得用这个函数把身份带上。
+//
+// 只对 http/https 代理生效：socks5 的 userinfo 是另一套认证，塞进去会把代理弄坏
+// （见 TestProxyEnvKeepsSocks5ProxyIntact）。
+//
+// taskID <= 0 ⇒ 不加身份（没有任务就没有范围边界，不伪造身份）。
+func egressProxyURL(proxyAddr string, taskID int64) string {
+	if proxyAddr == "" || taskID <= 0 {
+		return proxyAddr
+	}
+	u, err := url.Parse(proxyAddr)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return proxyAddr
+	}
+	u.User = url.User(traffic.SignEgressTaskToken(taskID))
+	return u.String()
+}
+
 func proxyEnv(proxyAddr, caCert string, taskID ...int64) []string {
 	if proxyAddr == "" {
 		return nil
 	}
-	addr := proxyAddr
-	if len(taskID) > 0 && taskID[0] > 0 {
-		if u, err := url.Parse(proxyAddr); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-			u.User = url.User(traffic.SignEgressTaskToken(taskID[0]))
-			addr = u.String()
-		}
+	var id int64
+	if len(taskID) > 0 {
+		id = taskID[0]
 	}
+	addr := egressProxyURL(proxyAddr, id)
 	env := []string{
 		"HTTP_PROXY=" + addr, "HTTPS_PROXY=" + addr,
 		"http_proxy=" + addr, "https_proxy=" + addr,
@@ -466,7 +487,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// WebFetch 走记录代理，其 HTTP 与 curl 一样被留痕；载入代理 CA 让经 MITM
 		// 重签的 HTTPS 证书能【正常校验通过】（而非关掉校验）。proxy 空则直连。
 		EnableWebFetch: true,
-		WebFetchProxy:  w.proxyAddr,
+		WebFetchProxy:  egressProxyURL(w.proxyAddr, taskID),
 		WebFetchCACert: w.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立的出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。

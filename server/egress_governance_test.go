@@ -48,11 +48,17 @@ func TestEgressGovernanceStateListsRequiredChannels(t *testing.T) {
 		name string
 		want string
 	}{
-		{"web_fetch / web_search 直连", "web_fetch / web_search"},
-		{"web_fetch 不吃 http_proxy", "http_proxy"},
-		{"绕过 netguard transport", "netguard transport"},
+		// web_search 仍未被覆盖，但原因要说准：它走独立出口代理，不经录制代理。
+		{"web_search 未覆盖", "web_search"},
+		{"web_search 的真实原因", "独立出口代理"},
+		{"web_search 不受范围校验", "不受任务范围校验"},
+		// web_fetch 本身已带身份经录制代理出去，受范围校验；剩的是它的直连兜底。
+		{"web_fetch 的直连兜底", "web_fetch 的直连兜底"},
+		{"直连兜底不经范围判定", "不经范围判定"},
 		{"MCP 的外部通道", "MCP 的外部通道"},
 		{"宿主侧出网", "宿主侧出网"},
+		{"全局出网代理路径", "全局出网代理路径"},
+		{"未归属的出网", "未归属的出网"},
 		{"内置 deny 规则只挡破坏性命令", "只挡破坏性命令"},
 		{"内置 deny 规则不挡范围外出网", "不挡范围外出网"},
 		{"数据外泄管道规则出厂即 disabled", "数据外泄管道"},
@@ -63,6 +69,11 @@ func TestEgressGovernanceStateListsRequiredChannels(t *testing.T) {
 		if !strings.Contains(joined, r.want) {
 			t.Fatalf("未覆盖通道清单缺 %s（期望含 %q）:\n%s", r.name, r.want, joined)
 		}
+	}
+	// web_fetch 已带任务身份经录制代理出去，不再是「未归属」通道 ⇒ 那条合并条目
+	// 不得回来（它会让 UI 谎报覆盖状态）。
+	if strings.Contains(joined, "web_fetch / web_search") {
+		t.Fatalf("清单不得再把 web_fetch 与 web_search 合并列为未覆盖:\n%s", joined)
 	}
 }
 
