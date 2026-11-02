@@ -25,6 +25,10 @@ import (
 // 注入路径（planner 的初始上下文）与本文件是两条路：注入只带摘要（见
 // RenderStrategySummaries 与 planner.go 的 SetStrategyContextProvider），
 // 正文按需用 strategy_get 单独加载（那个工具默认不绑给任何 agent）。
+//
+// allow: SIZE_OK —— 本单元的文件域被计划钉死为策略库面向 agent 的三个工具 +
+// 摘要渲染器：检索 / 按需加载 / 提议共用同一套「资产签名 + 只返摘要 + 提议写
+// 不出裁决态」的契约，拆开会把一份契约切成三处。
 
 // strategySearch 让 agent 检索可复用的策略。
 //
@@ -163,7 +167,7 @@ func (t *ToolSet) strategyGetResult(in json.RawMessage) (actool.Result, error) {
 // 只写：一条 state='quarantined' 的策略 + 一条 status='pending' 的提议。
 // 写不出 active —— CreateStrategy 结构上就只允许 quarantined。
 func (t *ToolSet) strategyPropose() actool.CoreTool {
-	return t.writeExpTool("strategy_propose", "提议一条可复用的策略。**只提议**：提议会进隔离态，需要 curator 复核并过重放闸门才会生效。",
+	return t.writeExpTool(strategyProposalToolKey, "提议一条可复用的策略。**只提议**：提议会进隔离态，需要 curator 复核并过重放闸门才会生效。",
 		obj(map[string]any{
 			"name":     str("策略短名（≤64 字符）"),
 			"summary":  str("一句话描述（≤1024 字符）"),
@@ -212,6 +216,14 @@ func (t *ToolSet) strategyProposeResult(in json.RawMessage) (actool.Result, erro
 	}
 	if len(in) > 0 {
 		_ = json.Unmarshal(in, &args)
+	}
+	// 守卫：提议级写入必须真的只写隔离态记录（不声明状态、不改归属、不自证裁决）。
+	// 判 Tier 3 ⇒ 拒绝写入，一个字节都不落库（设计 §4.2：裁决写只在宿主侧发生）。
+	//
+	// 为什么这道门在写入路径上而不是只在分层判定器里：判定器是纯函数，看不到
+	// 这次写到底写了什么；「入参里带了一个 state 字段」这件事只有这里判得了。
+	if verdict := guardStrategyProposal(strategyProposalToolKey, in); verdict.Tier != Tier2 {
+		return actool.Errorf(verdict.Reason), nil
 	}
 	args.Name = strings.TrimSpace(args.Name)
 	args.Summary = strings.TrimSpace(args.Summary)

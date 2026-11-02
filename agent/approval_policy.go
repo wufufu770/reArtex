@@ -224,12 +224,21 @@ var tier3AdjudicationStates = []string{"verified", "fixed", "retired", "active"}
 // 策略 + 待裁决提议，不改任何 owner、不触发任何状态迁移。与 Phase 5 的
 // propose_intent 同一处置（design §2 Step 4）。
 //
+// 这条「严格低于」不再是注释里的承诺，而是【可断言的关系】：分层判定器给提议级
+// 动作一个独立类别（CategoryProposal）与一个更低的审查成本序数
+// （TierVerdict.ReviewCost），守卫（agent/strategy_proposal_guard.go）在真正
+// 的写入路径上把 IsStrategyProposalTool 接上 ⇒ 轻判只给被证明的隔离提议。
+//
 // ⚠️ 策略工具**不得**进 Tier1ReadOnlyTools：策略库跨任务、跨租户，读它不是
 // 「任务范围内的只读」⇒ 进 Tier 1 等于自动放行范围外读取。这条由本文件末尾的
 // init 守卫结构性拦住，不是靠约定。
 var StrategyProposalTools = []string{"strategy_propose"}
 
 // IsStrategyProposalTool 报告某个工具 key 是否属于提议级。
+//
+// 调用点：分层判定器的提议级分支（agent/tier_judge.go 的 judgeProposalWrite）
+// 与策略提议守卫（agent/strategy_proposal_guard.go）—— 两处都在**副作用发生
+// 点**上，不是只在清单里躺着一个名字。
 func IsStrategyProposalTool(key string) bool {
 	for _, k := range StrategyProposalTools {
 		if k == key {
@@ -238,6 +247,25 @@ func IsStrategyProposalTool(key string) bool {
 	}
 	return false
 }
+
+// 提议级入参里**不该出现**的字段清单（判据见 agent/tier_judge.go 的
+// judgeProposalWrite 与 agent/strategy_proposal_guard.go 的守卫）。
+//
+// 为什么按「字段存在」判而不是「值非空」：提议的语义就是「不声明任何状态、
+// 不指定任何归属」—— 入参里出现这些字段（哪怕值是 null）就说明调用方在试图
+// 声明状态 / 归属，而不是在提议。
+//
+// 为什么放在本文件：判定器与守卫读的是同一份清单。抄一份就会出现「判定读一份、
+// 守卫读另一份」的漂移（与 Tier 1 清单同一条理由）。
+var (
+	// proposalStateArgs 是提议级入参里不该出现的【状态】字段。
+	proposalStateArgs = []string{"state", "new_state", "target_state"}
+	// proposalAdjudicationArgs 是提议级入参里不该出现的【裁决面】字段
+	//（裁决状态 + 裁决理由）。
+	proposalAdjudicationArgs = []string{"status", "proposal_status", "decided_reason"}
+	// proposalOwnershipArgs 是提议级入参里不该出现的【归属】字段。
+	proposalOwnershipArgs = []string{"owner", "intent_owner", "created_by", "decided_by", "promoted_by"}
+)
 
 // strategyLibraryToolKeys 是策略库（L4）面向 agent 的工具 key 全集。
 //
