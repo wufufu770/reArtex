@@ -2,7 +2,7 @@
 
 > 生效日期：2026-11-01（分支 `feat/task-hall`；链接线提交 `77a671c`）
 > 链的版本：`internal/sod` + `internal/sodpolicy` + `server/sod_chain.go`（规整结果缓存键版本串 `sod-normalizer-v1`，见 `internal/sod/cache.go`）
-> 依据计划：`/home/analyst/.omo/plans/2026-10-30-task-hall-sod-chain.md`
+> 依据计划：`.omo/plans/2026-10-30-task-hall-sod-chain.md`
 
 ## 概述
 

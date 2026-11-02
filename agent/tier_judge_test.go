@@ -10,7 +10,7 @@ import (
 
 // 本文件钉住【自动权限分层判定器】的行为。
 //
-// 钉的是设计文档 §1 的逐行映射（/home/analyst/.omo/plans/2026-10-29-auto-permission-tiers.md）：
+// 钉的是设计文档 §1 的逐行映射（.omo/plans/2026-10-29-auto-permission-tiers.md）：
 // 每个动作都必须落在文档说的那一层，【包括文档点名的「明确不含」】——
 // 改 intent owner 的意图写不是 Tier 2，状态迁出 open 的意图写也不是 Tier 2。
 //

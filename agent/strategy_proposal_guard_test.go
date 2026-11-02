@@ -25,9 +25,9 @@ import (
 //     它把 IsStrategyProposalTool 从「清单里的一个名字」变成真正被调用的判定。
 //
 // 口径来源：
-//   - /home/analyst/.omo/plans/2026-10-29-auto-permission-tiers.md §1（三层定义）、
+//   - .omo/plans/2026-10-29-auto-permission-tiers.md §1（三层定义）、
 //     §4.2（裁决写走 host-only 写面）；
-//   - /home/analyst/.omo/plans/2026-10-29-task-hall-phase6-implementation.md Task 6
+//   - .omo/plans/2026-10-29-task-hall-phase6-implementation.md Task 6
 //     （"把「提议级比直接写入级更轻」这件事在 strategy_propose 上落实 + 钉住"）。
 //
 // 【fail closed 的口径】提议级是【被证明】才成立的：证明不了 ⇒ Tier 3。

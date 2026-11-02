@@ -20,7 +20,7 @@ import (
 // 抄一份就等于出现第二个真相源，此后「清单说安全」与「读面真的隔离」可以各说各话，
 // 而没有任何东西会变红。派生之后，【任何人往 Tier 1 里加一个还没做范围隔离的工具，
 // 这道测试立刻失败】⇒ Tier 1 拿不到「可以启用」的结论。这正是
-// /home/analyst/.omo/plans/2026-10-29-auto-permission-tiers.md §1 里
+// .omo/plans/2026-10-29-auto-permission-tiers.md §1 里
 // 「Tier 1 的启用绑定读面范围隔离验收测试」这条硬要求的落地方式。
 //
 // 为什么用 package agent_test（外部测试包）：
