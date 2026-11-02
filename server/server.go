@@ -480,7 +480,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		s.cfgMu.Lock()
 		profName := s.llmProf
 		s.cfgMu.Unlock()
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(installQuotaGate(prov, s.m.PG()), s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, 0, profName)
 	}
 	s.cfgMu.Lock()
@@ -614,7 +614,7 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(installQuotaGate(prov, s.m.PG()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, id, p.Name)
 	}
 	s.provCacheMu.Lock()
@@ -987,6 +987,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/strategies/{id}/retire", s.strategyRetire)
 	mux.HandleFunc("GET /api/strategy-pin-queue", s.strategyPinQueue)
 	mux.HandleFunc("POST /api/strategies/refresh-utility", s.strategyRefreshUtility)
+
+	// 策略库的三个只读观测面（关系边 / utility 物化视图 / curator 仲裁面）。
+	// 仲裁面是**只读**的：晋级 / 退役 / 解 pin 是裁决写，不该由一个 GET 触发。
+	mux.HandleFunc("GET /api/strategies/edges", s.strategyEdgeList)
+	mux.HandleFunc("GET /api/strategies/utility", s.strategyUtilityList)
+	mux.HandleFunc("GET /api/strategies/curation", s.strategyCuration)
+
+	// 审计链校验：追加有入口，校验也该有 —— 操作者要能自查链有没有被改过。
+	mux.HandleFunc("GET /api/audit/chain", s.auditChainVerify)
+
+	// SoD 链（职责分离）的三个只读观测面。
+	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；
+	// 对抗复核队列是交给 redteam 证伪的清单，不是人工审批队列。
+	mux.HandleFunc("GET /api/sod/decisions", s.sodDecisionList)
+	mux.HandleFunc("GET /api/sod/review-queue", s.sodReviewQueue)
+	mux.HandleFunc("GET /api/sod/circuit", s.sodCircuitList)
+	mux.HandleFunc("GET /api/sod/circuit/{tool_key}", s.sodCircuitGet)
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the

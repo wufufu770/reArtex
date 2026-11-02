@@ -187,18 +187,28 @@ type TaskNodeDTO struct {
 	SourceTaskID string `json:"source_task_id,omitempty"`
 	Inherited    bool   `json:"inherited,omitempty"`
 	DeleteReason string `json:"delete_reason,omitempty"` // 意图假删除(state='deleted')时的删除原因
+	// Owner 是意图归属：认领这条意图的 worker / agent 名。
+	//
+	// 为什么必须暴露：归属的唯一权威是 exploration_nodes.owner（ClaimIntent 的
+	// CAS 原子写入），前端「Intent 看板」的「归属」一列此前永远是空的 —— 不是
+	// 没数据，是这层接口没把这一列带出去。
+	Owner string `json:"owner,omitempty"`
+	// BlockedReason 是意图被卡住的原因（state='blocked' 时非空）。
+	BlockedReason string `json:"blocked_reason,omitempty"`
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
 	d := TaskNodeDTO{
-		ID:           i64s(n.ID),
-		Type:         n.Kind,
-		Payload:      rawString(n.Payload),
-		DeleteReason: n.DeleteReason,
-		Priority:     n.Priority,
-		State:        n.State,
-		Origin:       n.Origin,
-		TS:           rfc3339(n.CreatedAt),
+		ID:            i64s(n.ID),
+		Type:          n.Kind,
+		Payload:       rawString(n.Payload),
+		DeleteReason:  n.DeleteReason,
+		BlockedReason: n.BlockedReason,
+		Owner:         n.Owner,
+		Priority:      n.Priority,
+		State:         n.State,
+		Origin:        n.Origin,
+		TS:            rfc3339(n.CreatedAt),
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)

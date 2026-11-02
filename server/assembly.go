@@ -12,10 +12,32 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/traffic"
+	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 	actool "github.com/Autumn-27/norma/tool"
 )
+
+// installQuotaGate 把群组预算闸门装到 provider 链上。
+//
+// 链的形状是 Recorder(QuotaProvider(raw)) —— 闸门在 **recorder 之内**：
+// 闸门拒绝时 recorder 仍会看到这次调用（记成一次**失败**调用，llm_usage 里
+// 留痕），而拒绝本身另有 group_quota_refusals 留痕。两条证据各说一件事：
+// 「调用发生过但被拒」与「这次调用没有发出去」。
+//
+// 为什么装在这里而不是「配了预算才装」：预算就是花钱的上限。上限不接进真实
+// 调用路径，它就只是一张表。没有预算行的群组按 fail-closed 拒绝
+// （db.ErrQuotaNoBudget）—— 那是 db 层既定的口径，不是这里新增的规则。
+//
+// 闸门按 ctx 里的 task id 解析群组：不属于任何群组的调用（平台对话路径）
+// 一律不拦截，所以装在共享 provider 链上不会波及非大厅流量。
+func installQuotaGate(prov llm.Provider, pg *db.DB) llm.Provider {
+	if prov == nil || pg == nil {
+		return prov
+	}
+	return llmrec.NewQuotaProvider(prov, llmrec.NewQuotaGate(pg, nil))
+}
 
 // wireToolDenialRecorder 把工具层的拒绝接进审计链。
 //

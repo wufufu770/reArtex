@@ -788,3 +788,100 @@ func TestAddIntentWithCreatorRecordsCreatorInPayload(t *testing.T) {
 		t.Fatalf("认领后 payload['created_by'] = %v, want pentest", payload["created_by"])
 	}
 }
+
+// TestReclaimExpiredIntents pins 孤儿 running 意图的回收：进程崩掉后停在
+// 'running' 的意图必须回到 'open'（否则它既不在 frontier 里、也没人再跑它 ——
+// 任务静默卡死）。
+//
+// 为什么叫「过期」而这里没有租约列：仓库里目前**没有** lease_until /
+// heartbeat_at 两列，「过期」= 崩溃残留的 running 意图。判定口径因此是
+// 「状态是 running」而不是「租约到期」—— 后者需要租约机制落地后才有意义。
+//
+// 两条腿都要钉：
+//   - 残留的 running 意图被复位（回收）；
+//   - **新鲜的意图不被碰**（既不在回收计数里，状态也不变）—— 回收器若把
+//     正常状态也一起改写，那是在破坏活跃运行，而不是在清理。
+func TestReclaimExpiredIntents(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	expID, err := d.CreateExploration("intent-reclaim", "goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	s := d.Exploration(expID)
+
+	// ① 崩溃残留：worker 认领后进程没了 ⇒ 停在 running。
+	stale, err := s.AddIntent(map[string]any{"summary": "认领后崩掉的意图"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatalf("add stale intent: %v", err)
+	}
+	ok, err := s.ClaimIntent(stale, "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("claim stale: ok=%v err=%v", ok, err)
+	}
+	// ② 新鲜意图：还在 open，没人认领。
+	fresh, err := s.AddIntent(map[string]any{"summary": "刚创建还没人动的意图"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatalf("add fresh intent: %v", err)
+	}
+	// ③ 已收尾的意图：终态，回收器绝不能把它改回 open。
+	finished, err := s.AddIntent(map[string]any{"summary": "已经收尾的意图"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatalf("add finished intent: %v", err)
+	}
+	if err := s.SetNodeState(finished, "done"); err != nil {
+		t.Fatalf("close finished intent: %v", err)
+	}
+
+	n, err := s.ResetRunningIntents()
+	if err != nil {
+		t.Fatalf("reset running intents: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("回收计数 = %d，want 1（只有那条残留的 running 意图）", n)
+	}
+
+	staleNode, err := s.GetNode(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleNode == nil {
+		t.Fatal("残留意图不见了")
+	}
+	if staleNode.State != "open" {
+		t.Fatalf("残留 running 意图的状态 = %q，want open（被回收）", staleNode.State)
+	}
+	if staleNode.BlockedReason != "" {
+		t.Fatalf("回收后不该留下 blocked_reason：%q", staleNode.BlockedReason)
+	}
+
+	freshNode, err := s.GetNode(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freshNode.State != "open" {
+		t.Fatalf("新鲜意图的状态 = %q，want open（回收器不得改动它）", freshNode.State)
+	}
+
+	finishedNode, err := s.GetNode(finished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishedNode.State != "done" {
+		t.Fatalf("已收尾意图的状态 = %q，want done（回收器不得复活它）", finishedNode.State)
+	}
+
+	// 幂等：再扫一次没有残留 ⇒ 计数 0，且状态不再变。
+	n2, err := s.ResetRunningIntents()
+	if err != nil {
+		t.Fatalf("second reset: %v", err)
+	}
+	if n2 != 0 {
+		t.Fatalf("第二次回收计数 = %d，want 0（清扫必须幂等）", n2)
+	}
+}

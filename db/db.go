@@ -24,6 +24,13 @@ var schemaSQL string
 
 const schemaMigrationLockKey int64 = 7337741001
 
+// schemaMigrationLockTimeout 是等待 schema 迁移锁的上限。
+//
+// 为什么要有上限：这个锁是**会话级**的，拿它的那个进程若被强杀（kill -9 / 掉电），
+// 它的数据库会话不会正常关闭 ⇒ 锁就留在那个僵尸会话上 ⇒ 之后每一次 db.Open 都会
+// 永久阻塞在拿锁上。等不到就明确报错（并告诉运维去哪儿清），好过无限期挂住。
+const schemaMigrationLockTimeout = 30 * time.Second
+
 // maxOpenConns 是连接池上限，见 Open 里的说明。取值远低于 PostgreSQL 默认的
 // max_connections=100，同时远高于应用自身的嵌套取连接深度（启动期的 schema
 // advisory lock 会在持有一条连接的同时让 seedBuiltins 另取连接），不会自锁。
@@ -93,8 +100,38 @@ func withSchemaMigrationLock(ctx context.Context, sqlDB *sql.DB, action func(*sq
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, schemaMigrationLockKey); err != nil {
-		return fmt.Errorf("advisory lock: %w", err)
+	// ⚠️ 用「尝试 + 超时」而不是阻塞式 pg_advisory_lock。
+	//
+	// 阻塞式的问题：这个锁是**会话级**的（pg_advisory_xact_lock 才是事务级）。
+	// 持锁的进程若被 kill -9 / 掉电，它的数据库会话**不会**正常关闭 ⇒ 锁留在
+	// 那个会话上 ⇒ 之后**每一个** db.Open 都永久阻塞在拿锁上 ⇒ 应用再也起不来，
+	// 只能手工去 pg_stat_activity 里终止那个僵尸会话。
+	//
+	// 本机就撞到过这个：一次被强制超时的测试留下了持锁会话，之后所有
+	// db.Open 都卡在 coordinateWithSchemaMigration，应用起不来。
+	//
+	// 改成 try + 超时之后，最坏情况是**明确报错**（并告诉运维去哪儿清僵尸会话），
+	// 而不是无限期挂住。
+	lockDeadline := time.Now().Add(schemaMigrationLockTimeout)
+	for {
+		var locked bool
+		if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, schemaMigrationLockKey).Scan(&locked); err != nil {
+			return fmt.Errorf("advisory lock: %w", err)
+		}
+		if locked {
+			break
+		}
+		if time.Now().After(lockDeadline) {
+			return fmt.Errorf("advisory lock: 等待 %s 仍未获得 schema 迁移锁。"+
+				"若持锁的进程已被强制杀死，它的会话可能仍在数据库里持锁（会话级 advisory lock 不会随进程消失而释放）——"+
+				"请在 pg_stat_activity 里找出持有该锁的会话并终止它",
+				schemaMigrationLockTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	defer func() {
 		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, schemaMigrationLockKey); unlockErr != nil && err == nil {

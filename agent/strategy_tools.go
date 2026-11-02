@@ -237,6 +237,18 @@ func (t *ToolSet) strategyProposeResult(in json.RawMessage) (actool.Result, erro
 	if store == nil {
 		return actool.Errorf("策略库不可用：当前工具集没有数据库句柄"), nil
 	}
+	// 任务上下文是硬要求：提议必须能说清「这条策略是从哪个任务沉淀出来的」。
+	//
+	// 为什么不能只靠 needExploration 的 nil-store 守卫：那个守卫判的是「有没有
+	// 探索图句柄」，而这里判的是「这条探索图是不是属于某个任务」。一份挂在
+	// **不属于任何任务**的探索图上的工具集能通过前者，却没有授权边界 ——
+	// 而 strategy_proposals 表没有 task_id 列，落库之后没人说得清它的出处。
+	//
+	// 与 strategy_search 同一把尺子（scopeTaskID）：两者都读任务内资产的
+	// 签名/归属，缺任务上下文时宁可拒绝，也不给一个没有归属的提议。
+	if taskID := t.scopeTaskID(); taskID <= 0 {
+		return actool.Errorf("缺少任务上下文，拒绝提议策略（策略必须从某个任务里沉淀出来）"), nil
+	}
 	// State 留空：CreateStrategy 会强制成 quarantined（新建只允许隔离态）。
 	// 这里**没有任何**把它变成 active 的路径 —— 晋级是宿主侧的裁决写。
 	s := &db.Strategy{

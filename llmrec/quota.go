@@ -18,7 +18,6 @@ package llmrec
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -30,22 +29,6 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
 )
-
-// asciiCharsPerToken 是 ASCII 文本"字符数/token"的经验值（4）。
-const asciiCharsPerToken = 4
-
-// defaultOutputTokenEstimate 是请求未指定 max_tokens 时的输出侧估算。
-//
-// 取值偏保守：预扣宁多勿少 —— 少扣会让并发调用一起越过预算线，多扣只是暂时
-// 占住额度（结算时按真实用量退回）。
-const defaultOutputTokenEstimate = 4096
-
-// QuotaEstimate 是一次模型调用的 token 估算（输入侧估算 + 输出侧上限）。
-type QuotaEstimate struct {
-	TotalTokens  int64
-	InputTokens  int64
-	OutputTokens int64
-}
 
 // QuotaResolver 把一次模型调用解析到它所属的群组。
 //
@@ -283,7 +266,7 @@ func (p *QuotaProvider) reserve(ctx context.Context, req llm.CompletionRequest) 
 	if p.gate == nil {
 		return 0, QuotaEstimate{}, nil
 	}
-	estimate, err := EstimateTokens(req)
+	estimate, err := EstimateTokens(req, DefaultRetryBudget)
 	if err != nil {
 		// 估算不出来 ⇒ fail closed（拒绝调用）。**禁止**退回"发出去再查额度"：
 		// 那正是估算失败时预算闸门被整条跳过、预算形同虚设的漏洞。
@@ -310,72 +293,4 @@ func (p *QuotaProvider) settle(reservationID int64, estimate QuotaEstimate, disp
 	default:
 		p.gate.Release(reservationID)
 	}
-}
-
-// EstimateTokens 估算一次模型调用要花的 token：输入侧估算 + 输出侧上限。
-//
-// 估算**必然**能给出一个值（估不出来就报错 → 调用方按 fail closed 拒绝），
-// 但它只是估算：预扣按它扣，结算按真实 usage 调整，差额在结算时结清 ——
-// 估算值永远不会被当成最终用量。
-func EstimateTokens(req llm.CompletionRequest) (QuotaEstimate, error) {
-	input := estimateInputTokens(req)
-	output := int64(req.MaxTokens)
-	if output <= 0 {
-		output = defaultOutputTokenEstimate
-	}
-	total := input + output
-	if total <= 0 {
-		return QuotaEstimate{}, errors.New("无法估算本次模型请求的 token")
-	}
-	return QuotaEstimate{TotalTokens: total, InputTokens: input, OutputTokens: output}, nil
-}
-
-// estimateInputTokens 估算输入侧 token：system + 历史消息 + 工具定义。
-func estimateInputTokens(req llm.CompletionRequest) int64 {
-	var total int64
-	add := func(s string) { total += countTokens(s) }
-	for _, seg := range req.System {
-		add(seg)
-	}
-	for _, msg := range req.Messages {
-		for _, block := range msg.Content {
-			switch block.Type {
-			case llm.BlockText:
-				add(block.Text)
-			case llm.BlockThinking:
-				add(block.Thinking)
-			case llm.BlockToolUse:
-				add(block.Name)
-				add(string(block.Input))
-			case llm.BlockToolResult:
-				add(block.ToolUseID)
-				for _, sub := range block.Content {
-					add(sub.Text)
-					add(sub.Thinking)
-				}
-			}
-		}
-	}
-	for _, tool := range req.Tools {
-		add(tool.Name)
-		add(tool.Description)
-		if raw, err := json.Marshal(tool.InputSchema); err == nil {
-			add(string(raw))
-		}
-	}
-	return total
-}
-
-// countTokens 估算一段文本的 token 数：ASCII 每 4 个字符算 1 个 token，
-// 非 ASCII（中文等）每个字符约 1 个 token。
-func countTokens(s string) int64 {
-	var ascii, wide int64
-	for _, r := range s {
-		if r < 128 {
-			ascii++
-		} else {
-			wide++
-		}
-	}
-	return (ascii+asciiCharsPerToken-1)/asciiCharsPerToken + wide
 }
