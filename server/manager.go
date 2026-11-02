@@ -393,6 +393,18 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if err != nil {
 			log.Printf("[traffic] disabled: %v", err)
 		} else {
+			// 注入出网范围判定：带任务身份的请求按「该任务已收录资产的 host」放行，
+			// 范围查不到就拒（fail-closed）。
+			//
+			// 为什么现在才接：SetEgressScope 此前只在 traffic 包的测试里被调用过，
+			// 生产路径上 egressScope() 恒为 nil ⇒ egressHostAllowed 直接返回
+			// 「出网范围判定未接线」⇒ 【所有带任务身份的出网都被拒绝】。也就是说
+			// 范围校验从未真正生效，worker 的出网反而是全拒的。
+			//
+			// 接线只放宽不收紧：未接线的语义是「带身份 ⇒ 全拒」，接上后变成
+			// 「带身份 ⇒ 范围内放行、范围外拒绝」，且范围判定不可用时仍拒绝。
+			tr.SetEgressScope(traffic.DBEgressScope{PG: pg})
+
 			err = tr.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
 				if taskID <= 0 {
 					return false, errors.New("归档流量暂存日志缺少任务 ID")
