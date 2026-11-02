@@ -5,7 +5,6 @@ import * as React from "react";
 import { ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -160,7 +159,6 @@ export default function SodReviewQueuePage() {
         </AlertDescription>
       </Alert>
 
-      <EgressGovernanceNotice />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card size="sm" className="gap-1">

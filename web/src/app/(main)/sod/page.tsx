@@ -7,7 +7,6 @@ import Link from "next/link";
 import { ScrollTextIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -203,7 +202,6 @@ export default function SodLedgerPage() {
 
       <SodNav current="decisions" />
 
-      <EgressGovernanceNotice />
 
       <ChainStatusCard compact />
 

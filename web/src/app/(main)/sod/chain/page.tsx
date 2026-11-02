@@ -2,7 +2,6 @@
 
 import { Link2Icon } from "lucide-react";
 
-import { EgressGovernanceNotice } from "@/components/egress-governance-notice";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 import { ChainStatusCard } from "../_components/chain-status-card";
@@ -22,7 +21,6 @@ export default function SodChainPage() {
 
       <ChainStatusCard />
 
-      <EgressGovernanceNotice />
 
       <Card>
         <CardHeader>
