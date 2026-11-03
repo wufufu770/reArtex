@@ -90,6 +90,10 @@ PGPORT="${PGPORT:-5432}"
 PGHOST="${PGHOST:-127.0.0.1}"
 if [ -z "${PGPASSWORD:-}" ]; then
     PGPASSWORD=$(getenv_from_env_file POSTGRES_PASSWORD || true)
+    # 迁移连接的超级用户口令兜底：容器内走 trust 认证时上面那行拿不到口令。
+    if [ -z "${PGPASSWORD:-}" ]; then
+        PGPASSWORD="$(getenv_from_env_file POSTGRES_PASSWORD || true)"
+    fi
     [ -n "$PGPASSWORD" ] && export PGPASSWORD
 fi
 
@@ -153,7 +157,9 @@ echo "── 2/4 建/刷新受限角色 $ROLE ──"
 psql_exec -q -v role="$ROLE" <<'SQL'
 DO $ensure$
 DECLARE
-    v_role text := COALESCE(NULLIF(:'role', ''), 'artex_app');
+    -- 角色名走会话 GUC（artex.app_role）：psql 变量（:'role'）在 $$ ... $$ 这种
+    -- 美元引号块里**不会**被替换 ⇒ 用它会直接语法错误。
+    v_role text := COALESCE(NULLIF(current_setting('artex.app_role', true), ''), 'artex_app');
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
         EXECUTE format('CREATE ROLE %I LOGIN', v_role);
@@ -169,10 +175,18 @@ $ensure$;
 SQL
 
 echo "── 3/4 设新口令并落地最小权限 ──"
-# 用 psql 的 \password 而不是 `ALTER ROLE ... PASSWORD '...'`：
-# 前者口令不出现在 SQL 文本里，因而不进服务器语句日志；后者会。
-printf '%s\n%s\n' "$APP_PW" "$APP_PW" \
-    | psql_exec -q -c "\password $ROLE" >/dev/null
+# 设口令：**不能**用 psql 的 \password —— 它强制要求一个 TTY（交互式读两次），
+# 在无人值守的脚本里读到的只有 EOF ⇒ 口令根本没设上（角色会带着空/旧口令存在）。
+# ⇒ 改用 ALTER ROLE ... PASSWORD，口令经 psql 变量插值，**经 stdin 送进去**：
+#   · 不进 argv ⇒ 不会出现在进程列表里；
+#   · 不进脚本文件、也不进 shell 历史；
+#   · 但它确实出现在送进服务器的 SQL 文本里 ⇒ 若服务器开了 log_statement，
+#     会进语句日志（PostgreSQL 默认关闭 log_statement）。
+#     这是「无人值守可用」与「绝不进语句日志」之间的真实取舍：这里选前者。
+{
+    printf "\\set app_pw '%s'\n" "$APP_PW"
+    printf "ALTER ROLE %s PASSWORD :'app_pw';\n" "$ROLE"
+} | psql_exec -q >/dev/null
 # 授权 SQL 与应用启动期用的是同一份文件（db/role_grants.sql）。
 # 角色名通过会话 GUC 传（artex.app_role），psql 用 PGOPTIONS 在连接建立时设好。
 if [ -n "${ARTEX_PG_CONTAINER:-}" ]; then
@@ -192,6 +206,29 @@ printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' \
     "$ROLE" "$APP_PW" "$DSN_HOST" "$DSN_PORT" "$PGDATABASE" > "$SECRET_FILE"
 chmod 600 "$SECRET_FILE"
 unset APP_PW
+
+# 迁移连接（超级用户）也走 secret 文件，而不是环境变量里裸奔。
+#
+# 为什么需要它：有一批表（llm_records / llm_usage / strategy_proposals /
+# strategy_usage / strategy_replay_corpus / task_strategy_snapshot*）的 DDL 写在 Go
+# 字符串常量里，不在任何 .sql 文件里 ⇒ **脚本补不了**，只能由应用启动时用迁移
+# 连接补（ARTEX_PG_ADMIN_DSN_FILE）。
+#
+# 为什么只在**缺失时**写：这里放的是**超级用户**口令，而超级用户口令不随轮换变
+# （轮换换的是受限角色 artex_app 的口令）⇒ 每次重写只会无谓地动这个文件。
+# 应用启动读走它之后会立刻抹掉磁盘上那份（只读挂载抹不掉时告警但不阻断）⇒
+# 超级用户凭据只在启动那一瞬间存在于内存里。
+ADMIN_SECRET_FILE="${ARTEX_ADMIN_DSN_SECRET:-$REPO_DIR/secrets/pg_dsn_admin}"
+if [ -s "$ADMIN_SECRET_FILE" ]; then
+    echo "  迁移连接 secret: $ADMIN_SECRET_FILE（已存在，保留）"
+else
+    mkdir -p "$(dirname "$ADMIN_SECRET_FILE")"
+    umask 077
+    printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' \
+        "$PGUSER" "$PGPASSWORD" "$DSN_HOST" "$DSN_PORT" "$PGDATABASE" > "$ADMIN_SECRET_FILE"
+    chmod 600 "$ADMIN_SECRET_FILE"
+    echo "  迁移连接 secret: $ADMIN_SECRET_FILE（已生成，0600）"
+fi
 
 cat <<EOF
 完成。

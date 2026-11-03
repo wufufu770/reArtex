@@ -32,6 +32,10 @@ services:
       ARTEX_DISABLE_SHORT_CIRCUIT: ${ARTEX_DISABLE_SHORT_CIRCUIT:-}
       # 口令走 secret 文件，不进容器配置面：docker inspect 看不到。
       ARTEX_PG_DSN_FILE: /run/secrets/pg_dsn
+      # 迁移连接（超级用户）：只用于【启动期】补 Go 侧那批 DDL（llm_records /
+      # llm_usage / strategy_* / task_strategy_snapshot*），应用读完即抹掉磁盘副本。
+      # 运行期的一切业务读写都走受限角色 artex_app。
+      ARTEX_PG_ADMIN_DSN_FILE: /run/secrets/pg_dsn_admin
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ARTEX_LLM_PROVIDER: ${ARTEX_LLM_PROVIDER:-}
@@ -59,3 +63,7 @@ secrets:
   # 数据库连接串：由 init-pg-dsn-secret.sh 从 .env 生成（0600，不进版本库）。
   pg_dsn:
     file: ${PG_DSN_SECRET_FILE:-./secrets/pg_dsn}
+  # 迁移连接（超级用户）：由 scripts/db-role-bootstrap.sh 生成（0600）。
+  # 只在启动期用来补 Go 侧那批 DDL；运行期一律用受限角色。
+  pg_dsn_admin:
+    file: ${PG_ADMIN_DSN_SECRET_FILE:-./secrets/pg_dsn_admin}
