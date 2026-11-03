@@ -637,7 +637,7 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 |---|---|---|
 | findings ↔ assets | **PARTIAL** | `findings.asset_ids JSONB` —— JSON 数组，无外键、无引用完整性 |
 | findings ↔ intents | **EXISTS** | `findings.node_id BIGINT REFERENCES exploration_nodes(id)` + 边 `intent --yields--> finding` |
-| findings ↔ strategies | **PARTIAL** | `strategy_evidence(ref_type, ref_id TEXT, content_digest, role)` —— 裸 id + 摘要，**无级联外键** ⇒ **任务归档会连带删掉策略的证据链，策略变成「凭空提权」** |
+| findings ↔ strategies | **PARTIAL** | `strategy_evidence(strategy_id → strategies(id) ON DELETE CASCADE, ref_type, ref_id TEXT, content_digest, role)` —— **无 FK 的是 `ref_id`（裸 TEXT）**，`strategy_id` 本身有级联 FK ⇒ **任务归档会连带删掉策略的证据链，策略变成「凭空提权」** |
 | intents ↔ assets | **EXISTS** | `exploration_anchors(node_id, asset_id)` PK + `idx_anchor_asset` |
 | intents ↔ sessions | **ABSENT** | intent 挂在 `exploration_id` 上，**没有任何东西指向会话** |
 | strategies ↔ sessions | **ABSENT** | `strategies` 无 session 列；会话侧只有 conversations / chat_groups / chat_group_members / chat_group_messages |
@@ -647,8 +647,7 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 ⚠️ 由此得到一条**与第十节 4.4 节直接相关**的结论：会话与既有图谱之间**目前完全没有边**
 ⇒ 第四节的 `session_attachments` 不只是「关联工件」，它是**把会话接进图谱的唯一入口**。
 
-另注：`third_party/norma/memory` 存在（MemFS 形态：`tools.go relevant.go memory.go`）但
-**ARTEX 完全没有 import 它** ⇒ 有一条现成但未接线的记忆库路径。
+另注：`third_party/norma/memory` 存在（MemFS 形态：`tools.go relevant.go memory.go`），且 `norma/agentcore` **import 了它并接进每个 session** —— 但 **ARTex 从不配置 `Options.Memory`** ⇒ 这条路径是「死的」而非「不存在」⇒ 有一条现成但未启用的记忆库路径。⚠️ 但它是**错误的**捐赠者（无索引上限 / 无 scope / 无 supersession / 截断不响亮）⇒ 方案 B 仍按「自建」估算工作量。见 §11.7。
 
 ### 10.4 三个记忆方案（工作量/代价是工程判断，非厂商数据）
 
