@@ -1,5 +1,16 @@
 package agent
 
+// 命名警示：本文件是**知识图谱压缩**（探索图的冷节点 → digest 节点），**不是对话压缩**。
+//
+// 为什么专门说明：一个仓库里曾经有两个含义相反的 "compaction"：
+//   - 本文件（旧名 agent/compaction.go）：改写**持久的知识图谱**，会调 AddDigest /
+//     SupersedeDigests ⇒ 不可逆地改数据；
+//   - third_party/norma/compaction：只改**模型看到的上下文**（历史仍在消息数组里，
+//     只有边界之后的消息被送出）⇒ 非破坏。
+//
+// 名字混在一起会让后来者继承错误的保证（「压缩只是换个视图，用户的对话历史不会消失」
+// 这句话对前者不成立）。故改名为 cold_digest.go，并在此写明区别。
+//
 // cold-digest §4/§5/§7: the Compactor ties the pure algorithms (coldgraph.go)
 // to the store (db/digest.go) and the LLM. It runs in two modes:
 //
