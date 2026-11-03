@@ -1002,3 +1002,27 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 **风险**：进程泄漏（靠 #4 兜住）、目录膨胀（靠 TTL + 保留策略兜住）、跨 session
 并发写同一输出文件（按 command 分文件，不共享句柄）。
 
+### 11.8 P2：探索图 ↔ 策略图的节点级连接（**schema 已落地**，写入路径待接）
+
+**已实现**（提交 `9856838`）：`exploration_nodes.strategy_id` 加**真外键**。
+
+- **为什么需要节点级**：`strategy_usage` 只到 exploration/intent 层 ⇒ 问不出
+  「这条 finding 是哪条策略产出的」。一个 exploration 里常同时跑多条策略 ⇒
+  exploration 级不够。
+- **为什么真外键**：payload 里存文本 id 没有引用完整性（策略删了节点还留悬空
+  字符串，反查靠文本扫描还可能命中同名字符串）。
+- **ON DELETE SET NULL（不是 CASCADE）**：策略被删只丢链接、不删节点 —— 节点是
+  事实与结论，策略是可替换的工作方法；CASCADE 会把结论一起抹掉，那是数据丢失。
+- **落在 `db/schema_strategy.sql`**：`db/schema.sql` 是 RESERVED 文件 ⇒ 列与约束
+  放策略库自己的文件（该文件本来就跨单元给 `exploration_nodes`/`findings` 建索引）。
+- **历史行不回填**：节点 payload 里没有意图键 ⇒ 没有可靠的归属依据；硬把一个
+  exploration 的所有节点归给其中某条策略 = **安静的错误归属** ⇒ 历史行保持 NULL。
+
+**验证**（一次性 Postgres，8 项全过）：ALTER 加列成功且**连跑两遍无错**（幂等）；
+写不存在的 strategy_id **被外键拦下**；删策略 ⇒ **节点保留、链接置空**；索引/列/约束
+均存在。
+
+**待接**：写入路径 —— 每轮开始时把「当前生效的策略」记到 `ExplorationStore`，节点
+落库时随行写入 `strategy_id`。这需要定位「一轮里策略何时被选中」的准确位置（与
+`db/strategy_proposal.go` 的提案/晋级流程对齐），是下一步的接线点。
+
