@@ -714,6 +714,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
 	mux.HandleFunc("GET /api/update/stream", s.updateStream)
 
+	// 会话实体化 API（sessions / members / attachments / messages）。
+	//
+	// 注册函数与处理器都归 server/session_api.go 所有，这里只挂一次。
+	s.RegisterSessionRoutes(mux)
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)

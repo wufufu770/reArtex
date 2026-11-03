@@ -122,6 +122,15 @@ import type {
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
+import type {
+  Session,
+  SessionCreateInput,
+  SessionMember,
+  SessionMessage,
+  SessionMessageInput,
+  SessionPatchInput,
+  SessionRole,
+} from "@/lib/session-types";
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -1216,6 +1225,40 @@ export const api = {
   sendConversationMessage: (id: number, message: string, attachments?: ChatAttachment[]) =>
     post<{ status: string }>(`/conversations/${id}/messages`, { message, attachments }),
   stopConversation: (id: number) => post<{ status: string }>(`/conversations/${id}/stop`, {}),
+
+  // ---- sessions (chat page, session-based) ----
+  //
+  // 会话是第一类对象：一个 session 下可以有多个成员（agent），人在同一条消息流里
+  // 与 agent 往来。旧的 /api/conversations 仍可用（兼容期），但新界面优先走这里。
+  // 端点与形状见方案书 §4.5；类型定义在 lib/session-types.ts。
+  sessions: () => get<{ sessions: Session[] }>("/sessions").then((r) => arr(r.sessions)),
+  createSession: (input: SessionCreateInput) => post<Session>("/sessions", input),
+  session: (id: number) => get<Session>(`/sessions/${id}`),
+  updateSession: (id: number, input: SessionPatchInput) => patch<Session>(`/sessions/${id}`, input),
+  deleteSession: (id: number) => del<{ deleted: number }>(`/sessions/${id}`),
+  // 会话消息（含 agent 消息、收据条、线程）。since=0 取全部，之后按 id 增量拉。
+  sessionMessages: (id: number, since = 0) =>
+    get<{ items: SessionMessage[]; cursor: number; running: boolean }>(`/sessions/${id}/messages?since=${since}`).then(
+      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running }),
+    ),
+  // 发言：@Agent名 路由由 to_agent 表达（空串 = 广播给全会话）。
+  postSessionMessage: (id: number, input: SessionMessageInput) =>
+    post<{ status: string }>(`/sessions/${id}/messages`, input),
+  // 热加入：会话中随时加 agent（@ 未在席的 agent 时前端先调用它）。
+  addSessionMember: (id: number, agent_key: string, role: SessionRole = "member") =>
+    post<{ ok: boolean }>(`/sessions/${id}/members`, { agent_key, role }),
+  // 退出：成员离席，历史消息归属不变。
+  removeSessionMember: (id: number, agent_key: string) =>
+    del<{ ok: boolean }>(`/sessions/${id}/members/${encodeURIComponent(agent_key)}`),
+  // 成员状态（presence 三态）。
+  sessionPresence: (id: number) =>
+    get<{ presence: SessionMember[] }>(`/sessions/${id}/presence`).then((r) => arr(r.presence)),
+  // 反查：某个工件关联了哪些会话（工件 → 会话方向）。
+  sessionsForAttachment: (attachment_type: string, identity_key: string) =>
+    get<{ sessions: Session[] }>(
+      `/sessions/attachments/${encodeURIComponent(attachment_type)}/${encodeURIComponent(identity_key)}/sessions`,
+    ).then((r) => arr(r.sessions)),
+
   saveAgentPrompt: (key: string, template: string, note = "") =>
     put<{ version: number }>(`/agents/${key}/prompt`, { template, note }),
   resetAgentPrompt: (key: string) => post<{ version: number }>(`/agents/${key}/prompt/reset`, {}),

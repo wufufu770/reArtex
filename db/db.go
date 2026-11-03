@@ -268,6 +268,27 @@ func Open(dsn string) (*DB, error) {
 		if err := d.EnsureQuotaSchema(); err != nil {
 			return fmt.Errorf("apply quota schema: %w", err)
 		}
+		// 记忆层（方案 B）DDL：append-only 的版本化记忆索引，走独立幂等文件
+	// （db/schema_memory.sql）。启动时接 ⇒ 库里没有这张表这件事在启动期就暴露，
+	// 而不是等某个接口运行期才报「关系不存在」。
+	if err := d.EnsureMemorySchema(); err != nil {
+		return fmt.Errorf("apply memory schema: %w", err)
+	}
+	// finding 级验证态与返工边（方案书 §7 的 P0-2）：三态 + rework 边，
+	// 走独立幂等文件（db/schema_finding_validation.sql）。
+	if err := d.EnsureFindingValidationSchema(); err != nil {
+		return fmt.Errorf("apply finding validation schema: %w", err)
+	}
+	// 会话实体化 DDL：会话成为第一类对象（sessions / session_members /
+		// session_attachments / session_messages），走独立幂等文件
+		// （db/schema_session.sql）。
+		//
+		// 为什么必须在这里接：会话表不接启动流程 ⇒ 库里没有这几张表 ⇒ 会话相关
+		// 接口全在运行期才报「关系不存在」，而不是启动期就报出来。幂等
+		// （CREATE TABLE IF NOT EXISTS）⇒ 重复调用无副作用。
+		if err := d.EnsureSessionSchema(); err != nil {
+			return fmt.Errorf("apply session schema: %w", err)
+		}
 		// 策略库（L4）DDL：同样走独立幂等文件（db/schema_strategy.sql）。
 		//
 		// 为什么必须在这里接：策略表不接启动流程 ⇒ 库里没有这张表 ⇒
