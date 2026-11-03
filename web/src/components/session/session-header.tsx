@@ -113,7 +113,7 @@ export function SessionHeader({
               if (event.key === "Enter") commit();
               if (event.key === "Escape") setEditing(false);
             }}
-            className="border-input bg-background min-w-0 max-w-72 flex-1 rounded-md border px-2 py-1 text-sm"
+            className="min-w-0 max-w-72 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
             aria-label="会话名"
           />
         ) : (
@@ -121,7 +121,7 @@ export function SessionHeader({
             type="button"
             onDoubleClick={() => setEditing(true)}
             title="双击重命名"
-            className="min-w-0 max-w-72 truncate text-left text-sm font-medium hover:underline"
+            className="min-w-0 max-w-72 truncate text-left font-medium text-sm hover:underline"
           >
             {sessionDisplayName(session)}
           </button>
@@ -211,8 +211,8 @@ export function SessionHeader({
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-56 p-1">
-            <p className="text-muted-foreground px-2 py-1 text-[11px] font-medium">加入会话</p>
-            {candidates.length === 0 && <p className="text-muted-foreground px-2 py-1.5 text-xs">没有可加入的 agent</p>}
+            <p className="px-2 py-1 font-medium text-[11px] text-muted-foreground">加入会话</p>
+            {candidates.length === 0 && <p className="px-2 py-1.5 text-muted-foreground text-xs">没有可加入的 agent</p>}
             {candidates.map((agent) => (
               <button
                 key={agent.key}
@@ -223,13 +223,13 @@ export function SessionHeader({
               >
                 <Bot className="size-3.5 shrink-0" />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <span className="text-muted-foreground shrink-0 text-[11px]">{agent.key}</span>
+                <span className="shrink-0 text-[11px] text-muted-foreground">{agent.key}</span>
               </button>
             ))}
           </PopoverContent>
         </Popover>
         {(session.attachments ?? []).length > 0 && (
-          <span className="text-muted-foreground flex items-center gap-1 text-[11px]">
+          <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
             <Link2Icon className="size-3" />
             {session.attachments?.length} 个关联工件
           </span>

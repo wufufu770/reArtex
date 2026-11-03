@@ -1,7 +1,5 @@
 "use client";
 
-import * as React from "react";
-
 import { Link2Icon, UsersIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -40,7 +38,7 @@ export function SessionSidePanel({
   return (
     <div className="flex flex-col gap-4 p-4">
       <section className="flex flex-col gap-2">
-        <h3 className="flex items-center gap-1.5 text-xs font-medium">
+        <h3 className="flex items-center gap-1.5 font-medium text-xs">
           <Link2Icon className="size-3.5" />
           关联工件
         </h3>
@@ -68,7 +66,7 @@ export function SessionSidePanel({
       <Separator />
 
       <section className="flex flex-col gap-2">
-        <h3 className="flex items-center gap-1.5 text-xs font-medium">
+        <h3 className="flex items-center gap-1.5 font-medium text-xs">
           <UsersIcon className="size-3.5" />
           参与 agent
         </h3>
@@ -82,14 +80,14 @@ export function SessionSidePanel({
                 <li key={member.agent_key} className="flex min-w-0 flex-col gap-0.5">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <PresenceDot presence={member.presence} />
-                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                    <span className="min-w-0 flex-1 truncate font-medium text-xs">
                       {memberDisplayName(member, agentByKey)}
                     </span>
                     <Badge variant="secondary" className="shrink-0 px-1 py-0 text-[9px]">
                       {ROLE_LABELS[member.role] ?? member.role}
                     </Badge>
                   </div>
-                  <span className="text-muted-foreground pl-3.5 text-[11px]">
+                  <span className="pl-3.5 text-[11px] text-muted-foreground">
                     {meta.label}
                     {member.presence === "blocked" && member.blocked_on ? ` · 卡在 ${member.blocked_on}` : ""}
                     {member.presence === "blocked" && member.eta_minutes != null
@@ -107,12 +105,12 @@ export function SessionSidePanel({
         <>
           <Separator />
           <section className="flex flex-col gap-1.5">
-            <h3 className="text-xs font-medium">额度</h3>
-            <p className="text-muted-foreground text-[11px] tabular-nums">
+            <h3 className="font-medium text-xs">额度</h3>
+            <p className="text-[11px] text-muted-foreground tabular-nums">
               预算 {fmtTokens(quota.budget_tokens)} · 已结算 {fmtTokens(quota.consumed_tokens)} · 剩余{" "}
               {fmtTokens(quota.remaining_tokens)}
             </p>
-            <p className="text-muted-foreground text-[11px]">状态：{quota.state}</p>
+            <p className="text-[11px] text-muted-foreground">状态：{quota.state}</p>
           </section>
         </>
       )}

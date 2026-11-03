@@ -22,10 +22,24 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
+import {
+  bindLegacyConversations,
+  DEFAULT_SESSION_LIST_QUERY,
+  filterSessions,
+  groupSessions,
+  groupSessionsByAgent,
+  groupSessionsByAttachment,
+  type SessionListQuery,
+  type SessionSection,
+  sessionMembers,
+} from "@/components/session/session-format";
+import { SessionList } from "@/components/session/session-list";
+import { SessionToolbar } from "@/components/session/session-toolbar";
+import { SessionView } from "@/components/session/session-view";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
-import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -56,25 +70,10 @@ import { mergeActivities } from "@/lib/activity-merge";
 import { ApiError, api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
-import { isBtwCommand } from "@/lib/side-questions";
 import type { Session } from "@/lib/session-types";
+import { isBtwCommand } from "@/lib/side-questions";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-import { SessionList } from "@/components/session/session-list";
-import { SessionToolbar } from "@/components/session/session-toolbar";
-import { SessionView } from "@/components/session/session-view";
-import {
-  type SessionListQuery,
-  DEFAULT_SESSION_LIST_QUERY,
-  type SessionSection,
-  bindLegacyConversations,
-  filterSessions,
-  groupSessions,
-  groupSessionsByAgent,
-  groupSessionsByAttachment,
-  sessionMembers,
-} from "@/components/session/session-format";
 
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
 function fmtBytes(n: number): string {
@@ -91,7 +90,7 @@ function fmtTokens(n: number): string {
 }
 
 // fmtDuration renders an elapsed milliseconds span compactly (90s → 1m30s).
-function fmtDuration(ms: number): string {
+function _fmtDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -157,7 +156,7 @@ function groupByAgent(conversations: Conversation[], agentByKey: Map<string, Age
 // console — shown while a turn is streaming.
 function LiveBadge() {
   return (
-    <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+    <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-[10px] text-blue-600 dark:text-blue-400">
       <span className="size-1 animate-pulse rounded-full bg-blue-500" />
       实时
     </span>
@@ -320,7 +319,7 @@ function LLMProfileRow({
 
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-1 px-1 pt-0.5 pb-1">
-      <ZapIcon className="text-muted-foreground/50 size-3 shrink-0" />
+      <ZapIcon className="size-3 shrink-0 text-muted-foreground/50" />
       <span className="truncate text-muted-foreground/70 text-xs" title={label}>
         {label}
       </span>
@@ -336,7 +335,7 @@ function LLMProfileRow({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-64 p-1">
-          <p className="text-muted-foreground px-2 py-1 text-[11px] font-medium">选择 LLM 配置</p>
+          <p className="px-2 py-1 font-medium text-[11px] text-muted-foreground">选择 LLM 配置</p>
           {/* default option */}
           <button
             type="button"
@@ -351,7 +350,7 @@ function LLMProfileRow({
           >
             <span className="text-sm">默认{activeDefault ? `（${activeDefault.name}）` : ""}</span>
             {activeDefault && (
-              <span className="text-muted-foreground text-[11px]">
+              <span className="text-[11px] text-muted-foreground">
                 {activeDefault.format} · {activeDefault.model}
               </span>
             )}
@@ -370,7 +369,7 @@ function LLMProfileRow({
               )}
             >
               <span className="text-sm">{p.name}</span>
-              <span className="text-muted-foreground text-[11px]">
+              <span className="text-[11px] text-muted-foreground">
                 {p.format} · {p.model}
               </span>
             </button>
@@ -417,7 +416,7 @@ function DraftChat({
       await api.sendConversationMessage(c.id, msg);
       onStarted(c);
     } catch (e) {
-      toast.error("发送失败：" + (e as Error).message);
+      toast.error(`发送失败：${(e as Error).message}`);
       setSending(false);
     }
   }
@@ -435,7 +434,7 @@ function DraftChat({
       const r = await api.chatUpload("session", `conv-${c.id}`, files);
       onStarted(c, { input, attachments: r.attachments });
     } catch (e) {
-      toast.error("上传失败：" + (e as Error).message);
+      toast.error(`上传失败：${(e as Error).message}`);
       setUploading(false);
     }
   }
@@ -469,11 +468,11 @@ function DraftChat({
     <>
       {/* empty / landing state fills the panel */}
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <div className="bg-primary/10 flex size-12 items-center justify-center rounded-full">
-          <Bot className="text-primary size-6" />
+        <div className="flex size-12 items-center justify-center rounded-full bg-primary/10">
+          <Bot className="size-6 text-primary" />
         </div>
-        <div className="text-sm font-medium">开始和「{agent?.name ?? "Agent"}」对话</div>
-        {agent?.description && <p className="text-muted-foreground max-w-md text-xs">{agent.description}</p>}
+        <div className="font-medium text-sm">开始和「{agent?.name ?? "Agent"}」对话</div>
+        {agent?.description && <p className="max-w-md text-muted-foreground text-xs">{agent.description}</p>}
       </div>
 
       <Composer
@@ -540,7 +539,7 @@ function ChatView({
       await api.updateConversationProfile(conv.id, id);
       onConvUpdated();
     } catch (e) {
-      toast.error("切换 LLM 失败：" + (e as Error).message);
+      toast.error(`切换 LLM 失败：${(e as Error).message}`);
     }
   }
 
@@ -629,14 +628,23 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
-  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE),
+    [conv.id],
+  );
   const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
     setMessages((prev) => mergeActivities(page.items, prev));
     earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
     hasMoreRef.current = page.hasMore;
     setHasMore(page.hasMore);
   }, []);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    historyLoaded,
+    messages,
+    loadFocusPage,
+    mergeFocusPage,
+  );
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -690,13 +698,13 @@ function ChatView({
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
-  }, [conv.id, viewport]);
+  }, [viewport]);
   // new activity → stick to bottom only if the user is already pinned there
   React.useLayoutEffect(() => {
     if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [messages, running, viewport, approvalFocus.state]);
+  }, [viewport, approvalFocus.state]);
 
   // Per-conversation token total, live — same accounting as the main-agent
   // console: completed runs' `result` sum + the in-progress run's latest `usage`.
@@ -736,7 +744,7 @@ function ChatView({
       const r = await api.chatUpload("session", `conv-${conv.id}`, files);
       setAttachments((prev) => [...prev, ...r.attachments]);
     } catch (e) {
-      toast.error("上传失败：" + (e as Error).message);
+      toast.error(`上传失败：${(e as Error).message}`);
     } finally {
       setUploading(false);
     }
@@ -756,7 +764,7 @@ function ChatView({
       // fetch avoids racing a separate post-send request against the poller.
       setRunning(true);
     } catch (e) {
-      toast.error("发送失败：" + (e as Error).message);
+      toast.error(`发送失败：${(e as Error).message}`);
       setInput(msg); // restore so the user doesn't lose their text
       setAttachments(atts); // and their attachments
     } finally {
@@ -773,7 +781,7 @@ function ChatView({
     try {
       await api.stopConversation(conv.id);
     } catch (e) {
-      toast.error("停止失败：" + (e as Error).message);
+      toast.error(`停止失败：${(e as Error).message}`);
     } finally {
       setStopping(false);
     }
@@ -783,20 +791,20 @@ function ChatView({
     <SideQuestionWorkspace side={side} label={agent?.name ?? conv.agent_key} composerLayout="inline">
       {/* header: which agent + live + token meta */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
-        <Bot className="text-muted-foreground size-4 shrink-0" />
-        <span className="min-w-0 max-w-48 truncate text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
-        <span className="text-muted-foreground hidden shrink-0 font-mono text-xs sm:inline">{conv.agent_key}</span>
+        <Bot className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 max-w-48 truncate font-medium text-sm">{agent?.name ?? conv.agent_key}</span>
+        <span className="hidden shrink-0 font-mono text-muted-foreground text-xs sm:inline">{conv.agent_key}</span>
         {agent && !agent.builtin && (
           <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
             自定义
           </Badge>
         )}
         {agent?.description && (
-          <span className="text-muted-foreground min-w-0 truncate text-xs">{agent.description}</span>
+          <span className="min-w-0 truncate text-muted-foreground text-xs">{agent.description}</span>
         )}
         {running && <LiveBadge />}
         <SideQuestionButton side={side} />
-        <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
+        <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-muted-foreground text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">
               {tokenTotal.turns} 轮
@@ -813,18 +821,24 @@ function ChatView({
       <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
 
       {/* messages */}
-      <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+      <ScrollArea type="auto" className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
           {messages.length === 0 && !running ? (
-            <div className="text-muted-foreground py-10 text-center text-sm">
+            <div className="py-10 text-center text-muted-foreground text-sm">
               开始和「{agent?.name ?? conv.agent_key}」对话
             </div>
           ) : (
             <>
               {hasMore && (
-                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
+                <div className="pb-2 text-center text-[11px] text-muted-foreground/70">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+              <Transcript
+                activity={messages}
+                live={running}
+                chat
+                fetchDetail={fetchDetail}
+                focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+              />
             </>
           )}
         </div>
@@ -922,7 +936,7 @@ const ConversationItem = React.memo(function ConversationItem({
               onCancelRename();
             }
           }}
-          className="border-input bg-background min-w-0 flex-1 rounded-md border px-2 py-1 text-sm"
+          className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
         />
       ) : (
         <button
@@ -933,7 +947,7 @@ const ConversationItem = React.memo(function ConversationItem({
           className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
         >
           <div className="flex min-w-0 items-center gap-1.5">
-            {pinned && <PinIcon className="text-primary size-3 shrink-0" aria-label="已置顶" />}
+            {pinned && <PinIcon className="size-3 shrink-0 text-primary" aria-label="已置顶" />}
             <div className="truncate text-sm">{conv.title || "新对话"}</div>
             {conv.running ? (
               <Badge variant="secondary" className="shrink-0 gap-1" title="Agent 正在运行">
@@ -942,7 +956,7 @@ const ConversationItem = React.memo(function ConversationItem({
               </Badge>
             ) : null}
           </div>
-          <div className="text-muted-foreground flex min-w-0 items-center gap-1 text-[11px]">
+          <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             {showAgent && (
               <>
                 <Bot className="size-3 shrink-0" />
@@ -967,7 +981,7 @@ const ConversationItem = React.memo(function ConversationItem({
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-muted-foreground shrink-0"
+            className="shrink-0 text-muted-foreground"
             aria-label={`管理对话「${conv.title || "新对话"}」`}
           >
             <MoreHorizontalIcon />
@@ -1275,7 +1289,7 @@ export default function ChatPage() {
         selectConversation(null);
         void reloadConvs();
       } catch (e) {
-        toast.error("删除失败：" + (e as Error).message);
+        toast.error(`删除失败：${(e as Error).message}`);
       }
     },
     [reloadConvs, selectConversation],
@@ -1307,7 +1321,7 @@ export default function ChatPage() {
         await api.renameConversation(id, title);
         void reloadConvs();
       } catch (e) {
-        toast.error("重命名失败：" + (e as Error).message);
+        toast.error(`重命名失败：${(e as Error).message}`);
       }
     },
     [reloadConvs],
@@ -1328,7 +1342,7 @@ export default function ChatPage() {
         await api.updateSession(session.id, { name });
         void reloadSessions();
       } catch (e) {
-        toast.error("重命名失败：" + (e as Error).message);
+        toast.error(`重命名失败：${(e as Error).message}`);
       }
     },
     [reloadSessions],
@@ -1354,7 +1368,7 @@ export default function ChatPage() {
         selectSession(null);
         void reloadSessions();
       } catch (e) {
-        toast.error("删除失败：" + (e as Error).message);
+        toast.error(`删除失败：${(e as Error).message}`);
       }
     },
     [reloadSessions, selectSession],
@@ -1369,7 +1383,7 @@ export default function ChatPage() {
       setSessions((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       selectSession(created.id);
     } catch (e) {
-      toast.error("新建会话失败：" + (e as Error).message);
+      toast.error(`新建会话失败：${(e as Error).message}`);
     } finally {
       setCreating(false);
     }
@@ -1421,7 +1435,7 @@ export default function ChatPage() {
     );
   } else if (sourceRequested) {
     rightPane = (
-      <div role="status" className="p-6 text-sm text-muted-foreground">
+      <div role="status" className="p-6 text-muted-foreground text-sm">
         {selectedSessionId != null ? "会话已被删除" : "对话已被删除"}
       </div>
     );
@@ -1455,7 +1469,7 @@ export default function ChatPage() {
     >
       <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(10rem,15rem)_minmax(0,1fr)] gap-3 md:grid-cols-[18rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:gap-4">
         {/* left: 会话列表 */}
-        <div className="bg-card flex flex-col overflow-hidden rounded-lg border">
+        <div className="flex flex-col overflow-hidden rounded-lg border bg-card">
           <div className="flex flex-col gap-2 border-b p-2">
             <Button size="sm" className="w-full" onClick={() => void createSession()} disabled={creating}>
               {creating ? <Loader2Icon className="size-4 animate-spin" /> : <PlusIcon />}
@@ -1472,11 +1486,11 @@ export default function ChatPage() {
           <ScrollArea
             key={query.view}
             type="auto"
-            className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+            className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1"
           >
             <div className="flex min-w-0 flex-col gap-0.5 p-2">
               {!sessionsAvailable && (
-                <p className="text-muted-foreground rounded-md border border-dashed px-2 py-2 text-[11px]">
+                <p className="rounded-md border border-dashed px-2 py-2 text-[11px] text-muted-foreground">
                   会话接口暂不可用，已回退到旧对话列表。
                 </p>
               )}
@@ -1499,7 +1513,7 @@ export default function ChatPage() {
               )}
               {legacyConversations.length > 0 && (
                 <>
-                  <div className="text-muted-foreground flex items-center gap-1.5 px-2 pt-2 text-[11px] font-medium">
+                  <div className="flex items-center gap-1.5 px-2 pt-2 font-medium text-[11px] text-muted-foreground">
                     <ListChecksIcon className="size-3 shrink-0" />
                     <span className="truncate">旧对话</span>
                     <span className="shrink-0 tabular-nums opacity-60">{legacyConversations.length}</span>
@@ -1537,23 +1551,25 @@ export default function ChatPage() {
                           </React.Fragment>
                         );
                       })
-                    : legacyConversations.slice(0, visibleConversationCount).map((c) => (
-                        <ConversationItem
-                          key={c.id}
-                          conv={c}
-                          agent={agentByKey.get(c.agent_key)}
-                          active={selectedConvId === c.id}
-                          renaming={renamingConvId === c.id}
-                          renameText={renamingConvId === c.id ? renameConvText : ""}
-                          onSelect={selectConversation}
-                          onStartRename={startRename}
-                          onRenameText={setRenameConvText}
-                          onCommitRename={(id, title) => void commitRename(id, title)}
-                          onCancelRename={cancelRename}
-                          onTogglePinned={(conversation) => void togglePinned(conversation)}
-                          onDelete={(id) => void del(id)}
-                        />
-                      ))}
+                    : legacyConversations
+                        .slice(0, visibleConversationCount)
+                        .map((c) => (
+                          <ConversationItem
+                            key={c.id}
+                            conv={c}
+                            agent={agentByKey.get(c.agent_key)}
+                            active={selectedConvId === c.id}
+                            renaming={renamingConvId === c.id}
+                            renameText={renamingConvId === c.id ? renameConvText : ""}
+                            onSelect={selectConversation}
+                            onStartRename={startRename}
+                            onRenameText={setRenameConvText}
+                            onCommitRename={(id, title) => void commitRename(id, title)}
+                            onCancelRename={cancelRename}
+                            onTogglePinned={(conversation) => void togglePinned(conversation)}
+                            onDelete={(id) => void del(id)}
+                          />
+                        ))}
                   {query.view !== "by_agent" && visibleConversationCount < legacyConversations.length && (
                     <Button
                       type="button"
@@ -1572,7 +1588,7 @@ export default function ChatPage() {
         </div>
 
         {/* right: session view / legacy chat view */}
-        <div className="bg-card flex min-w-0 flex-col overflow-hidden rounded-lg border">{rightPane}</div>
+        <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card">{rightPane}</div>
       </div>
     </div>
   );

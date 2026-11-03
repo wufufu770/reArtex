@@ -41,7 +41,7 @@ function MessageMeta({
 }) {
   const kind = KIND_LABELS[message.kind];
   return (
-    <div className={cn("text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px]", className)}>
+    <div className={cn("flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground", className)}>
       {kind && (
         <Badge variant="secondary" className="shrink-0 px-1 py-0 text-[9px]">
           {kind}
@@ -62,7 +62,7 @@ function ReceiptStrip({ receipts, agentByKey }: { receipts: SessionMessage[]; ag
       {receipts.map((receipt) => (
         <span
           key={receipt.id}
-          className="text-muted-foreground flex items-center gap-1 text-[11px]"
+          className="flex items-center gap-1 text-[11px] text-muted-foreground"
           title={`${agentName(receipt.from_agent, agentByKey)} · ${RECEIPT_LABELS[receipt.receipt_action] ?? "已读"}`}
         >
           <CheckCheckIcon className="size-3 text-emerald-500" />
@@ -96,14 +96,14 @@ function MessageBubble({
       <div
         className={cn(
           "min-w-0 max-w-full whitespace-pre-wrap rounded-lg px-3 py-1.5 text-sm [overflow-wrap:anywhere]",
-          human ? "bg-primary rounded-tr-sm text-primary-foreground" : "bg-muted text-card-foreground",
+          human ? "rounded-tr-sm bg-primary text-primary-foreground" : "bg-muted text-card-foreground",
           compact && "px-2 py-1 text-xs",
         )}
       >
         {message.body}
       </div>
       {message.blocked_reason && (
-        <p className="text-xs text-red-600 dark:text-red-400">已拦截：{message.blocked_reason}</p>
+        <p className="text-red-600 text-xs dark:text-red-400">已拦截：{message.blocked_reason}</p>
       )}
     </>
   );
@@ -112,17 +112,17 @@ function MessageBubble({
     <div className={cn("flex min-w-0 gap-2", human ? "justify-end" : "justify-start")}>
       {!human && (
         <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
-          <Bot className="text-primary size-3.5" />
+          <Bot className="size-3.5 text-primary" />
         </div>
       )}
       <div className={cn("flex min-w-0 max-w-[85%] flex-col", human ? "items-end" : "items-start")}>
-        {!human && <span className="text-muted-foreground mb-0.5 text-[11px] font-medium">{name}</span>}
+        {!human && <span className="mb-0.5 font-medium text-[11px] text-muted-foreground">{name}</span>}
         {body}
         <MessageMeta message={message} agentByKey={agentByKey} className={human ? "mt-0.5" : "mt-0.5"} />
         <ReceiptStrip receipts={receipts} agentByKey={agentByKey} />
         {replies.length > 0 && (
           <Collapsible open={open} onOpenChange={setOpen} className="mt-1 w-full">
-            <CollapsibleTrigger className="text-muted-foreground flex items-center gap-1 text-[11px] hover:text-foreground">
+            <CollapsibleTrigger className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
               {open ? <ChevronDownIcon className="size-3" /> : <ChevronRightIcon className="size-3" />}
               {replies.length} 条补充
             </CollapsibleTrigger>
@@ -143,7 +143,7 @@ function MessageBubble({
       </div>
       {human && (
         <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
-          <UserIcon className="text-primary size-3.5" />
+          <UserIcon className="size-3.5 text-primary" />
         </div>
       )}
     </div>
@@ -194,7 +194,7 @@ export function SessionTimeline({
 
   if (messages.length === 0) {
     return (
-      <div className="text-muted-foreground flex min-h-0 flex-1 items-center justify-center px-4 py-10 text-center text-sm">
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-10 text-center text-muted-foreground text-sm">
         {emptyHint ?? "这个会话还没有消息"}
       </div>
     );

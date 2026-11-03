@@ -171,7 +171,7 @@ export function SessionView({
       await api.updateSession(session.id, { name });
       onSessionChanged();
     } catch (error) {
-      toast.error("重命名失败：" + (error as Error).message);
+      toast.error(`重命名失败：${(error as Error).message}`);
     }
   }
 
@@ -180,7 +180,7 @@ export function SessionView({
       await api.updateSession(session.id, { pinned: !session.pinned_at });
       onSessionChanged();
     } catch (error) {
-      toast.error("置顶失败：" + (error as Error).message);
+      toast.error(`置顶失败：${(error as Error).message}`);
     }
   }
 
@@ -189,7 +189,7 @@ export function SessionView({
       await api.deleteSession(session.id);
       onSessionDeleted(session.id);
     } catch (error) {
-      toast.error("删除失败：" + (error as Error).message);
+      toast.error(`删除失败：${(error as Error).message}`);
     }
   }
 
@@ -199,7 +199,7 @@ export function SessionView({
       await api.addSessionMember(session.id, agentKey);
       onSessionChanged();
     } catch (error) {
-      toast.error("加入失败：" + (error as Error).message);
+      toast.error(`加入失败：${(error as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -211,7 +211,7 @@ export function SessionView({
       await api.removeSessionMember(session.id, agentKey);
       onSessionChanged();
     } catch (error) {
-      toast.error("移出失败：" + (error as Error).message);
+      toast.error(`移出失败：${(error as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -224,7 +224,7 @@ export function SessionView({
       const result = await api.chatUpload("session", `session-${session.id}`, files);
       setPendingAttachments((prev) => [...prev, ...result.attachments]);
     } catch (error) {
-      toast.error("上传失败：" + (error as Error).message);
+      toast.error(`上传失败：${(error as Error).message}`);
     } finally {
       setUploading(false);
     }
@@ -237,7 +237,7 @@ export function SessionView({
       try {
         await api.addSessionMember(session.id, toAgent);
       } catch (error) {
-        toast.error("加入会话失败：" + (error as Error).message);
+        toast.error(`加入会话失败：${(error as Error).message}`);
         return;
       }
     }
@@ -252,7 +252,7 @@ export function SessionView({
       setRunning(true);
       setTab("stream");
     } catch (error) {
-      toast.error("发送失败：" + (error as Error).message);
+      toast.error(`发送失败：${(error as Error).message}`);
     }
   }
 
@@ -299,7 +299,7 @@ export function SessionView({
           <button
             type="button"
             onClick={() => setPanelOpen(true)}
-            className="text-muted-foreground hover:text-foreground rounded p-1"
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
             title="关联与状态"
             aria-label="打开关联与状态面板"
           >
