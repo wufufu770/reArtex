@@ -33,3 +33,57 @@
 +	v := strings.TrimSpace(os.Getenv("NORMA_WEBFETCH_DIRECT_FALLBACK"))
 +	return v == "1" || strings.EqualFold(v, "true")
 +}
+--- a/tool/builtins_test.go
++++ b/tool/builtins_test.go
+@@ -243,10 +243,16 @@
+ 	}
+ }
+ 
+-// TestWebFetchProxyFallback proves a proxied fetch that fails for a proxy-caused
+-// reason (here: the proxy port is dead → connection refused) retries once directly
+-// (no proxy) and reaches the target. A successful fetch is not annotated.
++// TestWebFetchProxyFallback proves that, WHEN EXPLICITLY OPTED IN, a proxied
++// fetch that fails for a proxy-caused reason (here: the proxy port is dead →
++// connection refused) retries once directly (no proxy) and reaches the target.
++//
++// The opt-in is required, not decorative: the direct retry leaves the machine
++// with no task-identity token and no recording proxy on the path, so the
++// request is neither scope-checked nor captured. See
++// TestWebFetchProxyFallbackOffByDefault for the default (fail-closed) behaviour.
+ func TestWebFetchProxyFallback(t *testing.T) {
++	t.Setenv("NORMA_WEBFETCH_DIRECT_FALLBACK", "1")
+ 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		w.Header().Set("content-type", "text/html")
+ 		w.Write([]byte(`<html><body><h1>Direct OK</h1></body></html>`))
+@@ -263,6 +269,31 @@
+ 	}
+ }
+ 
++// TestWebFetchProxyFallbackOffByDefault proves the no-proxy retry is opt-in:
++// by DEFAULT a proxied fetch that fails for a proxy-caused reason must FAIL
++// instead of silently retrying without the proxy.
++//
++// Why this matters: the direct retry bypasses the recording proxy, so the
++// request leaves the machine with no task-identity token — neither
++// scope-checked nor captured. A proxy that is down must deny, not bypass.
++func TestWebFetchProxyFallbackOffByDefault(t *testing.T) {
++	t.Setenv("NORMA_WEBFETCH_DIRECT_FALLBACK", "")
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("content-type", "text/html")
++		w.Write([]byte(`<html><body><h1>Direct OK</h1></body></html>`))
++	}))
++	defer srv.Close()
++	raw, _ := json.Marshal(map[string]any{"url": srv.URL})
++	res, err := NewWebFetch(WebFetchConfig{Proxy: "http://127.0.0.1:1"}).Call(context.Background(), raw, &ToolContext{})
++	if err != nil {
++		t.Fatalf("webfetch: %v", err)
++	}
++	out := res.Flatten()
++	if strings.Contains(out, "Direct OK") {
++		t.Fatalf("the direct fallback must be opt-in, but the page was fetched anyway: %q", out)
++	}
++}
++
+ // TestWebFetchCompact verifies the HTML→Markdown output is token-lean: nested
+ // blocks don't leave blank lines, and per-line indentation is stripped, while
+ // content and list structure are preserved.

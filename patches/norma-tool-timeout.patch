@@ -1,0 +1,75 @@
+--- a/tool/bash.go
++++ b/tool/bash.go
+@@ -6,8 +6,10 @@
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"os/exec"
+ 	"regexp"
++	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -31,12 +33,13 @@
+ // NewBash builds the Bash tool: run a shell command with a timeout, optionally in
+ // the background.
+ func NewBash() CoreTool {
++	defTimeout := defaultForegroundTimeout()
+ 	props := map[string]any{
+ 		"command":    map[string]any{"type": "string", "description": "The shell command to execute."},
+-		"timeout_ms": map[string]any{"type": "integer", "description": "Timeout in ms (default 120000, max 600000)."},
++		"timeout_ms": map[string]any{"type": "integer", "description": fmt.Sprintf("Timeout in ms (default %d, max 600000).", defTimeout.Milliseconds())},
+ 	}
+ 	desc := "Executes a shell command in the working directory and returns combined stdout and stderr. Use for running tests, builds, package managers, and git. Prefer the dedicated file tools for file work."
+-	prompt := "The command runs through the shell, so you are not limited to one command: chain steps with && or ;, use pipes, and pass multi-line scripts or heredocs. For anything beyond a simple one-liner — loops, parsing, string/JSON handling, HTTP logic, computation — prefer writing a short script (Python, Node, shell, etc.) and executing it (e.g. via a heredoc or by writing a file then running it) rather than forcing everything into a single command. A timeout (default 120s, max 600s) applies. Avoid commands needing interactive input."
++	prompt := fmt.Sprintf("The command runs through the shell, so you are not limited to one command: chain steps with && or ;, use pipes, and pass multi-line scripts or heredocs. For anything beyond a simple one-liner — loops, parsing, string/JSON handling, HTTP logic, computation — prefer writing a short script (Python, Node, shell, etc.) and executing it (e.g. via a heredoc or by writing a file then running it) rather than forcing everything into a single command. A timeout (default %ds, max 600s) applies. Avoid commands needing interactive input.", int(defTimeout.Seconds()))
+ 	if !BackgroundTasksDisabled() {
+ 		props["run_in_background"] = map[string]any{
+ 			"type":        "boolean",
+@@ -71,6 +74,36 @@
+ 	return permission.AskUser("run shell command: " + in.Command)
+ }
+ 
++// defaultForegroundTimeout is how long a foreground command may run before the
++// tool hands control back to the agent.
++//
++// Why 60s by default (was 120s): a foreground command that hangs blocks the
++// agent for the whole timeout, and the agent cannot do anything useful while it
++// waits — no planning, no writing findings down, no reacting to a finding it
++// already has. The shorter the block, the sooner the agent regains control.
++// The SDK already moves an over-long foreground command to the background, so
++// shortening this does NOT lose the command: it returns immediately and the
++// agent reads the output later.
++//
++// AGENT_CORE_TOOL_TIMEOUT_SEC overrides it; the value is clamped to [5s, 600s].
++// The tool description and prompt are generated from the RESOLVED value, so the
++// contract shown to the model never contradicts the behaviour.
++func defaultForegroundTimeout() time.Duration {
++	d := 60 * time.Second
++	if v := strings.TrimSpace(os.Getenv("AGENT_CORE_TOOL_TIMEOUT_SEC")); v != "" {
++		if n, err := strconv.Atoi(v); err == nil && n > 0 {
++			d = time.Duration(n) * time.Second
++		}
++	}
++	if d < 5*time.Second {
++		d = 5 * time.Second
++	}
++	if d > 600*time.Second {
++		d = 600 * time.Second
++	}
++	return d
++}
++
+ func runBash(ctx context.Context, input json.RawMessage, tc *ToolContext) (Result, error) {
+ 	var in struct {
+ 		Command         string `json:"command"`
+@@ -83,7 +116,7 @@
+ 	if strings.TrimSpace(in.Command) == "" {
+ 		return Errorf("Error: command is required"), nil
+ 	}
+-	timeout := 120 * time.Second
++	timeout := defaultForegroundTimeout()
+ 	if in.TimeoutMS > 0 {
+ 		timeout = time.Duration(in.TimeoutMS) * time.Millisecond
+ 		if timeout > 600*time.Second {
