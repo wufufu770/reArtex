@@ -1,0 +1,41 @@
+--- a/compaction/compaction.go
++++ b/compaction/compaction.go
+@@ -42,6 +42,19 @@
+ 	// KeepRecent is the number of recent messages AutoCompact always preserves as
+ 	// the un-summarized tail (default 8). MicroCompact uses its own microKeepRecent.
+ 	KeepRecent int
++	// AutoCompactRatio, when > 0, moves the AutoCompact trigger EARLIER: the
++	// threshold becomes min(default threshold, effectiveWindow * AutoCompactRatio).
++	//
++	// Why: with a large context window the default threshold sits very close to
++	// the edge, so the summary has to compress a lot of already-stale history in
++	// one go, and the turn that crosses the line is the turn that loses the most.
++	// Proactively compacting earlier keeps each summary cheap and the loss
++	// bounded.
++	//
++	// It can only move the trigger EARLIER, never later: the ratio is always
++	// combined with min(), so a small ratio can never relax the default. 0 keeps
++	// the default behavior.
++	AutoCompactRatio float64
+ }
+ 
+ func (c *Config) defaults() {
+@@ -109,7 +122,17 @@
+ 		return 13000
+ 	}
+ }
+-func (c *Compactor) autoThreshold() int  { return c.effectiveWindow() - c.buffer() }
++func (c *Compactor) autoThreshold() int {
++	base := c.effectiveWindow() - c.buffer()
++	// An explicit ratio may only pull the trigger EARLIER (min), never push it
++	// later: relaxing the default would be a silent policy change.
++	if r := c.cfg.AutoCompactRatio; r > 0 && r < 1 {
++		if t := int(float64(c.effectiveWindow()) * r); t > 0 && t < base {
++			return t
++		}
++	}
++	return base
++}
+ func (c *Compactor) microThreshold() int { return c.effectiveWindow() * 6 / 10 }
+ 
+ // maxTurnGrowth == claude-code estimateMaxTurnGrowth: min(maxOutput,20000)+15000.
