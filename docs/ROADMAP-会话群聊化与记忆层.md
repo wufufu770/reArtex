@@ -1,7 +1,7 @@
 <!--
-本文件是「会话群聊化 + 记忆层 + 出网治理补齐」的方案书（设计之记录；§6 已实施，§1-§5/§7/§10 待实施）。
-它与交付目录里的 session-groupchat-proposal.md 同源；仓库内这一份把本机绝对路径与个人
-私有标识换成了通用占位，以便公开评审。
+本文件是「会话群聊化 + 记忆层 + 出网治理补齐」的方案书（设计之记录）。
+与交付目录里的 session-groupchat-proposal.md 同源；仓库内这一份把本机绝对路径与个人
+私有标识换成通用占位，以便公开评审。
 -->
 
 # 方案书 · 会话群聊化 + 任务大厅优化 + 出网治理补齐
@@ -500,6 +500,8 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 - 记忆层不是安全旁路：从记忆读入的内容一律当**不可信输入**（可能来自工具输出、可能是被污染的经验）⇒
   记忆不能扩大工具权限，不能绕过 SoD 裁决 ⇒ 写路径必须有出处校验（§10.5 的第 8 条）。
 - `db` 不 import `agent`；`internal/sod` 不 import `agent`/`server`；DDL 幂等。
+- **记忆是「提示」，不是「安全机制」**：记忆可查看、可编辑、可禁用（见 §11.1）；
+  必须强制的规则属于代码常量与 hook，不属于记忆文件。两者不可互相替代。
 
 ## 八、红线（沿用既有纪律）
 
@@ -696,6 +698,102 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 
 ⇒ **结论：记忆层不构成独立的第五期，而是第四期（sessions 实体化）的延伸** ⇒
 建议把二者合并为「会话 + 记忆」一个大期，否则会出现两套 session 概念。
+
+---
+
+## 十一、MiniMax 官方工程笔记的吸收结论（2026-11-03）
+
+> 来源：MiniMax 官方技术博客的公开镜像（`agent.minimax.io/docs/techblog`，同一系列英文版；
+> 飞书那篇需登录且 cookie 已失效）。原文全 6 篇分 4 个单元并行精读，并把每条机制
+> 对到 reArtex 的真实代码上。**本节每一条 reArtex 侧的断言都由我亲自复核过**（不只依赖单元结论）。
+
+### 11.1 「五层记忆」的真相（跨产品的口径收敛）
+
+五篇笔记与业界实现（Claude Code / Letta MemFS / MiniMax MCode / Codex）反复收敛到**同一套四层上下文分类**：
+
+| 层 | 载体 | 生命周期 | 谁负责 |
+|---|---|---|---|
+| **① 工作上下文** | 当前对话 + 工具结果 + 推理 | 单次请求 | compaction / context editing 只动这层 |
+| **② 会话产物** | 进度文件、todo、设计文档、研究笔记、git commit | 跟随任务，做完可归档 | **交接的主载体** |
+| **③ 项目记忆** | `AGENTS.md` / `CLAUDE.md`（构建命令、代码约定、已知坑） | 跨会话，每次会话开始加载、压缩后重注入 | 建议 < 200 行，**同一个坑犯两次才加** |
+| **④ 个人/全局记忆** | 偏好与习惯（跨项目） | 跨项目 | Claude Code 的 auto memory：`MEMORY.md` 只是索引，只加载前 200 行或 25KB，详情在主题文件里按需读 |
+
+三条被反复强调的规则（**可作为 reArtex 记忆层的验收口径**）：
+1. **记忆必须是索引**，不要把内容全塞进上下文；索引常驻、详情按需读。
+2. **「热规则」要有独立预算**：有一次记忆文件超预算被截断，**恰好把写在最上面的重要规则截掉了**，模型和人都没发现 ⇒ 教训是「截断必须响亮」。
+3. **记忆分层不重叠**：一次会话里达成的共识未必是项目级的；项目级共识未必适用于所有项目。**进度、todo、临时事件属于「会话产物」，不属于长期记忆**。
+4. 记忆本身是摘要，**会错** ⇒ 必须可查看、可编辑、可禁用；「CLAUDE.md 是上下文，不是强制」——必须强制的规则属于 hook。
+
+### 11.2 已复核的三条吸收项（定稿）
+
+#### 吸收项 1（P0，S）：`{{.Now}}` 是平台自己递的刀，必须改掉
+
+**事实（已复核）**：
+- `{{.Now}}` 被作为**可插入变量暴露给用户**：`server/server_mgmt.go:2125-2127`，描述「服务端当前时间（每次运行实时刷新；可与固定起始时间相减判断已用时长）」，示例 `2026-08-11 14:30:00 CST`。
+- 它渲染进 **system prompt 的开头**：`agent/prompt.go:25-30` `nowStr()` = `time.Now().Format("2006-01-02 15:04:05 MST")`（**秒级精度**），经 `PlannerVars/WorkerVars/MainVars/GoalsVars`（`agent/prompt.go:18-21`）注入。
+- **主 agent 每轮重拼 system**：`agent/mainagent.go:103-104` `mainAgentSystem(...)` 带 `Now: nowStr()`；`:134` `deferredSystem(mainAgentSystem(...))`；`:188-191` 注释明写「each Chat is a fresh session」⇒ **每一轮 system 都带一个变化的秒级时间戳**。
+- chat agent 同理（`agent/chat.go:93,170`），并且 system 里还拼了 `groupDigest`（群邮箱摘要，会变）。
+- SDK 自己的 system-reminder 反而是**日期粒度**（`third_party/norma/agentcore/agentcore.go:400-407`，`time.Now().Format("2006-01-02")`），且是作为**第一条消息**插入（`harness/query.go:784-786`）⇒ 一天变一次，代价可忽略。
+
+**问题**：笔记的核心警告是「**最前面 + 每轮都变的内容是最贵的**」。`{{.Now}}` 恰好允许用户把这种内容放在最前面；一旦用户模板引用了它，**主 agent / chat agent 每轮都废掉整个前缀缓存**（含工具定义与全部历史）⇒ 而这两个角色恰恰是长对话、历史最长的角色。
+
+**改法（P0，S）**：
+1. **把 `{{.Now}}` 从 system 变量降级为「每轮 user 消息里的时间」**：在 system prompt 里不再提供 `Now`；改为在组装本轮 user 输入时追加一行 `当前时间：…`（与笔记建议一致：时间随 user 消息走，不进 system）。
+2. **保留「固定起始时间」的能力**：笔记建议用「固定起始 + 当前时间相减」算已用时长 ⇒ 那就把**起始时间**放进 system（每轮稳定），把**当前时间**放进 user turn。
+3. **给模板校验加一条硬规则**：DB 里的 system 模板若引用 `{{.Now}}`，**直接拒绝保存**并给出原因（否则用户会亲手造出每轮废缓存的 system）。
+4. **把秒级降到分钟级**（笔记 PR #459 的做法）：分钟精度足够判断「最近 N 小时」，且同一分钟内稳定。
+
+#### 吸收项 2（P0，S）：transcript 写失败是**静默**的
+
+**事实（已复核）**：`third_party/norma/transcript/transcript.go` 的 `Writer` 有 `Err()`，但**全仓库没有任何一处读它**（`grep -rn "\.Err()"` 命中的全是 `ctx.Err()`，与此无关）⇒ **transcript 落盘失败会被吞掉**，用户侧表现为「会话记录少了一段」，且没有任何告警。
+
+**改法**：在 transcript 写入路径上把 `Err()` 向上冒泡到 agent 终止原因（`agent/terminalreason.go` 已有 `TerminalReason` 机制可复用）⇒ 失败必须变成**可见的终止原因**，而不是悄悄少一段历史。
+
+#### 吸收项 3（P1，M）：补上「上下文预算」这一层（reArtex 现在只有「压缩阈值」没有「输入上限」）
+
+**事实（已复核）**：reArtex 的压缩**已经是 token 驱动的**（不是按轮数）：`third_party/norma/compaction/compaction.go` 有 `reservedForSummary`（= `min(MaxOutputTokens, 20000)`）、`effectiveWindow`、分级 `buffer`（50000 / 30000 / 13000）、`autoThreshold`、`microThreshold`（= `effectiveWindow*6/10`）、`maxTurnGrowth`（= `reserved + 15000`）、`predictiveOver`；token 估计**优先用上一次响应的 `input_tokens`**，无则退化为 `chars/4*4/3`。
+
+**缺什么（笔记有、reArtex 没有）**：
+1. **没有「输入上限 L」与「压缩阈值 T」两个分离的概念** ⇒ 笔记的
+   `L = max(1, min(floor(0.95×C), C − R, C − O_eff − S))`、
+   `T = min(L, max(1, C − min(2R, floor(C/4))))`（默认 `R=16384`、`S=2048`）
+   这套「输入准入 vs 提前压缩」的分层，reArtex 是混在一起的 ⇒ 缺少一个**准入闸门**：
+   请求（system + 工具定义 + 消息）组装完后，若超过 L 就应当**拒绝准入**并报错，
+   而不是等它撞上 provider 的 4xx 再回头压。
+2. **没有任何字节计量**（token 估计是 `chars/4`，noa 那侧是字符数）⇒ 笔记的
+   「字节上限」与「序列化后大小不得大于压缩前」这两条准入检查没有对应物。
+3. **没有 usage anchor**：reArtex 只记「上一次响应的 input_tokens」，**没有绑定**
+   provider / API / model / system+工具指纹 / 历史纪元 / 锚定消息 id ⇒ 换模型或换
+   提示词后，旧估计会被继续沿用而失真。
+4. **压缩的产物归档已经有很好的实现**：`third_party/norma/noa`（`RenderArchive` /
+   `ArchiveFileName` / `ArchiveTierDir`）+ 准入检查（`checkSizeGate`、`validateSummary`、
+   `MinCompressRange=5000`、`MaxCompressAttempts=3`、`PreserveRecentTokens=5000`、
+   `Truncate.Threshold=0.95`）+ 溢出学习（`noaadapter/overflow.go` 的 `ParseOverflowWindow`，
+   `armedFloor()` = 实测窗口×0.95）⇒ **这一层不必重做**，只需补「准入闸门 + 字节计量 + anchor 绑定」。
+5. **度量基座已经存在**：`db/commands.go:287-288`、`db/conversation.go:16-17` 已落
+   `cache_read_tokens` / `cache_write_tokens` ⇒ 「每轮缓存命中率」现在就能算 ⇒
+   **吸收项 1 的效果可以当场度量**，不必等改造。
+
+### 11.3 与现有设计的冲突点（明说，不打圆场）
+
+| # | 冲突 | 处置 |
+|---|---|---|
+| 1 | **planner 已经做对了**：态势块放**本轮 user 输入**、system 只留静态规划正文（`agent/planner.go:323` 及「move-out 让 system 每轮稳定、更利于缓存」的注释）⇒ 笔记的建议在这里**已经落地** | 保持；把 planner 的做法**推广**到 main/chat agent（与吸收项 1 同源） |
+| 2 | **worker 反着做，而且是刻意的**：`agent/worker.go:428-430` 明写「system 每次 run 都重新拼一遍…混入 per-intent 易变数据、失去跨意图缓存复用；**这是刻意的取舍（意图丢失比省 token 严重得多）**」 | **不改**。worker 一个 run = 一个意图，跨意图缓存复用本来就不存在；而「意图信息不能被压缩掉」是更硬的约束。笔记的批评在这里不适用 ⇒ 不引入冲突 |
+| 3 | 笔记主张「记忆必须**可查看、可编辑、可禁用**」；而 reArtex 的安全边界原则是「关键约束进**代码常量**，不进可热改存储」 | 二者**不冲突**：记忆是**提示**，不是边界。记忆可编辑；**边界不可编辑**。这一条要写进 §8 红线，避免后续有人把记忆做成安全机制 |
+| 4 | 笔记建议把「压缩失败」显式暴露（`POST_ADMISSION_FAILED`）；reArtex 的失败语义是 fail-closed | 一致 ⇒ 直接沿用 reArtex 的终止原因机制表达 |
+| 5 | 笔记的「每轮 user 消息里带时间」意味着**每轮消息内容都变** ⇒ 若不缓存前缀，历史每轮都要重算 | 需与吸收项 1 一并落地：**分钟精度**（同一分钟内不变）+ 只在 user 侧 ⇒ 命中率高 |
+
+### 11.4 本节新增的定稿项（并入 §9.1）
+
+| # | 议题 | **定稿** | 理由 |
+|---|---|---|---|
+| 13 | `{{.Now}}` 暴露在 system 变量里 | **降级为每轮 user 消息里的时间（分钟精度）**；DB system 模板引用 `{{.Now}}` **拒绝保存**；「固定起始时间」留在 system | 笔记的核心警告 + 主/chat agent 每轮重拼 system ⇒ 每轮废前缀缓存 |
+| 14 | transcript 写失败被静默吞掉 | **冒泡为可见的终止原因** | 失败必须可见；会话记录缺段是最难排查的一类问题 |
+| 15 | 上下文只有压缩阈值、没有输入准入上限 | **补「准入闸门 L」与「压缩阈值 T」分层 + 字节计量 + usage anchor 绑定**（归档层复用已有 noa，不重做） | 笔记的公式可直接落地；准入与压缩分层后，「撞 provider 4xx 再回头压」变成「组装完即判定」 |
+| 16 | 记忆可编辑 vs 边界不可编辑 | **写入 §8 红线**：记忆是提示、不是安全机制 | 两套原则各自成立，但要写清边界，否则会被混用 |
+
+---
 
 ## 附：调研与勘察的原始出处
 
