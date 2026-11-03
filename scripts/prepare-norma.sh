@@ -18,8 +18,15 @@ cd "$ROOT"
 
 MODULE_PATH="github.com/Autumn-27/norma"
 TARGET_DIR="third_party/norma"
-PATCH_REL="patches/norma-privilege-drop.patch"
-PATCH_ABS="$ROOT/$PATCH_REL"
+# 补丁集合：patches/ 下所有 norma-*.patch，按文件名排序依次应用。
+#
+# 为什么支持多个：本地依赖树（third_party/norma）是 gitignore 的生成物，每次都要
+# 重新生成 ⇒ 任何对它的改动都必须以**可评审的补丁**形式落在仓库里，否则会被下一次
+# 生成悄悄冲掉。原来只支持一个补丁，于是每加一处改动就只能改脚本或手改生成目录 ——
+# 两者都会在重新生成时丢失。
+#
+# 顺序即依赖顺序：靠后的补丁可以假定靠前的已应用。
+PATCH_GLOB="patches/norma-*.patch"
 
 fail() {
 	printf 'prepare-norma: %s\n' "$*" >&2
@@ -27,7 +34,11 @@ fail() {
 }
 
 [ -f go.mod ] || fail "当前目录不是 Go 模块根目录（找不到 go.mod）"
-[ -f "$PATCH_ABS" ] || fail "缺少补丁文件 $PATCH_REL"
+PATCHES=()
+while IFS= read -r p; do
+	[ -n "$p" ] && PATCHES+=("$p")
+done < <(ls -1 "$ROOT"/$PATCH_GLOB 2>/dev/null | sort)
+[ "${#PATCHES[@]}" -gt 0 ] || fail "找不到任何补丁（$PATCH_GLOB）"
 
 # 版本以 go.mod 的 require 行为准（replace 指向本地目录，模块缓存里的原版才是补丁目标）。
 VERSION="${NORMA_VERSION:-}"
@@ -66,30 +77,36 @@ cp -a "$SRC_DIR" "$TARGET_DIR"
 chmod -R u+w "$TARGET_DIR"
 
 apply_patch() {
+	# $1 = 补丁绝对路径
+	local patch_abs="$1"
 	# git apply 在仓库子目录里会把补丁路径当成相对「仓库根目录」的路径，命中不到就
 	# 静默跳过（退出码仍是 0）。所以统一从仓库根目录跑，并用 --directory 指到目标树。
 	if command -v git >/dev/null 2>&1; then
-		if git apply --check -p1 --directory="$TARGET_DIR" "$PATCH_ABS" >/dev/null 2>&1; then
-			git apply -p1 --directory="$TARGET_DIR" "$PATCH_ABS"
+		if git apply --check -p1 --directory="$TARGET_DIR" "$patch_abs" >/dev/null 2>&1; then
+			git apply -p1 --directory="$TARGET_DIR" "$patch_abs"
 			return $?
 		fi
 	fi
 	# 兜底：patch 只认当前目录，没有 git 的仓库语义。
 	if command -v patch >/dev/null 2>&1; then
-		if (cd "$TARGET_DIR" && patch -p1 --dry-run --forward < "$PATCH_ABS") >/dev/null 2>&1; then
-			(cd "$TARGET_DIR" && patch -p1 --forward < "$PATCH_ABS" >/dev/null)
+		if (cd "$TARGET_DIR" && patch -p1 --dry-run --forward < "$patch_abs") >/dev/null 2>&1; then
+			(cd "$TARGET_DIR" && patch -p1 --forward < "$patch_abs" >/dev/null)
 			return $?
 		fi
 	fi
 	return 1
 }
 
-if ! apply_patch; then
-	rm -rf "$TARGET_DIR"
-	cp -a "$SRC_DIR" "$TARGET_DIR"
-	chmod -R u+w "$TARGET_DIR"
-	fail "补丁 $PATCH_REL 没有干净地应用到 ${MODULE_PATH}@${VERSION}；已把 $TARGET_DIR 还原成未打补丁的原版"
-fi
+for p in "${PATCHES[@]}"; do
+	rel="${p#"$ROOT"/}"
+	if ! apply_patch "$p"; then
+		rm -rf "$TARGET_DIR"
+		cp -a "$SRC_DIR" "$TARGET_DIR"
+		chmod -R u+w "$TARGET_DIR"
+		fail "补丁 $rel 没有干净地应用到 ${MODULE_PATH}@${VERSION}；已把 $TARGET_DIR 还原成未打补丁的原版"
+	fi
+	printf 'prepare-norma: 已应用补丁 %s\n' "$rel" >&2
+done
 
 # 补丁确实落到树上的标志：降权 helper 在，五处 spawn 点都接上了它。
 [ -f "$TARGET_DIR/tool/privdrop/privdrop.go" ] || fail "补丁应用后仍缺 tool/privdrop/privdrop.go，补丁内容不对？"
@@ -97,4 +114,4 @@ for site in tool/bash.go tool/shell_session.go tool/task.go tool/ripgrep.go mcp/
 	grep -q 'privdrop.ProcAttr()' "$TARGET_DIR/$site" || fail "补丁应用后 $site 里没有 privdrop.ProcAttr()，补丁内容不对？"
 done
 
-printf 'prepare-norma: %s@%s 已就位 → %s（补丁 %s 已应用）\n' "$MODULE_PATH" "$VERSION" "$TARGET_DIR" "$PATCH_REL"
+printf 'prepare-norma: %s@%s 已就位 → %s（已应用补丁：%s）\n' "$MODULE_PATH" "$VERSION" "$TARGET_DIR" "${PATCHES[*]#$ROOT/}"

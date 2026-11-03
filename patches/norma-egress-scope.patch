@@ -1,0 +1,35 @@
+--- a/tool/webfetch.go
++++ b/tool/webfetch.go
+@@ -161,8 +161,17 @@
+ 	// proxy-caused reason (closed tunnel / failed CONNECT / TLS or HTTP2 mismatch):
+ 	// it bypasses the configured proxy so a recording/MITM hiccup doesn't fail an
+ 	// otherwise-reachable URL. nil when no proxy is configured (nothing to bypass).
++	//
++	// WHY IT IS OPT-IN (default off, fail-closed): the direct retry leaves the
++	// machine with no task-identity token and no recording proxy on the path ⇒ the
++	// request is neither scope-checked nor captured. A proxy hiccup would then
++	// silently become an ungoverned egress path — exactly the failure mode the
++	// egress-scope contract forbids ("a proxy that is down must deny, not bypass").
++	// Scope rejection itself never reaches this branch: the proxy answers with an
++	// HTTP status, while proxyLikelyErr only matches transport-level errors.
++	// Set NORMA_WEBFETCH_DIRECT_FALLBACK=1 to opt in explicitly.
+ 	var direct *http.Client
+-	if cfg.Proxy != "" {
++	if cfg.Proxy != "" && webFetchDirectFallbackEnabled() {
+ 		direct = newFetchClient(WebFetchConfig{InsecureTLS: cfg.InsecureTLS})
+ 	}
+ 	return func(ctx context.Context, input json.RawMessage, _ *ToolContext) (Result, error) {
+@@ -489,3 +498,13 @@
+ 	}
+ 	return append(in[:n:n], fmt.Sprintf("… (%d more)", len(in)-n))
+ }
++
++// webFetchDirectFallbackEnabled reports whether the no-proxy retry is allowed.
++//
++// Default OFF: the direct retry bypasses the recording proxy, so the request
++// leaves the machine with no task-identity token — neither scope-checked nor
++// captured. Set NORMA_WEBFETCH_DIRECT_FALLBACK=1 to opt in explicitly.
++func webFetchDirectFallbackEnabled() bool {
++	v := strings.TrimSpace(os.Getenv("NORMA_WEBFETCH_DIRECT_FALLBACK"))
++	return v == "1" || strings.EqualFold(v, "true")
++}
