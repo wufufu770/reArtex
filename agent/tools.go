@@ -57,7 +57,14 @@ type ToolSet struct {
 	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore // company store (optional)
 	ts              *db.ExplorationStore
-	worker          string
+	// memoryDB 是记忆层（方案 B）的访问句柄；nil = 记忆层未启用。
+	//
+	// 为什么单独一个句柄而不是复用 ts：记忆的作用域键（task-hall / chat）跟探索
+	// 图的作用域不是一回事，硬塞进 ExplorationStore 会把两个作用域模型搅在一起。
+	memoryDB *db.DB
+	// findingValidator 是 db 层验证裁决的注入点；nil = 复核层未接线。
+	findingValidator FindingValidator
+	worker           string
 	// memberAgentKey 是【调用者的成员身份】（群成员的 agent key，如 pentest/reporter）。
 	//
 	// 为什么不用 worker 字段当成员身份：worker 是执行器名（work#N / planner / human），
@@ -175,6 +182,9 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
+// SetMemoryDB 注入记忆层句柄（nil = 关闭记忆层）。
+func (t *ToolSet) SetMemoryDB(pg *db.DB) { t.memoryDB = pg }
+
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
 
 // scopeTaskID 解析本次读写的【有效任务上下文】——范围判定的唯一输入。

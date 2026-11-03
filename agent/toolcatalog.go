@@ -123,14 +123,14 @@ func BuiltinToolSeeds() []ToolSeed {
 // 「模型以为能传的参数」与「代码里实际读的参数」不是一回事。
 var sodReviewToolSeeds = []ToolSeed{
 	{
-		Key:  "list_adversarial_review_pending",
-		Desc: "读【对抗复核队列】（needs_review）：职责分离链把可疑的工具调用拦在这里，等你（证释者）判断。只读，不改任何状态。",
+		Key:    "list_adversarial_review_pending",
+		Desc:   "读【对抗复核队列】（needs_review）：职责分离链把可疑的工具调用拦在这里，等你（证释者）判断。只读，不改任何状态。",
 		Schema: sodReviewListSchema,
 		Agents: []string{"redteam"},
 	},
 	{
-		Key:  "submit_adversarial_review_result",
-		Desc: "结案一条【对抗复核队列】里的复核项：给出结论与依据，把它从待查队列里清掉。status 只能是 resolved（已查清）或 dismissed（无需追查）。",
+		Key:    "submit_adversarial_review_result",
+		Desc:   "结案一条【对抗复核队列】里的复核项：给出结论与依据，把它从待查队列里清掉。status 只能是 resolved（已查清）或 dismissed（无需追查）。",
 		Schema: sodReviewSubmitSchema,
 		Agents: []string{"redteam"},
 	},
@@ -242,9 +242,9 @@ var advisoryStrategyToolSeeds = []ToolSeed{
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"name":     map[string]any{"type": "string", "description": "策略短名"},
-				"summary":  map[string]any{"type": "string", "description": "一句话描述"},
-				"reason":   map[string]any{"type": "string", "description": "为什么值得提议"},
+				"name":        map[string]any{"type": "string", "description": "策略短名"},
+				"summary":     map[string]any{"type": "string", "description": "一句话描述"},
+				"reason":      map[string]any{"type": "string", "description": "为什么值得提议"},
 				"strategy_id": map[string]any{"type": "integer", "description": "改已有策略时填它的 id"},
 			},
 			"required": []string{"name", "summary", "reason"},

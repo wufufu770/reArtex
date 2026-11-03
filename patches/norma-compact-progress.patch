@@ -1,0 +1,38 @@
+--- a/compaction/compaction.go
++++ b/compaction/compaction.go
+@@ -326,7 +326,7 @@
+ 		ActiveSkills:       skillNames(reinjected),
+ 	})
+ 	summaryMsg := llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{
+-		llm.TextBlock(compactContinuationPreamble + summary),
++		llm.TextBlock(compactContinuationPreamble + summary + "\n\n" + compactProgressReminder),
+ 	}}
+ 	// Retain everything before tailStart (non-destructive); insert the new
+ 	// boundary + summary (+ re-injected skills) just before the preserved recent tail.
+@@ -343,6 +343,26 @@
+ // the digest with "Summary:\n".
+ const compactContinuationPreamble = "This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:\n\n"
+ 
++// compactProgressReminder is appended right after the compaction summary.
++//
++// Why this exists: a compaction DROPS the middle of the conversation. If the
++// agent's progress lived only inside that conversation, the progress dies with
++// it — and the agent then either believes it has done nothing, or worse,
++// redoes work it already finished.
++//
++// So the durable record has to live OUTSIDE the compacted context: the agent
++// writes it to a file (and reads that file back at the start of a session).
++// That file is the thing compaction cannot take away.
++//
++// The wording names the concrete tool so the instruction is actionable: the
++// model must be able to follow it without guessing a tool name.
++const compactProgressReminder = "IMPORTANT — this conversation was just compacted, so the middle of it is gone. " +
++	"Before you continue, write down what you have already accomplished: call the record_progress tool " +
++	"once per finished step (it is durable and survives compaction), and read back any progress file " +
++	"you wrote earlier before repeating a step. Do not assume a step was never done — check the progress " +
++	"receipts and the file first. If you are unsure whether something was already done, treat it as not done " +
++	"and verify before acting."
++
+ // Skill re-injection budget: per-skill and total token caps for verbatim skill
+ // instructions re-surfaced after a compaction boundary (mirrors claude-code's
+ // 5K/25K policy). Most-recently-invoked skills win when the total is exceeded.
