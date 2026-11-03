@@ -5,6 +5,136 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.4.6] - 2026-11-03
+
+会话实体化、记忆层、产出级校验的一批落地。**功能面扩张**，执行模型（意图/工种模型）、
+对外 API 形态与部署形态保持上一版原样。
+
+### 会话
+
+#### 新增的功能
+
+- **会话成为一等对象**：新增 `sessions` / `session_members` / `session_attachments` /
+  `session_messages` 四张表（`db/schema_session.sql`）+ 访问层 + HTTP 接口 + 前端会话化界面。
+  兼容做法是**不做破坏性迁移**：`conversations` 不动结构，只加一列 `session_id`；现有会话每条
+  自成一个 session 并回填一行成员；`chat_groups` 保留为 `kind='task_hall'` 的 session。
+- **会话列表默认不再按 agent 分组**：默认分组轴改为「置顶 / 今天 / 更早」；「按 agent 分组」
+  降级为**可选视图且默认关闭**，agent 从分组轴变成**筛选维度**。旧对话列表仍可切回旧视图。
+- **命名三轨**：用户显式名 > 生成标题 > 默认显示名（`目录名-2位后缀`）。生成标题**永不覆盖**
+  用户显式名；自动命名从「首行截 40 字符」升级为「模型摘要 + 首行兜底」。
+- **成员花名册与在场状态**：`session_members` 记 `role`（dispatcher / member / observer）与
+  `presence`（idle / listening / working / blocked / left），支持会话中热加入 / 退出。
+- **消息与收据条**：消息 `kind` 分 note / request / answer / finding / escalation / receipt；
+  收据条（`receipt_of` + `receipt_action`：已接收 / 已记下 / 已推迟）贴在原消息下、**不占气泡**。
+- **会话 ↔ 工件双向关联**：`session_attachments` 支持 task / task_hall / strategy / asset /
+  finding / pr / external，并可由工件反查会话。
+
+### 发现
+
+#### 新增的功能
+
+- **finding 级验证态 + 返工边**：finding 节点的三态收敛为 `pending` / `confirmed` /
+  `dismissed`；新增 `rework` 边（finding → 产出它的那条 intent）。
+- **裁决归确定性层**：提出人不得自验（`ErrSoDReviewSelfCertification`）、已结案不得翻案、
+  `dismissed → rework` 必须给理由。
+- **`replay_evidence_id` 落库**：该列早已存在但**全仓库无写者**，永远为空 ⇒ SoD 的 tier2 检查
+  只能判它不一致；现在记录路径会写入。
+
+### 记忆
+
+#### 新增的功能
+
+- **追加式记忆层（方案 B）**：新增 `memory_index` / `memory_topic` / `memory_write_log`
+  （`db/schema_memory.sql`）。索引 **append-only + 版本化**（库层证明不覆盖）、带作用域、
+  可导出为纯文本（可查看 / 可编辑 / 可禁用）、可退役。
+- **dream 只提交 diff**：不整体重写索引 —— 记忆也是摘要，用更好的摘要去修一个摘要往往不работает。
+- **不做 per-agent 个人记忆层**：记忆归会话 / 任务大厅所有；`written_by` 只作审计，不是归属。
+  per-agent 记忆 = N 份发散副本 + 写冲突。
+
+### Agent
+
+#### 新增的功能
+
+- **任务级进度回执**：两个工具 `record_progress`（写）与 `list_progress_receipts`（读），
+  外加运行结束时的确定性回执。回执落在 `activity.kind='progress'`（自由文本列 ⇒ **不需要新
+  DDL**）。**阻塞不走回执**，走 `intercept_pending` 那条路 —— 阻塞是状态机，归确定性层。
+- **产出级复核（对抗终止从工具层搬到产出层）**：新增 `validate_finding` 工具，它**只把裁决送进
+  确定性层**，裁决本身由 db 做；复核器用**注入回调**（零编译期耦合）。
+- **压缩后提醒模型写进度**：`patches/norma-compact-progress.patch` 让压缩后的 preamble 点名
+  真实工具键 `record_progress` —— vendored SDK 是生成树，只能走补丁。
+- **Team 值得性闸**：`agent/team.go` 的 `JudgeTeamWorthiness` 是纯函数（不查库 / 不调模型 /
+  不出网 / 不读可变全局状态），输入全部是图上事实。**不拆硬底线** —— 闸只决定并行形态
+  （不值得时 `MaxParallel=1`），不决定要不要干活。
+
+### 出网治理
+
+#### 修复的问题
+
+- **范围校验从未真正接线**：`traffic.SetEgressScope` 在整个仓库里只被 traffic 包的测试调用过，
+  生产路径上范围判定恒为「未注入」⇒ worker 的出网一直是全拒，那套范围校验形同虚设。
+  `server/manager.go` 现在在 `traffic.Open` 成功后注入 `DBEgressScope`。**这只放宽不收紧**：
+  范围判定不可用时仍然拒绝（fail-closed 不变）。
+- **三类角色此前不带任务身份**：planner / 主 agent / 对话 agent 的出网不受任务范围校验
+  （只有 worker 带令牌）。现在统一走 `agent/egressTaskID`：显式 > 0 ⇒ 用它；否则回落 ctx 的
+  `RunInfo.TaskID`；都没有 ⇒ 0 ⇒ **不伪造身份**。
+- **web_fetch 也没带身份**：新增 `agent/egressProxyURL`（把令牌放进代理 URL 的 userinfo），
+  四类角色的 `WebFetchProxy` 全部改用它。
+
+#### 新增的功能
+
+- **web_search 范围豁免清单**：搜索走自己的出口代理，不经录制代理也不带任务身份 ⇒ 完全不受
+  任务范围校验。治理办法不是让它受范围校验（搜索服务商的域名不在任务资产范围里，会把工具
+  直接打死），而是引入**范围豁免清单**（`internal/sodpolicy.EgressScopeExemptHostList`，
+  **编译期常量**，不是 DB 行、不是 settings 项）：清单内 ⇒ 平台基础设施、不受任务范围管辖；
+  清单外 ⇒ 仍放行（工具不能坏）但按「未归属出网」留痕；**判不出目的地 ⇒ fail-closed**。
+- **未覆盖通道清单公开**：`GET /settings/egress-governance` 列出当前未被范围校验覆盖的通道，
+  「系统配置」页可见。
+
+### 运行时
+
+#### 新增的功能
+
+- **压缩触发点可提前**：新增 `ARTEX_COMPACT_TRIGGER_RATIO`（0~1）→ `Config.AutoCompactRatio`，
+  触发点变为 `min(默认阈值, effectiveWindow × ratio)`。**只能提前、不能推后**（实现里只在
+  t < base 时才采用 ⇒ 放松默认策略必须改代码，不可能靠改环境变量悄悄生效）。默认 ratio=0 ⇒
+  行为完全不变。
+- **前台命令上限 60s**：`AGENT_CORE_TOOL_TIMEOUT_SEC` 落地，钳制在 5s–600s。工具描述与提示词里
+  的数字**动态生成** —— 改行为却让模型看到过期数字等于骗模型。
+- **总预算不重置钉成回归测试**：复核结论是系统本来就做到了（绝对 deadline + 夹逼剩余时间），
+  但此前无测试保护，本次补 6 组用例钉住。
+- **web_fetch 直连兜底改为显式开启**：SDK 在代理**连接层**出错时会直连重试一次。改为
+  `NORMA_WEBFETCH_DIRECT_FALLBACK=1` 才开启，默认配置下代理失败**必须失败**、不得静默直连。
+
+### 策略
+
+#### 新增的功能
+
+- **节点级策略真外键**：`exploration_nodes.strategy_id` 改为真 FK（`ON DELETE SET NULL`：策略删了
+  只丢链接、不删节点），打通探索图与策略图 —— 「哪条策略奏效」从此查得到。
+
+### CI
+
+#### 修复的问题
+
+- **干净克隆里 Go 门禁形同虚设**：`go.mod` 用 `replace ... => ./third_party/norma`，而
+  `third_party/` 被 gitignore ⇒ 干净克隆里 `go build` 第一步就报「replacement directory does
+  not exist」，**后面的 vet / 测试全被跳过**。`scripts/prepare-norma.sh` 现在在模块缓存缺原版时
+  自己下载，并在 `ci.yml` / `release.yml` 的 Go 构建之前各插入一步。
+- **只改文档的提交被误判成 lint 失败**：lint 门改为自己算改动文件（`git diff --name-only`），
+  空集明确跳过；`git diff` 在仓库根目录跑，避免 `cd web` 后 pathspec 变成 `web/web` 匹配不到。
+- **前端满足 biome 门禁**：会话化改造后的前端文件通过仓库的 biome 棘轮门（class 排序 /
+  冗余解构 / 布尔 `||` 的逐行抑制并写明理由）。
+
+### 待落地（**不在本版内**）
+
+- **（占位，安全加固批次）** 后台命令跨 run 持久（`ARTEX_TASK_DIR` + 进程级注册表 + 回收者）、
+  受限运行角色（数据库侧最小权限）、跨会话共享上下文、会话收件条与线程、记忆混合检索面等条目
+  **正在并行落地中，尚未形成提交**。合入后再补写本节；在此之前它们**不计为本版内容**。
+- **Phase 0 Task 4（DB 直连靠 DB role 挡）** 改的是数据库权限模型 ⇒ 需要停机窗口 + 凭据轮换
+  配套，按既有红线不擅自执行。
+- **P0-④(c) 后台任务跨 run 持久** 需要宿主目录、跨 session 注册表、任务表当真相来源与回收者
+  四件同时到位 —— 缺回收者只会换来一个进程泄漏 ⇒ 与上一条同批处理。
+
 ## [0.4.1] - 2026-10-28
 
 W-A 波次：把「已登记的活路径」逐条闭合或如实降级。**功能面不变**，动的是边界、
