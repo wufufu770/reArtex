@@ -33,6 +33,7 @@
 DO $grant$
 DECLARE
     v_role text := COALESCE(NULLIF(current_setting('artex.app_role', true), ''), 'artex_app');
+    member_role text;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
         RAISE NOTICE '受限运行角色 % 不存在，跳过授权（先跑 scripts/db-role-bootstrap.sh）', v_role;
@@ -66,14 +67,16 @@ BEGIN
     -- 6) 成员关系清零：受限角色不得是任何别的角色的成员。
     --    NOINHERIT 只挡住「自动继承」，挡不住 `SET ROLE` —— 只要它是某个高权限
     --    角色的成员，直连的人一条 SET ROLE 就又提权回去了。
-    FOR r IN
-        SELECT r.rolname
+    -- ⚠️ 循环变量不能与查询里的表别名重名（原来两者都叫 r ⇒ PL/pgSQL 报
+    --    "loop variable of loop over rows must be a record variable"）。
+    FOR member_role IN
+        SELECT gr.rolname
         FROM pg_auth_members m
-        JOIN pg_roles r ON r.oid = m.roleid
+        JOIN pg_roles gr ON gr.oid = m.roleid
         WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = v_role)
     LOOP
-        EXECUTE format('REVOKE %I FROM %I', r, v_role);
-        RAISE NOTICE '已撤销受限角色 % 的成员身份：%', v_role, r;
+        EXECUTE format('REVOKE %I FROM %I', member_role, v_role);
+        RAISE NOTICE '已撤销受限角色 % 的成员身份：%', v_role, member_role;
     END LOOP;
 
     RAISE NOTICE '已把 % 收敛到最小权限（CONNECT + USAGE + DML + 序列 USAGE，无 CREATE、无所有权、无成员关系）', v_role;
