@@ -1,0 +1,179 @@
+--- a/tool/websearch.go
++++ b/tool/websearch.go
+@@ -9,6 +9,7 @@
+ 	"net/http"
+ 	"net/url"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/Autumn-27/norma/permission"
+@@ -31,6 +32,45 @@
+ 	Search(ctx context.Context, query string, limit int) ([]SearchResult, error)
+ }
+ 
++// WebSearchScopeFunc judges one web_search destination BEFORE the request
++// leaves the machine.
++//
++// host is the destination the provider is about to talk to; backend is the
++// provider's name (ddgs / brave-free / tavily / deepseek). allowed=false
++// stops the request; reason is surfaced to the caller.
++//
++// WHY THE HOST DECIDES (rather than the SDK): whether a destination is
++// platform infrastructure or an unattributed egress is a policy question the
++// host application owns. The SDK must not hard-code a destination allowlist:
++// that list would be a security boundary living in a vendored dependency.
++type WebSearchScopeFunc func(ctx context.Context, host, backend string) (allowed bool, reason string)
++
++// webSearchScopeHook is the process-wide scope hook (nil = no hook installed).
++//
++// It exists so the host can install ONE hook at startup instead of threading a
++// callback through every session's Options. Installed before any session runs,
++// read-only afterwards.
++var webSearchScopeHook atomic.Pointer[WebSearchScopeFunc]
++
++// SetWebSearchEgressScope installs the process-wide web_search scope hook.
++//
++// Passing nil removes it (back to no scope check, the pre-hook behaviour).
++func SetWebSearchEgressScope(fn WebSearchScopeFunc) {
++	if fn == nil {
++		webSearchScopeHook.Store(nil)
++		return
++	}
++	webSearchScopeHook.Store(&fn)
++}
++
++// webSearchScope returns the installed hook (nil = none installed).
++func webSearchScope() WebSearchScopeFunc {
++	if p := webSearchScopeHook.Load(); p != nil {
++		return *p
++	}
++	return nil
++}
++
+ // WebSearchConfig selects and configures the active search backend.
+ type WebSearchConfig struct {
+ 	// Backend chooses the provider: "ddgs" (DuckDuckGo scrape, no key),
+@@ -62,6 +102,12 @@
+ 	// Prefer CACert. See WebFetchConfig for the full semantics.
+ 	CACert      string
+ 	InsecureTLS bool
++	// EgressScope, when set, judges every search destination before the request
++	// goes out. Empty falls back to the process-wide hook installed by
++	// SetWebSearchEgressScope; both empty means no scope check (the pre-hook
++	// behaviour, kept so an uninstalled host degrades to today's behaviour
++	// instead of breaking the tool).
++	EgressScope WebSearchScopeFunc
+ }
+ 
+ // NewWebSearch builds the web_search tool for the configured backend. It returns
+@@ -109,19 +155,19 @@
+ 	client := newFetchClient(WebFetchConfig{Proxy: cfg.Proxy, CACert: cfg.CACert, InsecureTLS: cfg.InsecureTLS})
+ 	switch backend {
+ 	case "ddgs":
+-		return &ddgsProvider{client: client, endpoint: ddgsEndpoint}, nil
++		return scopeSearchProvider(&ddgsProvider{client: client, endpoint: ddgsEndpoint}, ddgsEndpoint, cfg.EgressScope), nil
+ 	case "brave-free":
+ 		key := strings.TrimSpace(cfg.BraveAPIKey)
+ 		if key == "" {
+ 			return nil, fmt.Errorf("web_search: backend %q requires a Brave Search API key", backend)
+ 		}
+-		return &braveProvider{apiKey: key, client: client, endpoint: braveEndpoint}, nil
++		return scopeSearchProvider(&braveProvider{apiKey: key, client: client, endpoint: braveEndpoint}, braveEndpoint, cfg.EgressScope), nil
+ 	case "tavily":
+ 		key := strings.TrimSpace(cfg.TavilyAPIKey)
+ 		if key == "" {
+ 			return nil, fmt.Errorf("web_search: backend %q requires a Tavily API key", backend)
+ 		}
+-		return &tavilyProvider{apiKey: key, client: client, endpoint: tavilyEndpoint}, nil
++		return scopeSearchProvider(&tavilyProvider{apiKey: key, client: client, endpoint: tavilyEndpoint}, tavilyEndpoint, cfg.EgressScope), nil
+ 	case "deepseek":
+ 		key := strings.TrimSpace(cfg.DeepSeekAPIKey)
+ 		if key == "" {
+@@ -135,12 +181,63 @@
+ 		if model == "" {
+ 			return nil, fmt.Errorf("web_search: backend %q requires a model name", backend)
+ 		}
+-		return &deepseekProvider{apiKey: key, model: model, client: client, endpoint: deepseekMessagesURL(base)}, nil
++		endpoint := deepseekMessagesURL(base)
++		return scopeSearchProvider(&deepseekProvider{apiKey: key, model: model, client: client, endpoint: endpoint}, endpoint, cfg.EgressScope), nil
+ 	default:
+ 		return nil, fmt.Errorf("web_search: unknown backend %q (want \"ddgs\", \"brave-free\", \"tavily\", or \"deepseek\")", backend)
+ 	}
+ }
+ 
++// scopeSearchProvider wraps a provider with the destination-scope hook.
++//
++// The hook runs BEFORE the provider issues its request, so a denied
++// destination never leaves the machine. With no hook installed the provider is
++// returned untouched: an uninstalled host keeps today's behaviour instead of
++// breaking the tool.
++func scopeSearchProvider(inner searchProvider, endpoint string, scope WebSearchScopeFunc) searchProvider {
++	if scope == nil {
++		scope = webSearchScope()
++	}
++	if scope == nil {
++		return inner
++	}
++	host := ""
++	if u, err := url.Parse(endpoint); err == nil {
++		host = u.Hostname()
++	}
++	return &scopedSearchProvider{inner: inner, host: host, scope: scope}
++}
++
++// scopedSearchProvider is the scope-checking wrapper around a search provider.
++type scopedSearchProvider struct {
++	inner searchProvider
++	host  string
++	scope WebSearchScopeFunc
++}
++
++func (p *scopedSearchProvider) Name() string { return p.inner.Name() }
++
++func (p *scopedSearchProvider) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
++	allowed, reason := p.scope(ctx, p.host, p.inner.Name())
++	if !allowed {
++		return nil, fmt.Errorf("web_search 出网被拒（目的地 %q）：%s", p.host, reason)
++	}
++	return p.inner.Search(ctx, query, limit)
++}
++
++// Timeout forwards the inner provider's wall-clock cap.
++//
++// It MUST exist on the wrapper: the runner type-asserts for it, and a wrapper
++// without it would silently fall back to the runner's default, which would cut
++// off the deepseek backend's longer budget. When the inner provider declares no
++// cap, the wrapper reports the runner's default so behaviour is unchanged.
++func (p *scopedSearchProvider) Timeout() time.Duration {
++	if tp, ok := p.inner.(interface{ Timeout() time.Duration }); ok {
++		return tp.Timeout()
++	}
++	return defaultWebSearchTimeout
++}
++
+ // WebSearchProbe runs a one-off search with cfg and returns the results, bypassing
+ // the tool/permission layer. It's the entry point for a connectivity/config check
+ // (e.g. a "test" button): same backend selection + proxy/TLS handling as the
+@@ -156,6 +253,12 @@
+ 	return prov.Search(ctx, query, limit)
+ }
+ 
++// defaultWebSearchTimeout is the wall-clock cap for a plain search request.
++//
++// It lives in one place because the scope wrapper must report the same default
++// when the inner provider declares no cap of its own.
++const defaultWebSearchTimeout = 30 * time.Second
++
+ func webSearchRunner(prov searchProvider) func(context.Context, json.RawMessage, *ToolContext) (Result, error) {
+ 	return func(ctx context.Context, input json.RawMessage, _ *ToolContext) (Result, error) {
+ 		var in struct {
+@@ -179,7 +282,7 @@
+ 		// Hard wall-clock cap so a slow/rate-limited backend can't hang the agent
+ 		// loop. A backend that runs a model call per search (deepseek) declares a
+ 		// longer cap of its own; plain HTTP backends keep the 30s default.
+-		wall := 30 * time.Second
++		wall := defaultWebSearchTimeout
+ 		if tp, ok := prov.(interface{ Timeout() time.Duration }); ok {
+ 			wall = tp.Timeout()
+ 		}
