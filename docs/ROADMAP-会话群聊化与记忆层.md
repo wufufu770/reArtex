@@ -795,6 +795,114 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 
 ---
 
+### 11.5 Notes 03（压缩 vs 记忆）+ Notes 04（Bash 前台 → 后台任务）
+
+#### 11.5.1 关键机制（逐字常量）
+
+- **03 的核心规则**：压缩**只改模型看到的**，不改用户的历史；压缩与上下文编辑**只作用于第 ① 层**（工作上下文）。
+  记忆必须是**索引**；「热规则要有自己的预算」；「**截断必须响亮**」（有一次记忆文件超预算，**恰好把写在最上面的重要规则截掉了**，模型和人都没发现）；「**给记忆划范围**」（进度/todo/临时事件属于会话产物，不属于长期记忆）；「**记忆也是摘要，它会错** ⇒ 必须可查看、可编辑、可禁用」；「`CLAUDE.md` 是上下文，不是强制」——**必须强制的规则属于 hook**。
+- **04 的核心规则**：前台最多等 **60 秒**（远低于 5 分钟缓存寿命）；后台任务总预算 **3600 秒**、**前台时间计入总预算且不重置**；**task table 是真相来源**（聊天记录不是）；完成时注入 `<background-task-completion-reminder>`；进程重启后未完成的任务标 **`lost`**；**反轮询**（工具描述里写明「会自动通知你，不要反复轮询」）；通知上限 **32 条 / 8KB**、速率限制 **3 次/60 秒**；重试退避 **1s/2s/5s → 60s（最多 5 分钟）**；watchdog **1 小时**；前台输出预算 **24KB**；完成后把经验写进 memory。
+
+#### 11.5.2 reArtex 映射（**含三处必须纠正的事实**）
+
+| # | 事实（已复核） | 坐标 |
+|---|---|---|
+| ⚠️**纠正 1** | **`agent/compaction.go` 不是对话压缩**，而是**探索图的冷摘要**（cold-node → digest，调用 `AddDigest` / `SupersedeDigests`，**会改写持久化的知识图谱**）。真正的对话压缩在 **`third_party/norma/compaction`**（vendored SDK，**在树内 ⇒ 可改可评审**） | `agent/compaction.go`；`third_party/norma/compaction/compaction.go` |
+| ⚠️**纠正 2** | 方案书 §10.3 写「`third_party/norma/memory` … ARTEX 完全没有 import 它」**不准确**：`norma/agentcore` import 了它并接进每个 session，**但 ARTEX 从不配置 `Options.Memory`** ⇒ 路径是「死的」而非「不存在」 | `third_party/norma/agentcore/agentcore.go` |
+| ⚠️**纠正 3** | `norma/memory` 是**错误的捐赠者**：无索引上限、无 scope、无 supersession、截断不响亮 ⇒ **违反文章规则与我们自己 §10.5-2** ⇒ **方案 B（DB 版）是对的** | `third_party/norma/memory/memory.go` |
+| ✅ 已有 | 对话压缩已是**非破坏 + 只改模型视图**：`llm.MessagesForAPI` 只送边界之后的消息，完整历史仍在消息数组里；MicroCompact 清工具结果**只动 result、保留 tool_use/result 配对**；压缩后有 preamble | `third_party/norma/compaction/compaction.go` |
+| ✅ 已有 | **热规则已有自己的预算**：`agent_prompts` → `SystemPrompt` 位于消息数组**之外** ⇒ 压缩永远截不到它 ⇒ 天然满足文章「热规则独立预算」 | `agent/worker.go`、`agent/mainagent.go` |
+| ✅ 已有 | Bash 后台任务**在 reArtex 其实是活的**：SDK 有 `run_in_background`、`RunForeground` 超时自动转后台、`taskoutput`/`taskstop`/`tasklist`、通知以 UserText 注入**会话尾部**、`AGENT_CORE_DISABLE_BACKGROUND_TASKS` 全局开关、`DisableBackgroundTasks` per-session 开关（reArtex **只在 goals agent 上开了**）⇒ worker/planner/mainagent/chat 都能用后台任务 | `third_party/norma/tool/bash.go`、`third_party/norma/tool/task.go`、`third_party/norma/agentcore/agentcore.go`、`agent/goals.go` |
+| ⚠️ 缺口 | **最贵的潜在 bug**：压缩把边界前消息移出 API 视图 ⇒ **落在那里的后台任务通知会消失**。文章的解法（task table 当真相来源 + 完成提醒）正是解药 | — |
+| ⚠️ 缺口 | **真实成本 bug（非理论）**：模型可要 `timeout_ms: 600000`（10 分钟）> Anthropic 5 分钟缓存 TTL ⇒ 前台阻塞超过缓存寿命 ⇒ 缓存重算 | `third_party/norma/tool/bash.go` |
+| ⚠️ 缺口 | 文章的 3600s 后台预算在 reArtex **达不到**：`agents.run_seconds` 默认 **1200**，且 `Session.Close()` 会杀掉后台任务 | `db/schema.sql`、`third_party/norma/agentcore/agentcore.go` |
+| ⚠️ 缺口 | **默认压缩触发点太晚**：reArtex 在窗口 ~93% 才触发，**没有「更早压缩」的旋钮** ⇒ 文章的「1M 窗口下别等自动压缩，要提前压」是 P0 不是锦上添花 | `third_party/norma/compaction/compaction.go` |
+
+#### 11.5.3 与现有设计的冲突（明说）
+
+1. **方案 B 的「dream 任务重写索引」与文章冲突**：文章说「**记忆也是摘要**，用更好的摘要去修一个摘要往往不работает」⇒ ⇒ **索引必须 append-only / 版本化；dream 只提 diff，不整体重写索引**；且索引要导出成纯文本（可查看/可编辑/可禁用）。
+2. **方案 B 会造出第二个常驻层**：`agent_prompts` 已经是安全的「热规则层」⇒ 必须写死不变式：**规则住在 `agent_prompts`，索引只放检索指针**。
+3. **文章四层里的第 ④ 层（个人/跨项目记忆）在渗透系统应整层丢弃**：「能从代码推断出来的就不要记录」，跨项目偏好没有持久价值。
+4. **命名陷阱（波及面最大）**：一个仓库里两个相反意义的 "compaction" ⇒ **把 `agent/compaction.go` 改名为 `agent/cold_digest.go`** 并标注「知识图谱压缩」，避免后来者继承错误的保证。
+5. 文章的 Verifier 有交付裁决权、Agent 与人类同权（可 prompt/abort/kill 别的 agent）⇒ **都不能照抄**（见 §11.6 冲突 2、3）。
+
+### 11.6 MiniMax Agent Team：把「对抗终止触发」从工具层搬到**产出层**
+
+#### 11.6.1 关键机制（逐字引用）
+
+- 「**Leader 负责把用户目标转化为任务结构**。**Worker 负责执行具体子任务**。**Verifier 负责把『完成了』变成『可以交付』**。」
+- 「**WorkerAgent 与 VerifierAgent 是对抗关系。双方都以运行结束为目标，但一方运行结束会引发另一方的运行开始。**」
+- 「Team Engine 会按照 producing、verifying、done 去管理每一个任务。**当 verifying 未通过时，Team Engine 会重新唤起 producing 节点继续修改。**」
+- 「用户发消息时，预期是秒级反馈；但很多任务天然需要分钟级甚至小时级执行」⇒ 长任务与对话上下文分离；「**session 不等于模型 context window，长任务需要可恢复的 session log 作为外部上下文对象**」。
+- 「本次执行的经验也可以沉淀为记忆、Skill」。
+
+#### 11.6.2 reArtex 映射：零件全在，**只缺闭环那一段**
+
+| 零件 | 已有（坐标） |
+|---|---|
+| 对抗者 redteam | `db/db.go:357` |
+| `needs_review` 对抗复核队列 | `db/schema_sod.sql` |
+| 确定性裁决纪律「模型只提议，确定性层裁决」 | `internal/sod/types.go` |
+| `rel='derived_from'` 表达返工 | `db/schema.sql`（探索边约束） |
+| worker→planner 的**边沿唤醒**（"一方的结束引发另一方"） | `server/engine.go`（`runRound("edge")`） |
+| **缺的** | **verifier→worker 这一条腿**：finding 落库即 `confirmed`，**没有产出级的验证态与返工边** |
+
+⇒ 文章的核心洞察「**双方都以运行结束为目标，但一方运行结束会引发另一方的运行开始**」在 reArtex 里**已经以 worker→planner 的边沿唤醒存在**，只是没有 verifier→worker 这一条腿。
+
+#### 11.6.3 最高价值的一条（定稿）
+
+**把「对抗终止触发」从工具层搬到产出层（finding 级），并把「不得自证」从注释变成确定性代码。**
+
+理由：① 渗透平台最贵的失败模式不是漏了攻击面，而是**报告里一条不可复现的漏洞**；② reArtex 全部零件已就位，缺的只是闭环；③ 文章的「结束引发开始」在 reArtex 已有对应实现；④ 平台核心风险是「自主运行久了不可信」，这条改动直接买信任。
+
+⚠️ 现状里的一个真问题：`db/sod.go` 的复核结论落库**没有校验「结案人 ≠ 提出人」** ⇒ **提出者可以给自己盖章** ⇒ 而 `internal/sodpolicy` 的注释里明写着「needs_review 交回给提出者复核等于自证」⇒ **规则只停在注释层** ⇒ 这是全链最便宜、价值最高的一处加固。
+
+#### 11.6.4 优先级（定稿）
+
+| 优先级 | 事项 | 改动位置 | 工期 | 不采纳的风险 |
+|---|---|---|---|---|
+| **P0** | 强制「**结案人 ≠ 提出人**」 | `db/sod.go` 的复核结论 UPDATE 加 `AND source_agent <> $3` + 受影响行数断言（≈15 行 + 1 个测试） | **S** | 全链的「对抗」只停在提示词层，提出者能给自己盖章 —— 正是整条 SoD 链要防的事 |
+| **P0** | **finding 级验证态 + 返工边** | `db/schema.sql` 的 node state 三态 + 探索边 `derived_from` | **M** | planner 能用 worker 自产 fact 去 `prove_goal` **自证**；长任务累积未验证结论 |
+| **P0** | **提前压缩触发**（不等到窗口 93%） | `third_party/norma/compaction`（在树内） | **S** | 晚期的压缩会把最重要的内容压没；文章称之为「context rot」 |
+| **P0** | **前台 60s / 总 3600s 不可重置 + 后台任务脱离 `run_seconds`** | `third_party/norma/tool/bash.go` + `task.go` + `db/schema.sql` 的 `run_seconds` 语义 | **S–M** | 前台阻塞超过 5 分钟缓存 TTL ⇒ 缓存重算（真实成本）；且后台任务必被 `run_seconds` 砍掉 |
+| **P0** | **task table 当真相来源 + 压缩后完成提醒 + `lost` 标记** | `third_party/norma/tool/task.go` + 压缩后的提醒注入 | **M** | **最贵的潜在 bug**：压缩把落在边界前的后台任务通知移出 API 视图 ⇒ 模型永远不知道任务已完成 |
+| **P1** | verifier 接进探索环（保持「只提议」，FAIL ⇒ 生成新 intent） | `server/engine.go` 的 `claimIntent` + `agent/planner.go` 的意图生成 | **L** | 上面两条没有执行者 |
+| **P1** | 产出可复现性前置（finding 落库时必填证据引用） | `findings` 的 `replay_evidence_id` 列**已存在** | **S–M** | 漏洞证据链与留痕脱钩，报告不可复核 |
+| **P1** | **任务级进度/回执契约**（`kind='progress'`；阻塞走 `intercept_pending`） | `server/engine.go` | **M** | 长任务在 UI 上像挂了 —— 文章称此为**头号用户反馈** |
+| **P1** | 压缩后告诉模型「上下文被自动管理，请把进度写文件」 | `third_party/norma/compaction` 的 preamble | **S** | 模型不知道该把进度外化 ⇒ 重要信息随压缩丢失 |
+| **P2** | Team **值得性闸**（放在硬底线**之前**判定，不拆底线） | `agent/planner.go` 的硬底线判定 | **S** | 简单任务也走全 Team，ROI 崩 |
+| **P2** | 打通两张图（`exploration_nodes.strategy_id` 真 FK） | `db/schema.sql` | **M** | 「哪条策略奏效」永远查不到；curator 的 utility 视图看不到执行结果 |
+| **P2** | 改名 `agent/compaction.go` → `agent/cold_digest.go` | 纯改名 + 注释 | **S** | 波及面最大的命名陷阱 |
+| ❌ | **per-agent 经验记忆** | **不采纳** | — | 与 §9 第 6 条（记忆归 task-hall）冲突；且 `strategies` 已是 per-company 的「Skill」，作用域更大 |
+
+#### 11.6.5 与现有设计的冲突（明说）
+
+1. **文章的「每个 Agent 各自越变越好」（per-agent 成长）与已定稿方案冲突** ⇒ **不抄**。
+2. **文章的 Verifier 有交付裁决权，与我们的铁律冲突** ⇒ Leader/Worker/Verifier 三角**必须**重写成「提议 → 确定性裁决」，不能让 LLM 的 FAIL 直接驱动状态机。
+3. **文章的「Agent 与人类同权」（agent 可 prompt/abort/kill 别的 agent）不能抄** ⇒ reArtex 的等价面只有 planner 的 `steer_work`/`kill_work` + 工具层「只能 deny、不能 abort」⇒ **abort/kill 保持人类 + 编排器专属**。
+4. **文章「不该鼓励凡事开 Team」与我们的硬底线相反**（planner 规定「目标未达成且无 open/running 意图 ⇒ 本轮**必须**产出至少一个意图」）⇒ 这条底线是防探索停摆的承重墙，**不能按文章删**；正确吸收方式是**加「值得性」闸**。
+5. **文章的「并行信息检索」整节在 reArtex 几乎无落点**（web_search 明确留在出网治理未覆盖清单里；渗透场景的并行探索 reArtex 已有）⇒ **低优先，别硬造**。
+6. **文章的共享留言板（文件白板）弱于我们的 DB 版**（`session_messages` + `receipt_of` 收据条，可审计、可回放）⇒ **保留 DB 版**。
+
+### 11.7 本次调研纠正了方案书的两处事实错误
+
+| 位置 | 原写法 | 纠正 |
+|---|---|---|
+| §10.3 | 「`third_party/norma/memory` 存在…但 **ARTEX 完全没有 import 它**」 | `norma/agentcore` **import 了它并接进每个 session**，只是 **ARTEX 从不配置 `Options.Memory`** ⇒ 路径是「死的」不是「不存在」。⇒ 既有好用的捐赠者，但它是**错误的**捐赠者（无索引上限/无 scope/无 supersession/截断不响亮）⇒ **方案 B（DB 版）仍然正确，但工作量估算要按「自建」算，不能按「接线」算** |
+| §10.3 关系矩阵 | 「`strategy_evidence` …**无级联外键**」 | `strategy_id` **有** `REFERENCES strategies(id) ON DELETE CASCADE`；**无 FK 的是 `ref_id`**（裸 TEXT）⇒ 结论（findings↔strategies 是 PARTIAL、任务归档会带走证据链）**成立**，但表述要改准，否则实施时会误删 FK |
+
+### 11.8 记忆层方案 B 的修正（据 03 的规则收紧）
+
+| # | 修正 | 理由 |
+|---|---|---|
+| 1 | **索引 append-only / 版本化；dream 只提 diff，不整体重写索引** | 文章：「记忆也是摘要，用更好的摘要去修一个摘要往往不работает」⇒ 重写索引 = 摘要的摘要 |
+| 2 | **索引导出为纯文本**（可查看/可编辑/可禁用） | 文章：记忆必须可查看、可编辑、可禁用 |
+| 3 | **写死不变式：规则住在 `agent_prompts`，索引只放检索指针** | 否则方案 B 会造出第二个常驻层，而 `agent_prompts` 已经是安全的热规则层 |
+| 4 | **索引硬上限 + 截断必须响亮**（超限时**拒绝写入**并提示，绝不静默丢弃） | 文章的「热规则被截掉、模型和人都没发现」事故；也是我们 §10.5-2 的原话 |
+| 5 | **第 ④ 层（个人/跨项目记忆）整层丢弃** | 渗透系统没有跨项目偏好要持久化；「能从代码推断出来的就不要记录」 |
+
+---
+
 ## 附：调研与勘察的原始出处
 
 - 代码勘察：会话/对话实现（`chat/page.tsx` 分组逻辑、`server/conversations.go` 派发链、
