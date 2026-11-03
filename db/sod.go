@@ -100,6 +100,17 @@ const (
 // ErrSoDReviewNotFound 表示要结案的对抗复核项不存在。
 var ErrSoDReviewNotFound = errors.New("对抗复核项不存在")
 
+// ErrSoDReviewSelfCertification 表示结案人就是提出人 —— 对抗复核被自证。
+//
+// 为什么必须有这条：internal/sodpolicy 早就写明「对抗证伪必须由对抗者做：
+// needs_review 交回给提出者复核等于自证」，但那只停在注释层：结案的 UPDATE 从来
+// 没有校验过「结案人 ≠ 提出人」。于是提出者可以给自己的异常动作盖章，整条 SoD 链
+// 的「对抗」就只剩提示词层面的默契。
+//
+// 这条把注释变成确定性约束：数据库层拒绝自证，调用方拿到的也是可区分的错误
+// （而不是「项不存在」那种会让人误以为队列被清空的重试理由）。
+var ErrSoDReviewSelfCertification = errors.New("提出人不得为自己的异常动作结案（对抗复核必须由对抗者做）")
+
 // AdversarialReviewItem 是 needs_review 队列的一项。
 type AdversarialReviewItem struct {
 	ID               int64
@@ -326,14 +337,30 @@ func (d *DB) ResolveAdversarialReview(id int64, by, resolution, status string) e
 	default:
 		return fmt.Errorf("对抗复核状态只能是 pending/claimed/resolved/dismissed，收到 %q", status)
 	}
+	// 守卫：结案人不得等于提出人（见 ErrSoDReviewSelfCertification）。
+	//
+	// 写成 SQL 条件而不是先查后写，是为了避免「查出来是提出人 → 放行」的竞态：
+	// 并发下两个结案请求都可能读到同一份 source_agent。UPDATE 的 WHERE 里直接排除，
+	// 由数据库在同一条语句内判定 ⇒ 不存在检查与写入之间的窗口。
+	//
+	// 两边为空时（source_agent 与 by 都是 ''）不算自证：那是「拿不到身份」的降级
+	// 情形，不是「自己给自己盖章」，不该在这里硬失败。
 	res, err := d.Exec(`
 UPDATE sod_adversarial_review_pending
    SET status=$2, claimed_by=$3, resolution=$4, updated_at=now()
- WHERE id=$1`, id, status, by, resolution)
+ WHERE id=$1
+   AND NOT (source_agent <> '' AND $3 <> '' AND source_agent = $3)`, id, status, by, resolution)
 	if err != nil {
 		return fmt.Errorf("结案对抗复核项失败: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		// 0 行有两种原因，必须区分：项不存在，还是被自证守卫挡下。
+		// 调用方对这两种情况的处理完全不同（前者可重试，后者必须换对抗者）。
+		var proposer string
+		if qerr := d.QueryRow(`SELECT source_agent FROM sod_adversarial_review_pending WHERE id=$1`, id).
+			Scan(&proposer); qerr == nil && proposer != "" && proposer == by {
+			return ErrSoDReviewSelfCertification
+		}
 		return ErrSoDReviewNotFound
 	}
 	return nil

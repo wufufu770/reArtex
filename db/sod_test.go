@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"reflect"
@@ -443,5 +444,58 @@ WHERE table_schema='public' AND table_name='findings' AND column_name='replay_ev
 	}
 	if !reflect.DeepEqual(ev.AssetIDs, []int64{7, 11}) {
 		t.Fatalf("资产归属不一致: %v", ev.AssetIDs)
+	}
+}
+
+// TestAdversarialReviewRejectsSelfCertification 断言「提出人不得给自己的异常动作
+// 结案」。
+//
+// 这是把 internal/sodpolicy 里那句注释（「对抗证伪必须由对抗者做：needs_review 交回
+// 给提出者复核等于自证」）变成确定性约束的地方：以前结案的 UPDATE 从不校验结案人身份，
+// 于是提出者可以给自己盖章 —— 整条 SoD 链的「对抗」就只剩提示词层面的默契。
+func TestAdversarialReviewRejectsSelfCertification(t *testing.T) {
+	d := sodOpen(t)
+	taskID := sodTestTask(t, d, "SoD 自证守卫")
+	id, err := d.EnqueueAdversarialReview(&AdversarialReviewItem{
+		TaskID:           &taskID,
+		SourceAgent:      sodpolicy.RedteamAgentKey, // 提案人就是 redteam 自己
+		ToolName:         "Bash",
+		PayloadDigest:    "payload-digest-self-cert",
+		PayloadPreview:   "«redacted»",
+		AnomalyFlag:      true,
+		AnomalyReason:    "命令里有管道与重定向",
+		StructuredIntent: json.RawMessage(`{"action_type":"shell"}`),
+	})
+	if err != nil {
+		t.Fatalf("入队失败: %v", err)
+	}
+
+	// 提出人自己结案 ⇒ 必须被拒，且错误要可区分（否则调用方会当成「项不存在」去重试）。
+	err = d.ResolveAdversarialReview(id, sodpolicy.RedteamAgentKey, "自证", SoDReviewResolved)
+	if !errors.Is(err, ErrSoDReviewSelfCertification) {
+		t.Fatalf("提出人自证应被拒，实际 err=%v", err)
+	}
+
+	// 拒绝后状态必须仍是 pending（不能被半写坏）。
+	var status string
+	if err := d.QueryRow(`SELECT status FROM sod_adversarial_review_pending WHERE id=$1`, id).
+		Scan(&status); err != nil {
+		t.Fatalf("读状态失败: %v", err)
+	}
+	if status != SoDReviewPending {
+		t.Fatalf("自证被拒后状态应为 pending，实际 %q", status)
+	}
+
+	// 换一个身份（对抗者）结案 ⇒ 应当成功。
+	if err := d.ResolveAdversarialReview(id, "redteam-verifier", "证伪不成立", SoDReviewResolved); err != nil {
+		t.Fatalf("他人结案失败: %v", err)
+	}
+	var claimedBy, resolution string
+	if err := d.QueryRow(`SELECT claimed_by, resolution FROM sod_adversarial_review_pending WHERE id=$1`, id).
+		Scan(&claimedBy, &resolution); err != nil {
+		t.Fatalf("读结案结果失败: %v", err)
+	}
+	if claimedBy != "redteam-verifier" || resolution != "证伪不成立" {
+		t.Fatalf("结案结果不对: %q/%q", claimedBy, resolution)
 	}
 }
