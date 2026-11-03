@@ -405,6 +405,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
+	// 记忆层与复核层接进 worker 循环：否则这两个能力只是「有工具没人用」。
+	// 复核走 store 级入口（自动把裁决限定在本探索内），记忆走同一个库句柄。
+	if ts != nil {
+		if pg := ts.DB(); pg != nil {
+			tsx.SetMemoryDB(pg)
+			tsx.SetFindingValidator(ts.ValidateFinding)
+		}
+	}
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {

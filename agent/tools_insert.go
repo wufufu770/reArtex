@@ -657,6 +657,11 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.searchAllWorkerTraces(), t.getWorkerTrace(),
 		// node_detail：worker 拿到 intent_id/节点 id 后可查该节点完整详情（配合上面的回看）。
 		t.nodeDetail(),
+		// 进度回执：对话会被压缩 ⇒ 进度只活在对话里就会被压缩抹掉（模型会重做已完成的
+		// 步骤，外部看起来像任务卡住）。回执落库，不随上下文消失。
+		t.recordProgress(), t.listProgressReceipts(),
+		// 记忆层（方案 B）：追加一条 / 导出索引。
+		t.rememberTool(), t.recallMemoryTool(),
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
@@ -680,6 +685,11 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.addTaskScope(),
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),
+		// 进度回执 + 记忆层：主控侧同样需要「记住做到哪了」与「读回记忆索引」。
+		t.recordProgress(), t.listProgressReceipts(),
+		t.rememberTool(), t.recallMemoryTool(),
+		// 复核：给一条 finding 下验证裁决（裁决本身由确定性层做，见 validate_finding 的说明）。
+		t.validateFindingTool(),
 	}
 }
 
