@@ -246,3 +246,41 @@ CREATE INDEX IF NOT EXISTS idx_exploration_nodes_finding_ref
 CREATE INDEX IF NOT EXISTS idx_exploration_nodes_traffic_ref
     ON exploration_nodes USING GIN ((payload->'traffic_ids') jsonb_path_ops)
     WHERE kind = 'finding' AND payload ? 'traffic_ids';
+
+-- ---------- exploration_nodes.strategy_id：打通「探索图」与「策略图」 ----------
+--
+-- 为什么需要：strategy_usage 记录的是「策略 ↔ 探索 ↔ 意图」这一层
+-- （db/strategy_proposal.go），粒度到 exploration / intent。但**节点级**没有链接
+-- ⇒ 问不出「这条 finding 是哪条策略产出的」，只能回答「这个 exploration 跑过
+-- 哪些策略」。而一个 exploration 里常常同时跑多条策略 ⇒ exploration 级不够。
+--
+-- 为什么是真外键而不是把 id 塞进 payload：payload 里存文本 id 没有引用完整性
+-- —— 策略被删后节点上还留着悬空字符串，反查只能靠文本扫描且可能命中同名字符串。
+--
+-- ON DELETE SET NULL：策略被删只丢链接，不删节点。节点是事实与结论，策略是
+-- 可替换的工作方法 ⇒ 方法没了，结论不该跟着消失。
+--
+-- ⚠️ db/schema.sql 由别的单元持有（RESERVED），所以列与约束都在本文件加，
+-- 由 EnsureStrategySchema 应用（幂等；本文件与本单元同属策略库）。
+--
+-- ⚠️ **历史行不回填**：现有节点没有可靠的「属于哪条策略」依据 ——
+-- strategy_usage 只有 exploration/intent 粒度，而节点 payload 里没有意图键；
+-- 硬把一个 exploration 的所有节点归给其中某一条策略 = 安静的错误归属。
+-- ⇒ 历史行保持 NULL（未知就是未知），新节点由写入路径按轮次填。
+ALTER TABLE exploration_nodes
+    ADD COLUMN IF NOT EXISTS strategy_id BIGINT;
+
+-- 外键用 DO 块做幂等（Postgres 没有 ADD CONSTRAINT IF NOT EXISTS）。
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_exploration_nodes_strategy'
+    ) THEN
+        ALTER TABLE exploration_nodes
+            ADD CONSTRAINT fk_exploration_nodes_strategy
+            FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_exploration_nodes_strategy
+    ON exploration_nodes(strategy_id) WHERE strategy_id IS NOT NULL;
