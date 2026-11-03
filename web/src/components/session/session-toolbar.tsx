@@ -1,7 +1,5 @@
 "use client";
 
-import * as React from "react";
-
 import { Bot, ListFilterIcon, SearchIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
@@ -48,7 +46,7 @@ export function SessionToolbar({ query, onQueryChange, agentOptions, resultCount
   return (
     <div className="flex flex-col gap-2">
       <div className="relative">
-        <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
+        <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={query.query}
           onChange={(event) => onQueryChange({ ...query, query: event.target.value })}
@@ -127,7 +125,7 @@ export function SessionToolbar({ query, onQueryChange, agentOptions, resultCount
           </SelectContent>
         </Select>
       </div>
-      <p className="text-muted-foreground px-1 text-xs tabular-nums">
+      <p className="px-1 text-muted-foreground text-xs tabular-nums">
         {resultCount === totalCount ? `共 ${totalCount} 个会话` : `${resultCount} / ${totalCount} 个会话`}
       </p>
     </div>

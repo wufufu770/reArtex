@@ -118,7 +118,7 @@ function SessionRow({
               onCancelRename();
             }
           }}
-          className="border-input bg-background min-w-0 flex-1 rounded-md border px-2 py-1 text-sm"
+          className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
           aria-label="重命名会话"
         />
       ) : (
@@ -130,11 +130,11 @@ function SessionRow({
           className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left"
         >
           <div className="flex min-w-0 items-center gap-1.5">
-            {pinned && <PinIcon className="text-primary size-3 shrink-0" aria-label="已置顶" />}
+            {pinned && <PinIcon className="size-3 shrink-0 text-primary" aria-label="已置顶" />}
             <span className="truncate text-sm">{sessionDisplayName(session)}</span>
             {status.label && <span className={cn("size-2 shrink-0 rounded-full", status.dot)} title={status.label} />}
           </div>
-          <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[11px]">
+          <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
             <RosterAvatars members={members} agentByKey={agentByKey} max={3} />
             <RosterNames members={members} agentByKey={agentByKey} max={2} className="min-w-0 truncate" />
             <span className="shrink-0 opacity-60">{relativeTime(session.updated_at)}</span>
@@ -149,7 +149,7 @@ function SessionRow({
           <Button
             variant="ghost"
             size="icon-sm"
-            className="text-muted-foreground shrink-0"
+            className="shrink-0 text-muted-foreground"
             aria-label={`管理会话「${sessionDisplayName(session)}」`}
           >
             <MoreHorizontalIcon />
@@ -194,15 +194,16 @@ function SessionRow({
 // SessionList 是左栏的会话列表：扁平列表 + 置顶/今天/更早分区。
 // 分区由调用方算好（groupSessions / groupSessionsByAgent / groupSessionsByAttachment）。
 export function SessionList(props: SessionListProps) {
-  const { sections, selectedId, emptyHint } = props;
+  // selectedId 不在此解构：渲染时用的是 props.selectedId（见下方 SessionRow 的 active）。
+  const { sections, emptyHint } = props;
   if (sections.length === 0) {
-    return <div className="text-muted-foreground px-2 py-6 text-center text-xs">{emptyHint ?? "暂无会话"}</div>;
+    return <div className="px-2 py-6 text-center text-muted-foreground text-xs">{emptyHint ?? "暂无会话"}</div>;
   }
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       {sections.map((section) => (
         <React.Fragment key={section.key}>
-          <div className="text-muted-foreground flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium">
+          <div className="flex items-center gap-1.5 px-2 py-1 font-medium text-[11px] text-muted-foreground">
             {section.key === "pinned" && <PinIcon className="size-3 shrink-0" />}
             {section.key === "__none__" && <Bot className="size-3 shrink-0" />}
             <span className="truncate">{section.label}</span>

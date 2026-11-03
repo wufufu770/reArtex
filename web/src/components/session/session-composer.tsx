@@ -165,7 +165,7 @@ export function SessionComposer({
               className="flex items-center gap-1.5 rounded-md border bg-muted/50 px-2 py-1 text-xs"
               title={attachment.path}
             >
-              <PaperclipIcon className="text-primary size-3 shrink-0" />
+              <PaperclipIcon className="size-3 shrink-0 text-primary" />
               <span className="max-w-[160px] truncate">{attachment.name}</span>
               {onRemoveAttachment && (
                 <button
@@ -182,7 +182,7 @@ export function SessionComposer({
         </div>
       )}
       {mention && filtered.length > 0 && (
-        <div className="bg-popover mb-2 max-h-56 overflow-y-auto rounded-md border p-1 shadow-md">
+        <div className="mb-2 max-h-56 overflow-y-auto rounded-md border bg-popover p-1 shadow-md">
           {filtered.map((target) => (
             <button
               key={target.key}
@@ -193,9 +193,9 @@ export function SessionComposer({
               }}
               className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
             >
-              <AtSignIcon className="text-muted-foreground size-3.5 shrink-0" />
+              <AtSignIcon className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{target.label}</span>
-              <span className="text-muted-foreground shrink-0 text-[11px]">{target.hint}</span>
+              <span className="shrink-0 text-[11px] text-muted-foreground">{target.hint}</span>
             </button>
           ))}
         </div>
@@ -218,6 +218,7 @@ export function SessionComposer({
               size="icon"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
+              // biome-ignore lint/nursery/useNullishCoalescing: disabled 与 uploading 都是布尔量，|| 才是「任一为真即置灰」；改成 ?? 会让上传中不置灰。
               disabled={disabled || uploading}
               title="上传文件"
               aria-label="上传文件"
@@ -255,6 +256,7 @@ export function SessionComposer({
           <Button
             size="icon"
             onClick={() => void send()}
+            // biome-ignore lint/nursery/useNullishCoalescing: 同上 —— 全是布尔量，|| 表达「任一为真即置灰」。
             disabled={disabled || sending || (!value.trim() && atts.length === 0)}
             title="发送消息"
             aria-label="发送消息"

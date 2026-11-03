@@ -23,14 +23,7 @@ export type SessionRole = "dispatcher" | "member" | "observer";
 export type SessionPresence = "idle" | "listening" | "working" | "blocked" | "left";
 
 // 会话↔工件的类型化关联（§4.4）。
-export type SessionAttachmentType =
-  | "task"
-  | "task_hall"
-  | "strategy"
-  | "asset"
-  | "finding"
-  | "pr"
-  | "external";
+export type SessionAttachmentType = "task" | "task_hall" | "strategy" | "asset" | "finding" | "pr" | "external";
 
 export interface Session {
   id: number;

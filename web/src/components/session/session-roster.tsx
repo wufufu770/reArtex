@@ -1,7 +1,5 @@
 "use client";
 
-import * as React from "react";
-
 import { Avatar, AvatarBadge, AvatarFallback, AvatarGroup, AvatarGroupCount } from "@/components/ui/avatar";
 import type { SessionMember } from "@/lib/session-types";
 import type { Agent } from "@/lib/types";
@@ -36,7 +34,7 @@ export function RosterAvatars({
   className?: string;
 }) {
   if (members.length === 0) {
-    return <span className="text-muted-foreground text-[11px]">无成员</span>;
+    return <span className="text-[11px] text-muted-foreground">无成员</span>;
   }
   const shown = members.slice(0, max);
   const rest = members.length - shown.length;
@@ -69,7 +67,7 @@ export function RosterNames({
   max?: number;
   className?: string;
 }) {
-  if (members.length === 0) return <span className="text-muted-foreground text-[11px]">无成员</span>;
+  if (members.length === 0) return <span className="text-[11px] text-muted-foreground">无成员</span>;
   const names = members.slice(0, max).map((member) => memberDisplayName(member, agentByKey));
   const rest = members.length - names.length;
   return (

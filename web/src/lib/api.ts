@@ -7,6 +7,15 @@ import type { ChatMention } from "@/lib/chat-mentions";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+  Session,
+  SessionCreateInput,
+  SessionMember,
+  SessionMessage,
+  SessionMessageInput,
+  SessionPatchInput,
+  SessionRole,
+} from "@/lib/session-types";
+import type {
   ActiveFindingRetest,
   Activity,
   Agent,
@@ -122,15 +131,6 @@ import type {
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
-import type {
-  Session,
-  SessionCreateInput,
-  SessionMember,
-  SessionMessage,
-  SessionMessageInput,
-  SessionPatchInput,
-  SessionRole,
-} from "@/lib/session-types";
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
