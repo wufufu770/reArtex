@@ -86,7 +86,7 @@ var sodReviewListSchema = obj(map[string]any{
 
 // sodReviewSubmitSchema 是 submit_adversarial_review_result 的参数 schema。
 var sodReviewSubmitSchema = obj(map[string]any{
-	"id": intp("要结案的复核项 id（list_adversarial_review_pending 返回的 id）"),
+	"id":         intp("要结案的复核项 id（list_adversarial_review_pending 返回的 id）"),
 	"resolution": str("结案结论：查清了什么 / 为什么判定无需追查（必填）"),
 	"status": map[string]any{
 		"type":        "string",
@@ -178,6 +178,10 @@ func (t *ToolSet) submitAdversarialReviewResult() actool.CoreTool {
 					db.SoDReviewResolved, db.SoDReviewDismissed, a.Status)), nil
 			}
 			if err := SodReviewStore.Resolve(a.ID, t.sodReviewActor(), resolution, status); err != nil {
+				if errors.Is(err, db.ErrSoDReviewSelfCertification) {
+					return actool.Errorf("结案被拒：你是这个复核项的提出人，不能自己给自己结案。" +
+						"对抗复核必须由对抗者做 —— 请把该项交给另一个 agent 结案"), nil
+				}
 				if errors.Is(err, db.ErrSoDReviewNotFound) {
 					return actool.Errorf("复核项不存在或已被结案：请重新读队列确认 id"), nil
 				}
