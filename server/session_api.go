@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/sessionwake"
 )
 
 const (
@@ -90,12 +92,19 @@ var sessionReceiptActions = map[string]bool{
 //
 // 也正因为名册在列表项里，§9 约束④的「按 agent 过滤」可以纯前端做（共用同一
 // 份列表数据，不额外请求）⇒ 本文件**不**提供按 agent 过滤的查询参数。
+//
+// ⚠️ 视图**直接就是响应体**（db.Session 内嵌 ⇒ 它的字段被摊平到顶层），
+// 不是 {"session": {...}} 的信封。理由：前端（web/src/lib/api.ts 的 sessions
+// 段）按「响应体本身就是 Session」来读；信封会让前端拿到一个没有 id 的对象。
 type sessionView struct {
 	*db.Session
 	Members     []db.SessionMember     `json:"members"`
 	Attachments []db.SessionAttachment `json:"attachments"`
 	// AgentCount 是在席成员数（退席的不算）。
 	AgentCount int `json:"agent_count"`
+	// GroupID 是这个会话对应的大厅 id（kind='task_hall' 时才有；老群回填出的
+	// session 会带上它 ⇒ 前端能读到额度与并发状态）。
+	GroupID *int64 `json:"group_id,omitempty"`
 }
 
 // sessionPresenceItem 是「成员在场状态」的一条对外形状。
@@ -166,7 +175,7 @@ func sessionViewOf(sess *db.Session, members []db.SessionMember, attachments []d
 	return sessionView{Session: sess, Members: members, Attachments: attachments, AgentCount: inSeat}
 }
 
-// sessionViewOfID 读一个会话的完整视图（本体 + 名册 + 关联）。
+// sessionViewOfID 读一个会话的完整视图（本体 + 名册 + 关联 + 大厅 id）。
 func sessionViewOfID(pg *db.DB, id int64) (sessionView, error) {
 	sess, err := pg.GetSession(id)
 	if err != nil {
@@ -183,7 +192,12 @@ func sessionViewOfID(pg *db.DB, id int64) (sessionView, error) {
 	if err != nil {
 		return sessionView{}, err
 	}
-	return sessionViewOf(sess, members, attachments), nil
+	view := sessionViewOf(sess, members, attachments)
+	view.GroupID, err = pg.ChatGroupIDBySession(id)
+	if err != nil {
+		return sessionView{}, err
+	}
+	return view, nil
 }
 
 // listSessions 列会话（扁平列表：按 updated_at，附 agent 名册、状态、关联摘要）。
@@ -214,10 +228,19 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "读会话关联失败: "+err.Error())
 		return
 	}
+	groups, err := pg.ChatGroupIDsBySession(ids)
+	if err != nil {
+		writeErr(w, 500, "读会话对应的大厅失败: "+err.Error())
+		return
+	}
 	views := make([]sessionView, 0, len(sessions))
 	for i := range sessions {
 		id := sessions[i].ID
-		views = append(views, sessionViewOf(&sessions[i], roster[id], attachments[id]))
+		view := sessionViewOf(&sessions[i], roster[id], attachments[id])
+		if gid, ok := groups[id]; ok {
+			view.GroupID = &gid
+		}
+		views = append(views, view)
 	}
 	writeJSON(w, 200, map[string]any{"sessions": views, "count": len(views)})
 }
@@ -301,7 +324,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "读会话失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 201, map[string]any{"session": view})
+	writeJSON(w, 201, view)
 }
 
 // sessionMemberSpec 是一个待入席成员的形状。
@@ -371,7 +394,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "读会话失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"session": view})
+	writeJSON(w, 200, view)
 }
 
 // patchSession 改会话（改名 / 改生成标题 / 钉住 / 关联增删）。
@@ -413,7 +436,12 @@ func (s *Server) patchSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "会话不存在")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"session": updated})
+	view, err := sessionViewOfID(pg, id)
+	if err != nil {
+		writeErr(w, 500, "读会话失败: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, view)
 }
 
 // deleteSession 删会话（成员、关联、消息随外键级联删除）。
@@ -440,12 +468,21 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "删会话失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": true, "id": id})
+	writeJSON(w, 200, map[string]any{"ok": true, "deleted": id, "id": id})
 }
 
 // listSessionMessages 读会话消息流（含 agent 消息、收据条、线程回复）。
 //
-// ?limit= 限单页条数（缺省 200，超出按缺省截）。
+// ?since=<id> 增量拉（只回 id 更大的消息）；?limit= 限单页条数（缺省 200）。
+//
+// 响应：items（消息数组）/ cursor（下次增量用的水位线 = 本次最大 id）/ running
+// （会话里有没有正在跑的对话）/ count。
+//
+// cursor 用**消息 id**而不是时间戳：id 是本会话内的单调序号 ⇒ 增量拉不会漏
+// 也不会重（时间戳会因同毫秒写入而漏消息）。
+//
+// running 的口径是「这个会话背后的对话有没有在跑」—— 不是 presence 的推论：
+// presence 是持久化的状态字段，没人去改它 ⇒ 用它当「正在跑」会永远返回真。
 func (s *Server) listSessionMessages(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -469,15 +506,47 @@ func (s *Server) listSessionMessages(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > sessionMessageListLimit {
 		limit = sessionMessageListLimit
 	}
-	msgs, err := pg.SessionMessages(id, limit)
+	since := int64(0)
+	if sv := strings.TrimSpace(r.URL.Query().Get("since")); sv != "" {
+		since, _ = strconv.ParseInt(sv, 10, 64)
+		if since < 0 {
+			since = 0
+		}
+	}
+	msgs, err := pg.SessionMessagesSince(id, since, limit)
 	if err != nil {
 		writeErr(w, 500, "读会话消息失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"messages": msgs, "count": len(msgs)})
+	cursor := since
+	if n := len(msgs); n > 0 {
+		cursor = msgs[n-1].ID
+	}
+	writeJSON(w, 200, map[string]any{
+		"items":   msgs,
+		"cursor":  cursor,
+		"running": s.sessionRunning(pg, id),
+		"count":   len(msgs),
+	})
 }
 
-// postSessionMessage 往会话消息流写一条消息。
+// sessionRunning 判定这个会话背后有没有正在跑的对话（前端据此决定要不要继续轮询）。
+func (s *Server) sessionRunning(pg *db.DB, sessionID int64) bool {
+	convIDs, err := pg.SessionConversationIDs(sessionID)
+	if err != nil || len(convIDs) == 0 {
+		return false
+	}
+	s.chatMu.Lock()
+	defer s.chatMu.Unlock()
+	for _, cid := range convIDs {
+		if s.chatBusy[s.convBusyKey(cid)] {
+			return true
+		}
+	}
+	return false
+}
+
+// postSessionMessage 往会话消息流写一条消息，并回报**唤醒集合**。
 //
 // 请求体：from_agent?（空 = 人）/ to_agent?（空 = 广播给全会话）/ kind? / body /
 // parent_message_id? / task_id? / intent_id? / finding_id? / receipt_of? /
@@ -488,9 +557,18 @@ func (s *Server) listSessionMessages(w http.ResponseWriter, r *http.Request) {
 // 但标成 blocked 并带 blocked_reason，不进入接收方上下文。响应里带 status /
 // blocked_reason，让调用方看得见（与 server/chat_group.go 同款处置）。
 //
-// 【唤醒与自取必须分开】（§9 约束①）：本出口只**报告**唤醒集合（wake_agents =
-// 正文里被 @ 到、且仍在席的成员），**不**代为唤醒 —— 唤醒路径与「自取」路径
-// 要分开实现、分开计量。
+// 【唤醒与自取必须分开】（§9 约束①）：本出口只**报告**两个集合，**不**代为
+// 唤醒 —— 唤醒路径与「自取」路径要分开实现、分开计量：
+//
+//	wake_agents       定向必醒（@ 到了 / 显式 to_agent，且仍在席、不是发起者）
+//	self_serve_agents 非 @ 按需自取（空闲的普通成员；不因此起任何 turn）
+//
+// 裁决本身在 internal/sessionwake（纯函数、无库无模型）⇒ 同一份输入永远得到
+// 同一份唤醒集合。
+//
+// 【@ 到不在席的 agent ⇒ 先加入再被定向】（§4.3 的热加入路径②）：本出口在写
+// 消息前把被 @ 的 agent 热加入（presence='listening'），否则「@ 必醒」在成员
+// 还没入席时就落空了。
 //
 // 【claims_authorization 不开放】：那一列只表示「发送方声称本消息携带某个已
 // 批准」，永远是不可信输入，没有任何权限门读它（db/session.go 同款纪律）⇒
@@ -549,9 +627,14 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "读会话成员失败: "+err.Error())
 		return
 	}
+	sender := strings.TrimSpace(req.FromAgent)
+	mentions := db.ParseSessionAgentMentions(strings.TrimSpace(req.Body))
+	// 热加入：@ 到不在席的 agent ⇒ 先入席再被定向（§4.3）。
+	members = hotJoinMentioned(pg, id, mentions, members, sender)
+
 	msg := &db.SessionMessage{
 		SessionID:       id,
-		FromAgent:       strings.TrimSpace(req.FromAgent),
+		FromAgent:       sender,
 		ToAgent:         strings.TrimSpace(req.ToAgent),
 		Kind:            kind,
 		Body:            strings.TrimSpace(req.Body),
@@ -566,30 +649,80 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "写会话消息失败: "+err.Error())
 		return
 	}
-	mentions := db.ParseSessionAgentMentions(msg.Body)
+	decision := sessionwake.Decide(sessionwake.Message{
+		Body:      msg.Body,
+		FromAgent: msg.FromAgent,
+		ToAgent:   msg.ToAgent,
+		Kind:      msg.Kind,
+		Blocked:   msg.Status == db.SessionMessageBlocked,
+	}, sessionWakeMembers(members))
 	writeJSON(w, 201, map[string]any{
-		"message":     msg,
-		"mentions":    mentions,
-		"wake_agents": sessionWakeAgents(mentions, members),
+		"status":            "ok",
+		"message":           msg,
+		"mentions":          decision.Mentions,
+		"everyone":          decision.Everyone,
+		"designated":        decision.Designated,
+		"wake_agents":       decision.MustWake,
+		"wake_states":       decision.WakeStates,
+		"self_serve_agents": decision.SelfServe,
 	})
 }
 
-// sessionWakeAgents 算出唤醒集合：被 @ 到、且**仍在席**的成员。
+// hotJoinMentioned 把正文里被 @ 到的、不在席的 agent 热加入会话。
 //
-// 退席的成员（left_at 有值）不在集合里 —— 叫醒一个已经走了的 agent 是白烧
-// 额度（§9 决策①：唤醒器只对「显式 @」负责，且额度是硬约束）。
-func sessionWakeAgents(mentions []string, members []db.SessionMember) []string {
+// §4.3 的加入方式②：「在会话里 @Agent名 ⇒ 若该 agent 尚未在席，先加入再被
+// 定向」。没有这一步，「@ 必醒」在成员还没入席时就落空了（裁决层只对在席的
+// 人负责 —— 叫醒一个不在席的 agent 是白烧额度）。
+//
+// 不在 agents 表里的 agent 跳过（session_members.agent_key 有外键，硬写会
+// 失败）；退席过的 agent 重新入席（AddSessionMember 会把 left_at 清空）。
+//
+// 返回更新后的名册（就地追加，不重新查库）。
+func hotJoinMentioned(pg *db.DB, sessionID int64, mentions []string, members []db.SessionMember, sender string) []db.SessionMember {
 	inSeat := map[string]bool{}
 	for _, m := range members {
 		if !m.HasLeft {
 			inSeat[m.AgentKey] = true
 		}
 	}
-	out := []string{}
 	for _, key := range mentions {
-		if inSeat[key] {
-			out = append(out, key)
+		key = strings.TrimSpace(key)
+		if key == "" || key == sender || inSeat[key] {
+			continue
 		}
+		a, err := pg.GetAgentByKey(key)
+		if err != nil || a == nil {
+			continue
+		}
+		role := db.SessionRoleMember
+		if key == "auto" {
+			role = db.SessionRoleDispatcher
+		}
+		if err := pg.AddSessionMember(sessionID, key, role, db.SessionPresenceListening); err != nil {
+			continue
+		}
+		members = append(members, db.SessionMember{
+			SessionID: sessionID,
+			AgentKey:  key,
+			Role:      role,
+			Presence:  db.SessionPresenceListening,
+		})
+		inSeat[key] = true
+	}
+	return members
+}
+
+// sessionWakeMembers 把名册转成唤醒裁决层的输入（裁决层不认 db 的类型 ⇒ 转换
+// 发生在这里，裁决层保持零依赖、可脱离数据库单测）。
+func sessionWakeMembers(members []db.SessionMember) []sessionwake.Member {
+	out := make([]sessionwake.Member, 0, len(members))
+	for _, m := range members {
+		out = append(out, sessionwake.Member{
+			AgentKey: m.AgentKey,
+			Role:     sessionwake.Role(m.Role),
+			Presence: sessionwake.Presence(m.Presence),
+			Left:     m.HasLeft,
+		})
 	}
 	return out
 }
@@ -666,7 +799,7 @@ func (s *Server) addSessionMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "加会话成员失败: 写入后读不到该成员")
 		return
 	}
-	writeJSON(w, 201, map[string]any{"member": member})
+	writeJSON(w, 201, map[string]any{"ok": true, "member": member})
 }
 
 // patchSessionMember 更新成员的在场状态（working / blocked(+eta,blocked_on) /
@@ -718,7 +851,7 @@ func (s *Server) patchSessionMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "更新在场状态失败: 写入后读不到该成员")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"member": member})
+	writeJSON(w, 200, map[string]any{"ok": true, "member": member})
 }
 
 // deleteSessionMember 退席（写 left_at + presence='left'）。
@@ -752,7 +885,7 @@ func (s *Server) deleteSessionMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "退席失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"removed": true, "session_id": id, "agent_key": key})
+	writeJSON(w, 200, map[string]any{"ok": true, "removed": true, "session_id": id, "agent_key": key})
 }
 
 // getSessionPresence 读会话成员的到场状态。

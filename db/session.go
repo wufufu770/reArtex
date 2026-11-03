@@ -31,12 +31,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/Autumn-27/artex/internal/sessionwake"
 )
 
 //go:embed schema_session.sql
@@ -1027,6 +1026,14 @@ WHERE session_id=$1 AND agent_key=$2)`, m.SessionID, m.ToAgent).Scan(&member); e
 // 排序按 id 升序：id 是本会话内的单调序号，线程与收据条靠 parent_message_id /
 // receipt_of 表达归属，不靠时间戳猜。
 func (d *DB) SessionMessages(sessionID int64, limit int) ([]SessionMessage, error) {
+	return d.SessionMessagesSince(sessionID, 0, limit)
+}
+
+// SessionMessagesSince 读会话里 id 更大的消息（增量拉；sinceID=0 ⇒ 全量）。
+//
+// 水位线用**消息 id**而不是时间戳：id 是本会话内的单调序号 ⇒ 增量拉既不会漏
+// 也不会重（同毫秒写入的两条消息，用时间戳会漏掉一条）。
+func (d *DB) SessionMessagesSince(sessionID int64, sinceID int64, limit int) ([]SessionMessage, error) {
 	if err := d.ensureSessionSchema(); err != nil {
 		return nil, err
 	}
@@ -1034,7 +1041,7 @@ func (d *DB) SessionMessages(sessionID int64, limit int) ([]SessionMessage, erro
 		limit = 200
 	}
 	rows, err := d.Query(`SELECT `+sessionMessageCols+` FROM session_messages
-WHERE session_id=$1 ORDER BY id ASC LIMIT $2`, sessionID, limit)
+WHERE session_id=$1 AND id > $2 ORDER BY id ASC LIMIT $3`, sessionID, sinceID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,6 +1056,77 @@ WHERE session_id=$1 ORDER BY id ASC LIMIT $2`, sessionID, limit)
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SessionConversationIDs 列这个会话背后的旧对话 id（迁移回填后，一个会话可以
+// 挂着多个对话 —— 每个成员 agent 一个）。
+//
+// 用途：判定「这个会话有没有正在跑的对话」（服务端拿它查 in-flight 状态）。
+func (d *DB) SessionConversationIDs(sessionID int64) ([]int64, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`SELECT id FROM conversations WHERE session_id=$1 ORDER BY id`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("查会话的对话失败: %w", err)
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ChatGroupIDBySession 查这个会话对应的大厅 id（没有则 nil）。
+//
+// 一个群（chat_groups）回填出的会话带 kind='task_hall' ⇒ 前端能拿它读额度与
+// 并发状态（会话页右侧的「关联与状态」面板）。
+func (d *DB) ChatGroupIDBySession(sessionID int64) (*int64, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	var id int64
+	err := d.QueryRow(`SELECT id FROM chat_groups WHERE session_id=$1 ORDER BY id LIMIT 1`,
+		sessionID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("查会话对应的大厅失败: %w", err)
+	}
+	return &id, nil
+}
+
+// ChatGroupIDsBySession 批量查多个会话各自对应的大厅 id（列表页免 N+1）。
+func (d *DB) ChatGroupIDsBySession(sessionIDs []int64) (map[int64]int64, error) {
+	out := map[int64]int64{}
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`SELECT session_id, id FROM chat_groups
+WHERE session_id = ANY($1) ORDER BY id`, sessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("查会话对应的大厅失败: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID, groupID int64
+		if err := rows.Scan(&sessionID, &groupID); err != nil {
+			return nil, err
+		}
+		if _, dup := out[sessionID]; !dup {
+			out[sessionID] = groupID
+		}
 	}
 	return out, rows.Err()
 }
@@ -1070,46 +1148,104 @@ WHERE id = ANY($1) AND status='unread'`, ids); err != nil {
 
 // ---------- @提及 ----------
 
-// sessionMentionPattern 匹配 @agentKey 形式的提及。
-//
-// agent key 的形状与 agents.key 的 CHECK 一致（^[a-z][a-z0-9_]*$）。
-var sessionMentionPattern = regexp.MustCompile(`@([a-z][a-z0-9_]*)`)
-
-// sessionMentionEveryone 是广播关键词（§4.3 的 @everyone）。
-const sessionMentionEveryone = "everyone"
-
 // ParseSessionAgentMentions 从消息正文里解析 @提及 的 agent key（去重、保序）。
 //
-// 边界判定：@ 前面不能是字母/数字/下划线/@/斜杠 ⇒ 邮箱（a@b.com）与 URL
-// （x/@user）不会被误认成提及。
-//
 // '@everyone' 是广播关键词，不作为 agent key 返回。
+//
+// ⚠️ 解析规则只有**一份**：真正的实现在 internal/sessionwake（唤醒裁决层），
+// 这里只是转发 —— 唤醒裁决与消息写入必须用同一套提及口径，否则「@ 到的人」
+// 与「被叫醒的人」会对不上（两份副本就是漂移的开始）。
 func ParseSessionAgentMentions(body string) []string {
-	idx := sessionMentionPattern.FindAllStringSubmatchIndex(body, -1)
-	out := []string{}
-	seen := map[string]bool{}
-	for _, loc := range idx {
-		if loc[2] < 0 {
-			continue
-		}
-		key := body[loc[2]:loc[3]]
-		if key == sessionMentionEveryone || seen[key] {
-			continue
-		}
-		if !sessionMentionBoundaryOK(body, loc[0]) {
-			continue
-		}
-		seen[key] = true
-		out = append(out, key)
-	}
-	return out
+	return sessionwake.ParseMentions(body).Agents
 }
 
-// sessionMentionBoundaryOK 判定 @ 之前是不是合法的提及边界。
-func sessionMentionBoundaryOK(body string, at int) bool {
-	if at == 0 {
-		return true
+// ---------- 会话 ↔ 旧对话 / 成员信箱 ----------
+
+// SessionByConversation 按旧对话 id 反查它所属的会话。
+//
+// 为什么需要它：迁移回填之后，**每个旧对话背后是一个会话**
+// （conversations.session_id，proposal §4.7 第 2 条）⇒ agent 侧只知道自己
+// 在哪个对话里跑，要参与群聊就得先反查自己所在的会话。
+//
+// 没有绑定（session_id 为 NULL）或对话不存在时返回 nil, nil（调用方按「这个
+// 对话还没进会话体系」处理，不是错误）。
+func (d *DB) SessionByConversation(conversationID int64) (*Session, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
 	}
-	r, _ := utf8.DecodeLastRuneInString(body[:at])
-	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '@' && r != '/'
+	var sessionID *int64
+	if err := d.QueryRow(`SELECT session_id FROM conversations WHERE id=$1`,
+		conversationID).Scan(&sessionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("查对话的会话失败: %w", err)
+	}
+	if sessionID == nil {
+		return nil, nil
+	}
+	return d.GetSession(*sessionID)
+}
+
+// SessionMessagesForAgent 读一个 agent 在会话里该看的消息（成员信箱的取件面）。
+//
+// 过滤口径（四条，每条都有理由）：
+//
+//  1. **定向给它的 + 广播给全会话的**：别的成员之间的私聊不该进它的上下文
+//     （to_agent 指向第三个人时它不是收件人）。
+//  2. **排除被拦下的**（status='blocked'）：拦截发生在投递前，被拦的消息不进
+//     接收方上下文（与 agent/group_mailbox.go 的同款纪律）。
+//  3. **排除收据条**（kind='receipt'）：收据是给界面看的确认噪音（「收到 / 好
+//     的」），不是内容（proposal §4.3 的噪音控制）。
+//  4. **排除它自己发的**：自己的话不需要再读一遍。
+//
+// ⚠️ 为什么**不**按 status='unread' 过滤：会话消息的 status / read_at 是**消息
+// 级**的，不是成员级的 ⇒ 一个成员读了就会把这条消息对**所有**成员标成已读 ⇒
+// 群聊会退化成单播（第二个成员就看不见第一条了）。所以这里用**窗口**（最近
+// limit 条）代替「未读」语义。成员级的已读水位线需要一张新表（成员 × 消息），
+// 那是 P5 噪音治理的活，不在本单元里偷偷加。
+//
+// 排序按 id 升序（id 是本会话内的单调序号）⇒ 同一份数据永远得到同一份窗口。
+func (d *DB) SessionMessagesForAgent(sessionID int64, toAgent string, limit int) ([]SessionMessage, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	toAgent = strings.TrimSpace(toAgent)
+	if toAgent == "" {
+		return nil, errors.New("收件 agent key 不能为空")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	// 先取窗口内最新的 limit 条，再按 id 升序排回去。
+	rows, err := d.Query(`SELECT `+sessionMessageCols+` FROM session_messages
+WHERE session_id=$1
+  AND status <> 'blocked'
+  AND kind <> 'receipt'
+  AND (to_agent = '' OR to_agent = $2)
+  AND (from_agent = '' OR from_agent <> $2)
+ORDER BY id DESC LIMIT $3`, sessionID, toAgent, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读会话成员信箱失败: %w", err)
+	}
+	defer rows.Close()
+	out := []SessionMessage{}
+	for rows.Next() {
+		var m SessionMessage
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.ParentMessageID, &m.FromAgent, &m.ToAgent,
+			&m.Kind, &m.Body, &m.TaskID, &m.IntentID, &m.FindingID, &m.Status,
+			&m.BlockedReason, &m.ClaimsAuthorization, &m.ReceiptOf, &m.ReceiptAction,
+			&m.CreatedAt, &m.ReadAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 反转成升序（窗口是倒着取的）。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
