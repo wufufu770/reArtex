@@ -858,6 +858,56 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 
 #### 11.6.4 优先级（定稿）
 
+> **P0-④ 已完成（a、b 两件）+（c）出设计单独排期**（提交 `7174838`）
+>
+> **(a) 前台命令上限 60s（原 120s）—— 已实现**
+> 一条卡住的前台命令会把 agent 整整阻塞一个超时时长：等待期间它不能规划、不能把
+> 已识别的东西落库、不能对已有发现做反应。⇒ 默认 120s → 60s。
+> **命令不会因此丢失**：SDK 本来就会把超时的前台命令移到后台（agent 稍后用
+> TaskOutput/Read 取输出），缩短超时只是让控制权更早回到 agent 手里。
+> 关键细节：**工具描述与提示词里的数字必须跟着动态生成** —— 原来 props 里写死
+> "default 120000"、提示词里写死 "default 120s"，改了行为不改描述 = 对模型说谎
+> （模型会按 120s 规划自己的等待）。现在两者都从解析后的实际值生成。
+> `AGENT_CORE_TOOL_TIMEOUT_SEC` 可覆盖，钳制 [5s, 600s]。干净实例显式写 60。
+>
+> **(b) 总预算不重置 —— 复核结论：ARTex 已经做到了，不是缺口**
+> 任务级预算是**绝对时间**（`TaskClock.DeadlineUnix`，首次运行盖章）；
+> `clampMaxDuration(taskDeadline, ownBudget)` 把每一轮夹逼到**剩余**时间 ⇒
+> N 轮总时长 ≤ 任务总预算。
+> 但这条不变量此前**没有任何测试保护** ⇒ 补 `agent/taskclock_budget_test.go`：
+> 5 组取值 + 1 条直接钉「同一绝对 deadline 下，后续轮拿到的预算**不得变大**」。
+>
+> **(c) 后台任务跨 run 持久 —— 本次不做，出设计（见下方 P0-④b）**
+> SDK 自己的注释把话说清楚了：`tool/task.go` 的 `Cleanup()` 上方写着
+> 「Those pointers are consumed inside the session that produced them. Making
+> them genuinely durable needs spill output to live in a host-chosen directory
+> with its own retention policy, not in os.TempDir() keyed by a per-session
+> UUID; **that is a design change, not a change to this function**.」
+> ⇒ 后台任务的生命周期绑在 session（= 一次 run）上：run 结束 ⇒ `Manager.Cleanup()`
+> ⇒ `KillAll()`。要跨 run 存活需要：输出落在**宿主指定目录** + **自己的保留策略**
+> + **跨 session 注册表** + **回收者**。
+> 这**不是打补丁能解决的**。硬塞进本次提交只会得到一个没有回收者的进程泄漏 ——
+> 那比现状更糟。⇒ 单独排期，设计见下方 §11.7 P0-④b。
+>
+> **顺带修掉**：SDK 自带测试 `TestWebFetchProxyFallback` 断言的是**旧的**直连兜底
+> 行为 ⇒ 契约改了就留个红的测试是雷。已改为**显式 opt-in**
+> （`t.Setenv("NORMA_WEBFETCH_DIRECT_FALLBACK","1")`），并补对偶测试
+> `TestWebFetchProxyFallbackOffByDefault`：默认配置下代理失败**必须失败**，
+> 不得静默直连。⇒ `patches/norma-egress-scope.patch` 扩到 2 个文件，SDK 自带测试
+> 套件现全绿。
+
+> **P0-③ 已完成**（提交 `2c2f9f9`）：AutoCompact 触发点可提前。新增
+> `Config.AutoCompactRatio`（vendored SDK 侧以 `patches/norma-compaction-trigger.patch`
+> 落地），触发点变为 `min(默认阈值, effectiveWindow * ratio)`。
+> **只能提前、不能推后** —— 实现里只在 `t < base` 时才采用 ⇒ 放松默认策略必须改
+> 代码，不可能靠改环境变量悄悄生效。默认 ratio=0 ⇒ 行为完全不变。
+> ARTex 侧从 `ARTEX_COMPACT_TRIGGER_RATIO` 读取（0~1，非法值忽略并打日志），
+> 不加 DB 列（`llm_profiles` 在 RESERVED 的 `db/schema.sql` 里，且阈值是运维旋钮
+> 而非每档案数据）。干净实例默认 0.75。
+> 测试：`TestCompactionTriggerRatioEnv`（9 组取值）+ `TestCompactionTriggerOnlyMovesEarlier`
+> （直接对生成出来的 vendored 源码断言两处守卫在 —— 补丁会被悄悄改写或丢失，这条
+> 不变量必须由测试盯着）。
+
 > **实施前置已就位**：`patches/` 多 patch 机制 + `scripts/prepare-norma.sh` 按序应用
 > （提交 `2735758`）⇒ 下面 ③④⑤ 与 §9.1 第 8 条**全部作用于 vendored SDK**，
 > 现在都可以直接按「写补丁 → 提交 → 重新生成依赖树」的套路做，不需要改脚本或手改生成目录。
@@ -919,3 +969,36 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
   Cursor 文档与发布说明、VS Code chat sessions 文档、Cline 文档、Windsurf 文档、
   Devin 发布说明与 API、Linear Agent 文档、Notion AI 文档、Hermes Agent Bot Mode。
 - ⚠️ 少数二手来源已在正文标注（Hermes 的具体轮次上限、DotCollab 的 UI 细节未获一手证实）。
+
+### 11.7 P0-④b：后台任务跨 run 持久（设计，本次未实施）
+
+**问题**：后台命令（`run_in_background`，或前台超时被自动转后台）的生命周期绑在
+**session** 上。session = 一次 run ⇒ run 结束（agent 收尾、意图完成、或 run 预算
+到点）⇒ `Manager.Cleanup()` ⇒ `KillAll()` ⇒ 后台进程被杀，agent 承诺「稍后我会去
+读它的输出」的承诺落空。
+
+**为什么不能用补丁糊**：SDK 的 `Manager` 把任务目录放在 `os.TempDir()/norma/<sessionUUID>/tasks`，
+清理时整目录删除。要让任务活过 session，输出必须落在**宿主指定**的目录、由**宿主**
+决定保留多久。这需要改变所有权模型，不是改一个函数。
+
+**设计（六件，缺一不可）**：
+
+| # | 件 | 落点 |
+|---|---|---|
+| 1 | **宿主目录**：后台命令输出写到 `ARTEX_TASK_DIR`（默认宿主 `~/.artex/tasks/<taskID>/`），不写 `os.TempDir()` | 部署配置 + SDK 侧目录来源可注入 |
+| 2 | **跨 session 注册表**：进程级（package-level）注册表，按 ARTex 任务 ID 索引后台进程 ⇒ 换 session 仍能找到 | SDK `tool` 包新增 registry |
+| 3 | **真相来源 = ARTex 任务表**：后台命令在 ARTex 任务表里**占一行**（`kind='background_cmd'`），状态 running/done/lost ⇒ 不再由 SDK 的内存状态说了算 | 新表或复用 tasks 加 kind 列（**注意 `db/schema.sql` 是 RESERVED** ⇒ 走独立 schema 文件 + 幂等 ALTER） |
+| 4 | **回收者（关键）**：任务超时收尾（`settleTask`）时统一 kill 该 ARTex 任务下的后台进程；再加进程级兜底：无主任务且超过 TTL（默认 1h）的后台进程被回收并标记 lost | `server/engine_timeout.go` 的 settle 序列 + 进程级 janitor |
+| 5 | **完成提醒**：后台命令结束时向该 ARTex 任务的 mailbox 投递一条完成通知 ⇒ agent 下一轮读得到（对应 §11 的「完成提醒」） | 复用现有 mailbox/通知机制 |
+| 6 | **lost 标记**：被回收的后台命令在任务表里标 `lost`（不是 `failed`）⇒ agent 知道「它被回收了」而不是「它失败了」 | 与 #3 同表 |
+
+**顺序**：#1+#2 是前置（没有它们，#3–#6 无处落地）；#3 与 #4 必须同时上线
+（只有记账没有回收 = 进程泄漏）；#5、#6 可以在其后补。
+
+**不做会怎样**：现状是「agent 说稍后读输出，但进程已经死了」⇒ agent 下一轮读到
+的是一个死进程的残缺输出，或者读不到而困惑。**这是一个真实的静默失效**，只是
+不如出网绕行那么致命。
+
+**风险**：进程泄漏（靠 #4 兜住）、目录膨胀（靠 TTL + 保留策略兜住）、跨 session
+并发写同一输出文件（按 command 分文件，不共享句柄）。
+
