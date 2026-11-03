@@ -59,6 +59,10 @@ services:
       # 契约：这个比率**只能把触发点提前、不能推后**（SDK 侧用 min() 强制），
       # 所以填错不会放松默认策略；填 0 或非法值 = 保持 SDK 默认。
       ARTEX_COMPACT_TRIGGER_RATIO: "${ARTEX_COMPACT_TRIGGER_RATIO:-0.75}"
+      # 前台命令超时上限（秒）：超时后命令被移到后台，agent 立刻拿回控制权
+      # （命令不会丢，稍后用 TaskOutput/Read 取输出）。SDK 默认 60，这里写明
+      # 以便审计；上限 600。
+      AGENT_CORE_TOOL_TIMEOUT_SEC: "${AGENT_CORE_TOOL_TIMEOUT_SEC:-60}"
     # 仅开发实例：保留 CAP_SYS_ADMIN，便于 Phase 0 Task 4 的 Layer 2a
     # （mount namespace 隔离 / unshare -m）可执行。现役 compose 一律不加。
     cap_add:
