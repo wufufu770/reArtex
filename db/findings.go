@@ -749,6 +749,37 @@ func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
 	return d.setFindingCol(id, "vulnclass", "vulnclass", vulnclass)
 }
 
+// ErrFindingReplayEvidenceMissing 表示这条漏洞还没有可重放证据。
+//
+// 为什么要有这个错误：db/sod.go 的 GetFindingReplayEvidence 对「没有可重放证据」
+// 返回的是一个**空字符串**（ReplayEvidenceID == ""）—— 闸门（internal/sod/gate.go 的
+// tier2 检查）正是靠这个空值把动作判成 tier2_inconsistent，所以那条读路径不能改：
+// 改了闸门的原因码就从 tier2_inconsistent 变成 tier2_check_unavailable，与
+// docs/SoD链覆盖边界.md 登记的口径不符。
+//
+// 而对「我需要知道这条漏洞到底能不能重放」的调用方，空字符串是个**静默**的缺口：
+// 调用方必须自己记得判空，忘了就是拿一条不可重放的结论去放行。本错误把那个缺口
+// 变成一个**可区分**的失败。
+var ErrFindingReplayEvidenceMissing = errors.New("该漏洞尚无可重放证据")
+
+// GetFindingReplayEvidenceStrict 读 finding 的重放证据；缺证据时报错。
+//
+// finding 不存在 ⇒ (nil, nil)（与 GetFindingReplayEvidence 一致：调用方按「不适用」
+// 处理）。finding 存在但没有可重放证据 ⇒ ErrFindingReplayEvidenceMissing。
+func (d *DB) GetFindingReplayEvidenceStrict(findingID int64) (*ReplayEvidence, error) {
+	ev, err := d.GetFindingReplayEvidence(findingID)
+	if err != nil {
+		return nil, err
+	}
+	if ev == nil {
+		return nil, nil
+	}
+	if ev.ReplayEvidenceID == "" {
+		return nil, fmt.Errorf("%w: finding %d", ErrFindingReplayEvidenceMissing, findingID)
+	}
+	return ev, nil
+}
+
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the
 // per-task view grafts onto its exploration-node findings.
 type FindingMeta struct {
@@ -757,6 +788,14 @@ type FindingMeta struct {
 	ID       int64
 	Status   string
 	AssetIDs []int64
+	// ValidationState 是这条漏洞的**验证态**（exploration_nodes.state）：
+	// pending（已提出，未验证）/ confirmed（验证通过）/ dismissed（不成立）。
+	// 空 = 这条漏洞没有对应的探索节点（或节点已被删）。
+	//
+	// ⚠️ 与 Status 不是一个东西：Status 是 findings.status 的**处置**状态（待处理 /
+	// 已确认 / 已修复…），ValidationState 回答的是「这条结论有没有被独立复核过」。
+	// 两组语义混在一起正是本单元要消灭的混淆。
+	ValidationState string
 }
 
 // FindingMetaByNodeID maps a task's finding node ids to their standalone-row
@@ -774,8 +813,11 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	if taskID <= 0 {
 		return out, nil
 	}
-	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), asset_ids, (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=findings.id) FROM findings
-		WHERE task_id=$1 AND node_id IS NOT NULL`, taskID)
+	rows, err := d.Query(`SELECT f.node_id, f.id, COALESCE(f.status,'pending'), f.asset_ids,
+ (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
+ COALESCE(n.state,'')
+FROM findings f LEFT JOIN exploration_nodes n ON n.id = f.node_id
+WHERE f.task_id=$1 AND f.node_id IS NOT NULL`, taskID)
 	if err != nil {
 		return out, err
 	}
@@ -784,7 +826,7 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 		var nid int64
 		var m FindingMeta
 		var aidsJSON string
-		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount); err != nil {
+		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount, &m.ValidationState); err != nil {
 			return out, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &m.AssetIDs)

@@ -336,12 +336,51 @@ type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
 	AssetIDs                                             []int64
+	// ReplayEvidenceID 是这条漏洞的「可重放证据」标识（重放语料 id / 流量快照 id /
+	// 证据链 id）。
+	//
+	// 为什么要有它：findings.replay_evidence_id 这一列一直存在（db/schema_sod.sql
+	// 引入）却**没有任何写入方** ⇒ 闸门（internal/sod/gate.go 的 tier2 检查）永远
+	// 判成「关联漏洞缺少可重放证据」⇒ 每一条与 finding 关联的动作都被拒。
+	//
+	// 留空 ⇒ 由记录路径按流量证据推导（见 replayEvidenceID）；两者都拿不到时仍写空
+	// —— 空是**合法状态**（schema_sod.sql 明写「空 = 尚无可重放证据 ⇒
+	// tier2_inconsistent」），由闸门按 fail-closed 拒掉，而不是在登记时炸掉整条
+	// 上报路径。
+	ReplayEvidenceID string
 }
 
 type RecordedFinding struct {
 	FindingID int64           `json:"finding_id,string"`
 	NodeID    int64           `json:"finding_node_id,string"`
 	Traffic   *FindingTraffic `json:"traffic"`
+}
+
+// replayEvidenceID 解析这条 finding 的「可重放证据」标识。
+//
+// 优先级：
+//  1. 调用方显式给的（重放语料 id / 证据链 id / 流量快照 id 皆可）；
+//  2. 绑定的流量证据里 role='proof' 的那条快照 id —— 快照 id 是快照元数据的
+//     内容哈希（见 TrafficSnapshotID），它本身就是一个可重放的把手；
+//  3. role='verification' 的那条快照 id；
+//  4. 都没有 ⇒ 空串。
+//
+// ⚠️ 第 4 条不是错误：schema_sod.sql 明写「空 = 该 finding 尚无可重放证据 ⇒ tier2
+// 一致性检查判定为 tier2_inconsistent」—— 空是一个**合法状态**，由闸门 fail-closed
+// 拒掉；在登记时炸掉整条上报路径只会逼调用方谎报证据。要区分「这条漏洞到底能不能
+// 重放」的调用方用 GetFindingReplayEvidenceStrict（返回可区分的错误）。
+func replayEvidenceID(in RecordFindingInput, prepared []PreparedTrafficEvidence) string {
+	if id := strings.TrimSpace(in.ReplayEvidenceID); id != "" {
+		return id
+	}
+	for _, role := range []string{"proof", "verification"} {
+		for _, item := range prepared {
+			if item.Ref.Role == role && item.Snapshot.ID != "" {
+				return item.Snapshot.ID
+			}
+		}
+	}
+	return ""
 }
 
 // ctx 由调用方传入本次事务所用的上下文（而非在内部取 context.Background）：
@@ -386,8 +425,21 @@ func (d *DB) RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingIn
 	}
 	payload, _ := json.Marshal(map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})
 	out := &RecordedFinding{}
+	// 出生态是 **pending**（已提出，未验证），不是 confirmed。
+	//
+	// 为什么：「提出」被当成了「验证」⇒ 看不出这条结论有没有被独立复核过，而且
+	// 复核不通过时没有退路（既不能关掉，也不能退回给提出它的人）。验证态由
+	// db/finding_validation.go 的 ValidateFinding 决定（confirmed / dismissed 结案，
+	// rework 打回且状态留在 pending）。
+	//
+	// ⚠️ 落库前先确保 DDL 到位：ck_node_state 在放行 'pending' 之前只认
+	// ('confirmed','dismissed') ⇒ 老库上直接写 pending 会被 CHECK 挡下（整条上报
+	// 路径失败）。ensureFindingValidationSchema 是幂等的（第二次起只是一次 map 查表）。
+	if err := d.ensureFindingValidationSchema(); err != nil {
+		return nil, err
+	}
 	if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
-VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string(payload), in.Worker).Scan(&out.NodeID); err != nil {
+VALUES($1,'finding',$2,9,'pending',$3) RETURNING id`, in.ExplorationID, string(payload), in.Worker).Scan(&out.NodeID); err != nil {
 		return nil, err
 	}
 	// 锚点：只有落在任务范围内的资产才建立关系（范围判定见上）。无任务上下文时
@@ -409,8 +461,9 @@ VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string
 		assets = []int64{}
 	}
 	raw, _ := json.Marshal(assets)
-	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids)
-VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw)).Scan(&out.FindingID); err != nil {
+	replayID := replayEvidenceID(in, prepared)
+	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids,replay_evidence_id)
+VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw), replayID).Scan(&out.FindingID); err != nil {
 		return nil, err
 	}
 	// 在**同一事务**里登记一条推送事件：提交即保证「漏洞落库」与「推送任务存在」
