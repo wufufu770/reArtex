@@ -8,10 +8,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/config"
@@ -64,6 +66,17 @@ func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(t
 		return nil
 	}
 }
+
+// schemaMigrationHeld 记录**本进程**当前是否已持有 schema 迁移锁（计数器）。
+//
+// 为什么需要它：withSchemaMigrationLock 用的是【会话级】 advisory lock（它在一条
+// 专用连接上持有）；而 coordinateWithSchemaMigration 用的是【事务级】 lock，且
+// 事务是从连接池里另取的一条连接 ⇒ 两者即使 key 相同也**互相冲突**（PostgreSQL 的
+// 会话级与事务级 advisory lock 共用同一把锁的空间）⇒ 启动期 DDL 自己请求事务级锁时
+// 会等自己持有的那把锁 ⇒ 跨连接自锁，表现为「启动时永久挂住」。
+//
+// ⇒ 进程内再取一次同一把锁没有意义（本进程已经持着它），直接放行。
+var schemaMigrationHeld atomic.Int32
 
 // withSchemaMigrationLock pins the session-level lock to one checked-out
 // connection. Running pg_advisory_lock through *sql.DB is incorrect because a
@@ -133,7 +146,9 @@ func withSchemaMigrationLock(ctx context.Context, sqlDB *sql.DB, action func(*sq
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+	schemaMigrationHeld.Add(1)
 	defer func() {
+		schemaMigrationHeld.Add(-1)
 		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, schemaMigrationLockKey); unlockErr != nil && err == nil {
 			err = fmt.Errorf("advisory unlock: %w", unlockErr)
 		}
@@ -145,6 +160,12 @@ func withSchemaMigrationLock(ctx context.Context, sqlDB *sql.DB, action func(*sq
 // mutually exclusive with startup DDL while allowing ordinary runtime queries
 // to continue normally.
 func coordinateWithSchemaMigration(tx *sql.Tx) error {
+	// 本进程已经持有 schema 迁移锁（启动期 DDL 正在锁内跑）⇒ 不能再从另一条
+	// 连接去要同一把锁：会话级与事务级同 key 互相冲突 ⇒ 那会等自己持有的锁
+	// （跨连接自锁，表现为启动永久挂住）。此时锁已经被本进程持有，直接放行。
+	if schemaMigrationHeld.Load() > 0 {
+		return nil
+	}
 	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, schemaMigrationLockKey); err != nil {
 		return fmt.Errorf("coordinate with schema migration: %w", err)
 	}
@@ -183,12 +204,34 @@ var (
 // (MVCC), so unlike the old SQLite store there is no process-wide write mutex.
 type DB struct {
 	*sql.DB
+	// admin 是**迁移连接**（超级用户）池，只用于 schema 应用与给运行期角色授权。
+	//
+	// 为 nil ⇒ 没配置迁移连接串（单 DSN 部署）⇒ schema 应用走运行期连接，
+	// 与本层落地之前的行为一致。
+	//
+	// 为什么单独一个池而不是复用运行期连接：运行期角色刻意没有 DDL 权限
+	// （见 db/role.go）⇒ 建表/改表必须换一条有 DDL 权限的连接。
+	admin *sql.DB
 	// toolTableFallback 报「工具表不可读但仍有上一份可用快照」。
 	// 由 server 装配时注册（见 server/assembly.go 的 wireTools）。
 	toolTableFallback func() bool
 	// listTools 读工具表，默认用 d.ListTools。抽成字段是为了让「工具表不可读
 	// 时拒绝创建 run」这道闸能在没有数据库的情况下被测试。
 	listTools func() ([]*Tool, error)
+}
+
+// Close 关掉连接池。
+//
+// 迁移连接池（admin）也要关：它是超级用户凭据的持有者，进程退出时不该留着
+// 打开的会话。迁移连接池没有时只关运行期池。
+func (d *DB) Close() error {
+	err := d.DB.Close()
+	if d.admin != nil {
+		if adminErr := d.admin.Close(); err == nil {
+			err = adminErr
+		}
+	}
+	return err
 }
 
 // ensureDatabase connects to the postgres system database and creates the target
@@ -224,8 +267,25 @@ func ensureDatabase(dsn string) error {
 }
 
 // Open connects, applies the schema (idempotent), and seeds builtin rows.
+//
+// 连接分工（见 db/role.go）：
+//   - dsn（运行期）：受限角色 artex_app。普通查询与全部业务读写走它。
+//   - ARTEX_PG_ADMIN_DSN（迁移）：超级用户。**只**用于 schema 应用
+//     （db/schema.sql + 各层 Ensure*Schema）与给运行期角色授权。
+//
+// 没配迁移连接串时 schema 应用退回运行期连接 —— 单 DSN 部署照旧工作
+// （那条路径的角色本来就是高权限的，不需要这一层防护）。
 func Open(dsn string) (*DB, error) {
-	if err := ensureDatabase(dsn); err != nil {
+	adminDSN, adminSource, err := AdminDSN()
+	if err != nil {
+		return nil, err
+	}
+	// 建库与 schema 应用都必须走「有 DDL 权限」的那条连接。
+	schemaDSN := dsn
+	if adminDSN != "" {
+		schemaDSN = adminDSN
+	}
+	if err := ensureDatabase(schemaDSN); err != nil {
 		return nil, err
 	}
 	sqlDB, err := sql.Open("pgx", dsn)
@@ -246,18 +306,64 @@ func Open(dsn string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)
 	}
-	d := &DB{sqlDB, nil, nil}
+	d := &DB{DB: sqlDB}
+	// 迁移连接池：只在配置了迁移连接串时存在。没有它 ⇒ schema 应用走运行期连接。
+	schemaPool := sqlDB
+	if adminDSN != "" {
+		adminPool, err := sql.Open("pgx", adminDSN)
+		if err != nil {
+			sqlDB.Close()
+			return nil, err
+		}
+		adminPool.SetMaxOpenConns(maxOpenConns)
+		adminPool.SetMaxIdleConns(maxOpenConns)
+		adminPool.SetConnMaxLifetime(30 * time.Minute)
+		adminPool.SetConnMaxIdleTime(5 * time.Minute)
+		if err := adminPool.Ping(); err != nil {
+			adminPool.Close()
+			sqlDB.Close()
+			return nil, fmt.Errorf("ping postgres (迁移连接, %s): %w", config.Redact(adminDSN), err)
+		}
+		d.admin = adminPool
+		schemaPool = adminPool
+		log.Printf("[pg] 迁移连接已就绪（%s）：%s", adminSource, config.Redact(adminDSN))
+	}
 	// pgx runs multi-statement Exec via the simple protocol when there are no args.
 	// Keep the dedicated lock connection checked out until both DDL and seeding
 	// finish so concurrent application instances cannot initialize out of order.
-	schemaKey := databaseIdentity(dsn)
-	err = withSchemaMigrationLock(context.Background(), sqlDB, func(conn *sql.Conn) error {
+	schemaKey := databaseIdentity(schemaDSN)
+	err = withSchemaMigrationLock(context.Background(), schemaPool, func(conn *sql.Conn) error {
+		// schemaDB 的底层连接就是 schemaPool ⇒ 这里的每一次 DDL 都跑在有 DDL
+		// 权限的连接上（受限运行角色建不了表）。
+		schemaDB := &DB{DB: schemaPool}
+		// 没配迁移连接 ⇒ schema 应用跑在运行期连接上。若该角色连 CREATE 都没有
+		//（受限角色），schema 必须已经在库里（bootstrap 脚本应用过）⇒ 只校验
+		// 核心表在不在：在就跳过，不在就明确报错让人去补迁移连接。
+		if adminDSN == "" {
+			canDDL, err := roleCanDDL(context.Background(), conn)
+			if err != nil {
+				return err
+			}
+			if !canDDL {
+				present, err := coreSchemaPresent(context.Background(), conn)
+				if err != nil {
+					return err
+				}
+				if !present {
+					return fmt.Errorf("当前连接角色无权在 public schema 建对象（CREATE 被拒），且核心表缺失。" +
+						"请设置 ARTEX_PG_ADMIN_DSN（迁移连接，超级用户）后重试，或先运行 scripts/db-role-bootstrap.sh 把 schema 应用好")
+				}
+				log.Printf("[pg] 运行期角色无 DDL 权限且核心 schema 已就位 ⇒ 跳过 schema 应用")
+				markRuntimeSchemasReady(sqlDB)
+				return nil
+			}
+		}
 		// schema 与内置种子按【数据库】只做一次（见 schemaApplied 的说明）。
 		if _, done := schemaApplied.Load(schemaKey); !done {
 			if err := applySchemaWithRetry(context.Background(), conn, time.Sleep); err != nil {
 				return fmt.Errorf("apply schema: %w", err)
 			}
-			if err := d.seedBuiltins(); err != nil {
+			if err := schemaDB.seedBuiltins(); err != nil {
 				return fmt.Errorf("seed builtins: %w", err)
 			}
 			schemaApplied.Store(schemaKey, struct{}{})
@@ -265,36 +371,36 @@ func Open(dsn string) (*DB, error) {
 		// 群组预算 DDL：与 db/schema.sql 并行应用（见 db/quota.go 的
 		// EnsureQuotaSchema）。预算表外键指向 chat_groups，因此它内部会先
 		// 补齐群聊 DDL。
-		if err := d.EnsureQuotaSchema(); err != nil {
+		if err := schemaDB.EnsureQuotaSchema(); err != nil {
 			return fmt.Errorf("apply quota schema: %w", err)
 		}
 		// 记忆层（方案 B）DDL：append-only 的版本化记忆索引，走独立幂等文件
-	// （db/schema_memory.sql）。启动时接 ⇒ 库里没有这张表这件事在启动期就暴露，
-	// 而不是等某个接口运行期才报「关系不存在」。
-	if err := d.EnsureMemorySchema(); err != nil {
-		return fmt.Errorf("apply memory schema: %w", err)
-	}
-	// finding 级验证态与返工边（方案书 §7 的 P0-2）：三态 + rework 边，
-	// 走独立幂等文件（db/schema_finding_validation.sql）。
-	if err := d.EnsureFindingValidationSchema(); err != nil {
-		return fmt.Errorf("apply finding validation schema: %w", err)
-	}
-	// 会话实体化 DDL：会话成为第一类对象（sessions / session_members /
+		// （db/schema_memory.sql）。启动时接 ⇒ 库里没有这张表这件事在启动期就暴露，
+		// 而不是等某个接口运行期才报「关系不存在」。
+		if err := schemaDB.EnsureMemorySchema(); err != nil {
+			return fmt.Errorf("apply memory schema: %w", err)
+		}
+		// finding 级验证态与返工边（方案书 §7 的 P0-2）：三态 + rework 边，
+		// 走独立幂等文件（db/schema_finding_validation.sql）。
+		if err := schemaDB.EnsureFindingValidationSchema(); err != nil {
+			return fmt.Errorf("apply finding validation schema: %w", err)
+		}
+		// 会话实体化 DDL：会话成为第一类对象（sessions / session_members /
 		// session_attachments / session_messages），走独立幂等文件
 		// （db/schema_session.sql）。
 		//
 		// 为什么必须在这里接：会话表不接启动流程 ⇒ 库里没有这几张表 ⇒ 会话相关
 		// 接口全在运行期才报「关系不存在」，而不是启动期就报出来。幂等
 		// （CREATE TABLE IF NOT EXISTS）⇒ 重复调用无副作用。
-		if err := d.EnsureSessionSchema(); err != nil {
+		if err := schemaDB.EnsureSessionSchema(); err != nil {
 			return fmt.Errorf("apply session schema: %w", err)
 		}
 		// 策略库（L4）DDL：同样走独立幂等文件（db/schema_strategy.sql）。
 		//
-		// 为什么必须在这里接：策略表不接启动流程 ⇒ 库里没有这张表 ⇒
+		// 为什么必须在这里接：策略表不接启动流程 ⇒ 库里没有这几张表 ⇒
 		// 策略相关接口全在运行期才报「关系不存在」，而不是启动期就报出来。
 		// 失败即启动失败，不静默跳过。
-		if err := d.EnsureStrategySchema(); err != nil {
+		if err := schemaDB.EnsureStrategySchema(); err != nil {
 			return fmt.Errorf("apply strategy schema: %w", err)
 		}
 		// 策略库的第二批表（strategy_proposals / strategy_usage /
@@ -305,28 +411,50 @@ func Open(dsn string) (*DB, error) {
 		// 「库里没有这张表」这件事只在运行期的某个接口上暴露，而不是启动期 ⇒
 		// 排障时看到的是「关系不存在」这种底层报错，而不是「启动期就报出来」。
 		// 幂等（CREATE TABLE IF NOT EXISTS）⇒ 重复调用无副作用。
-		if err := d.EnsureStrategySnapshotSchema(); err != nil {
+		if err := schemaDB.EnsureStrategySnapshotSchema(); err != nil {
 			return fmt.Errorf("apply strategy snapshot schema: %w", err)
 		}
 		// 职责分离链的 DDL：裁决留痕、待对抗复核队列、工具熔断状态。
 		//
 		// 为什么必须在这里接：不接 ⇒ 库里没有这三张表 ⇒ 闸门写裁决时运行期才报
 		// 「关系不存在」，而不是启动期就报出来。
-		if err := d.EnsureSoDSchema(); err != nil {
+		if err := schemaDB.EnsureSoDSchema(); err != nil {
 			return fmt.Errorf("apply sod schema: %w", err)
 		}
 		// 任务拦截规则的 kind 枚举放宽（含命令级唯一索引）：在启动时补一次。
 		// 不能留在写路径上懒执行 —— 重建 CHECK 约束要拿这张热表的表级锁，
 		// 同库并发时互相排队。
-		if err := d.EnsureTaskInterceptSchema(); err != nil {
+		if err := schemaDB.EnsureTaskInterceptSchema(); err != nil {
 			return fmt.Errorf("apply task intercept schema: %w", err)
+		}
+		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
+		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用
+		// 有 DDL 权限的连接建好：受限运行角色建不了表。
+		if err := schemaDB.EnsureLLMRecordsTable(); err != nil {
+			return fmt.Errorf("apply llm_records schema: %w", err)
+		}
+		if err := schemaDB.EnsureLLMUsageTable(); err != nil {
+			return fmt.Errorf("apply llm_usage schema: %w", err)
+		}
+		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
+		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
+		if adminDSN != "" {
+			if err := applyRuntimeRoleGrants(context.Background(), conn, RuntimeRoleName()); err != nil {
+				log.Printf("[pg] 给受限运行角色 %s 授权失败: %v（请重跑 scripts/db-role-bootstrap.sh）", RuntimeRoleName(), err)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		sqlDB.Close()
+		if d.admin != nil {
+			d.admin.Close()
+		}
 		return nil, err
 	}
+	// 各层 Ensure*Schema 的「已就位」标记按**运行期连接池**打上：运行期的懒
+	// 执行 DDL 因此变成空操作（受限角色跑不了 DDL）。
+	markRuntimeSchemasReady(sqlDB)
 	return d, nil
 }
 
