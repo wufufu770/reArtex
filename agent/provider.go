@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,11 +129,33 @@ func (c Config) CompactionWindow() int {
 // compactionConfig builds the agent-core compaction config for a context window
 // in tokens. agentcore.NewSession wires the summarizer (same provider) when this
 // is set on Options.Compaction.
+//
+// ARTEX_COMPACT_TRIGGER_RATIO (optional, 0 = off) moves the AutoCompact trigger
+// EARLIER: the threshold becomes min(default threshold, effectiveWindow * ratio).
+//
+// Why expose it: the default trigger sits very close to the context edge, so the
+// turn that crosses the line has to compress a lot of already-stale history at
+// once — and that turn is the one that loses the most. Compacting proactively
+// keeps each summary cheap and the loss bounded.
+//
+// The ratio can only move the trigger earlier, never later (the SDK combines it
+// with min()), so setting it too small cannot relax the default policy. It is
+// read from the environment rather than a DB column on purpose: llm_profiles
+// lives in db/schema.sql, which is a RESERVED file, and a compaction threshold
+// is an operator dial, not per-profile data.
 func compactionConfig(windowTokens int) *compaction.Config {
 	if windowTokens <= 0 {
 		windowTokens = defaultWindowK * 1000
 	}
-	return &compaction.Config{ContextWindow: windowTokens}
+	cfg := &compaction.Config{ContextWindow: windowTokens}
+	if v := strings.TrimSpace(os.Getenv("ARTEX_COMPACT_TRIGGER_RATIO")); v != "" {
+		if r, err := strconv.ParseFloat(v, 64); err == nil && r > 0 && r < 1 {
+			cfg.AutoCompactRatio = r
+		} else {
+			log.Printf("[agent] 忽略无效的 ARTEX_COMPACT_TRIGGER_RATIO=%q（应为 0~1 之间的小数）", v)
+		}
+	}
+	return cfg
 }
 
 // FromEnv resolves the LLM provider config:
@@ -143,9 +166,9 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
 var (
-	envKeysRead    bool
-	anthKeyCached  string
-	oaiKeyCached   string
+	envKeysRead   bool
+	anthKeyCached string
+	oaiKeyCached  string
 )
 
 // envAPIKeys 读一次 API key 并立刻从进程环境抹掉。

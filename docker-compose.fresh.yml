@@ -51,6 +51,14 @@ services:
       ARTEX_LLM_MODEL: "${ARTEX_LLM_MODEL:-}"
       ARTEX_LLM_BASE_URL: "${ARTEX_LLM_BASE_URL:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # 提前压缩触发：把 AutoCompact 的触发点从「有效窗口的 93%」提前到 75%。
+      #
+      # 为什么：默认触发点贴着窗口边缘 ⇒ 越线的那一轮要一次性压缩大量早已过期的
+      # 历史，而那一轮恰好是损失最大的一轮。提前压缩让每次摘要都便宜、损失有界。
+      #
+      # 契约：这个比率**只能把触发点提前、不能推后**（SDK 侧用 min() 强制），
+      # 所以填错不会放松默认策略；填 0 或非法值 = 保持 SDK 默认。
+      ARTEX_COMPACT_TRIGGER_RATIO: "${ARTEX_COMPACT_TRIGGER_RATIO:-0.75}"
     # 仅开发实例：保留 CAP_SYS_ADMIN，便于 Phase 0 Task 4 的 Layer 2a
     # （mount namespace 隔离 / unshare -m）可执行。现役 compose 一律不加。
     cap_add:
