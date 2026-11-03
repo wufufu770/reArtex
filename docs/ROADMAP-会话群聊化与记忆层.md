@@ -860,7 +860,7 @@ http 代理地址（socks5 的 userinfo 是另一套认证）；改走录制代�
 
 | 优先级 | 事项 | 改动位置 | 工期 | 不采纳的风险 |
 |---|---|---|---|---|
-| **P0** | 强制「**结案人 ≠ 提出人**」 | `db/sod.go` 的复核结论 UPDATE 加 `AND source_agent <> $3` + 受影响行数断言（≈15 行 + 1 个测试） | **S** | 全链的「对抗」只停在提示词层，提出者能给自己盖章 —— 正是整条 SoD 链要防的事 |
+| **P0** ✅**已完成** | 强制「**结案人 ≠ 提出人**」 | `db/sod.go` 的复核结论 UPDATE 加 `AND NOT (source_agent <> '' AND $3 <> '' AND source_agent = $3)` + 新增可区分错误 `ErrSoDReviewSelfCertification` + agent 侧单独说清（提交 `890bd88`） | **S**（已做完） | 全链的「对抗」只停在提示词层，提出者能给自己盖章 —— 正是整条 SoD 链要防的事 |
 | **P0** | **finding 级验证态 + 返工边** | `db/schema.sql` 的 node state 三态 + 探索边 `derived_from` | **M** | planner 能用 worker 自产 fact 去 `prove_goal` **自证**；长任务累积未验证结论 |
 | **P0** | **提前压缩触发**（不等到窗口 93%） | `third_party/norma/compaction`（在树内） | **S** | 晚期的压缩会把最重要的内容压没；文章称之为「context rot」 |
 | **P0** | **前台 60s / 总 3600s 不可重置 + 后台任务脱离 `run_seconds`** | `third_party/norma/tool/bash.go` + `task.go` + `db/schema.sql` 的 `run_seconds` 语义 | **S–M** | 前台阻塞超过 5 分钟缓存 TTL ⇒ 缓存重算（真实成本）；且后台任务必被 `run_seconds` 砍掉 |
