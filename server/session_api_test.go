@@ -65,9 +65,11 @@ func TestSessionAPISmoke(t *testing.T) {
 			Members   []any  `json:"members"`
 			AgentCnt  int    `json:"agent_count"`
 			Attachmnt []any  `json:"attachments"`
-		} `json:"session"`
+		}
 	}
-	if err := json.Unmarshal([]byte(body), &created); err != nil {
+	// ⚠️ 返回是**扁平**的会话视图（不是 {"session":{...}} 包装）：
+	// id/name/title/kind/members/attachments/agent_count 平铺在顶层。
+	if err := json.Unmarshal([]byte(body), &created.Session); err != nil {
 		t.Fatalf("解响应失败: %v", err)
 	}
 	sid := created.Session.ID

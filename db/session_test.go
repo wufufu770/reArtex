@@ -869,3 +869,184 @@ func TestParseSessionAgentMentions(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionGroupMessageWritePath 断言**群消息写入路径**（proposal §4.3 的
+// 「群里 agent 能发言」+ §4.1 的收据条语义）。
+//
+// 覆盖的是一条完整链路：
+//
+//	人发言（正文里 @peer）→ agent 回答（线程回复）→ 另一个 agent 收据（贴在人的
+//	消息下面）→ 读回来时三者的归属关系（parent_message_id / receipt_of）都在。
+//
+// 另外钉住两条硬约束：收据条**必须**带 receipt_of（挂不上原消息的收据是
+// 无意义的），以及定向给非成员的消息在投递前被拦下。
+func TestSessionGroupMessageWritePath(t *testing.T) {
+	d := sessionOpen(t)
+	suffix := sessionTestSuffix()
+	peer := fmt.Sprintf("sess_peer_%d", suffix)
+	sessionTestAgent(t, d, peer)
+
+	sess := sessionTestSession(t, d, "群消息-"+strconv.FormatInt(suffix, 10))
+	if err := d.AddSessionMember(sess.ID, peer, SessionRoleMember, SessionPresenceListening); err != nil {
+		t.Fatalf("加成员失败: %v", err)
+	}
+
+	// 1) 人发言：正文里 @peer（广播语义，收件人为空）。
+	human := &SessionMessage{
+		SessionID: sess.ID, FromAgent: "", ToAgent: "",
+		Kind: SessionMessageKindNote, Body: "@" + peer + " 帮忙看一眼",
+	}
+	humanID, err := d.AddSessionMessage(human)
+	if err != nil {
+		t.Fatalf("写人的消息失败: %v", err)
+	}
+	if human.Status != SessionMessageUnread {
+		t.Fatalf("新消息状态应为 unread，得到 %q", human.Status)
+	}
+
+	// 2) agent 回答：挂在人的消息下面（线程回复）。
+	reply := &SessionMessage{
+		SessionID: sess.ID, FromAgent: peer, ToAgent: "",
+		Kind: SessionMessageKindAnswer, Body: "看过了",
+		ParentMessageID: &humanID,
+	}
+	replyID, err := d.AddSessionMessage(reply)
+	if err != nil {
+		t.Fatalf("写 agent 的回答失败: %v", err)
+	}
+
+	// 3) 收据条：auto 确认收到了人的消息（贴在原消息下面，不占气泡）。
+	receipt := &SessionMessage{
+		SessionID: sess.ID, FromAgent: "auto", ToAgent: "",
+		Kind: SessionMessageKindReceipt, ReceiptOf: &humanID, ReceiptAction: SessionReceiptTaken,
+	}
+	receiptID, err := d.AddSessionMessage(receipt)
+	if err != nil {
+		t.Fatalf("写收据条失败: %v", err)
+	}
+
+	// 读回来：三者的归属关系都在。
+	msgs, err := d.SessionMessages(sess.ID, 100)
+	if err != nil {
+		t.Fatalf("列消息失败: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("消息条数不对: %d", len(msgs))
+	}
+	byID := map[int64]SessionMessage{}
+	for _, m := range msgs {
+		byID[m.ID] = m
+	}
+	if got := byID[replyID]; got.ParentMessageID == nil || *got.ParentMessageID != humanID {
+		t.Fatalf("线程回复的 parent 丢了: %+v", got)
+	}
+	if got := byID[receiptID]; got.ReceiptOf == nil || *got.ReceiptOf != humanID {
+		t.Fatalf("收据条的 receipt_of 丢了: %+v", got)
+	}
+	if got := byID[receiptID]; got.ReceiptAction != SessionReceiptTaken {
+		t.Fatalf("收据动作丢了: %+v", got)
+	}
+	if got := byID[receiptID]; got.FromAgent != "auto" {
+		t.Fatalf("收据条的作者丢了: %+v", got)
+	}
+
+	// 增量拉：水位线之后的消息。
+	tail, err := d.SessionMessagesSince(sess.ID, humanID, 100)
+	if err != nil {
+		t.Fatalf("增量读失败: %v", err)
+	}
+	if len(tail) != 2 || tail[0].ID != replyID || tail[1].ID != receiptID {
+		t.Fatalf("增量读的结果不对: %+v", tail)
+	}
+
+	// 收据条必须带 receipt_of ⇒ 不带就报错（不落库）。
+	bad := &SessionMessage{SessionID: sess.ID, Kind: SessionMessageKindReceipt, ReceiptAction: SessionReceiptTaken}
+	if _, err := d.AddSessionMessage(bad); err == nil {
+		t.Fatalf("没有 receipt_of 的收据条被放行了")
+	}
+	// 收据动作必须是白名单里的。
+	bad = &SessionMessage{
+		SessionID: sess.ID, Kind: SessionMessageKindReceipt,
+		ReceiptOf: &humanID, ReceiptAction: "done",
+	}
+	if _, err := d.AddSessionMessage(bad); err == nil {
+		t.Fatalf("非法收据动作被放行了")
+	}
+	// 收据挂在别的会话的消息上 ⇒ 报错。
+	other := sessionTestSession(t, d, "别的会话-"+strconv.FormatInt(suffix, 10))
+	otherMsg := &SessionMessage{SessionID: other.ID, Body: "别的会话"}
+	otherID, err := d.AddSessionMessage(otherMsg)
+	if err != nil {
+		t.Fatalf("写别的会话的消息失败: %v", err)
+	}
+	bad = &SessionMessage{
+		SessionID: sess.ID, Kind: SessionMessageKindReceipt,
+		ReceiptOf: &otherID, ReceiptAction: SessionReceiptNoted,
+	}
+	if _, err := d.AddSessionMessage(bad); err == nil {
+		t.Fatalf("跨会话的收据条被放行了")
+	}
+
+	// 定向给非成员 ⇒ 投递前拦下（落库留痕，但不进接收方上下文）。
+	stranger := fmt.Sprintf("sess_stranger_%d", suffix)
+	sessionTestAgent(t, d, stranger)
+	blocked := &SessionMessage{SessionID: sess.ID, ToAgent: stranger, Kind: SessionMessageKindNote, Body: "喂"}
+	if _, err := d.AddSessionMessage(blocked); err != nil {
+		t.Fatalf("写消息失败: %v", err)
+	}
+	if blocked.Status != SessionMessageBlocked || blocked.BlockedReason == "" {
+		t.Fatalf("非成员收件人应当被拦下: %+v", blocked)
+	}
+
+	// 成员信箱：peer 应当看到人的那条，看不到自己发的，也看不到收据条。
+	box, err := d.SessionMessagesForAgent(sess.ID, peer, 50)
+	if err != nil {
+		t.Fatalf("读成员信箱失败: %v", err)
+	}
+	if len(box) != 1 || box[0].ID != humanID {
+		t.Fatalf("成员信箱的内容不对: %+v", box)
+	}
+}
+
+// TestSessionMessagesForAgentExcludesBlockedAndOwn 断言成员信箱的三条过滤口径：
+// 被拦下的消息、收据条、自己发的消息都不进接收方上下文。
+func TestSessionMessagesForAgentExcludesBlockedAndOwn(t *testing.T) {
+	d := sessionOpen(t)
+	suffix := sessionTestSuffix()
+	peer := fmt.Sprintf("sess_box_%d", suffix)
+	sessionTestAgent(t, d, peer)
+
+	sess := sessionTestSession(t, d, "信箱-"+strconv.FormatInt(suffix, 10))
+	if err := d.AddSessionMember(sess.ID, peer, SessionRoleMember, SessionPresenceListening); err != nil {
+		t.Fatalf("加成员失败: %v", err)
+	}
+
+	broadcast := &SessionMessage{SessionID: sess.ID, Body: "广播"}
+	broadcastID, err := d.AddSessionMessage(broadcast)
+	if err != nil {
+		t.Fatalf("写广播失败: %v", err)
+	}
+	own := &SessionMessage{SessionID: sess.ID, FromAgent: peer, Body: "我自己说的"}
+	if _, err := d.AddSessionMessage(own); err != nil {
+		t.Fatalf("写自己的消息失败: %v", err)
+	}
+	receipt := &SessionMessage{
+		SessionID: sess.ID, FromAgent: "auto", Kind: SessionMessageKindReceipt,
+		ReceiptOf: &broadcastID, ReceiptAction: SessionReceiptNoted,
+	}
+	if _, err := d.AddSessionMessage(receipt); err != nil {
+		t.Fatalf("写收据条失败: %v", err)
+	}
+	other := &SessionMessage{SessionID: sess.ID, FromAgent: "auto", ToAgent: "auto", Body: "给 auto 的"}
+	if _, err := d.AddSessionMessage(other); err != nil {
+		t.Fatalf("写定向消息失败: %v", err)
+	}
+
+	box, err := d.SessionMessagesForAgent(sess.ID, peer, 50)
+	if err != nil {
+		t.Fatalf("读成员信箱失败: %v", err)
+	}
+	if len(box) != 1 || box[0].ID != broadcastID {
+		t.Fatalf("成员信箱只应有广播那一条: %+v", box)
+	}
+}

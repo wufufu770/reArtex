@@ -1,0 +1,850 @@
+norma v0.4.4 —— 后台任务跨 run 持久补丁（durable background tasks）
+
+问题：norma 把后台命令的生命周期绑在 Session 上。Session.Close() → Manager.Cleanup()
+→ KillAll()，于是 agent 被告知「稍后我会去读它的输出」的那个进程，在这一轮 run 结束的
+时候已经被杀掉了 —— 承诺静默落空。SDK 自己在 tool/task.go 的 Cleanup 注释里就写明了这一点：
+让输出真正持久需要「spill output 落在宿主指定目录 + 由宿主决定保留多久」，而
+「that is a design change, not a change to this function」。
+
+做法（本补丁只动 SDK 侧，不含任何宿主业务逻辑）：
+  1. 输出目录由宿主决定：NORMA_TASK_DIR（宿主环境变量）或 agentcore.Options.TaskDir
+     （宿主显式注入）；都没给时退回原来的 os.TempDir()/norma ⇒ 不接线的宿主行为不变。
+     目录布局仍是 <base>/<sessionID>/tasks/<taskID>.output：一条命令一个文件，
+     两个 session 不共享句柄。
+  2. 进程级注册表（tool/bg_task.go 的 DurableRegistry）：按宿主给的 owner key 索引，
+     换 session 仍能找到一个还活着的后台进程。
+  3. 宿主钩子（tool.TaskObserver）：宿主在「命令转后台」的那一刻先记账，然后回一个
+     owner key。回空串 = 不持久（保持旧行为，进程随 session 死）；回非空 = 该任务登记
+     进进程级注册表，并活过本 session 的 Cleanup。
+  4. Cleanup 只杀非持久任务；持久任务的输出目录保留，进程由宿主的回收者按 TTL / 任务
+     deadline 杀（宿主拿得到 pid）。
+  5. TaskInfo 补 PID / SessionID / Owner / Durable：宿主的账本要能跨进程按 pid 回收，
+     也需要一个跨 session 唯一（sessionID, taskID）的句柄。
+
+为什么「记账」和「回收」必须同时上线：只持久不回收 = 进程泄漏。所以接口把顺序写死了 ——
+OnBackgrounded 返回 owner key 之前，宿主必须已经把自己的账本写下去；写不进去就回空串，
+任务就不持久。于是「活过 session 的任务」永远有一个会来收它的人。
+
+刻意不改的一处：Spawn() 里的 exec.CommandContext(m.rootCtx, ...) 这一行原样保留 ——
+patches/norma-privilege-drop.patch 的 tool/task.go hunk 以它作上下文行，本补丁排在
+norma-privilege-drop 之前（文件名序），改了它后者的补丁就打不上。持久化因此改成
+「Cleanup 在还有持久任务时不取消 root context」，而不是换掉命令构造。
+
+应用方式（作用在 norma 模块根目录，即 go.mod 所在目录）：
+    git apply -p1 patches/norma-background-persist.patch
+    # 或
+    patch -p1 < patches/norma-background-persist.patch
+
+--- /dev/null
++++ b/tool/bg_task.go
+@@ -0,0 +1,181 @@
++package tool
++
++// Durable background tasks: the process-level registry and the host hook that
++// lets a background command outlive the session that started it.
++//
++// Why this exists: the SDK binds a background command's lifetime to the Session
++// that spawned it. Session.Close() -> Manager.Cleanup() -> KillAll(), so a
++// command the agent was told it could "read later" is already dead by the time
++// the agent's run ends — the promise is silently broken, and the agent later
++// reads a dead process's truncated output (or nothing at all).
++//
++// The fix has two halves that must land together:
++//   - the HOST chooses where the output lives (a directory the host owns, with
++//     the host's own retention policy) instead of os.TempDir() keyed by a
++//     per-session UUID;
++//   - the host is told, through TaskObserver, when a task becomes backgrounded
++//     and when it finishes, so the host can keep its own ledger and kill the
++//     process later.
++//
++// The first half alone leaks processes: an output file that outlives its run is
++// exactly as bad as a process that does, and the host is the only party that
++// knows when the task itself is over.
++
++import (
++	"context"
++	"sync"
++)
++
++// TaskObserver is the host hook for durable background tasks.
++//
++// The SDK owns the processes; the host owns the ledger. A host that wants
++// background commands to survive the session that started them installs an
++// observer with SetTaskObserver.
++//
++// Both callbacks may run on SDK goroutines: OnBackgrounded runs on the
++// tool-call path, OnFinished runs on the process-watch goroutine. Neither may
++// block for long, and neither may call back into the Manager.
++type TaskObserver interface {
++	// OnBackgrounded is called once, when a task is marked backgrounded, and
++	// decides whether the task is durable.
++	//
++	// The returned value is the durable owner key — the host's identity for
++	// whatever the task belongs to (an ARTEX task id, say). The key is what a
++	// later session uses to find the task again, so it must be stable across
++	// sessions.
++	//
++	// A non-empty key means "this task is durable": the SDK files it in the
++	// process-level durable registry and lets it outlive the session. An empty
++	// key means "not durable": the task keeps the pre-patch behaviour and dies
++	// with its session.
++	//
++	// The host gets to write its own bookkeeping BEFORE answering, so a host
++	// that cannot record the task (no ledger row, no database) answers with
++	// the empty key and the task stays session-bound. That ordering is what
++	// keeps the two halves of the contract together: a task can only outlive
++	// its session if somebody is going to reap it later.
++	OnBackgrounded(ctx context.Context, info TaskInfo) string
++
++	// OnFinished is called once, when a backgrounded task reaches a terminal
++	// state (completed, failed or killed).
++	OnFinished(ctx context.Context, info TaskInfo)
++}
++
++var (
++	observerMu sync.RWMutex
++	observer   TaskObserver
++)
++
++// SetTaskObserver installs the process-wide observer; nil removes it.
++//
++// Process-wide rather than per-Session because the durable registry is
++// process-wide too: a task that outlives its session must be findable by the
++// next session, and the next session holds no handle on the observer that
++// started it.
++func SetTaskObserver(o TaskObserver) {
++	observerMu.Lock()
++	observer = o
++	observerMu.Unlock()
++}
++
++// currentTaskObserver returns the installed observer, or nil when none is set.
++func currentTaskObserver() TaskObserver {
++	observerMu.RLock()
++	o := observer
++	observerMu.RUnlock()
++	return o
++}
++
++// DurableRegistry is the process-level index of background tasks that outlived
++// their session.
++//
++// Keyed by the host's owner key first: the host asks "what is still running for
++// task 42?" and gets an answer without knowing which session started it. The
++// SDK's own task ids are per-session ("task_1" in every session), so the
++// (owner, session, id) triple is the only unambiguous handle.
++type DurableRegistry struct {
++	mu      sync.Mutex
++	byOwner map[string][]*Task
++}
++
++var durableRegistry = &DurableRegistry{byOwner: map[string][]*Task{}}
++
++// DurableTasks returns the process-level registry.
++func DurableTasks() *DurableRegistry { return durableRegistry }
++
++// Add files a task under its owner key. Re-adding the same task is a no-op.
++func (r *DurableRegistry) Add(owner string, t *Task) {
++	if owner == "" || t == nil {
++		return
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	for _, e := range r.byOwner[owner] {
++		if e == t {
++			return
++		}
++	}
++	r.byOwner[owner] = append(r.byOwner[owner], t)
++}
++
++// Remove drops a task from the registry.
++func (r *DurableRegistry) Remove(owner, sessionID, id string) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	kept := r.byOwner[owner][:0]
++	for _, e := range r.byOwner[owner] {
++		if e.sessionID == sessionID && e.ID == id {
++			continue
++		}
++		kept = append(kept, e)
++	}
++	if len(kept) == 0 {
++		delete(r.byOwner, owner)
++		return
++	}
++	r.byOwner[owner] = kept
++}
++
++// List returns the tasks filed under one owner key, in the order they were
++// filed.
++func (r *DurableRegistry) List(owner string) []TaskInfo {
++	r.mu.Lock()
++	ts := make([]*Task, len(r.byOwner[owner]))
++	copy(ts, r.byOwner[owner])
++	r.mu.Unlock()
++	out := make([]TaskInfo, 0, len(ts))
++	for _, t := range ts {
++		out = append(out, t.info())
++	}
++	return out
++}
++
++// Owners returns the owner keys that currently have at least one task.
++func (r *DurableRegistry) Owners() []string {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	out := make([]string, 0, len(r.byOwner))
++	for k := range r.byOwner {
++		out = append(out, k)
++	}
++	return out
++}
++
++// Kill terminates a durable task's process tree and reports whether a task
++// matched. The (session, id) pair disambiguates the per-session task ids.
++func (r *DurableRegistry) Kill(owner, sessionID, id string) bool {
++	r.mu.Lock()
++	var hit *Task
++	for _, e := range r.byOwner[owner] {
++		if e.sessionID == sessionID && e.ID == id {
++			hit = e
++			break
++		}
++	}
++	r.mu.Unlock()
++	if hit == nil {
++		return false
++	}
++	hit.manager.terminate(hit, TaskKilled, false)
++	return true
++}
+--- /dev/null
++++ b/tool/bg_task_test.go
+@@ -0,0 +1,125 @@
++//go:build !windows
++
++package tool
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"syscall"
++	"testing"
++	"time"
++)
++
++// recordingObserver is a host stub that names an owner for every backgrounded
++// task and remembers what it was told.
++type recordingObserver struct {
++	owner        string
++	backgrounded []TaskInfo
++	finished     []TaskInfo
++}
++
++func (o *recordingObserver) OnBackgrounded(_ context.Context, info TaskInfo) string {
++	o.backgrounded = append(o.backgrounded, info)
++	return o.owner
++}
++
++func (o *recordingObserver) OnFinished(_ context.Context, info TaskInfo) {
++	o.finished = append(o.finished, info)
++}
++
++// processAlive reports whether the task's process is still running.
++func processAlive(t *Task) bool {
++	if t.cmd == nil || t.cmd.Process == nil {
++		return false
++	}
++	return t.cmd.Process.Signal(syscall.Signal(0)) == nil
++}
++
++// A task the host took ownership of must outlive the session that started it:
++// the model was told it could read the output later.
++func TestDurableTaskSurvivesSessionCleanup(t *testing.T) {
++	obs := &recordingObserver{owner: "task:7"}
++	SetTaskObserver(obs)
++	defer SetTaskObserver(nil)
++
++	base := t.TempDir()
++	m, err := NewManagerIn("sess-durable", base)
++	if err != nil {
++		t.Fatalf("NewManagerIn: %v", err)
++	}
++	task, err := m.Spawn(SpawnSpec{Command: "sleep 30", Ctx: context.Background()})
++	if err != nil {
++		t.Fatalf("Spawn: %v", err)
++	}
++	m.Background(task.ID)
++
++	m.Cleanup()
++
++	if !processAlive(task) {
++		t.Fatal("durable task was killed by Cleanup")
++	}
++	if _, err := os.Stat(task.OutputPath); err != nil {
++		t.Fatalf("durable task output was removed: %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(base, "sess-durable")); err != nil {
++		t.Fatalf("durable task directory was removed: %v", err)
++	}
++	found := DurableTasks().List("task:7")
++	if len(found) != 1 || found[0].ID != task.ID {
++		t.Fatalf("durable task not findable under its owner: %+v", found)
++	}
++	if found[0].PID == 0 {
++		t.Fatal("durable task carries no pid")
++	}
++	if len(obs.backgrounded) != 1 {
++		t.Fatalf("observer saw %d backgrounded tasks, want 1", len(obs.backgrounded))
++	}
++
++	// The host reaps it.
++	if !DurableTasks().Kill("task:7", "sess-durable", task.ID) {
++		t.Fatal("Kill reported no such durable task")
++	}
++	waitDead(t, task)
++}
++
++// Without an owner the task keeps the old behaviour: it dies with its session.
++func TestUnownedTaskDiesWithSession(t *testing.T) {
++	obs := &recordingObserver{owner: ""}
++	SetTaskObserver(obs)
++	defer SetTaskObserver(nil)
++
++	base := t.TempDir()
++	m, err := NewManagerIn("sess-ephemeral", base)
++	if err != nil {
++		t.Fatalf("NewManagerIn: %v", err)
++	}
++	task, err := m.Spawn(SpawnSpec{Command: "sleep 30", Ctx: context.Background()})
++	if err != nil {
++		t.Fatalf("Spawn: %v", err)
++	}
++	m.Background(task.ID)
++
++	m.Cleanup()
++
++	waitDead(t, task)
++	if _, err := os.Stat(filepath.Join(base, "sess-ephemeral")); !os.IsNotExist(err) {
++		t.Fatalf("ephemeral session directory survived cleanup: %v", err)
++	}
++	if len(DurableTasks().List("")) != 0 {
++		t.Fatal("an unowned task was filed in the durable registry")
++	}
++}
++
++// waitDead waits for the task's process to disappear.
++func waitDead(t *testing.T, task *Task) {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		if !processAlive(task) {
++			return
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++	t.Fatal("task process is still alive")
++}
+--- a/tool/task.go
++++ b/tool/task.go
+@@ -70,11 +70,24 @@
+ 	OutputPath  string
+ 
+ 	// internal, guarded by Manager.mu
+-	backgrounded bool          // surfaced as a background task: notify on exit
+-	notified     bool          // completion already enqueued into pending
+-	oversize     bool          // terminated by the size watchdog
++	backgrounded bool // surfaced as a background task: notify on exit
++	notified     bool // completion already enqueued into pending
++	oversize     bool // terminated by the size watchdog
+ 	cmd          *exec.Cmd
+ 	done         chan struct{} // closed by watch when the process exits
++
++	// Durable-task bookkeeping. sessionID/owner identify the task to a host
++	// that keeps its own ledger; ctx carries the host context of the run that
++	// started it, which is what the host observer needs in order to attribute
++	// the task. ctx is only ever read, never cancelled, by the SDK.
++	sessionID    string
++	owner        string
++	durable      bool
++	registered   bool // the host observer already knows about this task
++	hostNotified bool // the host observer already knows how it ended
++	ctx          context.Context
++	pid          int
++	manager      *Manager
+ }
+ 
+ func (t *Task) info() TaskInfo {
+@@ -83,21 +96,33 @@
+ 		Status: t.Status, ExitCode: t.ExitCode,
+ 		StartTime: t.StartTime, EndTime: t.EndTime,
+ 		OutputPath: t.OutputPath, Backgrounded: t.backgrounded,
++		SessionID: t.sessionID, Owner: t.owner, PID: t.pid, Durable: t.durable,
+ 	}
+ }
+ 
+ // TaskInfo is an immutable snapshot of a task for safe reads outside the lock.
+ type TaskInfo struct {
+-	ID          string
+-	Kind        TaskKind
+-	Command     string
+-	Description string
+-	Status      TaskStatus
+-	ExitCode    int
+-	StartTime   time.Time
+-	EndTime     time.Time
+-	OutputPath  string
++	ID           string
++	Kind         TaskKind
++	Command      string
++	Description  string
++	Status       TaskStatus
++	ExitCode     int
++	StartTime    time.Time
++	EndTime      time.Time
++	OutputPath   string
+ 	Backgrounded bool
++
++	// SessionID, Owner and PID identify the task to a host that keeps its own
++	// ledger: Owner is the host's owner key (see TaskObserver), SessionID the
++	// SDK session that started it, PID the process id of the spawned command
++	// (0 before the process starts).
++	SessionID string
++	Owner     string
++	PID       int
++	// Durable reports whether the task was handed to the process-level durable
++	// registry, i.e. whether it survives the end of its session.
++	Durable bool
+ }
+ 
+ // Notification is surfaced to the model when a backgrounded task exits.
+@@ -131,6 +156,10 @@
+ 	// Env holds extra "KEY=VALUE" entries layered onto the process environment for
+ 	// this command (see ToolContext.Env). Empty still applies nonInteractiveEnv.
+ 	Env []string
++	// Ctx is the caller's context. The SDK does not cancel it and does not let
++	// it govern the process lifetime; it is carried along so the host observer
++	// (see TaskObserver) can attribute the task to the run that started it.
++	Ctx context.Context
+ }
+ 
+ // nonInteractiveEnv are defaults every spawned shell gets, whether or not the
+@@ -209,6 +238,11 @@
+ 	dir     string
+ 	seq     int
+ 
++	// sessionID names this session; base is the directory that holds every
++	// session's task directory (see baseTaskDir).
++	sessionID string
++	base      string
++
+ 	rootCtx    context.Context
+ 	rootCancel context.CancelFunc
+ 
+@@ -220,24 +254,57 @@
+ 	sessSeq  int
+ }
+ 
+-func baseTaskDir() string { return filepath.Join(os.TempDir(), "norma") }
+-
+-// NewManager creates the per-session task directory and garbage-collects stale
+-// directories left by previous sessions.
++// baseTaskDir returns the base directory that holds background-task output.
++//
++// The host chooses it: NORMA_TASK_DIR points at a directory the host owns and
++// whose retention policy the host controls. Only when the host names nothing
++// does the SDK fall back to its old temp-dir location, so a host that never
++// opts in keeps the previous behaviour exactly.
++//
++// Why a host-chosen base rather than os.TempDir(): a background command that
++// outlives its session needs its output to outlive it too, and os.TempDir() is
++// the OS's to reclaim. The old comment on Cleanup() said exactly this — that
++// making the output durable "needs spill output to live in a host-chosen
++// directory with its own retention policy, not in os.TempDir() keyed by a
++// per-session UUID; that is a design change, not a change to this function".
++func baseTaskDir() string {
++	if v := strings.TrimSpace(os.Getenv("NORMA_TASK_DIR")); v != "" {
++		return v
++	}
++	return filepath.Join(os.TempDir(), "norma")
++}
++
++// NewManager creates the per-session task directory under the host-chosen
++// base (see baseTaskDir) and garbage-collects stale directories left by
++// previous sessions.
+ func NewManager(sessionID string) (*Manager, error) {
++	return NewManagerIn(sessionID, "")
++}
++
++// NewManagerIn creates a Manager whose task directory lives under base instead
++// of the host-chosen default. An empty base means "use baseTaskDir()".
++//
++// The layout is <base>/<sessionID>/tasks/<taskID>.output: one file per command,
++// so two sessions never share a handle on the same output.
++func NewManagerIn(sessionID, base string) (*Manager, error) {
+ 	if sessionID == "" {
+ 		sessionID = "default"
+ 	}
+-	dir := filepath.Join(baseTaskDir(), sessionID, "tasks")
++	if base == "" {
++		base = baseTaskDir()
++	}
++	dir := filepath.Join(base, sessionID, "tasks")
+ 	if err := os.MkdirAll(dir, 0o755); err != nil {
+ 		return nil, err
+ 	}
+-	cleanStaleSessions(baseTaskDir(), sessionID)
++	cleanStaleSessions(base, sessionID)
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	return &Manager{
+ 		tasks:      map[string]*Task{},
+ 		sessions:   map[string]*ptySession{},
+ 		dir:        dir,
++		sessionID:  sessionID,
++		base:       base,
+ 		rootCtx:    ctx,
+ 		rootCancel: cancel,
+ 	}, nil
+@@ -265,12 +332,26 @@
+ 			continue
+ 		}
+ 		dir := filepath.Join(base, e.Name())
++		// Only reclaim directories that look like an SDK session directory
++		// (<sessionID>/tasks). The base may be a host-chosen directory that
++		// holds other things too, and deleting those because their mtime is
++		// old would be destroying the host's data, not ours.
++		if !isSessionDir(dir) {
++			continue
++		}
+ 		if newestMTime(dir).Before(cutoff) {
+ 			_ = os.RemoveAll(dir)
+ 		}
+ 	}
+ }
+ 
++// isSessionDir reports whether dir looks like an SDK session directory, i.e.
++// whether it holds the <sessionID>/tasks subdirectory the SDK creates.
++func isSessionDir(dir string) bool {
++	fi, err := os.Stat(filepath.Join(dir, "tasks"))
++	return err == nil && fi.IsDir()
++}
++
+ // newestMTime returns the most recent mtime of dir or anything one level below
+ // it (<sessionID>/tasks and the output files inside). One level is enough: the
+ // layout is fixed at <base>/<sessionID>/tasks/<file>.
+@@ -351,6 +432,12 @@
+ 		OutputPath:  outPath,
+ 		cmd:         cmd,
+ 		done:        make(chan struct{}),
++		sessionID:   m.sessionID,
++		ctx:         spec.Ctx,
++		manager:     m,
++	}
++	if cmd.Process != nil {
++		t.pid = cmd.Process.Pid
+ 	}
+ 	m.mu.Lock()
+ 	m.tasks[id] = t
+@@ -384,11 +471,34 @@
+ 	}
+ 	t.EndTime = time.Now()
+ 	close(t.done)
+-	if t.backgrounded && !t.notified && (t.Status == TaskCompleted || t.Status == TaskFailed) {
++	notify := t.backgrounded && !t.notified && (t.Status == TaskCompleted || t.Status == TaskFailed)
++	if notify {
+ 		t.notified = true
+ 		m.pending = append(m.pending, m.notifFor(t))
+ 	}
+ 	m.mu.Unlock()
++
++	// The host hears about the outcome of every backgrounded task, including
++	// one that was killed: a task that dies with its session still has to be
++	// accounted for somewhere, and the host is the only party that can.
++	m.notifyHostFinished(t)
++}
++
++// notifyHostFinished tells the host observer that a backgrounded task reached a
++// terminal state. It fires at most once per task.
++func (m *Manager) notifyHostFinished(t *Task) {
++	m.mu.Lock()
++	if !t.backgrounded || t.hostNotified || !t.Status.Terminal() {
++		m.mu.Unlock()
++		return
++	}
++	t.hostNotified = true
++	ctx := t.ctx
++	info := t.info()
++	m.mu.Unlock()
++	if obs := currentTaskObserver(); obs != nil {
++		obs.OnFinished(ctx, info)
++	}
+ }
+ 
+ // watchSize terminates a task whose output file grows past the cap.
+@@ -443,11 +553,17 @@
+ // Background marks a task as backgrounded: its completion will be surfaced to the
+ // model. If the task already finished (a race against a fast command), the
+ // notification is enqueued immediately.
++//
++// A backgrounded task is also the SDK's notion of a DURABLE task: when a host
++// observer names an owner for it, the task is handed to the process-level
++// durable registry and survives the end of this session (see Cleanup). The
++// host is told about it through TaskObserver.OnBackgrounded, which is what lets
++// the host keep a ledger it can reap later.
+ func (m *Manager) Background(id string) {
+ 	m.mu.Lock()
+-	defer m.mu.Unlock()
+ 	t, ok := m.tasks[id]
+ 	if !ok {
++		m.mu.Unlock()
+ 		return
+ 	}
+ 	t.backgrounded = true
+@@ -455,6 +571,49 @@
+ 		t.notified = true
+ 		m.pending = append(m.pending, m.notifFor(t))
+ 	}
++	m.mu.Unlock()
++
++	m.registerDurable(t)
++}
++
++// registerDurable asks the host observer who owns a backgrounded task and, if
++// the host names an owner, files the task in the process-level durable
++// registry so that it survives this session.
++//
++// The observer is host code and may block, so it runs outside the manager lock.
++func (m *Manager) registerDurable(t *Task) {
++	obs := currentTaskObserver()
++	if obs == nil {
++		return
++	}
++	m.mu.Lock()
++	if t.registered {
++		m.mu.Unlock()
++		return
++	}
++	t.registered = true
++	ctx := t.ctx
++	m.mu.Unlock()
++
++	info := t.info()
++	// The host answers with the owner key only after it has recorded the task
++	// in its own ledger: an unrecorded durable task would outlive its session
++	// with nobody left to reap it.
++	owner := obs.OnBackgrounded(ctx, info)
++	if owner == "" {
++		return
++	}
++
++	m.mu.Lock()
++	t.owner = owner
++	t.durable = true
++	m.mu.Unlock()
++	durableRegistry.Add(owner, t)
++
++	// The task may have finished before it was marked backgrounded (a fast
++	// command racing the Background call). The host still has to learn how it
++	// ended, or its ledger keeps a task running that is long gone.
++	m.notifyHostFinished(t)
+ }
+ 
+ // Forget removes a task from the registry and deletes its output file. Used for
+@@ -482,6 +641,9 @@
+ // keeps running and the caller decides whether to background or kill it. A
+ // cancelled ctx kills the task and returns ctx.Err().
+ func (m *Manager) RunForeground(ctx context.Context, spec SpawnSpec, timeout time.Duration) (t *Task, finished bool, output string, err error) {
++	// The caller's context rides along so the host observer can attribute the
++	// task to the run that started it (see TaskObserver).
++	spec.Ctx = ctx
+ 	t, err = m.Spawn(spec)
+ 	if err != nil {
+ 		return nil, false, "", err
+@@ -517,6 +679,11 @@
+ }
+ 
+ // KillAll terminates every running task and returns how many were stopped.
++//
++// Durable tasks are included: an explicit "stop everything" from the model is
++// the model changing its mind, not the session ending. The host is told how
++// they ended through the usual observer callback, and their entries leave the
++// durable registry so nothing stale is left behind.
+ func (m *Manager) KillAll() int {
+ 	m.mu.Lock()
+ 	ts := make([]*Task, 0, len(m.tasks))
+@@ -528,10 +695,15 @@
+ 	for _, t := range ts {
+ 		m.mu.Lock()
+ 		running := t.Status == TaskRunning
++		owner := t.owner
++		sessionID := t.sessionID
+ 		m.mu.Unlock()
+ 		if running {
+ 			m.terminate(t, TaskKilled, false)
+ 			n++
++			if owner != "" {
++				durableRegistry.Remove(owner, sessionID, t.ID)
++			}
+ 		}
+ 	}
+ 	return n
+@@ -608,36 +780,82 @@
+ 	return out
+ }
+ 
+-// Cleanup kills all tasks, closes PTY sessions, removes the session's task
+-// directory and cancels the root context. Safe to call on a nil Manager.
++// Cleanup kills the session's tasks, closes PTY sessions, removes the session's
++// task directory and cancels the root context. Safe to call on a nil Manager.
++//
++// DURABLE TASKS SURVIVE. A task the host observer gave an owner to (see
++// registerDurable) keeps running and keeps its output file: the promise the
++// model was given — "you are notified when it completes" — must not be broken
++// by the end of the run that made it. Every other task is killed, exactly as
++// before.
+ //
+-// Removing the directory does strand the "full output saved to <path>" pointers
+-// that were handed to the model, which is a real cost. It is still the right
+-// trade: agentcore mints a fresh random sessionID per Session, so keeping the
+-// directory means every run of the host leaves one behind, each task file capped
+-// only at maxTaskOutputBytes (50 MiB), with the stale sweep below as the sole
+-// reclaimer — and that sweep runs only inside NewManager, so a host that stops
+-// opening sessions never reclaims at all. Deterministic cleanup at a known cost
+-// beats unbounded growth in the host's temp dir.
+-//
+-// Those pointers are consumed inside the session that produced them. Making
+-// them genuinely durable needs spill output to live in a host-chosen directory
+-// with its own retention policy, not in os.TempDir() keyed by a per-session
+-// UUID; that is a design change, not a change to this function.
++// Removing the directory used to strand the "full output saved to <path>"
++// pointers that were handed to the model, which is a real cost. It is still the
++// right trade for the tasks that die with their session: agentcore mints a
++// fresh random sessionID per Session, so keeping the directory means every run
++// of the host leaves one behind, each task file capped only at
++// maxTaskOutputBytes (50 MiB), with the stale sweep as the sole reclaimer — and
++// that sweep runs only inside NewManager, so a host that stops opening
++// sessions never reclaims at all.
++//
++// A durable task's directory is therefore kept (the whole <base>/<sessionID>
++// is kept, because the output files live inside it) and its retention is the
++// host's business: the host owns the ledger, the host reaps the process, and
++// the host's own retention policy decides when the output goes away.
+ func (m *Manager) Cleanup() {
+ 	if m == nil {
+ 		return
+ 	}
+-	m.KillAll()
++	m.killEphemeral()
+ 	m.closeAllSessions()
+-	if m.dir != "" {
++	if m.dir != "" && !m.hasDurableTasks() {
+ 		_ = os.RemoveAll(filepath.Dir(m.dir)) // <base>/<sessionID>, not just its tasks/
+ 	}
+-	if m.rootCancel != nil {
++	// The root context governs the spawned processes (exec.CommandContext), so
++	// cancelling it kills them. It is therefore cancelled ONLY when no durable
++	// task is left running: a durable task's process has to outlive this
++	// session, and the host reaps it later by pid.
++	//
++	// The tasks that die with the session were already stopped explicitly
++	// (killEphemeral), so skipping the cancel costs nothing for them.
++	if m.rootCancel != nil && !m.hasDurableTasks() {
+ 		m.rootCancel()
+ 	}
+ }
+ 
++// killEphemeral terminates every task that is not durable. Durable tasks were
++// handed to the process-level registry and must outlive this session.
++func (m *Manager) killEphemeral() {
++	m.mu.Lock()
++	ts := make([]*Task, 0, len(m.tasks))
++	for _, t := range m.tasks {
++		ts = append(ts, t)
++	}
++	m.mu.Unlock()
++	for _, t := range ts {
++		m.mu.Lock()
++		running := t.Status == TaskRunning
++		durable := t.durable
++		m.mu.Unlock()
++		if running && !durable {
++			m.terminate(t, TaskKilled, false)
++		}
++	}
++}
++
++// hasDurableTasks reports whether any durable task of this session is still
++// running — i.e. whether its output directory has to be kept.
++func (m *Manager) hasDurableTasks() bool {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	for _, t := range m.tasks {
++		if t.durable && t.Status == TaskRunning {
++			return true
++		}
++	}
++	return false
++}
++
+ // tailFile reads the last maxBytes of a file, prefixing a notice when earlier
+ // output is omitted.
+ func tailFile(path string, maxBytes int) (string, error) {
+--- a/tool/bash.go
++++ b/tool/bash.go
+@@ -102,7 +102,7 @@
+ // runBashManaged runs the command through the task manager, supporting explicit
+ // background launch and timeout auto-backgrounding.
+ func runBashManaged(ctx context.Context, tc *ToolContext, command string, timeout time.Duration, explicitBG bool) (Result, error) {
+-	spec := SpawnSpec{Command: command, Kind: KindBash, WorkingDir: tc.WorkingDir, Description: short(command), Env: tc.Env}
++	spec := SpawnSpec{Command: command, Kind: KindBash, WorkingDir: tc.WorkingDir, Description: short(command), Env: tc.Env, Ctx: ctx}
+ 
+ 	if explicitBG {
+ 		t, err := tc.Tasks.Spawn(spec)
+--- a/tool/monitor.go
++++ b/tool/monitor.go
+@@ -29,7 +29,7 @@
+ 	})
+ }
+ 
+-func runMonitor(_ context.Context, input json.RawMessage, tc *ToolContext) (Result, error) {
++func runMonitor(ctx context.Context, input json.RawMessage, tc *ToolContext) (Result, error) {
+ 	var in struct {
+ 		Command     string `json:"command"`
+ 		Description string `json:"description"`
+@@ -48,6 +48,7 @@
+ 		Description: in.Description,
+ 		Kind:        KindMonitor,
+ 		WorkingDir:  tc.WorkingDir,
++		Ctx:         ctx,
+ 	})
+ 	if err != nil {
+ 		return Errorf("Error: failed to start monitor: " + err.Error()), nil
+--- a/agentcore/agentcore.go
++++ b/agentcore/agentcore.go
+@@ -190,6 +190,15 @@
+ 	// before falling back to resume-recovery.
+ 	EscalateMaxTokens bool
+ 
++	// TaskDir is the base directory for background-task output.
++	//
++	// Empty means "use the host-chosen default": the NORMA_TASK_DIR environment
++	// variable if set, otherwise the SDK's own temp-dir location. A host that
++	// wants background commands to outlive the session that started them must
++	// point this at a directory it owns and whose retention it controls — the
++	// temp dir is the OS's to reclaim.
++	TaskDir string
++
+ 	// DisableBackgroundTasks, when true, prevents the SDK from injecting the
+ 	// background-task management tools (TaskOutput, TaskStop, TaskList, Monitor)
+ 	// into this session's registry. Use for focused single-purpose agents (e.g.
+@@ -312,7 +321,7 @@
+ 	// control it. Disabled by the global AGENT_CORE_DISABLE_BACKGROUND_TASKS env var
+ 	// or by setting Options.DisableBackgroundTasks for this session only.
+ 	if !tool.BackgroundTasksDisabled() && !opts.DisableBackgroundTasks {
+-		if mgr, err := tool.NewManager(s.sessionID); err == nil {
++		if mgr, err := tool.NewManagerIn(s.sessionID, opts.TaskDir); err == nil {
+ 			s.tasks = mgr
+ 			tools = append(tools, tool.NewTaskOutput(), tool.NewTaskStop(), tool.NewTaskList(), tool.NewMonitor())
+ 		}
