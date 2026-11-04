@@ -209,4 +209,6 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	strategySnapshotSchemaReady.Store(pool, struct{}{})
 	findingValidationSchemaReady.Store(pool, struct{}{})
 	taskCommandRuleSchemaReady.Store(pool, struct{}{})
+	llmRecordsSchemaReady.Store(pool, struct{}{})
+	llmUsageSchemaReady.Store(pool, struct{}{})
 }

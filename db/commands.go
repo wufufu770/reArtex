@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -187,8 +188,18 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_request TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_response TEXT;
 `
 
+// llmRecordsSchemaReady 记录某个连接池已经应用过 llm_records 的 DDL。
+//
+// 与 db/quota.go 的 quotaSchemaReady 同理（键 = 连接池指针）：受限运行角色没有
+// DDL 权限 ⇒ 运行期那次调用必须退化成空操作，否则每次启动都会报「permission
+// denied for schema public」。启动期那次走迁移连接（超级用户）⇒ 不受影响。
+var llmRecordsSchemaReady sync.Map
+
 // EnsureLLMRecordsTable creates the llm_records table if it does not exist.
 func (d *DB) EnsureLLMRecordsTable() error {
+	if _, ok := llmRecordsSchemaReady.Load(d.DB); ok {
+		return nil
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return err
@@ -203,7 +214,11 @@ func (d *DB) EnsureLLMRecordsTable() error {
 	if _, err := tx.Exec(llmRecordsMigrate); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	llmRecordsSchemaReady.Store(d.DB, struct{}{})
+	return nil
 }
 
 // InsertLLMRecord stores one LLM call record.
