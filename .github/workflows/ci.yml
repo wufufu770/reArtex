@@ -140,3 +140,25 @@ jobs:
           echo "lint 下列文件："
           echo "$changed"
           npx biome check $changed
+
+  # ③ 敏感信息门：所有 ref 的整棵树 + 全部历史都不能出现凭据 / 本机拓扑 /
+  #    私有 MCP 名 / 私有路径
+  #
+  # 为什么要有这道门：2026-10-26 ~ 11-02 期间，本机拓扑信息（内网网关地址、
+  # 家目录绝对路径、本地情报目录、本机计划路径）与私有工具的名字曾被推上公开
+  # 仓库；当时的 pre-push 钩子只扫「推送区间」，看不见已经推上去的历史 ⇒
+  # 事后只能靠重写历史补救。
+  #
+  # 现在这道门在**服务端**再验一次，扫的是全部历史而不只是当前树：内容被从
+  # tree 里删掉不等于没泄漏过，历史里还在。规则与本地 pre-push 钩子同源
+  # （scripts/scan-sensitive.sh），两边不会漂移；本机私有字面量只存在于本地
+  # 规则文件（secrets/scan-*.local，不进版本库）。
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要扫全部历史，浅克隆扫不到。
+          fetch-depth: 0
+      - name: 扫描敏感信息（整棵树 + 全部历史）
+        run: bash scripts/scan-sensitive.sh all
