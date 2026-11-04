@@ -23,9 +23,34 @@ type Props = Omit<React.ComponentProps<"textarea">, "value" | "onChange" | "ref"
   value: string;
   onValueChange: (value: string) => void;
   inputGroup?: boolean;
+  /** 触发字符，默认 "@"。新会话传 "/"（只在行首或空白后触发）。 */
+  trigger?: string;
+  /** 本地项（会话成员等），即时可见，排在服务端搜索结果之前。 */
+  extraItems?: ChatMention[];
+  /** 选中 agent 时的额外副作用（可选）。 */
+  onPickAgent?: (agentKey: string) => void;
 };
 
-export function MentionTextarea({ value, onValueChange, onKeyDown, className, inputGroup, disabled, ...props }: Props) {
+type Choice = { type: "category"; kind: string; label: string } | { type: "item"; item: ChatMention };
+
+function panelHeading(categoryCount: number, localCount: number, recordLabel: string): string {
+  if (categoryCount === 0) return `搜索${recordLabel}`;
+  if (localCount > 0) return "选择成员或引用类型";
+  return "选择引用类型";
+}
+
+export function MentionTextarea({
+  value,
+  onValueChange,
+  onKeyDown,
+  className,
+  inputGroup,
+  disabled,
+  trigger = "@",
+  extraItems,
+  onPickAgent,
+  ...props
+}: Props) {
   const textarea = React.useRef<HTMLTextAreaElement>(null);
   const composing = React.useRef(false);
   const pendingKeyboardIndex = React.useRef<number | null>(null);
@@ -42,8 +67,9 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
   } | null>(null);
   const request = React.useRef<{ key: string; controller: AbortController; loadingMore: boolean } | null>(null);
   const listId = React.useId();
-  const active = cursor === null ? null : activeMention(value, cursor);
-  const search = mentionSearch(active?.query ?? "");
+  const active = cursor === null ? null : activeMention(value, cursor, trigger);
+  const query = active?.query ?? "";
+  const search = mentionSearch(query);
   const open = !!active && !dismissed && !disabled;
   const categories = search.categories;
   const requestKey = open && !categories.length ? `${search.kind}:${search.query}` : "";
@@ -53,7 +79,22 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
   const nextCursor = result?.key === requestKey ? result.next_cursor : undefined;
   const loadingMore = result?.key === requestKey && result.loadingMore;
   const pageError = result?.key === requestKey ? result.pageError : undefined;
-  const count = categories.length || items.length;
+  const localItems = React.useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const source = extraItems ?? [];
+    if (!needle) return source;
+    return source.filter(
+      (item) => item.label.toLowerCase().includes(needle) || (item.agentKey ?? "").toLowerCase().includes(needle),
+    );
+  }, [extraItems, query]);
+  const choices = React.useMemo<Choice[]>(() => {
+    const list: Choice[] = [];
+    for (const item of localItems) list.push({ type: "item", item });
+    for (const kind of categories) list.push({ type: "category", kind: kind.kind, label: kind.label });
+    for (const item of items) list.push({ type: "item", item });
+    return list;
+  }, [localItems, categories, items]);
+  const count = choices.length;
   const selected = selectedMentions(value);
 
   React.useEffect(() => {
@@ -145,8 +186,16 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
   }
 
   function choose(index: number) {
-    if (categories[index]) replaceActive(`@${categories[index].label} `, false);
-    else if (items[index]) replaceActive(`${mentionToken(items[index])} `, true);
+    const choice = choices[index];
+    if (!choice) return;
+    if (choice.type === "category") {
+      replaceActive(`${trigger}${choice.label} `, false);
+      return;
+    }
+    const item = choice.item;
+    const token = mentionToken(item);
+    replaceActive(item.kind === "agent" ? token : `${token} `, true);
+    if (item.kind === "agent") onPickAgent?.(item.agentKey ?? item.label);
   }
 
   function keyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -171,6 +220,12 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
       if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
         if (event.key === "Tab" && (loading || !count)) {
           setDismissed(true);
+          return;
+        }
+        // 自定义触发符（/）在「搜完仍无候选」时把 Enter 落回调用方，让消息能正常发出去；
+        // 默认的 @ 保持旧行为：Enter 被面板吃掉，等用户继续输入或按 Esc。
+        if (!count && !loading && trigger !== "@") {
+          onKeyDown?.(event);
           return;
         }
         event.preventDefault();
@@ -198,7 +253,7 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
               value={value}
               disabled={disabled}
               className={className}
-              aria-label={props["aria-label"] ?? "消息，输入 @ 引用记录"}
+              aria-label={props["aria-label"] ?? `消息，输入 ${trigger} 引用记录`}
               aria-autocomplete="list"
               aria-controls={open ? listId : undefined}
               aria-expanded={open}
@@ -230,13 +285,15 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
           onInteractOutside={(event) => {
             if (event.target === textarea.current) event.preventDefault();
           }}
-          aria-label="选择引用记录"
+          aria-label={trigger === "@" ? "选择引用记录" : "选择成员或记录"}
         >
           <div className="flex items-center justify-between px-2 py-1 text-muted-foreground text-xs">
             <span>
-              {categories.length
-                ? "选择引用类型"
-                : `搜索${mentionKinds.find((kind) => kind.kind === search.kind)?.label ?? "全部记录"}`}
+              {panelHeading(
+                categories.length,
+                localItems.length,
+                mentionKinds.find((kind) => kind.kind === search.kind)?.label ?? "全部记录",
+              )}
             </span>
             <span>↑↓ 选择 · Enter 确认 · Esc 关闭</span>
           </div>
@@ -250,25 +307,6 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
               if (list.scrollHeight - list.scrollTop - list.clientHeight < 64) loadMore();
             }}
           >
-            {categories.map((kind, index) => (
-              <button
-                key={kind.kind}
-                id={`${listId}-${index}`}
-                type="button"
-                role="option"
-                aria-selected={activeIndex === index}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent",
-                  activeIndex === index && "bg-accent",
-                )}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => choose(index)}
-              >
-                <AtSignIcon className="size-4 text-muted-foreground" />
-                <span>{kind.label}</span>
-                <ChevronRightIcon className="ml-auto size-4 text-muted-foreground" />
-              </button>
-            ))}
             {!categories.length && loading && (
               <div role="status" className="flex items-center gap-2 p-3 text-muted-foreground text-sm">
                 <Loader2Icon className="size-4 animate-spin" />
@@ -280,33 +318,57 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
                 搜索失败：{error}。请重新输入重试。
               </div>
             )}
-            {!categories.length && !loading && !error && !items.length && (
+            {!categories.length && !loading && !error && !items.length && !localItems.length && (
               <div role="status" className="p-3 text-muted-foreground text-sm">
                 没有匹配记录，请更换名称、地址或 ID
               </div>
             )}
-            {items.map((item, index) => (
-              <button
-                key={`${item.kind}:${item.id}`}
-                id={`${listId}-${index}`}
-                type="button"
-                role="option"
-                aria-selected={activeIndex === index}
-                className={cn(
-                  "flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-accent",
-                  activeIndex === index && "bg-accent",
-                )}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => choose(index)}
-              >
-                <span className="flex w-full items-center gap-2">
-                  <Badge variant="outline">{mentionKinds.find((kind) => kind.kind === item.kind)?.label}</Badge>
-                  <span className="truncate text-sm">{item.label}</span>
-                  <span className="ml-auto shrink-0 text-muted-foreground text-xs">#{item.id}</span>
-                </span>
-                <span className="w-full truncate text-muted-foreground text-xs">{item.description}</span>
-              </button>
-            ))}
+            {choices.map((choice, index) =>
+              choice.type === "category" ? (
+                <button
+                  key={`category:${choice.kind}`}
+                  id={`${listId}-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={activeIndex === index}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent",
+                    activeIndex === index && "bg-accent",
+                  )}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => choose(index)}
+                >
+                  <AtSignIcon className="size-4 text-muted-foreground" />
+                  <span>{choice.label}</span>
+                  <ChevronRightIcon className="ml-auto size-4 text-muted-foreground" />
+                </button>
+              ) : (
+                <button
+                  key={choice.item.agentKey ? `agent:${choice.item.agentKey}` : `${choice.item.kind}:${choice.item.id}`}
+                  id={`${listId}-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={activeIndex === index}
+                  className={cn(
+                    "flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left hover:bg-accent",
+                    activeIndex === index && "bg-accent",
+                  )}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => choose(index)}
+                >
+                  <span className="flex w-full items-center gap-2">
+                    <Badge variant="outline">
+                      {mentionKinds.find((kind) => kind.kind === choice.item.kind)?.label}
+                    </Badge>
+                    <span className="truncate text-sm">{choice.item.label}</span>
+                    {choice.item.kind !== "agent" && (
+                      <span className="ml-auto shrink-0 text-muted-foreground text-xs">#{choice.item.id}</span>
+                    )}
+                  </span>
+                  <span className="w-full truncate text-muted-foreground text-xs">{choice.item.description}</span>
+                </button>
+              ),
+            )}
           </div>
           {!categories.length && (
             <p className="px-2 py-1 text-muted-foreground text-xs">
