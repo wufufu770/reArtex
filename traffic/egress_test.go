@@ -66,8 +66,13 @@ func TestEgressTaskTokenRoundTrip(t *testing.T) {
 	if id, ok := parseEgressTaskToken(forged); ok {
 		t.Fatalf("伪造的任务号被接受：%d", id)
 	}
-	// 篡改签名 → 不认。
-	tampered := token[:len(token)-1] + "A"
+	// 篡改签名 → 不认。替换位必须保证与原字符不同：固定替换成 'A' 时，原令牌
+	// 末位恰为 'A' 的那几次运行里 tampered == token，测试随机假红（CI 实测）。
+	repl := byte('A')
+	if token[len(token)-1] == 'A' {
+		repl = 'B'
+	}
+	tampered := token[:len(token)-1] + string(repl)
 	if _, ok := parseEgressTaskToken(tampered); ok {
 		t.Fatal("被篡改的令牌被接受")
 	}
