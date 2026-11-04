@@ -108,6 +108,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
+      - name: 纯逻辑测试（mention 触发与 token 分流）
+        run: npm run test:mentions
+        working-directory: web
       - run: npm run build:static
         working-directory: web
       - name: lint（仅相对基线改动的文件）
