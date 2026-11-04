@@ -38,14 +38,20 @@
 #   ARTEX_PG_DSN_HOST        运行期 DSN 里的主机名，默认 postgres（compose 服务名）。
 #   ARTEX_PG_DSN_PORT        运行期 DSN 里的端口，默认 5432。
 #   ARTEX_RUNTIME_DSN_SECRET 运行期 DSN 的落地路径，默认 secrets/pg_dsn。
+#   ARTEX_ADMIN_DSN_SECRET  迁移连接 DSN 的落地路径，默认 secrets/pg_dsn_admin。
+#   ARTEX_ENV_FILE          从哪个 .env 读管理连接参数，默认脚本所在仓库根 .env。
+#                             ⚠️ 部署实例的 .env 在**部署目录**而不在仓库根 ⇒
+#                             部署时必须显式指过去，否则脚本会拿仓库根的
+#                             POSTGRES_PASSWORD（开发口令）当超级用户口令，
+#                             写出的迁移 secret 与生产集群对不上 ⇒ 应用起不来。
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
-#                             管理连接参数。未设置时从仓库根 .env 兜底
+#                             管理连接参数。未设置时从 ARTEX_ENV_FILE 兜底
 #                             （POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB）。
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
-ENV_FILE="$REPO_DIR/.env"
+ENV_FILE="${ARTEX_ENV_FILE:-$REPO_DIR/.env}"
 
 ROLE="${ARTEX_PG_APP_ROLE:-artex_app}"
 SECRET_FILE="${ARTEX_RUNTIME_DSN_SECRET:-$REPO_DIR/secrets/pg_dsn}"
@@ -90,11 +96,12 @@ PGPORT="${PGPORT:-5432}"
 PGHOST="${PGHOST:-127.0.0.1}"
 if [ -z "${PGPASSWORD:-}" ]; then
     PGPASSWORD=$(getenv_from_env_file POSTGRES_PASSWORD || true)
-    # 迁移连接的超级用户口令兜底：容器内走 trust 认证时上面那行拿不到口令。
-    if [ -z "${PGPASSWORD:-}" ]; then
-        PGPASSWORD="$(getenv_from_env_file POSTGRES_PASSWORD || true)"
+    # 兜底：.env 里没有口令时，从已有的迁移 secret 里取回超级用户口令
+    # （那份文件装的就是超级用户口令；口令随 .env 走，库卷重建后需同步刷新）。
+    if [ -z "${PGPASSWORD:-}" ] && [ -r "${ARTEX_ADMIN_DSN_SECRET:-/nonexistent}" ]; then
+        PGPASSWORD=$(sed -n 's#.*://[^:]*:\([^@]*\)@.*#\1#p' "${ARTEX_ADMIN_DSN_SECRET}" | tail -n 1)
     fi
-    [ -n "$PGPASSWORD" ] && export PGPASSWORD
+    [ -n "${PGPASSWORD:-}" ] && export PGPASSWORD
 fi
 
 # ---------------------------------------------------------------------
@@ -219,16 +226,15 @@ unset APP_PW
 # 应用启动读走它之后会立刻抹掉磁盘上那份（只读挂载抹不掉时告警但不阻断）⇒
 # 超级用户凭据只在启动那一瞬间存在于内存里。
 ADMIN_SECRET_FILE="${ARTEX_ADMIN_DSN_SECRET:-$REPO_DIR/secrets/pg_dsn_admin}"
-if [ -s "$ADMIN_SECRET_FILE" ]; then
-    echo "  迁移连接 secret: $ADMIN_SECRET_FILE（已存在，保留）"
-else
-    mkdir -p "$(dirname "$ADMIN_SECRET_FILE")"
-    umask 077
-    printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' \
-        "$PGUSER" "$PGPASSWORD" "$DSN_HOST" "$DSN_PORT" "$PGDATABASE" > "$ADMIN_SECRET_FILE"
-    chmod 600 "$ADMIN_SECRET_FILE"
-    echo "  迁移连接 secret: $ADMIN_SECRET_FILE（已生成，0600）"
-fi
+# ⚠️ 每次都重写（不只在缺失时写）：这份文件装的是**超级用户**口令，而超级用户
+# 口令跟着 .env 走 —— 库卷被重建后集群会用新的 .env 口令重新初始化，此时若还留着
+# 旧文件，应用启动时就会用旧口令连迁移库 ⇒ 认证失败 ⇒ 容器起不来。
+mkdir -p "$(dirname "$ADMIN_SECRET_FILE")"
+umask 077
+printf 'postgres://%s:%s@%s:%s/%s?sslmode=disable' \
+    "$PGUSER" "$PGPASSWORD" "$DSN_HOST" "$DSN_PORT" "$PGDATABASE" > "$ADMIN_SECRET_FILE"
+chmod 600 "$ADMIN_SECRET_FILE"
+echo "  迁移连接 secret: $ADMIN_SECRET_FILE（已按当前 .env 口令重写，0600）"
 
 cat <<EOF
 完成。
