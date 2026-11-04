@@ -17,6 +17,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ var errSessionNotFound = errors.New("会话不存在")
 // （db 那份也是用同一组常量拼的）。
 var sessionKinds = map[string]bool{
 	db.SessionKindChat:         true,
+	db.SessionKindMaster:       true,
 	db.SessionKindTaskHall:     true,
 	db.SessionKindSideQuestion: true,
 }
@@ -270,6 +272,9 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Agents      []string                   `json:"agents"`
 		Dispatcher  string                     `json:"dispatcher"`
 		Attachments []db.SessionAttachmentSpec `json:"attachments"`
+		// Goal 只对 kind='master'（总控）有意义：非空 ⇒ 创建会话的同时按这个目标
+		// 起一个任务并绑定（launchTask 共享路径），后续规划/执行进展直接播报进会话流。
+		Goal string `json:"goal"`
 	}
 	if !decodeSessionRequest(w, r, &req) {
 		return
@@ -279,7 +284,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		kind = db.SessionKindChat
 	}
 	if !sessionKinds[kind] {
-		writeErr(w, 400, "会话类型只能是 chat/task_hall/side_question")
+		writeErr(w, 400, "会话类型只能是 chat/master/task_hall/side_question")
+		return
+	}
+	goal := strings.TrimSpace(req.Goal)
+	if goal != "" && kind != db.SessionKindMaster {
+		writeErr(w, 400, "只有总控会话（kind='master'）支持创建时附带任务目标（goal）")
 		return
 	}
 	members, err := sessionMembersFromRequest(pg, req.Agents, req.Dispatcher)
@@ -317,6 +327,42 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "加会话关联失败: "+err.Error())
 			return
 		}
+	}
+	// 总控创建即编排：goal 非空 ⇒ 建任务 + 绑定 + 播报，再走 launchTask 共享路径。
+	// 失败回滚要连带删掉刚建的任务（半个总控比没有总控更糟，与 PublishTask 同款纪律）。
+	spawnedTask := int64(0)
+	defer func() {
+		if rollback && spawnedTask > 0 {
+			_ = pg.DeleteTask(spawnedTask)
+		}
+	}()
+	if kind == db.SessionKindMaster && goal != "" {
+		t, err := s.m.CreateTaskWithOptions("总控会话目标："+firstLine(goal, 40), goal, db.TaskCreateOptions{
+			Name: strings.TrimSpace(req.Name),
+		})
+		if err != nil {
+			writeErr(w, 500, "创建总控任务失败: "+err.Error())
+			return
+		}
+		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+		spawnedTask = taskID
+		ok, err := pg.BindSessionTask(id, taskID)
+		if err != nil {
+			writeErr(w, 500, "绑定总控任务失败: "+err.Error())
+			return
+		}
+		if !ok {
+			writeErr(w, 500, "绑定总控任务失败：会话已绑定其他任务")
+			return
+		}
+		announce := fmt.Sprintf("【总控】已创建任务 #%d 并绑定本会话。\n目标：%s\n后续的规划、认领与执行进展会直接播报在这里。",
+			taskID, goal)
+		if _, err := pg.AddSessionMessage(&db.SessionMessage{SessionID: id, FromAgent: members[0].AgentKey,
+			Kind: db.SessionMessageKindNote, Body: announce}); err != nil {
+			log.Printf("[session] 总控播报写入失败（session %d）: %v", id, err)
+		}
+		s.launchTask(t, goal, false)
+		s.registerTaskSessionBinding(taskID, id)
 	}
 	rollback = false
 	view, err := sessionViewOfID(pg, id)
@@ -656,6 +702,10 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		Kind:      msg.Kind,
 		Blocked:   msg.Status == db.SessionMessageBlocked,
 	}, sessionWakeMembers(members))
+	// 会话级唤醒器（server/session_waker.go）：本出口只报告 wake 集合；真正起 turn
+	// 在这里 —— @ 定向必醒（人发消息接力深度 0）。异步、尽力而为：起不起得动
+	// 不影响本响应。
+	s.wakeSessionAgents(id, decision.MustWake, msg, 0)
 	writeJSON(w, 201, map[string]any{
 		"status":            "ok",
 		"message":           msg,

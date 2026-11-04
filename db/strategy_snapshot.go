@@ -311,11 +311,21 @@ func (d *DB) PinnedStrategies(limit int) ([]*Strategy, error) {
 //
 // 权威 utility 在物化视图里（静态列只是缓存）；curator 平时会自己刷新，
 // 这个入口给 operator 一个「立刻对齐」的手段。
+//
+// 为什么优先走迁移连接（admin）：REFRESH MATERIALIZED VIEW 需要物化视图的
+// **属主**权限，而视图由迁移连接（超级用户）建（db/schema_strategy.sql）；
+// 运行期角色（artex_app）刻意没有任何对象的所有权（db/role.go）⇒ 直接在
+// 运行期连接上刷必然报「must be owner of materialized view」。admin 池缺失
+// （单 DSN 部署）时运行期连接就是属主，直刷即可。
 func (d *DB) RefreshStrategyUtility() error {
 	if err := d.ensureStrategySchema(); err != nil {
 		return err
 	}
-	if _, err := d.Exec(`REFRESH MATERIALIZED VIEW strategy_utility`); err != nil {
+	pool := d.DB
+	if d.admin != nil {
+		pool = d.admin
+	}
+	if _, err := pool.Exec(`REFRESH MATERIALIZED VIEW strategy_utility`); err != nil {
 		return fmt.Errorf("刷新策略 utility 物化视图失败: %w", err)
 	}
 	return nil

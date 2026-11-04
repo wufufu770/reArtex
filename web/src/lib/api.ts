@@ -949,6 +949,17 @@ export const api = {
   gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
 
   // ---- 任务大厅（群聊）----
+  // 发布任务（POST /api/task-hall/tasks）：一次调用建任务 + 声明范围 + 建大厅 +
+  // 可选开额度，返回 task_id 与 group_id。一个任务至多一个大厅（重复发布 409）。
+  publishTaskHallTask: (input: {
+    name?: string;
+    description?: string;
+    goal: string;
+    asset_ids?: number[];
+    members?: string[];
+    concurrency_limit?: number;
+    budget_tokens?: number;
+  }) => post<{ task_id: number; group_id: number }>("/task-hall/tasks", input),
   // 大厅列表。/task-hall/tasks 带出成员与额度上限，/task-hall/groups 只有群本体，
   // 两个接口列的是同一批群（都读 chat_groups），这里用带成员的那个。
   taskHallTasks: () =>
@@ -1250,6 +1261,12 @@ export const api = {
   // 退出：成员离席，历史消息归属不变。
   removeSessionMember: (id: number, agent_key: string) =>
     del<{ ok: boolean }>(`/sessions/${id}/members/${encodeURIComponent(agent_key)}`),
+  // 更新成员在场状态（presence）：working / blocked(+eta,blocked_on) / listening / idle。
+  updateSessionMemberPresence: (
+    id: number,
+    agent_key: string,
+    input: { presence: string; eta_minutes?: number; blocked_on?: string },
+  ) => patch<{ ok: boolean; member: SessionMember }>(`/sessions/${id}/members/${encodeURIComponent(agent_key)}`, input),
   // 成员状态（presence 三态）。
   sessionPresence: (id: number) =>
     get<{ presence: SessionMember[] }>(`/sessions/${id}/presence`).then((r) => arr(r.presence)),

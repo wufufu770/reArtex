@@ -75,6 +75,15 @@ type Server struct {
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
 	chatCancel map[string]context.CancelCauseFunc
+	// sessionWakePending 暂存「成员正在跑时到达的定向消息」（会话级唤醒器，
+	// server/session_waker.go）：turn 结束后合并成一条后续唤醒。与 chatBusy 同锁
+	// （chatMu）、同生命周期（in-memory，重启即清 —— 消息本体已在 session_messages
+	// 落库，丢失的只是这次自动跟进，人在群里重发一条即可）。
+	sessionWakePending map[string][]pendingWake
+	// sessionWakeChain 记每个对话线程上在跑唤醒 turn 的接力深度（封顶用）。
+	sessionWakeChain map[string]int
+	// mirror 是任务→会话播报的路由缓存（server/session_task_mirror.go）。
+	mirror *taskSessionMirror
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
@@ -148,11 +157,17 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
 	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
-		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
+		chatCancel: map[string]context.CancelCauseFunc{}, sessionWakePending: map[string][]pendingWake{},
+		sessionWakeChain: map[string]int{}, mirror: newTaskSessionMirror(),
+		triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
+	s.engine.ActivityMirror = s.onEngineTaskActivity
+	s.engine.ClaimMirror = s.onEngineIntentClaim
+	s.loadTaskSessionBindings()
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。

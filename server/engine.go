@@ -126,6 +126,13 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
+	// ActivityMirror / ClaimMirror 是总控会话播报的注入点（server/session_task_mirror.go）：
+	// emitActivity / 认领点在主链路旁 best-effort 调用，nil = 未装配（测试、无会话形态）。
+	// 为什么做成字段而不是直接 import：Engine 在 Server 之下装配，回调由 New() 注入，
+	// 引擎侧不感知会话形态 —— 与 toolTableFallback（db 层注入回调）同一套手法。
+	ActivityMirror func(taskID string, r db.Activity)
+	ClaimMirror    func(taskID, workerKey string, intentID int64, summary string)
+
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
@@ -1137,6 +1144,18 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 		r.CreatedAt = time.Now()
 	}
 	e.bc.Publish(t.ID, r)
+	if e.ActivityMirror != nil {
+		// 总控/群聊播报：镜像规则在回调内部（session_task_mirror.go），这里只转发。
+		// best-effort：回调自身吞错，panic 也不能拖垮引擎主链路。
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[activity-mirror] panic（task %s）: %v", t.ID, rec)
+				}
+			}()
+			e.ActivityMirror(t.ID, r)
+		}()
+	}
 	e.touch(t.ID)
 	return r
 }
@@ -1470,6 +1489,28 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 		return false
 	}
 	log.Printf("[worker %s] task %s 领取意图 #%d", name, t.ID, intent.ID)
+	if e.ClaimMirror != nil {
+		// 总控/群聊播报：认领是关键节点，原样转发（panic 隔离，不碰主链路）。
+		// 意图摘要在 payload JSON 里（Node 本体不带 summary 列）⇒ 这里解一层最小
+		// 结构；解不出退到原始 payload（截断），保证播报始终有意义。
+		var p struct {
+			Summary string `json:"summary"`
+		}
+		summary := ""
+		if json.Unmarshal(intent.Payload, &p) == nil && strings.TrimSpace(p.Summary) != "" {
+			summary = p.Summary
+		} else {
+			summary = string(intent.Payload)
+		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[claim-mirror] panic（task %s intent #%d）: %v", t.ID, intent.ID, rec)
+				}
+			}()
+			e.ClaimMirror(t.ID, name, intent.ID, summary)
+		}()
+	}
 	return e.runIntent(ctx, t, name, worker, intent, "", "")
 }
 

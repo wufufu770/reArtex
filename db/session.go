@@ -51,8 +51,13 @@ var sessionSchemaReady sync.Map
 // ---------- 会话的状态机常量（与 db/schema_session.sql 的 CHECK 镜像）----------
 
 // 会话类型。
+// kind='master' 是总控会话：群聊全部能力（成员/唤醒/会话流）+ 绑定任务（创建即编排
+// 或 spawn_task 自动绑回）+ 引擎进展播报进会话流。与 task_hall 的区别：task_hall 是
+// 「发布任务时生成的任务大厅」，master 是「人主动开的指挥室」——任务可由 goal 在
+// 创建时一并起，也可由成员在会话里 spawn_task 后自动绑定。
 const (
 	SessionKindChat         = "chat"
+	SessionKindMaster       = "master"
 	SessionKindTaskHall     = "task_hall"
 	SessionKindSideQuestion = "side_question"
 )
@@ -138,7 +143,7 @@ var sessionPresences = map[string]bool{
 }
 
 var sessionKinds = map[string]bool{
-	SessionKindChat: true, SessionKindTaskHall: true, SessionKindSideQuestion: true,
+	SessionKindChat: true, SessionKindMaster: true, SessionKindTaskHall: true, SessionKindSideQuestion: true,
 }
 
 // ---------- 结构体 ----------
@@ -437,7 +442,7 @@ func (d *DB) CreateSession(s *Session) (int64, error) {
 		s.Kind = SessionKindChat
 	}
 	if !sessionKinds[s.Kind] {
-		return 0, fmt.Errorf("会话类型只能是 chat/task_hall/side_question，收到 %q", s.Kind)
+		return 0, fmt.Errorf("会话类型只能是 chat/master/task_hall/side_question，收到 %q", s.Kind)
 	}
 	s.NameSource = SessionNameSourceDefault
 	if s.Name != "" {
@@ -1082,6 +1087,122 @@ func (d *DB) SessionConversationIDs(sessionID int64) ([]int64, error) {
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// BindSessionTask 把任务绑定到会话（sessions.task_id）。幂等且「首个为准」：
+// 已绑定别的任务时不覆盖（返回 ok=false），绑定同一条任务视为成功。
+//
+// 用途：总控会话创建时带 goal 一并起任务；成员在会话里 spawn_task 后把任务绑回
+// 会话（server/session_task_mirror.go 的播报路由按绑定走）。UPDATE 只碰 task_id
+// 一列，updated_at 由 trg_sessions_upd 维护。
+func (d *DB) BindSessionTask(sessionID, taskID int64) (bool, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return false, err
+	}
+	if sessionID <= 0 || taskID <= 0 {
+		return false, errors.New("绑定参数不合法（session/task id 必须为正）")
+	}
+	var current *int64
+	err := d.QueryRow(`SELECT task_id FROM sessions WHERE id=$1`, sessionID).Scan(&current)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("会话 %d 不存在", sessionID)
+		}
+		return false, fmt.Errorf("读会话失败: %w", err)
+	}
+	if current != nil {
+		if *current == taskID {
+			return true, nil
+		}
+		return false, nil // 首个为准：一个会话一个主任务，后续 spawn 的任务是它的子任务
+	}
+	if _, err := d.Exec(`UPDATE sessions SET task_id=$2 WHERE id=$1 AND task_id IS NULL`, sessionID, taskID); err != nil {
+		return false, fmt.Errorf("绑定任务失败: %w", err)
+	}
+	// 并发下可能被别处抢先绑定 ⇒ 复核一次（失败只影响播报路由，不致命）。
+	err = d.QueryRow(`SELECT task_id FROM sessions WHERE id=$1`, sessionID).Scan(&current)
+	if err != nil {
+		return false, fmt.Errorf("复核绑定失败: %w", err)
+	}
+	return current != nil && *current == taskID, nil
+}
+
+// SessionByTask 查绑定到某任务的会话（总控/群聊的进展播报路由）。
+// 一个任务至多被一个会话持有主绑定（首个为准）⇒ 取 task_id 命中的第一条；
+// 没有绑定 ⇒ nil。
+func (d *DB) SessionByTask(taskID int64) (*Session, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	var id int64
+	err := d.QueryRow(`SELECT id FROM sessions WHERE task_id=$1 ORDER BY id LIMIT 1`, taskID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("查任务会话失败: %w", err)
+	}
+	sess, err := d.GetSession(id)
+	if err != nil {
+		return nil, fmt.Errorf("读任务会话失败: %w", err)
+	}
+	return sess, nil
+}
+
+// SessionConversationFor 返回会话里某个成员的专属对话线程；没有就建一个。
+//
+// 为什么需要它：conversations.agent_key 是单值列 ⇒ 一个成员一个线程；会话流
+// （session_messages）只记消息，「成员跑一个 turn」要落在它的对话线程上
+// （transcript / 活动 / in-flight 判定都以 conversations 为主体）。
+// 迁移回填出来的会话每个成员自带一个对话（session_id 回填）；新会话（HTTP 建的）
+// 成员入席时**不**建对话 ⇒ 唤醒器在第一次唤醒该成员时按需补建。
+//
+// 建线程的插入失败回表重读一次（同一成员的线程在并发唤醒下只建一条）：对话线程
+// 重复的代价（transcript 分裂）比少一条难补救，宁可重读。
+func (d *DB) SessionConversationFor(sessionID int64, agentKey string) (*Conversation, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	agentKey = strings.TrimSpace(agentKey)
+	if agentKey == "" {
+		return nil, errors.New("agent key 不能为空")
+	}
+	var id int64
+	err := d.QueryRow(`SELECT id FROM conversations WHERE session_id=$1 AND agent_key=$2
+ORDER BY id LIMIT 1`, sessionID, agentKey).Scan(&id)
+	if err == nil {
+		c, err := scanConv(d.QueryRow(`SELECT ` + convCols + ` FROM conversations WHERE id=$1`, id))
+		if err != nil {
+			return nil, fmt.Errorf("读会话对话线程失败: %w", err)
+		}
+		return &c, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("查会话对话线程失败: %w", err)
+	}
+	// 没有线程 ⇒ 建一个。标题取「会话显示名/成员 key」（与任务大厅建成员会话的
+	// 命名一致）；会话名缺失时退到 id，保证标题非空。
+	var sessName string
+	_ = d.QueryRow(`SELECT COALESCE(NULLIF(name,''), NULLIF(title,'')) FROM sessions WHERE id=$1`,
+		sessionID).Scan(&sessName)
+	if sessName == "" {
+		sessName = fmt.Sprintf("会话-%d", sessionID)
+	}
+	c, err := scanConv(d.QueryRow(`INSERT INTO conversations(agent_key, title, session_id)
+VALUES ($1, $2, $3) RETURNING `+convCols, agentKey, sessName+"/"+agentKey, sessionID))
+	if err != nil {
+		// 并发建线程没有 DB 约束兜底（session_id+agent_key 无 UNIQUE）⇒ 插入失败
+		// 回表重读一次；仍读不到就如实报错。
+		if inner := d.QueryRow(`SELECT id FROM conversations WHERE session_id=$1 AND agent_key=$2
+ORDER BY id LIMIT 1`, sessionID, agentKey).Scan(&id); inner == nil {
+			c, err = scanConv(d.QueryRow(`SELECT ` + convCols + ` FROM conversations WHERE id=$1`, id))
+			if err == nil {
+				return &c, nil
+			}
+		}
+		return nil, fmt.Errorf("建会话对话线程失败: %w", err)
+	}
+	return &c, nil
 }
 
 // ChatGroupIDBySession 查这个会话对应的大厅 id（没有则 nil）。

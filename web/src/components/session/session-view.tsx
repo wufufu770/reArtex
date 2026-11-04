@@ -53,7 +53,9 @@ export function SessionView({
   const [running, setRunning] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [panelOpen, setPanelOpen] = React.useState(false);
-  const [tab, setTab] = React.useState<"stream" | "legacy">(legacyPanel ? "legacy" : "stream");
+  // 页签始终默认「会话流」（群聊/总控的主界面）；「旧对话记录」只是迁移期的查阅
+  // 入口，手点可达 —— 默认落进去会让群聊看起来「变回」旧会话。
+  const [tab, setTab] = React.useState<"stream" | "legacy">("stream");
   const [uploading, setUploading] = React.useState(false);
   const [pendingAttachments, setPendingAttachments] = React.useState<ChatAttachment[]>([]);
   const cursorRef = React.useRef(0);
@@ -68,7 +70,7 @@ export function SessionView({
     setMembers(session.members ?? []);
     setAttachments(session.attachments ?? []);
     setPendingAttachments([]);
-    setTab(legacyPanel ? "legacy" : "stream");
+    setTab("stream");
   }, [session.id]);
 
   // 首次拉取消息（since=0 取全量），之后按 cursor 增量。
@@ -205,6 +207,21 @@ export function SessionView({
     }
   }
 
+  // 更新成员在场状态（PATCH /sessions/{id}/members/{agent}）：working/blocked/
+  // listening/idle。唤醒器会把 working 覆盖回 listening，所以这里主要是把卡住的
+  // 成员标 blocked、或把误标的拨回 listening。
+  async function setPresence(agentKey: string, presence: string) {
+    setBusy(true);
+    try {
+      await api.updateSessionMemberPresence(session.id, agentKey, { presence });
+      onSessionChanged();
+    } catch (error) {
+      toast.error(`状态更新失败：${(error as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function removeMember(agentKey: string) {
     setBusy(true);
     try {
@@ -294,6 +311,7 @@ export function SessionView({
         onDelete={() => void removeSession()}
         onAddMember={(agentKey) => void addMember(agentKey)}
         onRemoveMember={(agentKey) => void removeMember(agentKey)}
+        onSetPresence={(agentKey, presence) => void setPresence(agentKey, presence)}
         tabs={tabs}
         aside={
           <button

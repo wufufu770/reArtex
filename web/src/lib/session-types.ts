@@ -11,7 +11,9 @@
 
 // ---- 会话本体 ----
 
-export type SessionKind = "chat" | "task_hall" | "side_question";
+// kind='master' 是总控会话：群聊全部能力 + 绑定任务（创建即编排或 spawn_task
+// 自动绑回）+ 引擎进展播报进会话流。
+export type SessionKind = "chat" | "master" | "task_hall" | "side_question";
 
 // 三轨命名（§4.2）：用户显式名 > 生成标题 > 默认显示名。
 export type SessionNameSource = "user" | "generated" | "default";
@@ -126,10 +128,15 @@ export interface SessionMessage {
 export interface SessionCreateInput {
   // 用户显式名；留空则由后端生成标题或用默认显示名。
   name?: string;
+  // 会话形态；缺省 chat（群聊）。master = 总控（创建即编排）。
+  kind?: SessionKind;
   // 成员（agent key）；默认只带 auto（§9 定稿 2）。
   agents?: string[];
   // 分发者（默认 auto）。
   dispatcher?: string;
+  // 只对 kind='master' 有意义：非空 ⇒ 后端按这个目标建任务并绑定会话，
+  // 规划/认领/执行进展直接播报进会话流。
+  goal?: string;
   // 建会话时顺手关联的工件。
   attachments?: { attachment_type: SessionAttachmentType; identity_key: string }[];
 }

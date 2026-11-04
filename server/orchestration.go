@@ -251,7 +251,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 600(10min)；"},
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：对于简单任务可开启，创建时直接下发一条种子意图(内容=描述+目标)让 worker 免等首轮 planner 直接开跑测试；默认 false(走标准先规划再执行)。"},
 		}, "description", "goal"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Description          string          `json:"description"`
 				Goal                 string          `json:"goal"`
@@ -318,6 +318,15 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 				t.ParentRef = a.ParentRef
 				if id, e := strconv.ParseInt(t.ID, 10, 64); e == nil {
 					_ = s.m.PG().SetParentRef(id, a.ParentRef)
+				}
+			}
+			// 会话里的 spawn_task：把新任务绑回发起会话（总控/群聊的进展播报路由）。
+			// 只认 chat 形态的调用（RunInfo.SessionID="conv-<id>" 且无任务身份）——
+			// 任务引擎内部的编排 spawn（worker 间派生）没有会话上下文，跳过。
+			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+			if taskID > 0 {
+				if sessID, convID := s.bindSpawnedTaskToSession(ctx, taskID); sessID > 0 {
+					s.announceSpawnedTask(sessID, taskID, convID, a.Description, a.Goal)
 				}
 			}
 			// 共享的建后流程,与 HTTP 建任务(server.go createTask)复用同一段 launchTask:

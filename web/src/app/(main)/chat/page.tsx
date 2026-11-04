@@ -24,6 +24,7 @@ import { toast } from "sonner";
 
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
+import { CreateSessionDialog } from "@/components/session/create-session-dialog";
 import {
   bindLegacyConversations,
   DEFAULT_SESSION_LIST_QUERY,
@@ -335,7 +336,6 @@ function LLMProfileRow({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-64 p-1">
-          <p className="px-2 py-1 font-medium text-[11px] text-muted-foreground">选择 LLM 配置</p>
           {/* default option */}
           <button
             type="button"
@@ -389,10 +389,13 @@ function DraftChat({
   agents,
   profiles,
   onStarted,
+  presetAgentKey,
 }: {
   agents: Agent[];
   profiles: LLMProfile[];
   onStarted: (c: Conversation, pending?: { input?: string; attachments?: ChatAttachment[] }) => void;
+  // 「旧会话」创建入口带过来的预选 agent：存在即选中（允许切换）。
+  presetAgentKey?: string;
 }) {
   const [agentKey, setAgentKey] = React.useState("");
   const [llmProfileId, setLlmProfileId] = React.useState<number | null>(null);
@@ -400,10 +403,14 @@ function DraftChat({
   const [sending, setSending] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
 
-  // default the agent to Auto once agents load.
+  // default the agent to Auto once agents load; the create-dialog preset wins.
   React.useEffect(() => {
+    if (presetAgentKey && agents.some((a) => a.key === presetAgentKey)) {
+      setAgentKey(presetAgentKey);
+      return;
+    }
     if (!agentKey && agents.some((a) => a.key === "auto")) setAgentKey("auto");
-  }, [agentKey, agents]);
+  }, [agentKey, agents, presetAgentKey]);
 
   const agent = agents.find((a) => a.key === agentKey);
 
@@ -1077,7 +1084,6 @@ export default function ChatPage() {
   const [renamingConvId, setRenamingConvId] = React.useState<number | null>(null);
   const [renameConvText, setRenameConvText] = React.useState("");
   const [visibleConversationCount, setVisibleConversationCount] = React.useState(CONVERSATION_LIST_PAGE);
-  const [creating, setCreating] = React.useState(false);
   // Collapsed agent groups（只用于旧对话的「按 agent 分组」可选视图）。
   const [collapsedAgents, setCollapsedAgents] = React.useState<Set<string>>(() => new Set());
   // Pending text + uploaded attachments handed off from a draft that created a
@@ -1374,20 +1380,25 @@ export default function ChatPage() {
     [reloadSessions, selectSession],
   );
 
-  // 新建会话：默认只带 auto（方案书 §9 定稿 2），其它 agent 之后在会话里热加。
-  const createSession = React.useCallback(async () => {
-    if (creating) return;
-    setCreating(true);
-    try {
-      const created = await api.createSession({ agents: ["auto"], dispatcher: "auto" });
+  // 新建会话（三形态选择弹窗）：创建成功后插入列表并选中。
+  const [createOpen, setCreateOpen] = React.useState(false);
+  // 旧会话路径：从弹窗选好 agent 后滚回 DraftChat（首条消息懒创建，同迁移期旧对话流）。
+  const [draftPresetAgent, setDraftPresetAgent] = React.useState("");
+  const onSessionCreated = React.useCallback(
+    (created: Session) => {
       setSessions((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       selectSession(created.id);
-    } catch (e) {
-      toast.error(`新建会话失败：${(e as Error).message}`);
-    } finally {
-      setCreating(false);
-    }
-  }, [creating, selectSession]);
+    },
+    [selectSession],
+  );
+  const onPickLegacyAgent = React.useCallback(
+    (agentKey: string) => {
+      setDraftPresetAgent(agentKey);
+      selectSession(null);
+      selectConversation(null);
+    },
+    [selectConversation, selectSession],
+  );
 
   const legacyGroups = React.useMemo(
     () => groupByAgent(legacyConversations, agentByKey),
@@ -1444,6 +1455,7 @@ export default function ChatPage() {
       <DraftChat
         agents={chatAgents}
         profiles={profiles}
+        presetAgentKey={draftPresetAgent}
         onStarted={(c, pending) => {
           // Insert the new conversation immediately so `selected` resolves to
           // it on this render (switching to ChatView right away, before the
@@ -1471,8 +1483,8 @@ export default function ChatPage() {
         {/* left: 会话列表 */}
         <div className="flex flex-col overflow-hidden rounded-lg border bg-card">
           <div className="flex flex-col gap-2 border-b p-2">
-            <Button size="sm" className="w-full" onClick={() => void createSession()} disabled={creating}>
-              {creating ? <Loader2Icon className="size-4 animate-spin" /> : <PlusIcon />}
+            <Button size="sm" className="w-full" onClick={() => setCreateOpen(true)}>
+              <PlusIcon />
               新建会话
             </Button>
             <SessionToolbar
@@ -1508,7 +1520,7 @@ export default function ChatPage() {
                   onCancelRename={cancelRenameSession}
                   onTogglePin={(session) => void toggleSessionPinned(session)}
                   onDelete={(session) => void deleteSession(session)}
-                  emptyHint="暂无会话 —— 点「新建会话」开始"
+                  emptyHint="暂无会话"
                 />
               )}
               {legacyConversations.length > 0 && (
@@ -1590,6 +1602,13 @@ export default function ChatPage() {
         {/* right: session view / legacy chat view */}
         <div className="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card">{rightPane}</div>
       </div>
+      <CreateSessionDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        agents={chatAgents}
+        onCreated={onSessionCreated}
+        onPickLegacy={onPickLegacyAgent}
+      />
     </div>
   );
 }
