@@ -14,3 +14,28 @@ bench/.env
 bench/scheduler.py
 bench/entrypoint_v2.sh
 bench/seed_v2.sh
+
+# 本机环境与凭据：绝不能进镜像层。
+# .env / secrets/ / jwt.key 里装的是数据库口令与平台密钥；.omo/ 是本机计划与
+# 决策记录（含家目录绝对路径）；docker-compose.override.yml 是本机部署拓扑。
+.env
+secrets/
+.omo/
+jwt.key
+docker-compose.override.yml
+docker-compose.override.yml.bak-*
+
+# skills/ 白名单：只放行三个公开 skill。
+#
+# 为什么必须白名单而不是黑名单：Dockerfile 是 `COPY skills/ /app/skills/` ——
+# 构建上下文里有什么就装什么。本机的私有 recon skill（名称属本机私有信息，
+# 清单在本地 secrets/scan-*.local，不进版本库）一旦留在工作树里就会被装进
+# 公开镜像，目录名本身就暴露个人工具链。黑名单只能挡住「已知的那几个」，
+# 新增一个私有 skill 就又漏出去了；白名单是「没登记的一律不进」。
+#
+# 顺序要紧：后面的规则覆盖前面的（与 gitignore 同），所以白名单放在排除之后。
+# 新增公开 skill 时，这里与 Dockerfile 里的构建期校验两处一起改。
+skills/*
+!skills/api-recon
+!skills/playwright-cli
+!skills/scopesentry

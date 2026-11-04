@@ -60,6 +60,25 @@ RUN chmod +x /app/artex /app/start.sh /usr/local/bin/verify-binary-version.sh \
     /usr/local/bin/verify-secret-env.sh /usr/local/bin/verify-ptrace-blocked.sh
 RUN /usr/local/bin/verify-binary-version.sh /app/artex "$ARTEX_BINARY_VERSION"
 COPY skills/ /app/skills/
+# 交付前的第三道验收：镜像里的 skills/ 必须**恰好**是三个公开 skill。
+#
+# 为什么要有这道门：上一行是 `COPY skills/ /app/skills/` —— 构建上下文里有什么
+# 就装什么。本机的私有 recon skill（名称属本机私有信息，清单在本地
+# secrets/scan-*.local，不进版本库）一旦留在工作树里，就会被装进公开镜像：
+# 目录名本身就暴露个人工具链。.dockerignore 已经用白名单挡住了它们，这里再加
+# 一道 —— 挡住「白名单被改松」与「构建上下文来源不对」这两种情况。
+#
+# 白名单改了必须同步改这里：新加公开 skill 时两处一起改，否则构建直接失败。
+RUN set -eu; \
+    for d in /app/skills/*; do \
+      case "$(basename "$d")" in \
+        api-recon|playwright-cli|scopesentry) ;; \
+        *) echo "镜像里出现未登记的 skill: $(basename "$d")" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    for d in api-recon playwright-cli scopesentry; do \
+      test -d "/app/skills/$d" || { echo "镜像里缺少公开 skill: $d" >&2; exit 1; }; \
+    done
 # data/（SQLite + jwt.key）持久化点
 VOLUME ["/app/data"]
 EXPOSE 8787 8788
