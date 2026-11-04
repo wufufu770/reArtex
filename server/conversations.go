@@ -476,9 +476,12 @@ func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMe
 // run ends (clearing busyKey). runConversation wraps it in a goroutine for the
 // fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
 // for completion before starting the next queued fire for the same agent.
-func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
+// runConversationSync runs ONE agent turn on a conversation and BLOCKS until the
+// run ends (clearing busyKey). Returns the turn's final assistant text and the run
+// error, if any — the session waker mirrors the text into the group stream.
+func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) (string, error) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
-	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	return s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
@@ -493,7 +496,10 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 	return ctx, cancel
 }
 
-func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
+// runConversationTurn runs ONE agent turn and returns its final assistant text
+// (empty on early bail-outs) plus the run error, if any. The session waker mirrors
+// the text back into the group stream; the chat path discards it.
+func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) (string, error) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -514,7 +520,7 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复测状态读取失败，请重新发起"); err != nil {
 				log.Printf("[conv %d] seal retest: %v", c.ID, err)
 			}
-			return
+			return "", nil
 		}
 		if r != nil && r.Status == "pending" {
 			defer func() {
@@ -524,26 +530,26 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 				s.finishRetest(r.ID, finishStatus, finishReason)
 			}()
 			if ctx.Err() != nil {
-				return
+				return "", nil
 			}
 			started, err := s.m.pg.StartFindingRetest(ctx, r.ID)
 			if err != nil {
 				finishReason = err.Error()
-				return
+				return "", nil
 			}
 			if !started {
-				return
+				return "", nil
 			}
 		}
 	}
 	if ctx.Err() != nil {
-		return
+		return "", nil
 	}
 	// precedence: the conversation agent's own binding → this conversation's pin → global.
 	ca := s.resolveChatAgent(c)
 	if ca == nil {
 		finishReason = s.chatUnavailableReason()
-		return
+		return "", errors.New(finishReason)
 	}
 	pg := s.m.pg
 	maxTurns := s.agentMaxTurns(c.AgentKey)
@@ -560,7 +566,8 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	}
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
-	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
+	text, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit)
+	if err != nil {
 		finishReason = err.Error()
 		if ctx.Err() == nil {
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
@@ -570,6 +577,7 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		finishStatus, finishReason = "completed", ""
 	}
 	_ = pg.TouchConversation(c.ID)
+	return text, err
 }
 
 // triggerBehavior is an agent's cached P3 trigger post-processing策略 (see the

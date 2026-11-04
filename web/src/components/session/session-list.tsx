@@ -131,6 +131,17 @@ function SessionRow({
         >
           <div className="flex min-w-0 items-center gap-1.5">
             {pinned && <PinIcon className="size-3 shrink-0 text-primary" aria-label="已置顶" />}
+            {session.kind === "master" && (
+              <span
+                className="shrink-0 rounded border border-primary/40 px-1 font-medium text-primary text-[10px] leading-4"
+                title="总控会话：绑定任务，进展自动播报进群"
+              >
+                总控
+              </span>
+            )}
+            {session.kind === "task_hall" && (
+              <span className="shrink-0 rounded border px-1 text-[10px] leading-4 text-muted-foreground">大厅</span>
+            )}
             <span className="truncate text-sm">{sessionDisplayName(session)}</span>
             {status.label && <span className={cn("size-2 shrink-0 rounded-full", status.dot)} title={status.label} />}
           </div>

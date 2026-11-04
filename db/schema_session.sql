@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     name_source   TEXT NOT NULL DEFAULT 'default'
                   CHECK (name_source IN ('user','generated','default')),
     kind          TEXT NOT NULL DEFAULT 'chat'
-                  CHECK (kind IN ('chat','task_hall','side_question')),
+                  CHECK (kind IN ('chat','master','task_hall','side_question')),
     -- task_id 可空：纯对话型 session 不必挂任务（proposal §1.2 硬伤①的解法）。
     task_id       BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
     -- strategy_id 的外键在下面用条件式 ALTER 补（strategies 在另一个 DDL 文件里，
@@ -156,3 +156,10 @@ CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id
 -- 群 = session 的一种（kind='task_hall'）；chat_groups 保留，task_id 继续用。
 ALTER TABLE chat_groups ADD COLUMN IF NOT EXISTS session_id BIGINT REFERENCES sessions(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_groups_session ON chat_groups(session_id) WHERE session_id IS NOT NULL;
+
+-- ---------- kind='master'（总控会话）----------
+-- 老库的内联 CHECK 由建表时的自动命名（sessions_kind_check）兜住：先 DROP 再 ADD
+-- 一条**具名**约束，重复应用结果一致（本文件其余约束迁移同款纪律）。
+ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_kind_check;
+ALTER TABLE sessions ADD CONSTRAINT sessions_kind_check
+    CHECK (kind IN ('chat','master','task_hall','side_question'));

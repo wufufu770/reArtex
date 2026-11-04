@@ -53,6 +53,8 @@ export interface SessionHeaderProps {
   onDelete: () => void;
   onAddMember: (agentKey: string) => void;
   onRemoveMember: (agentKey: string) => void;
+  // 更新成员在场状态（PATCH /sessions/{id}/members/{agent}）；未提供时状态菜单不出现。
+  onSetPresence?: (agentKey: string, presence: string) => void;
   // 会话流 / 旧对话记录 的切换条（由调用方渲染）。
   tabs?: React.ReactNode;
   // 右侧抽屉的触发按钮。
@@ -76,6 +78,7 @@ export function SessionHeader({
   onDelete,
   onAddMember,
   onRemoveMember,
+  onSetPresence,
   tabs,
   aside,
   busy,
@@ -190,6 +193,23 @@ export function SessionHeader({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
+                {onSetPresence && !member.left_at && (
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onSelect={() => onSetPresence(member.agent_key, "listening")}>
+                      在听
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onSetPresence(member.agent_key, "working")}>
+                      工作中
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onSetPresence(member.agent_key, "blocked")}>
+                      需关注（阻塞）
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onSetPresence(member.agent_key, "idle")}>
+                      在席（空闲）
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                )}
+                {onSetPresence && !member.left_at && <DropdownMenuSeparator />}
                 <DropdownMenuGroup>
                   <DropdownMenuItem
                     disabled={member.role === "dispatcher"}
