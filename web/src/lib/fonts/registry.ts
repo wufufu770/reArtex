@@ -1,25 +1,77 @@
 // TEMPORARY: offline build fallback — uses local Geist fonts instead of Google Fonts.
 // Restore registry.ts.bak after build.
 import localFont from "next/font/local";
+
 import { GeistPixelSquare } from "geist/font/pixel";
 
-const geist = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-geist" });
-const inter = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-inter" });
-const notoSans = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-noto-sans" });
-const roboto = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-roboto" });
-const outfit = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-outfit" });
-const dmSans = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-dm-sans" });
-const nunitoSans = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-nunito-sans" });
-const figtree = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-figtree" });
-const raleway = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-raleway" });
-const publicSans = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-public-sans" });
-const notoSerif = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-noto-serif" });
-const robotoSlab = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-roboto-slab" });
-const merriweather = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-merriweather" });
-const lora = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-lora" });
-const playfairDisplay = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", variable: "--font-playfair-display" });
-const geistMono = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", variable: "--font-geist-mono" });
-const jetBrainsMono = localFont({ src: "../../../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2", variable: "--font-jetbrains-mono" });
+const geist = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-geist",
+});
+const inter = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-inter",
+});
+const notoSans = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-noto-sans",
+});
+const roboto = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-roboto",
+});
+const outfit = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-outfit",
+});
+const dmSans = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-dm-sans",
+});
+const nunitoSans = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-nunito-sans",
+});
+const figtree = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-figtree",
+});
+const raleway = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-raleway",
+});
+const publicSans = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-public-sans",
+});
+const notoSerif = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-noto-serif",
+});
+const robotoSlab = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-roboto-slab",
+});
+const merriweather = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-merriweather",
+});
+const lora = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-lora",
+});
+const playfairDisplay = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2",
+  variable: "--font-playfair-display",
+});
+const geistMono = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2",
+  variable: "--font-geist-mono",
+});
+const jetBrainsMono = localFont({
+  src: "../../../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2",
+  variable: "--font-jetbrains-mono",
+});
 
 export const fontRegistry = {
   geist: { label: "Geist", font: geist },
@@ -48,10 +100,10 @@ export const fontVars = (Object.values(fontRegistry) as Array<(typeof fontRegist
   .map((f) => f.font.variable)
   .join(" ");
 
-export const fontOptions = (Object.entries(fontRegistry) as [FontKey, { label: string; font: { variable: string } }][]).map(
-  ([key, f]) => ({
-    key,
-    label: f.label,
-    variable: f.font.variable,
-  }),
-);
+export const fontOptions = (
+  Object.entries(fontRegistry) as [FontKey, { label: string; font: { variable: string } }][]
+).map(([key, f]) => ({
+  key,
+  label: f.label,
+  variable: f.font.variable,
+}));

@@ -21,7 +21,6 @@ export default function SodChainPage() {
 
       <ChainStatusCard />
 
-
       <Card>
         <CardHeader>
           <CardTitle>这条链是什么</CardTitle>

@@ -495,10 +495,7 @@ export default function DashboardPage() {
     <div className="flex flex-1 flex-col gap-4 pb-6">
       {/* ── Header ── */}
       <div>
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">总览</h1>
-          <p className="text-xs text-muted-foreground">系统全局状态 · 实时刷新</p>
-        </div>
+        <h1 className="text-lg font-semibold tracking-tight">总览</h1>
       </div>
 
       {/* ── 出网治理状态（置于统计卡之前：出网未完全受管时，必须先看见这件事）── */}

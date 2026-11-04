@@ -161,7 +161,6 @@ export default function SodCircuitPage() {
         </AlertDescription>
       </Alert>
 
-
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Card size="sm" className="gap-1">
           <CardContent>

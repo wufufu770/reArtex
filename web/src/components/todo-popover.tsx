@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+
 import { ListTodo } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -42,7 +43,7 @@ export function TodoPopover({
 
   // refetch on each open — todos change as the run progresses.
   React.useEffect(() => {
-    if (open) load();
+    if (open) void load();
   }, [open, load]);
 
   const disabled = seq == null;
@@ -65,14 +66,15 @@ export function TodoPopover({
           最近 Todo{loading ? " · 加载中…" : ""}
         </p>
         {err && <p className="text-destructive px-1 text-xs">{err}</p>}
-        {todos && todos.length === 0 && !loading && (
-          <p className="text-muted-foreground px-1 text-xs">（空）</p>
-        )}
+        {todos && todos.length === 0 && !loading && <p className="text-muted-foreground px-1 text-xs">（空）</p>}
         <ul className="space-y-0.5">
           {(todos ?? []).map((t, i) => (
             <li
               key={`${i}:${t.content}`}
-              className={cn("flex gap-1.5 px-1 text-xs", t.status === "completed" && "text-muted-foreground line-through")}
+              className={cn(
+                "flex gap-1.5 px-1 text-xs",
+                t.status === "completed" && "text-muted-foreground line-through",
+              )}
             >
               <span className="shrink-0">{MARK[t.status] ?? "☐"}</span>
               <span className="break-words">{t.content}</span>

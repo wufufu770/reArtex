@@ -103,7 +103,7 @@ export default function LoginPage() {
       <div className="flex w-full items-center justify-center bg-background p-8 lg:w-2/3">
         <div className="w-full max-w-md space-y-10 py-24 lg:py-32">
           <div className="space-y-4 text-center">
-            <h2 className="text-2xl font-medium tracking-tight">登录</h2>
+            <h2 className="font-medium text-2xl tracking-tight">登录</h2>
             <p className="mx-auto max-w-xl text-muted-foreground">欢迎回来，请输入密码以继续使用 ARTEX</p>
           </div>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -130,7 +130,7 @@ export default function LoginPage() {
                 onCheckedChange={(v) => setAgreed(v === true)}
                 className="mt-0.5"
               />
-              <Label htmlFor="agree-terms" className="text-sm font-normal leading-relaxed text-muted-foreground">
+              <Label htmlFor="agree-terms" className="font-normal text-muted-foreground text-sm leading-relaxed">
                 我已阅读并同意
                 <button
                   type="button"
@@ -141,7 +141,7 @@ export default function LoginPage() {
                 </button>
               </Label>
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && <p className="text-destructive text-sm">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading || !password || !agreed}>
               {loading ? "登录中..." : "登录"}
             </Button>
@@ -157,7 +157,7 @@ export default function LoginPage() {
             </div>
             <div className="space-y-0.5">
               <DialogTitle className="text-base">ARTEX 使用须知与免责声明</DialogTitle>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-muted-foreground text-xs">
                 版本 v1.0 · 生效日期 2026-09-18 · 请在登录前完整阅读以下全部条款
               </p>
             </div>
@@ -166,7 +166,7 @@ export default function LoginPage() {
           <div
             ref={termsBodyRef}
             onScroll={handleTermsScroll}
-            className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5 text-sm leading-relaxed text-muted-foreground"
+            className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5 text-muted-foreground text-sm leading-relaxed"
           >
             <p className="rounded-lg border bg-muted/40 p-3 text-foreground/80">
               本《使用须知与免责声明》（以下简称"本声明"）是您与 ARTEX
@@ -179,7 +179,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   1
                 </span>
                 第一条 · 定义与开源许可
@@ -193,7 +193,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   2
                 </span>
                 第二条 · 授权使用范围
@@ -205,7 +205,7 @@ export default function LoginPage() {
 
             <section className="space-y-2">
               <h4 className="flex items-center gap-2 font-medium text-destructive">
-                <span className="flex size-5 items-center justify-center rounded-md bg-destructive/10 text-xs font-semibold text-destructive">
+                <span className="flex size-5 items-center justify-center rounded-md bg-destructive/10 font-semibold text-destructive text-xs">
                   3
                 </span>
                 <AlertTriangle className="size-4" />
@@ -224,7 +224,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   4
                 </span>
                 第四条 · 知识产权
@@ -237,7 +237,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   5
                 </span>
                 第五条 · 数据与隐私
@@ -249,7 +249,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   6
                 </span>
                 第六条 · 合规与法律责任
@@ -265,7 +265,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   7
                 </span>
                 第七条 · 免责声明与责任限制
@@ -278,7 +278,7 @@ export default function LoginPage() {
 
             <section className="space-y-1.5">
               <h4 className="flex items-center gap-2 font-medium text-foreground">
-                <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
+                <span className="flex size-5 items-center justify-center rounded-md bg-muted font-semibold text-muted-foreground text-xs">
                   8
                 </span>
                 第八条 · 条款变更与最终解释
@@ -290,7 +290,7 @@ export default function LoginPage() {
           </div>
 
           <DialogFooter className="mx-0 mb-0 flex-col items-stretch gap-2 rounded-b-xl px-6 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-muted-foreground text-xs">
               {readToEnd ? "您已浏览全部条款" : "请将条款滚动至底部后再确认"}
             </p>
             <DialogClose asChild>
