@@ -16,6 +16,7 @@ import { api } from "@/lib/api";
 import type { Task, TaskHallQuota, TaskHallRow } from "@/lib/types";
 
 import { CreateGroupDialog } from "./_components/create-group-dialog";
+import { PublishTaskDialog } from "./_components/publish-task-dialog";
 import { QuotaMeter } from "./_components/quota-meter";
 import { fmtDateTime, fmtTokens, workerMembers } from "./_components/task-hall-format";
 
@@ -201,7 +202,10 @@ export default function TaskHallPage() {
             一个任务一个大厅 · 多 Agent 共享一张探索图 · 人在大厅里布置、仲裁与插话
           </p>
         </div>
-        <CreateGroupDialog onCreated={() => void load()} />
+        <div className="flex shrink-0 gap-2">
+          <PublishTaskDialog onPublished={() => void load()} />
+          <CreateGroupDialog onCreated={() => void load()} />
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
