@@ -2,8 +2,8 @@
 
 import * as React from "react";
 
-import { Card, CardContent } from "@/components/ui/card";
 import { ExplorationGraph } from "@/components/exploration-graph";
+import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { Edge, TaskNode } from "@/lib/types";
 

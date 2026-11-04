@@ -159,7 +159,6 @@ export default function SodReviewQueuePage() {
         </AlertDescription>
       </Alert>
 
-
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card size="sm" className="gap-1">
           <CardContent>

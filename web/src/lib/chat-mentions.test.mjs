@@ -1,6 +1,6 @@
+import { activeMention, mentionSearch, mentionToken, selectedMentions } from "./chat-mentions.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activeMention, mentionSearch, mentionToken, selectedMentions } from "./chat-mentions.ts";
 
 test("mention trigger supports Chinese and cursor placement without hijacking email", () => {
   assert.equal(activeMention("user@example.com", 16), null);
