@@ -3,6 +3,7 @@ package db
 import (
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -47,8 +48,16 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(task_id, model);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
 `
 
+// llmUsageSchemaReady 记录某个连接池已经应用过 llm_usage 的 DDL。
+//
+// 与 db/commands.go 的 llmRecordsSchemaReady 同理（键 = 连接池指针）。
+var llmUsageSchemaReady sync.Map
+
 // EnsureLLMUsageTable creates the llm_usage metering table if it does not exist.
 func (d *DB) EnsureLLMUsageTable() error {
+	if _, ok := llmUsageSchemaReady.Load(d.DB); ok {
+		return nil
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return err
@@ -60,7 +69,11 @@ func (d *DB) EnsureLLMUsageTable() error {
 	if _, err := tx.Exec(llmUsageSchema); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	llmUsageSchemaReady.Store(d.DB, struct{}{})
+	return nil
 }
 
 // InsertLLMUsage appends one metering row. Best-effort: callers log and continue on
