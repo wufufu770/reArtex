@@ -82,9 +82,12 @@ var httpNotGetRe = regexp.MustCompile(`(?:-X|--request)\s*(?:POST|PUT|DELETE|PAT
 // urlRe 从任意文本里抠 URL 的 host 部分。
 var urlRe = regexp.MustCompile(`(?i)(?:https?|ftp|wss?)://([A-Za-z0-9._\-]+(?::\d{2,5})?)`)
 
-// tempPrefixes 是「工人的临时作业区」：写这些位置不构成宿主 FS 越界
-// （线上实锤 worker 全在 /tmp 里写脚本跑脚本——合法 scratch，不是攻击面）。
-var tempPrefixes = []string{"/tmp/", "/app/data/sessions/"}
+// tempPrefixes 是「平台内部区」：这些位置读写不构成宿主 FS 越界——
+// /tmp 与 /app/data/sessions 是工人 scratch（线上实锤 worker 全在这里写脚本
+// 跑脚本）；/app/data/tasks 是平台任务区（v6.1：跨任务读取任务间共享的收集
+// 产物是合理动作——任务 2 的 worker 读任务 1 的缓存目录不该问人，用户拍板
+// 「尽量不要让人工」）。真正的宿主敏感面与破坏由锁定基线/敏感面种类兜底。
+var tempPrefixes = []string{"/tmp/", "/app/data/sessions/", "/app/data/tasks/"}
 
 // harmlessSystemPaths 是 shell 常态下的无害系统路径（v6.1 修复：线上实锤
 // `ls /app/data/tasks/2/i89 2>/dev/null` 的 stderr 重定向被当成「任务目录外
