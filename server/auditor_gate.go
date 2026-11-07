@@ -335,10 +335,13 @@ func (s *Server) auditorPromptText() string {
 // 不另造限流器）。
 func (s *Server) auditorProvider() (llm.Provider, bool) {
 	if pol, ok := s.roleLanePolicy("auditor"); ok {
-		if prov, _, pok := s.providerForProfile(pol.PrimaryID); pok && prov != nil {
+		// 必须带 lane 的 primary_model 解析（E1 变体）：不带模型的 providerForProfile
+		// 会落 profile 默认模型——实测重推理模型不吐 tool_use，auditor 裁决全部
+		// 解析失败（tool_uses=0）→ 每次都转人工。
+		if prov, _, pok := s.providerForProfileModel(pol.PrimaryID, pol.PrimaryModel); pok && prov != nil {
 			return prov, true
 		}
-		log.Printf("[role-policy] auditor lane 的 profile #%d 不可用，回退活动 profile", pol.PrimaryID)
+		log.Printf("[role-policy] auditor lane 的 profile #%d(%s) 不可用，回退活动 profile", pol.PrimaryID, pol.PrimaryModel)
 	}
 	if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 		if prov, _, ok := s.providerForProfile(p.ID); ok && prov != nil {

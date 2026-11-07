@@ -319,10 +319,12 @@ func (s *Server) sodProviderFunc() sod.ProviderFunc {
 	return func(profileID int64) (llm.Provider, bool) {
 		if profileID == 0 {
 			if pol, ok := s.roleLanePolicy("normalizer"); ok {
-				if prov, _, pok := s.providerForProfile(pol.PrimaryID); pok && prov != nil {
+				// 同 auditor：lane 的 primary_model 必须参与解析（E1 变体），
+				// 否则配置的快模型被忽略、落回 profile 默认的重模型。
+				if prov, _, pok := s.providerForProfileModel(pol.PrimaryID, pol.PrimaryModel); pok && prov != nil {
 					return prov, true
 				}
-				log.Printf("[role-policy] normalizer lane 的 profile #%d 不可用，回退活动 profile", pol.PrimaryID)
+				log.Printf("[role-policy] normalizer lane 的 profile #%d(%s) 不可用，回退活动 profile", pol.PrimaryID, pol.PrimaryModel)
 			}
 			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 				profileID = p.ID
