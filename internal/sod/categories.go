@@ -44,8 +44,11 @@ type AuditorVerdict struct {
 	TargetHint    string
 	AnomalyFlag   bool
 	AnomalyReason string
-	DecidedBy     string // "auditor" / "cache"
-	LatencyMs     int
+	// ExploitRelevance 是 auditor 对「该调用对漏洞挖掘的相关度」的判定
+	//（high/medium/none，v6 B4 口径）——审计与统计用。
+	ExploitRelevance string
+	DecidedBy        string // "auditor" / "cache"
+	LatencyMs        int
 }
 
 // AskRequest 是升级人工的一次请求。
@@ -145,6 +148,10 @@ func categoryMatches(cat *sodpolicy.SodCategory, tool string, cls ClassResult, p
 		return strings.EqualFold(tool, "insert_assets")
 	case sodpolicy.RecognizeFindingWrite:
 		return strings.EqualFold(tool, "report_finding")
+	case sodpolicy.RecognizeBruteForce:
+		return cls.BruteForce
+	case sodpolicy.RecognizeTargetWrite:
+		return cls.TargetWrite
 	}
 	return false
 }

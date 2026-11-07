@@ -41,6 +41,16 @@ func reasonCodeFromDenialMessage(msg string) string {
 	return "rule_deny"
 }
 
+// environmentalDenialCodes 是「环境类失败」的原因码（方案 v6 D3，d2d 失败
+// 七分类的精简版）：基础设施/额度/裁决通道的抖动——不是对 worker 行为的
+// 实质性拒绝，不计入 B6 连续拒绝计数（否则目标站抖两下就把正要出成果的
+// 意图升到 blocked）。
+var environmentalDenialCodes = map[string]bool{
+	"normalizer_unavailable": true, "scope_check_unavailable": true,
+	"tool_health_unavailable": true, "quota_check_unavailable": true,
+	"auditor_unavailable": true, "execution_token_invalid": true,
+}
+
 // denialEscalation 记录每任务的连续拒绝计数（引擎侧持有）。
 type denialEscalation struct {
 	mu    sync.Mutex
@@ -75,6 +85,9 @@ func (d *denialEscalation) resetTool(taskID, toolName, reasonCode string) {
 // 处调用。达到阈值 ⇒ 在跑意图转 blocked + 会话播报。
 func (s *Server) onToolDenial(taskID, toolName, denialMessage string) {
 	reasonCode := reasonCodeFromDenialMessage(denialMessage)
+	if environmentalDenialCodes[reasonCode] {
+		return // D3 环境类失败：不计数（实质拒绝才升 blocked）
+	}
 	if !s.denials.recordDenial(taskID, toolName, reasonCode) {
 		return
 	}

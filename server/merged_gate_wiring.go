@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
@@ -124,6 +126,30 @@ func (s *Server) sodCategoryUsed(ctx context.Context, taskID int64, category str
 	return s.m.pg.CountSodCategoryUsed(taskID, category)
 }
 
+// baselineDestructiveStopper 是 ChainDeps.OnBaselineDestructive 的落点
+// （方案 v6 C1，用户拍板「超出界限外的删除动作就停」）：锁定基线删除/破坏
+// 命中 ⇒ 自动暂停任务 + 引擎活动 + 绑定会话播报；人工在任务页续跑。
+func (s *Server) baselineDestructiveStopper(taskID int64, toolName, hit string) {
+	if s.m == nil || taskID <= 0 {
+		return
+	}
+	numeric := taskID
+	t, ok := s.m.Task(fmt.Sprintf("%d", taskID))
+	if !ok || t == nil {
+		return
+	}
+	// 暂停（幂等：已暂停/终态的任务 Pause 内部自然无效）。
+	if _, aerr := s.applyTaskControlWithCause(t, "pause", agent.AbortPausedByUser); aerr != nil {
+		log.Printf("[baseline] task %d 自动暂停失败（拦截仍生效）: %v", taskID, aerr)
+	}
+	summary := fmt.Sprintf("【已自动暂停】任务 #%d 出现删除/破坏类动作（%s：%s）——动作已拦截，任务已暂停待人工确认后续跑", taskID, toolName, hit)
+	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true, Summary: summary})
+	if sess, serr := s.m.pg.SessionByTask(numeric); serr == nil && sess != nil {
+		s.say(sess.ID, numeric, "system", "system", summary)
+	}
+	log.Printf("[baseline] task %d 删除/破坏命中，已自动暂停：tool=%s hit=%s", taskID, toolName, hit)
+}
+
 // wireMergedGateDeps 把合并闸依赖补进 ChainDeps（装配点在 setupSoDChain）。
 func (s *Server) wireMergedGateDeps(deps *sod.ChainDeps) {
 	deps.MergedGateMode = s.mergedGateMode
@@ -133,6 +159,7 @@ func (s *Server) wireMergedGateDeps(deps *sod.ChainDeps) {
 	deps.ElevateAsk = s.elevateAsk
 	deps.CategoryUsed = s.sodCategoryUsed
 	deps.RecordShadowDiff = s.recordSodShadowDiff
+	deps.OnBaselineDestructive = s.baselineDestructiveStopper
 }
 
 // sodShadowRowOf 转换 internal/sod.ShadowDiff → db 行（db 不 import internal）。
@@ -156,19 +183,34 @@ func sodShadowRowOf(d sod.ShadowDiff) struct {
 	}{d.TaskID, d.ToolName, d.PayloadDigest, d.OldVerdict, d.OldReason, d.NewVerdict, d.NewReason}
 }
 
-// ensureAuditorAgent 播种 auditor agent 行（幂等）+ 内置提示词；没有 agent 行
-// 就没有 CurrentPrompt 可读，内置 auditorPrompt 仍是兜底，这里补齐身份。
+// ensureAuditorAgent 播种 auditor agent 行（幂等、enabled=true——v6 B3：它是
+// 合并闸的常驻裁决岗，必须在 agent 页可见可配置）+ 提示词版本（DB 优先，
+// 内置兜底）。
 func (s *Server) ensureAuditorAgent() {
-	if _, err := s.m.pg.GetAgentByKey(sodpolicy.AuditorAgentKey); err == nil {
-		return
+	var ag *db.Agent
+	ag, err := s.m.pg.GetAgentByKey(sodpolicy.AuditorAgentKey)
+	if err != nil || ag == nil {
+		if _, ierr := s.m.pg.Exec(`
+			INSERT INTO agents (key, name, role, builtin, enabled, web_search, interactive_shell)
+			VALUES ($1, $2, 'assistant', true, true, false, false)
+			ON CONFLICT (key) DO UPDATE SET enabled=true, name=EXCLUDED.name`,
+			sodpolicy.AuditorAgentKey, "审计裁决"); ierr != nil {
+			log.Printf("[auditor] agent 行播种失败（裁决回落内置提示词）: %v", ierr)
+			return
+		}
+		if ag, err = s.m.pg.GetAgentByKey(sodpolicy.AuditorAgentKey); err != nil || ag == nil {
+			return
+		}
 	}
-	_, err := s.m.pg.Exec(`
-		INSERT INTO agents (key, name, role, builtin, enabled, web_search, interactive_shell)
-		VALUES ($1, $2, 'assistant', true, false, false, false)
-		ON CONFLICT (key) DO NOTHING`,
-		sodpolicy.AuditorAgentKey, "审计裁决")
-	if err != nil {
-		log.Printf("[auditor] agent 行播种失败（裁决回落内置提示词）: %v", err)
+	// enabled 兜底（v6：历史行可能停在 false——裁决岗不该禁用）。
+	if !ag.Enabled {
+		_, _ = s.m.pg.Exec(`UPDATE agents SET enabled=true WHERE key=$1`, sodpolicy.AuditorAgentKey)
+	}
+	// 提示词版本：无任何版本时把内置 prompt 落 agent_prompts（agent 页可编辑）。
+	if body, err := s.m.pg.CurrentPrompt(ag.ID); err == nil && strings.TrimSpace(body) == "" {
+		if _, perr := s.m.pg.SavePrompt(ag.ID, auditorPrompt, "v6 裁决口径（exploit_relevance）", "system"); perr != nil {
+			log.Printf("[auditor] 提示词播种失败（用内置兜底）: %v", perr)
+		}
 	}
 }
 

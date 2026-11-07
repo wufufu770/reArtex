@@ -2009,6 +2009,50 @@ export type SodCategoryFallback = "deny" | "ask" | "pass";
 // off=旧链裁决 / shadow=新旧并跑只记差异 / enforce=新链接管裁决。
 export type SodMergedGateMode = "off" | "shadow" | "enforce";
 
+// SodFeedRow 是裁决大屏 recent 流的一行（GET /api/sod/feed，方案 v6 主题 A）。
+// 字段与 server/sod_feed.go 的 sodFeedRow 对齐：ts 是 HH24:MI:SS；auditor 与
+// relevance 取自 checks（auditor=pass/deny，exploit_relevance=high/medium/none）。
+export interface SodFeedRow {
+  id: number;
+  ts: string;
+  agent: string;
+  tool: string;
+  verdict: string;
+  reason_code: string;
+  category: string;
+  auditor: string;
+  relevance: string;
+  note: string;
+}
+
+// SodFeedPending 是中列「待人工裁决」的一张卡（intercept_pending status=pending，
+// input 是脱敏载荷前 400 字）。决策动作复用 POST /api/intercept/pending/{id}/decide。
+export interface SodFeedPending {
+  id: number;
+  tool: string;
+  reason: string;
+  agent: string;
+  ts: string;
+  input: string;
+}
+
+// SodFeedStats 是右列统计卡：近 1h 自动放行 / auditor 拒 / 转人工 / 硬拦 + blocked 意图数。
+export interface SodFeedStats {
+  auto_pass_1h: number;
+  auditor_deny_1h: number;
+  human_1h: number;
+  hard_deny_1h: number;
+  blocked_intents: number;
+}
+
+// SodFeed 是大屏 2s 轮询的聚合响应。
+export interface SodFeed {
+  recent: SodFeedRow[];
+  pending: SodFeedPending[];
+  stats: SodFeedStats;
+  mode: SodMergedGateMode;
+}
+
 // SodCategory 是拦截种类表的一行（种类 = 一类命令的名字 + 匹配器 + 动作 + 上限 + 兜底）。
 export interface SodCategory {
   id: number;

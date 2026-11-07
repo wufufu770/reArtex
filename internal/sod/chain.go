@@ -241,6 +241,10 @@ type ChainDeps struct {
 	CategoryUsed func(ctx context.Context, taskID int64, category string) (int, error)
 	// RecordShadowDiff 影子模式对照账本。nil = 影子模式不记差异。
 	RecordShadowDiff func(ShadowDiff)
+	// OnBaselineDestructive 是锁定基线命中（删除/破坏）的宿主回调（方案 v6
+	// C1，用户拍板「超出界限外的删除动作就停」）：宿主据此自动暂停任务+播报。
+	// nil = 只拦动作不停任务。guard 基线预检命中由宿主侧独立接同一语义。
+	OnBaselineDestructive func(taskID int64, toolName, hit string)
 }
 
 // NewChain 构造链。inner 为 nil 时链独立工作（测试用）。
@@ -394,6 +398,9 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	// 之前拦过一次；这里兜「guard 未装配 / 被 env 停用」的路径，并让基线拒绝
 	// 也留 sod 账本行（可回放、可统计）。
 	if bReason, bHit := sodpolicy.BaselineHit(call.toolName, call.payload); bReason != "" {
+		if bReason == sodpolicy.ReasonDestructiveAction && c.deps.OnBaselineDestructive != nil {
+			c.deps.OnBaselineDestructive(call.taskID, call.toolName, bHit)
+		}
 		return c.deny(ctx, call, bReason, "锁定基线命中（"+bHit+"）：删除/破坏、平台凭据与平台自身配置不可被任何机制放行")
 	}
 

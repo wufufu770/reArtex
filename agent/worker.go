@@ -354,7 +354,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// Optional finding guidance is added for every role after tool resolution.
 	// C6 写回纪律：收工前必须有写回——0 写回的收工让规划者无法判断进展
 	//（实测 3 个意图 done 0 写回带真结果，规划者据此开接续意图空转）。
-	const writeBackDiscipline = "\n\n【写回纪律（收工前的最后一步）】结束前必须把本次结论用 record_fact 写回（含否定结论：\"端口关闭\"\"参数不可注入\"\"未发现登录入口\"同样是结论）。哪怕本次产出很少，也要写一条 summary 如实收尾——0 写回的收工会让规划者误判进展并重复派工。"
+	const writeBackDiscipline = "\n\n【写回纪律（收工前的最后一步）】结束前必须把本次结论用 record_fact 写回（含否定结论：\"端口关闭\"\"参数不可注入\"\"未发现登录入口\"同样是结论）。哪怕本次产出很少，也要写一条 summary 如实收尾——0 写回的收工会让规划者误判进展并重复派工。预算（轮次/时长）是【止损机制，不是对你工作质量的评价】——接近上限时停止开辟新方向，把已有线索、证据路径、下一步计划写回任务图，接手的人能从你的断点继续。"
 	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir) + writeBackDiscipline
 }
 
