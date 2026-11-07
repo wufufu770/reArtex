@@ -329,6 +329,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// precedence: persisted DB config > env.
 	log.Printf("[boot] loadLLMConfig begin")
 	if cfg, ok := s.loadLLMConfig(); ok {
+		log.Printf("[boot] loadLLMConfig returned ok")
 		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] saved LLM config init failed — engine idle: %v", err)
 		} else {
@@ -426,10 +427,12 @@ func (s *Server) agentRunSeconds(key string) int {
 
 // loadLLMConfig reads the active LLM profile from PG (llm_profiles).
 func (s *Server) loadLLMConfig() (agent.Config, bool) {
+	log.Printf("[boot] llm: ActiveProfile query")
 	p, err := s.m.pg.ActiveProfile()
 	if err != nil || p == nil {
 		return agent.Config{}, false
 	}
+	log.Printf("[boot] llm: active profile loaded (id=%d)", p.ID)
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
 	cfg.Models = p.Models // E1：模型列表随配置走（模型变体校验/前端回显都要用）
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
