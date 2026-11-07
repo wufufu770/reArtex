@@ -535,12 +535,16 @@ func maxTokensResolver(cfg agent.Config) func() int {
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	log.Printf("[boot] applyLLM begin")
 	var prov llm.Provider
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
 	if active, _ := s.m.pg.ActiveProfile(); active != nil {
+		log.Printf("[boot] applyLLM: active profile found (id=%d)", active.ID)
 		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && reflect.DeepEqual(activeCfg, cfg) {
+			log.Printf("[boot] applyLLM: resolving provider for profile %d", active.ID)
 			prov, _, _ = s.providerForProfile(active.ID)
+			log.Printf("[boot] applyLLM: provider resolved")
 		}
 	}
 	if prov == nil {
