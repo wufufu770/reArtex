@@ -230,7 +230,8 @@ const (
 
 // SodCategory 是拦截种类表的一行（db 同构）。
 type SodCategory struct {
-	ID         int64  `json:"id"`
+	ID           int64  `json:"id"`
+	SuggestionID int64  `json:"suggestion_id,omitempty"` // 采纳来源回链（0=非采纳产物）
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`    // builtin | custom
 	Pattern    string `json:"pattern"` // builtin=识别器名；custom=正则

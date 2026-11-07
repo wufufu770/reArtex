@@ -27,7 +27,7 @@ const sodCategoriesVersionKey = "sod_categories_version"
 // ListSodCategories 列全部种类（含停用——UI 要能看见并重新启用）。
 func (d *DB) ListSodCategories() ([]SodCategoryRow, error) {
 	rows, err := d.Query(`
-		SELECT id, name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by, created_at, updated_at
+		SELECT id, name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by, COALESCE(suggestion_id,0), created_at, updated_at
 		FROM sod_categories ORDER BY priority DESC, id`)
 	if err != nil {
 		return nil, err
@@ -37,7 +37,7 @@ func (d *DB) ListSodCategories() ([]SodCategoryRow, error) {
 	for rows.Next() {
 		var r SodCategoryRow
 		if err := rows.Scan(&r.ID, &r.Name, &r.Kind, &r.Pattern, &r.Action, &r.CapPerTask, &r.Fallback,
-			&r.Locked, &r.Enabled, &r.Priority, &r.Reason, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			&r.Locked, &r.Enabled, &r.Priority, &r.Reason, &r.CreatedBy, &r.SuggestionID, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -49,9 +49,10 @@ func (d *DB) ListSodCategories() ([]SodCategoryRow, error) {
 func (d *DB) CreateSodCategory(cat sodpolicy.SodCategory) (SodCategoryRow, error) {
 	var id int64
 	err := d.QueryRow(`
-		INSERT INTO sod_categories (name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+		INSERT INTO sod_categories (name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by, suggestion_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,0)) RETURNING id`,
 		cat.Name, cat.Kind, cat.Pattern, cat.Action, cat.CapPerTask, cat.Fallback, cat.Locked, cat.Enabled, cat.Priority, cat.Reason, cat.CreatedBy,
+		cat.SuggestionID,
 	).Scan(&id)
 	if err != nil {
 		return SodCategoryRow{}, fmt.Errorf("创建种类失败: %w", err)
@@ -64,10 +65,10 @@ func (d *DB) CreateSodCategory(cat sodpolicy.SodCategory) (SodCategoryRow, error
 func (d *DB) GetSodCategory(id int64) (SodCategoryRow, error) {
 	var r SodCategoryRow
 	err := d.QueryRow(`
-		SELECT id, name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by, created_at, updated_at
+		SELECT id, name, kind, pattern, action, cap_per_task, fallback, locked, enabled, priority, reason, created_by, COALESCE(suggestion_id,0), created_at, updated_at
 		FROM sod_categories WHERE id=$1`, id).
 		Scan(&r.ID, &r.Name, &r.Kind, &r.Pattern, &r.Action, &r.CapPerTask, &r.Fallback,
-			&r.Locked, &r.Enabled, &r.Priority, &r.Reason, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
+			&r.Locked, &r.Enabled, &r.Priority, &r.Reason, &r.CreatedBy, &r.SuggestionID, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return SodCategoryRow{}, err
 	}

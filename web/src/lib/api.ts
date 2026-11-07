@@ -1181,6 +1181,10 @@ export const api = {
   // 裁决一条建议：adopted=落成种类行（裁量经验沉淀为确定性规则）/ dismissed=忽略。
   decideSodCategorySuggestion: (id: number, decision: "adopted" | "dismissed", operator: string) =>
     post<{ ok: boolean; adopted: boolean }>(`/sod/category-suggestions/${id}/decide`, { decision, operator }),
+  // 撤销采纳：删除采纳时落成的回链种类，把建议放回 pending。removed_category =
+  // 是否真的删了一个种类（false = 种类已不在——可能被手动删过——只把建议放回）。
+  revokeSodCategorySuggestion: (id: number, operator: string) =>
+    post<{ ok: boolean; removed_category: boolean }>(`/sod/category-suggestions/${id}/revoke`, { operator }),
   // 影子对照：近期新旧链裁决差异（倒序，limit 后端截到 500）+ 当前合并闸 mode。
   sodShadowDiffs: (limit = 100) =>
     get<{ diffs: ShadowDiff[] | null; mode: SodMergedGateMode }>(`/sod/shadow?limit=${limit}`).then((r) => ({
