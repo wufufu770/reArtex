@@ -210,7 +210,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.engine.DenialWatcher = s.onToolDenial
 	go s.RunSupervisionLoop(s.ctx)
 	s.engine.AuditSummary = s.emitAuditSummary
+	log.Printf("[boot] pre-loadTaskSessionBindings")
 	s.loadTaskSessionBindings()
+	log.Printf("[boot] loadTaskSessionBindings ok")
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -299,9 +301,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// = 所有工具调用都不受管 ⇒ 那是**比没有这个特性更危险**的状态（制造虚假
 		// 安全感）。宁可启动失败，让部署方看到明确原因。
 		sod.SetContextReader(agent.SodContextReader)
+		log.Printf("[boot] installSoDChain begin")
 		if err := s.installSoDChain(); err != nil {
 			log.Fatalf("[sod] 安装 SoD 链失败: %v", err)
 		}
+		log.Printf("[boot] installSoDChain ok")
 		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
