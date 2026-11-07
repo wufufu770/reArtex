@@ -162,6 +162,14 @@ func (r *Registry) Trip(id int64, errMsg string, hard bool) (tripped bool) {
 }
 
 // Reset clears one profile's state — the UI's "立即恢复" action.
+// ResetAll 清除全部成员的健康状态（v5.3 G-G：profile 保存（key 轮换）后
+// 调用——401 拉黑立即解除，主链路无需重启即恢复）。
+func (r *Registry) ResetAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m = map[int64]*State{}
+}
+
 func (r *Registry) Reset(id int64) {
 	r.mu.Lock()
 	delete(r.m, id)

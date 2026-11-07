@@ -685,6 +685,19 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 // model="" ⇒ 用 profile 默认模型；否则必须是该 profile models 列表里的一个
 // （不在列表 ⇒ 回退默认并记日志——fail-open 到可用模型而不是报错拒跑）。
 func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, agent.Config, bool) {
+	// G-A：唯一构建源统一挂故障转移链（Pool）。所有下游出口（role lane/
+	// 任务链/任务 pin/auditor/normalizer/旁路提问）都经这里 ⇒ 一处包装全通
+	// 道生效。Pool 成员构建（poolMember）走 Raw 版防嵌套。
+	prov, cfg, ok := s.providerForProfileModelRaw(id, model)
+	if !ok {
+		return prov, cfg, false
+	}
+	return s.poolForBinding(id, prov, cfg), cfg, true
+}
+
+// providerForProfileModelRaw 是不挂 Pool 的裸构建（Pool 成员构建专用——
+// 成员内部再嵌 Pool 会无限递归）。
+func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provider, agent.Config, bool) {
 	key := provKey{id: id, model: model}
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[key]; e != nil {
@@ -724,6 +737,10 @@ func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, 
 		prov = llmrec.Wrap(installQuotaGate(prov, s.sharedQuotaGate()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, id, p.Name)
 	}
+	// G-A（方案 v5.3）：唯一构建源统一挂故障转移链——role lane / 任务链 /
+	// 任务 pin / auditor / normalizer / 旁路提问等全部下游出口都经这里，
+	// 401/网络故障时全部通道自动切链上备用成员（§15.4 矩阵的结构性修复）。
+	prov = s.poolForBinding(id, prov, cfg)
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
@@ -767,7 +784,7 @@ func (s *Server) chatAgentForProfileModel(id int64, model string) *agent.ChatAge
 		return nil
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	ca := agent.NewChatAgent(s.poolForBinding(id, prov, cfg), cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
+	ca := agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
@@ -796,6 +813,11 @@ func (s *Server) invalidateProfileAgents() {
 	s.provByProfile = map[provKey]*provEntry{}
 	s.profileRateLimits = map[int64]*llm.RateLimit{} // 限流器随缓存一起重建（配置可能改了速率）
 	s.provCacheMu.Unlock()
+	// G-G（v5.3）：profile 保存（key/地址更新）⇒ 全部 401 拉黑解除——用户
+	// 轮换 key 后无需重启即恢复主链路（多配置时全清是最保守的正确语义）。
+	if s.llmHealth != nil {
+		s.llmHealth.ResetAll()
+	}
 	s.invalidateTaskAgents()
 }
 

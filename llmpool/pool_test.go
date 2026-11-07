@@ -368,3 +368,60 @@ func TestExpiredWindowIsClosed(t *testing.T) {
 		t.Fatal("expired window should read as closed")
 	}
 }
+
+
+// TestPoolStreamTwoPhase v5.3 G-C 回归钉：流式两阶段语义——
+// 首事件前失败 → 同请求内切下一成员（无感重放）；首事件后失败 → 错误
+// 原样透传（绝不跨成员重放，防重复/残缺输出）。
+func TestPoolStreamTwoPhase(t *testing.T) {
+	reg := NewRegistry(nil, nil)
+
+	// 阶段一：A 首事件前连接失败 → 无感切到 B（B 正常产出）。
+	a := &fakeProv{name: "A", errs: []error{fmt.Errorf("dial tcp: connection refused")}}
+	b := okProv("B", "from-B")
+	p := &Pool{members: []*Member{
+		{ID: 1, Name: "A", Model: "m", Prov: a},
+		{ID: 2, Name: "B", Model: "m", Prov: b},
+	}, health: reg}
+	var texts []string
+	for ev, err := range p.Stream(context.Background(), llm.CompletionRequest{}) {
+		if err != nil {
+			t.Fatalf("A 首事件前失败应无感切 B，got err: %v", err)
+		}
+		if ev.Text != "" {
+			texts = append(texts, ev.Text)
+		}
+		if ev.Type == llm.SEMessageStop {
+			break
+		}
+	}
+	if len(texts) == 0 || texts[0] != "from-B" {
+		t.Fatalf("应拿到 B 的输出，got %v", texts)
+	}
+	if a.calls != 1 || b.calls != 1 {
+		t.Fatalf("调用次数不符：A=%d B=%d（A 失败一次、B 接手一次）", a.calls, b.calls)
+	}
+
+	// 阶段二：C 先产出事件、流中再失败 → 错误原样透传，D 不被调用。
+	c := &fakeProv{name: "C", events: [][]llm.StreamEvent{{{Type: llm.SETextDelta, Text: "partial"}}},
+		errs: []error{fmt.Errorf("mid-stream collapse")}}
+	d := okProv("D", "from-D")
+	p2 := &Pool{members: []*Member{
+		{ID: 3, Name: "C", Model: "m", Prov: c},
+		{ID: 4, Name: "D", Model: "m", Prov: d},
+	}, health: reg}
+	sawErr := false
+	for ev, err := range p2.Stream(context.Background(), llm.CompletionRequest{}) {
+		if err != nil {
+			sawErr = true
+			break
+		}
+		_ = ev
+	}
+	if !sawErr {
+		t.Fatal("流中失败应把错误透传给调用方")
+	}
+	if d.calls != 0 {
+		t.Fatal("流中失败不得切到下一成员（防重复输出）")
+	}
+}

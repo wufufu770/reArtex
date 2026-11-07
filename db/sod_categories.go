@@ -322,3 +322,21 @@ func (d *DB) ActiveTaskIDsForSupervision() ([]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// BoundSessionIDsForBroadcast 列全部绑定任务的会话 id（v5.3 G-B：配置级故障
+// 播报没有单一任务归属——打到所有绑定会话，运维在群聊里必然看到）。
+func (d *DB) BoundSessionIDsForBroadcast() []int64 {
+	rows, err := d.Query(`SELECT id FROM sessions WHERE task_id IS NOT NULL AND archived_at IS NULL ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
