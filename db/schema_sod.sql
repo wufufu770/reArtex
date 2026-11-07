@@ -163,7 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_sod_shadow_task ON sod_gate_shadow(task_id, creat
 CREATE TABLE IF NOT EXISTS sod_category_suggestions (
     id         BIGSERIAL PRIMARY KEY,
     name       TEXT NOT NULL,
-    kind       TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('builtin','custom')),
+    kind       TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('builtin','custom','cap')),
     pattern    TEXT NOT NULL DEFAULT '',
     action     TEXT NOT NULL DEFAULT 'pass' CHECK (action IN ('hard_deny','ask','auditor','pass')),
     evidence   JSONB NOT NULL DEFAULT '[]'::jsonb,

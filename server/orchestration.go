@@ -63,7 +63,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 // orchestrationTools returns the cross-task tool set. Bound per-agent via the
 // tools table (default: no binding — opt-in for orchestration agents).
 func (s *Server) orchestrationTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	tools := []actool.CoreTool{
 		s.toolListTasks(),
 		s.toolListLLMProfiles(),
 		s.toolSpawnTask(),
@@ -79,6 +79,8 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolGetFindingTraffic(),
 		s.toolBindFindingTraffic(),
 	}
+	tools = append(tools, s.governanceTools()...)
+	return tools
 }
 
 // --- schema helpers ---
@@ -253,38 +255,38 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：对于简单任务可开启，创建时直接下发一条种子意图(内容=描述+目标)让 worker 免等首轮 planner 直接开跑测试；默认 false(走标准先规划再执行)。"},
 		}, "description", "goal"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-		var a struct {
-			Description          string          `json:"description"`
-			Goal                 string          `json:"goal"`
-			Category             string          `json:"category"`
-			ParentRef            string          `json:"parent_ref"`
-			SourceTaskIDs        []string        `json:"source_task_ids"`
-			LLMProfileID         json.RawMessage `json:"llm_profile_id"`
-			TimeoutSeconds       int             `json:"timeout_seconds"`
-			PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
-			SeedFirstIntent      bool            `json:"seed_first_intent"`
-		}
-		_ = json.Unmarshal(in, &a)
-		if strings.TrimSpace(a.Description) == "" {
-			a.Description = "未命名任务"
-		}
-		if strings.TrimSpace(a.Goal) == "" {
-			return actool.Errorf("goal 为必填"), nil
-		}
-		// 类别按名字解析（模型记得住「资产收集」，记不住库里的 id）：nkey 口径
-		// （空白折叠+小写）。不存在 ⇒ 明确报错，静默降级成未分类会让「资产收集」
-		// 任务的收集纪律悄悄失效。
-		var categoryID *int64
-		if name := strings.TrimSpace(a.Category); name != "" {
-			category, err := s.m.pg.TaskCategoryByName(name)
-			if err != nil {
-				return actool.Errorf("查任务类别失败: " + err.Error()), nil
+			var a struct {
+				Description          string          `json:"description"`
+				Goal                 string          `json:"goal"`
+				Category             string          `json:"category"`
+				ParentRef            string          `json:"parent_ref"`
+				SourceTaskIDs        []string        `json:"source_task_ids"`
+				LLMProfileID         json.RawMessage `json:"llm_profile_id"`
+				TimeoutSeconds       int             `json:"timeout_seconds"`
+				PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
+				SeedFirstIntent      bool            `json:"seed_first_intent"`
 			}
-			if category == nil {
-				return actool.Errorf(fmt.Sprintf("任务类别 %q 不存在（可用：资产收集/渗透测试/漏洞验证）", name)), nil
+			_ = json.Unmarshal(in, &a)
+			if strings.TrimSpace(a.Description) == "" {
+				a.Description = "未命名任务"
 			}
-			categoryID = &category.ID
-		}
+			if strings.TrimSpace(a.Goal) == "" {
+				return actool.Errorf("goal 为必填"), nil
+			}
+			// 类别按名字解析（模型记得住「资产收集」，记不住库里的 id）：nkey 口径
+			// （空白折叠+小写）。不存在 ⇒ 明确报错，静默降级成未分类会让「资产收集」
+			// 任务的收集纪律悄悄失效。
+			var categoryID *int64
+			if name := strings.TrimSpace(a.Category); name != "" {
+				category, err := s.m.pg.TaskCategoryByName(name)
+				if err != nil {
+					return actool.Errorf("查任务类别失败: " + err.Error()), nil
+				}
+				if category == nil {
+					return actool.Errorf(fmt.Sprintf("任务类别 %q 不存在（可用：资产收集/渗透测试/漏洞验证）", name)), nil
+				}
+				categoryID = &category.ID
+			}
 			if a.TimeoutSeconds < 0 {
 				a.TimeoutSeconds = 0
 			}

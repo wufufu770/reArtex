@@ -123,6 +123,14 @@ func auditorVerdictSchema() llm.ToolSchema {
 				"exploit_relevance": map[string]any{"type": "string", "enum": []string{"high", "medium", "none"}},
 				"anomaly_flag":      map[string]any{"type": "boolean"},
 				"anomaly_reason":    map[string]any{"type": "string"},
+				"suggest_cap_adjust": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"category":      map[string]any{"type": "string"},
+						"suggested_cap": map[string]any{"type": "integer"},
+						"reason":        map[string]any{"type": "string"},
+					},
+				},
 				"suggest_category": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -246,7 +254,12 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 		TargetHint       string `json:"target_hint"`
 		AnomalyFlag      bool   `json:"anomaly_flag"`
 		AnomalyReason    string `json:"anomaly_reason"`
-		SuggestCategory  *struct {
+		SuggestCapAdjust *struct {
+			Category     string `json:"category"`
+			SuggestedCap int    `json:"suggested_cap"`
+			Reason       string `json:"reason"`
+		} `json:"suggest_cap_adjust"`
+		SuggestCategory *struct {
 			Name    string `json:"name"`
 			Pattern string `json:"pattern"`
 			Action  string `json:"action"`
@@ -279,6 +292,24 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 	s.auditorCache.put(k, out)
 
 	// 建议队列（best-effort；v4.1 §3 观察建议循环）。
+	if raw.SuggestCapAdjust != nil && raw.SuggestCapAdjust.Category != "" {
+		sc := raw.SuggestCapAdjust
+		cap := sc.SuggestedCap
+		if cap < 0 {
+			cap = 0
+		}
+		if cap > 500 {
+			cap = 500
+		}
+		name := fmt.Sprintf("[cap] %s → %d", sc.Category, cap)
+		evidence := []map[string]any{{
+			"task_id": req.TaskID, "tool": req.ToolName,
+			"payload_digest": req.PayloadDigest, "preview": req.PayloadPreview,
+		}}
+		if err := s.m.pg.CreateSodCategorySuggestion(name, "cap", sc.Reason, "pass", sc.Reason, evidence); err != nil {
+			log.Printf("[auditor] cap 建议落库失败（忽略）: %v", err)
+		}
+	}
 	if raw.SuggestCategory != nil && raw.SuggestCategory.Name != "" {
 		sc := raw.SuggestCategory
 		action := sc.Action

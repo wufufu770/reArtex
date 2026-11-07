@@ -150,6 +150,7 @@ type Engine struct {
 	// D2 三门收敛：任务级「最近结论物入账」时刻 + 意图延期计数（软着陆）。
 	lastConclusionAt map[string]time.Time
 	intentExtends    map[string]int
+	drained          map[string]bool
 	stagnationMu sync.Mutex
 	stagnation   map[string]*taskStagnation
 
@@ -1322,6 +1323,10 @@ func (e *Engine) stagnationOf(taskID string) *taskStagnation {
 // intentExtendBudget 是软着陆的延期上限（v6 用户拍板：3 次，每次满预算重开）。
 const intentExtendBudget = 3
 
+// intentExtendSupervisorBudget 是监督者（auto）延期的上限（v7：5 次——比
+// D1 软着陆的 3 次宽一档，第 6 次起转人工）。
+const intentExtendSupervisorBudget = 5
+
 // tryExtendActiveIntent 判定「预算到线但正要出成果」的意图是否延期续跑：
 // 本轮有有效写回（事实/资产/finding 至少一项）且延期未超限 ⇒ 意图转回 open、
 // 播报延期、返回 true（调用方跳过 exhausted 落库）。
@@ -1599,6 +1604,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
+		if e.Drained(t.ID) {
+			// 软截止（v7）：停派新意图——触发器丢弃，在飞 worker 自然收尾。
+			_ = t.drainTriggers()
+			return
+		}
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
@@ -1713,6 +1723,9 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
+	if e.Drained(t.ID) {
+		return false // 软截止（v7）：停派新意图，在飞收尾
+	}
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
@@ -2208,3 +2221,111 @@ func terminateCauseLabel(err error, reason harness.TerminalReason) string {
 	}
 	return string(reason)
 }
+
+// ---------- 治理原语（方案 v7：auto 监督环的工具后端）----------
+//
+// 全部是确定性方法：监督者（auto）通过治理工具调用，护栏在方法内，
+// 工具层不做二次判断。d2d 原则：LLM 判断，确定性代码兜底。
+
+// Drain 置/清任务的软截止（v7 ⑤）：drain=true ⇒ 停派新意图（planner 与
+// claim 双闸），在飞的 worker 自然收尾；drain=false 恢复正常派发。可逆。
+func (e *Engine) Drain(taskID string, on bool) {
+	e.stagnationMu.Lock()
+	if e.drained == nil {
+		e.drained = map[string]bool{}
+	}
+	if on {
+		e.drained[taskID] = true
+	} else {
+		delete(e.drained, taskID)
+	}
+	e.stagnationMu.Unlock()
+	if t, ok := e.m.Task(taskID); ok && t != nil {
+		verb := "进入软截止（停派新意图，在飞收尾）"
+		if !on {
+			verb = "解除软截止（恢复正常派发）"
+		}
+		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "【治理】任务 " + verb})
+	}
+}
+
+// Drained 报告任务是否处于软截止。
+func (e *Engine) Drained(taskID string) bool {
+	e.stagnationMu.Lock()
+	defer e.stagnationMu.Unlock()
+	return e.drained[taskID]
+}
+
+// ExtendIntent 给监督者的意图延期入口（v7：上限 5 次，D1 软着陆同通道）：
+// running 意图只加延期余量（下次预算到线时软着陆判定放行）；blocked 意图
+// 直接重开。返回 (是否生效, 说明)。
+func (e *Engine) ExtendIntent(taskID string, intentID int64) (bool, string) {
+	t, ok := e.m.Task(taskID)
+	if !ok || t == nil || t.Store == nil {
+		return false, "task 不存在"
+	}
+	e.stagnationMu.Lock()
+	if e.intentExtends == nil {
+		e.intentExtends = map[string]int{}
+	}
+	key := taskID + ":" + fmt.Sprintf("%d", intentID)
+	if e.intentExtends[key] >= intentExtendSupervisorBudget {
+		e.stagnationMu.Unlock()
+		return false, fmt.Sprintf("意图 #%d 已延期 %d 次（监督者上限），再延需人工", intentID, intentExtendSupervisorBudget)
+	}
+	e.intentExtends[key]++
+	n := e.intentExtends[key]
+	e.stagnationMu.Unlock()
+	// blocked 意图直接重开（transitionIntentState 失败即目标不在 blocked 态——
+	// 静默忽略：running 意图的延期只加余量）。
+	_ = transitionIntentState(t.Store, intentID, "blocked", "open")
+	summary := fmt.Sprintf("【治理延期】意图 #%d 获得追加预算（第 %d/%d 次）——监督者判定仍有产出价值", intentID, n, intentExtendSupervisorBudget)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
+	return true, summary
+}
+
+// StopIntent 停掉一个跑偏的意图（v7：转 exhausted 带理由）。
+func (e *Engine) StopIntent(taskID string, intentID int64, reason string) (bool, string) {
+	t, ok := e.m.Task(taskID)
+	if !ok || t == nil || t.Store == nil {
+		return false, "task 不存在"
+	}
+	if err := transitionIntentState(t.Store, intentID, "running", "exhausted"); err != nil {
+		return false, "停止失败（意图不在 running 态？）: " + err.Error()
+	}
+	_ = t.Store.SetIntentBlockedReason(intentID, "治理停止："+reason)
+	summary := fmt.Sprintf("【治理停止】意图 #%d 已停（%s）——监督者判定跑偏/无前景", intentID, trunc(reason, 80))
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
+	return true, summary
+}
+
+// ConcludeTask 收尾任务（v7 双签）：三门满足（无 running/open 意图 + 有产出）
+// ⇒ 直接 conclude；不满足 ⇒ 返回需人工（调用方转 ask）。
+func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
+	t, ok := e.m.Task(taskID)
+	if !ok || t == nil || t.Store == nil {
+		return false, "task 不存在"
+	}
+	running, _ := t.Store.RunningIntentIDs()
+	openIntents, _ := t.Store.OpenIntentsCount()
+	var facts, findings int
+	_ = e.m.pg.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1 AND kind='fact'`, t.ExpID).Scan(&facts)
+	_ = e.m.pg.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1 AND kind='finding'`, t.ExpID).Scan(&findings)
+	assets := 0
+	_ = e.m.pg.QueryRow(`SELECT count(*) FROM assets WHERE id IN (SELECT CAST(n.payload->>'asset_id' AS BIGINT) FROM exploration_nodes n WHERE n.exploration_id=$1 AND n.kind='fact' AND n.payload->>'asset_id' IS NOT NULL)`, t.ExpID).Scan(&assets)
+	if len(running) > 0 || openIntents > 0 || facts+assets+findings == 0 {
+		return false, fmt.Sprintf("三门未满足：running=%d open=%d 产出(f/a/f)=%d/%d/%d——需人工确认收尾", len(running), openIntents, facts, assets, findings)
+	}
+	if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil || !won {
+		return false, "收尾落终态失败/已被判"
+	}
+	e.freezeReplayCorpus(t.ID)
+	if e.LegacyDistiller != nil {
+		e.LegacyDistiller(t)
+	}
+	e.emitAuditSummary(t)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+		Summary: "【治理收尾】监督者判定目标实质达成（三门满足）：" + trunc(summary, 120)})
+	return true, "任务已收尾"
+}
+
