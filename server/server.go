@@ -307,12 +307,16 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		}
 		log.Printf("[boot] installSoDChain ok")
 		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		log.Printf("[boot] seedOrchestrationTools ok")
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
+		log.Printf("[boot] seedFindingRetester ok")
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
+		log.Printf("[boot] seedPythonInterpreter ok")
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		log.Printf("[boot] scheduler started")
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
 		go newNotifier(s).Run(s.ctx)
