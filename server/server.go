@@ -687,10 +687,14 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, agent.Config, bool) {
 	// G-A：唯一构建源统一挂故障转移链（Pool）。所有下游出口（role lane/
 	// 任务链/任务 pin/auditor/normalizer/旁路提问）都经这里 ⇒ 一处包装全通
-	// 道生效。Pool 成员构建（poolMember）走 Raw 版防嵌套。
+	// 道生效。Pool 成员构建（poolMember）走 Raw 版防嵌套；已包装的 Pool
+	// 原样返回（防 Pool 嵌 Pool）。
 	prov, cfg, ok := s.providerForProfileModelRaw(id, model)
 	if !ok {
 		return prov, cfg, false
+	}
+	if _, already := prov.(*llmpool.Pool); already {
+		return prov, cfg, true
 	}
 	return s.poolForBinding(id, prov, cfg), cfg, true
 }
@@ -744,7 +748,9 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
-		return s.providerForProfileModel(id, model)
+		// 递归必须落回 Raw：主函数出口会包 poolForBinding → poolMember →
+		// 再次进入本函数 ⇒ provCacheMu 二次加锁死锁（v0.9.2 启动挂起实锤）。
+		return s.providerForProfileModelRaw(id, model)
 	}
 	if e := s.provByProfile[key]; e != nil { // lost the race → keep the winner
 		prov, cfg = e.prov, e.cfg
