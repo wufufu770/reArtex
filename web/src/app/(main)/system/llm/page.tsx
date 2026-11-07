@@ -11,6 +11,7 @@ import {
   SaveIcon,
   StarIcon,
   Trash2Icon,
+  TriangleAlertIcon,
   ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,8 +28,9 @@ import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
+import type { LLMEndpointStatus, LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
@@ -98,6 +100,70 @@ function healthOf(p: LLMProfile, m?: LLMPoolMember): Health {
     };
   }
   return { label: "正常", cls: "border-emerald-500/50 text-emerald-600 dark:text-emerald-400" };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 端点健康（网关候选地址）：当前生效端点 + 候选红绿灯 + 最近切换。
+// 数据来自轮询状态的 endpoints 字段；字段缺失（后端未发版）时整体不渲染，优雅降级。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ProfileEndpoints({ ep }: { ep: LLMEndpointStatus }) {
+  const candidates = ep.candidates ?? [];
+  // 后端最多留 20 条，这里只展示最近 5 条。
+  const switches = (ep.switches ?? []).slice(0, 5);
+  return (
+    <div className="ml-7 grid gap-1.5 rounded-md bg-muted/50 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="shrink-0 text-muted-foreground">当前生效端点</span>
+        <code className="truncate font-mono" title={ep.current}>
+          {ep.current || "（未设置）"}
+        </code>
+        {ep.main && (
+          <span className="truncate text-muted-foreground" title={ep.main}>
+            （主 {ep.main}）
+          </span>
+        )}
+      </div>
+      {candidates.length > 0 && (
+        <div className="grid gap-1">
+          {candidates.map((c) => (
+            <div key={c.url} className="flex items-center gap-1.5">
+              <span
+                className={cn("size-1.5 shrink-0 rounded-full", c.alive ? "bg-emerald-500" : "bg-destructive")}
+                title={c.alive ? "探活通过" : "不可达"}
+              />
+              <code className="truncate font-mono" title={c.url}>
+                {c.url}
+              </code>
+              {c.latency_ms !== undefined && (
+                <span className="ml-auto shrink-0 text-muted-foreground tabular-nums">{c.latency_ms}ms</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {switches.length > 0 && (
+        <div className="grid gap-0.5 border-t pt-1.5">
+          <span className="text-muted-foreground">最近切换</span>
+          {switches.map((s) => (
+            <div key={`${s.at}|${s.from}|${s.to}`} className="flex flex-wrap items-center gap-x-2">
+              <span className="shrink-0 text-muted-foreground tabular-nums">
+                {new Date(s.at).toLocaleString("zh-CN")}
+              </span>
+              <code className="truncate font-mono" title={`${s.from} → ${s.to}`}>
+                {s.from} → {s.to}
+              </code>
+              {s.cause && (
+                <span className="truncate text-muted-foreground" title={s.cause}>
+                  {s.cause}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +288,8 @@ function PoolSheet({
                 {chain.map((m) => {
                   const excluded = m.excluded && !m.active;
                   const order = excluded ? null : inChain.findIndex((x) => x.profile_id === m.profile_id) + 1;
+                  // 端点维度的状态（候选地址/切换历史）。endpoints 缺省（后端未发版）时不渲染。
+                  const ep = pool?.endpoints?.find((e) => e.profile_id === m.profile_id);
                   return (
                     <div
                       key={m.profile_id}
@@ -272,6 +340,7 @@ function PoolSheet({
                           {m.last_error}
                         </p>
                       )}
+                      {ep && <ProfileEndpoints ep={ep} />}
                     </div>
                   );
                 })}
@@ -315,6 +384,9 @@ function ProfileSheet({
   const [format, setFormat] = React.useState<"anthropic" | "openai" | "openai-responses">("anthropic");
   const [model, setModel] = React.useState("");
   const [baseUrl, setBaseUrl] = React.useState("");
+  // 备用网关地址：多行文本，每行一个 URL，存的是「除主地址外的候选」。
+  // 保存时与主地址合成 base_urls（主地址恒在首位——接口语义「第一行为主」）。
+  const [baseUrls, setBaseUrls] = React.useState("");
   const [proxy, setProxy] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
   const [keyHint, setKeyHint] = React.useState("");
@@ -346,6 +418,9 @@ function ProfileSheet({
     setFormat(profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic");
     setModel(profile?.model ?? "");
     setBaseUrl(profile?.base_url ?? "");
+    // 备用地址 = 候选列表去掉主地址后的剩余项（兼容后端把主地址也放进 base_urls 首位的情况）。
+    const mainUrl = profile?.base_url ?? "";
+    setBaseUrls((profile?.base_urls ?? []).filter((u) => u && u !== mainUrl).join("\n"));
     setProxy(profile?.proxy ?? "");
     setRps(String(profile?.rate_per_second ?? 0));
     setRpm(String(profile?.rate_per_minute ?? 0));
@@ -427,12 +502,20 @@ function ProfileSheet({
     if (saving) return;
     setSaving(true);
     try {
+      // base_urls = 主地址 + 备用行，去空去重，主地址恒在首位（第一行为主）。
+      // 主地址为空时由备用行顶上（第一行自然成为主地址）；空数组 = 只用主地址。
+      const backupLines = baseUrls
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const baseUrlsOut = Array.from(new Set([baseUrl.trim(), ...backupLines].filter(Boolean)));
       const { id } = await api.saveLLMProfile({
         ...(profile ? { id: Number(profile.id) } : {}),
         name: name.trim(),
         format,
         model: model.trim(),
         base_url: baseUrl.trim(),
+        base_urls: baseUrlsOut,
         proxy: proxy.trim(),
         api_key: apiKey,
         rate_per_second: Number(rps) || 0,
@@ -566,7 +649,7 @@ function ProfileSheet({
                 <Badge
                   key={m}
                   variant={m === model ? "default" : "outline"}
-                  className="gap-1 py-0.5 pl-2 pr-1 font-mono text-[10px]"
+                  className="gap-1 py-0.5 pr-1 pl-2 font-mono text-[10px]"
                 >
                   {m === model ? "默认·" : ""}
                   {m}
@@ -595,6 +678,22 @@ function ProfileSheet({
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
             />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="p-base-urls">备用网关地址（可选，每行一个）</Label>
+            <Textarea
+              id="p-base-urls"
+              className="max-h-40 min-h-16 font-mono text-xs"
+              rows={3}
+              placeholder={"https://mirror-a.example.com/v1\nhttps://mirror-b.example.com/v1"}
+              value={baseUrls}
+              onChange={(e) => setBaseUrls(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              主地址连不上（连接类失败）时按从上到下的顺序探测切换，恢复后自动回切主地址。每行一个
+              URL，与主地址组成候选列表（主地址恒为第一项，即「第一行为主」）；留空 = 只用主地址。
+            </p>
           </div>
 
           <div className="grid gap-2">
@@ -885,6 +984,9 @@ export default function LLMPage() {
   }
 
   const poolOn = pool?.enabled ?? false;
+  // 备用链引导：配置不足两个、或轮询总开关未开时，主配置故障就没有任何兜底——黄条提醒。
+  // 走琥珀色 + 现有卡片风格，不上致命色（红）。
+  const noFallback = profiles.length < 2 || !poolOn;
 
   return (
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
@@ -910,6 +1012,15 @@ export default function LLMPage() {
         </div>
       </div>
 
+      {noFallback && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-400/50 bg-amber-400/5 px-3.5 py-3">
+          <TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <p className="text-sm leading-relaxed">
+            {"当前无备用 LLM（或轮询未开启），主配置故障时全部通道停摆——添加第二个配置并开启 LLM 轮询。"}
+          </p>
+        </div>
+      )}
+
       <Tabs defaultValue="profiles" className="flex-1">
         <TabsList>
           <TabsTrigger value="profiles">模型配置</TabsTrigger>
@@ -921,6 +1032,9 @@ export default function LLMPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {profiles.map((p) => {
               const h = healthOf(p, health.get(p.id));
+              // 网关候选徽标：备用数 = 候选列表去掉主地址后的条数（兼容主地址在列表首位的情况）。
+              const mainUrl = p.base_url ?? p.base_urls?.[0] ?? "";
+              const backups = (p.base_urls ?? []).filter((u) => u && u !== mainUrl);
               return (
                 // biome-ignore lint/a11y/useSemanticElements: 卡片内含自己的操作按钮，用原生 <button> 会造成按钮嵌套（非法 HTML）
                 <Card
@@ -962,6 +1076,15 @@ export default function LLMPage() {
                     </div>
 
                     <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
+                      {backups.length > 0 && (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px]"
+                          title={[p.base_url, ...backups].filter(Boolean).join("\n")}
+                        >
+                          主地址 + {backups.length} 个备用
+                        </Badge>
+                      )}
                       {p.api_key_hint && <span>{p.api_key_hint}</span>}
                       <span>
                         {p.rate_per_second}/s · {p.rate_per_minute}/min

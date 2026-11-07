@@ -426,6 +426,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default)
 -- 迁移把旧行初始化为 [model]；model 列语义=默认模型（列表里必有它）。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS models JSONB NOT NULL DEFAULT '[]'::jsonb;
 UPDATE llm_profiles SET models = jsonb_build_array(model) WHERE models = '[]'::jsonb;
+-- 网关候选地址（方案 v5 G1）：base_url 之外的可选备用端点，有序（第一项为主）。
+-- 换网/网关迁移时 provider 在连接类失败后自动切换，主地址恢复后自动回切。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS base_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

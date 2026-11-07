@@ -25,6 +25,9 @@ type LLMProfile struct {
 	// Model 恒为「默认模型」——列表的第一个语义槽位。引用方可用列表里的任何
 	// 一个模型名构造变体（同 key/网关/限流，只换 model 参数）。
 	Models []string `json:"models,omitempty"`
+	// BaseURLs 是网关候选地址（方案 v5 G1）：有序（第一项为主）。空 = 只用
+	// BaseURL 单地址。provider 在连接类失败后自动切下一候选，主地址恢复回切。
+	BaseURLs []string `json:"base_urls,omitempty"`
 	APIKey     string `json:"-"` // never serialized to UI
 	APIKeyHint string `json:"api_key_hint,omitempty"`
 	// APIKeyCipher 是加密落库的 key（AAD 绑定 Name）。不序列化。
@@ -240,11 +243,12 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 		p.Models = append([]string{p.Model}, p.Models...)
 	}
 	modelsJSON, _ := json.Marshal(p.Models)
+	baseURLsJSON, _ := json.Marshal(p.BaseURLs)
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,models,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,api_key_cipher)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,NULLIF($26,'')) RETURNING id`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, string(modelsJSON), plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,models,base_urls,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,api_key_cipher)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,NULLIF($27,'')) RETURNING id`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, string(modelsJSON), string(baseURLsJSON), plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, cipherText).Scan(&id)
 		return id, err
 	}
