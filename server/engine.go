@@ -1957,6 +1957,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
+		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+			Summary: "【LLM 通道故障】意图 #" + fmt.Sprintf("%d", intent.ID) + " 因模型链耗尽转 blocked——请检查 LLM 配置（key/额度），或通过治理工具/设置页切换备用配置"})
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)

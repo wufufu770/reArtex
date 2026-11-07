@@ -49,6 +49,12 @@ type Pool struct {
 	members []*Member // in chain order (active first, then priority DESC)
 	health  *Registry
 	rr      atomic.Uint64 // rotates the starting point within an equal-priority group
+	// OnHardTrip 是硬熔断（401/403 等 key 级失效）的宿主回调（v5.3 G-B）：
+	// 宿主据此群播报「key 失效已切换，请轮换」。nil = 只留日志。
+	OnHardTrip func(memberName, errMsg string)
+	// OnFailover 是每次成员切换的宿主回调（v5.3 G-E 可观测：切换原因/
+	// 从谁到谁，全部留痕+播报）。nil = 只留日志。
+	OnFailover func(fromName, toName, reason string)
 }
 
 // New builds a Pool over members (already in chain order). Returns nil when the
@@ -107,11 +113,17 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 			hard := isHardFailure(failed)
 			if p.health.Trip(m.ID, trimErr(failed), hard) {
 				log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(failed))
+				if hard && p.OnHardTrip != nil {
+					p.OnHardTrip(m.Name+"/"+m.Model, trimErr(failed))
+				}
 			}
 			if i+1 < len(order) {
 				n := order[i+1]
 				log.Printf("[llmpool] LLM 故障转移：%q(%s) → %q(%s)，原因：%s",
 					m.Name, m.Model, n.Name, n.Model, trimErr(failed))
+				if p.OnFailover != nil {
+					p.OnFailover(m.Name+"/"+m.Model, n.Name+"/"+n.Model, trimErr(failed))
+				}
 			}
 		}
 		if lastErr == nil {
@@ -146,6 +158,9 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		hard := isHardFailure(err)
 		if p.health.Trip(m.ID, trimErr(err), hard) {
 			log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
+			if hard && p.OnHardTrip != nil {
+				p.OnHardTrip(m.Name+"/"+m.Model, trimErr(err))
+			}
 		}
 		if i+1 < len(order) {
 			n := order[i+1]

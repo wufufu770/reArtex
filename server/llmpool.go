@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -58,7 +59,7 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 // provider cache so every agent pointing at the same profile shares one provider
 // (hence one rate limiter). Returns nil when the profile can't be built.
 func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
-	prov, cfg, ok := s.providerForProfile(p.ID)
+	prov, cfg, ok := s.providerForProfileModelRaw(p.ID, "")
 	if !ok {
 		return nil
 	}
@@ -122,7 +123,28 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 	if len(members) < 2 {
 		return nil // nothing to fail over to
 	}
-	return llmpool.New(members, s.llmHealth)
+	pool := llmpool.New(members, s.llmHealth)
+	// G-B：硬熔断（401/403 key 失效）→ 群播报+治理留痕（请轮换 key）。
+	pool.OnFailover = func(fromName, toName, reason string) {
+		log.Printf("[llmpool] G-E 留痕：%s → %s（%s）", fromName, toName, reason)
+		if s.m == nil || s.m.pg == nil {
+			return
+		}
+		_ = s.m.pg.InsertLLMRecord(&db.LLMRecord{Worker: "governance", Model: fromName, Status: "ok",
+			RawResponse: fmt.Sprintf(`{"event":"failover","from":%q,"to":%q,"reason":%q}`, fromName, toName, reason)})
+	}
+	pool.OnHardTrip = func(memberName, errMsg string) {
+		msg := fmt.Sprintf("【LLM 配置故障】%s 鉴权失效（%s）——已切换备用配置；请轮换该配置的 API Key", memberName, errMsg)
+		log.Printf("[llmpool] %s", msg)
+		if s.m == nil || s.m.pg == nil {
+			return
+		}
+		_ = s.m.pg.InsertLLMRecord(&db.LLMRecord{Worker: "governance", Model: memberName, Status: "error", Error: msg})
+		for _, sid := range s.m.pg.BoundSessionIDsForBroadcast() {
+			s.say(sid, 0, "system", "system", msg)
+		}
+	}
+	return pool
 }
 
 // poolForActive wraps the globally-active provider in the failover chain. Returns
