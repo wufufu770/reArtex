@@ -24,6 +24,15 @@ const MODE_META: Record<SodMergedGateMode, { label: string; variant: "default" |
   enforce: { label: "enforce · 新链已接管", variant: "default" },
 };
 
+// MODE_DESCRIPTION 是卡头描述随 mode 联动的文案：off 没在对照、shadow 才有新差异落表、
+// enforce 后新链已接管，这张表只剩 shadow 期的历史存档。
+const MODE_DESCRIPTION: Record<SodMergedGateMode, string> = {
+  off: "合并闸关闭，新旧链对照未启用。",
+  shadow:
+    "shadow 模式新旧链并跑：最终动作永远按旧链，新链的裁决只记录差异（最多 100 条）。「不一致」的行是新旧链的分歧——切 enforce 前先核对有没有系统性误伤。",
+  enforce: "新链已接管裁决——本卡为 shadow 期的历史对照存档（差异不再新增）。",
+};
+
 // fmtTime 把时间戳压成 MM-DD HH:mm（对照行按时间定位就够用了）。
 function fmtTime(iso?: string | null): string {
   if (!iso) return "—";
@@ -68,10 +77,7 @@ export function SodShadowCard() {
             {MODE_META[mode].label}
           </Badge>
         </CardTitle>
-        <CardDescription>
-          shadow 模式新旧链并跑：最终动作永远按旧链，新链的裁决只记录差异（最多 100
-          条）。「不一致」的行是新旧链的分歧——切 enforce 前先核对有没有系统性误伤。
-        </CardDescription>
+        <CardDescription>{MODE_DESCRIPTION[mode]}</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-2">
         <div className="flex items-center justify-end">

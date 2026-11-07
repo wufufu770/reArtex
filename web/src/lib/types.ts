@@ -2069,6 +2069,8 @@ export interface SodCategory {
   enabled: boolean;
   priority: number;
   reason: string;
+  // 回链：本种类由哪条 auditor 建议采纳而来（人工新建的行没有此字段）。
+  suggestion_id?: number;
   created_by: string;
   created_at: string;
   updated_at: string;

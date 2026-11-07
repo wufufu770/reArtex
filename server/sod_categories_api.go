@@ -4,6 +4,7 @@ package server
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,7 @@ func (s *Server) registerSodCategoryRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/sod/categories/{id}", s.sodCategoryDelete)
 	mux.HandleFunc("GET /api/sod/category-suggestions", s.sodSuggestionList)
 	mux.HandleFunc("POST /api/sod/category-suggestions/{id}/decide", s.sodSuggestionDecide)
+	mux.HandleFunc("POST /api/sod/category-suggestions/{id}/revoke", s.sodSuggestionRevoke)
 	mux.HandleFunc("GET /api/sod/shadow", s.sodShadowList)
 	mux.HandleFunc("GET /api/sod/merged-gate", s.sodMergedGateState)
 	mux.HandleFunc("POST /api/sod/merged-gate", s.sodMergedGateSet)
@@ -254,11 +256,25 @@ func (s *Server) sodSuggestionDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Decision == "adopted" {
+		// 伪正则防护（v6.1）：auditor 的 pattern 字段常是中文描述——原样采纳会
+		// 建出「永不命中」的死种类。custom 必须是可编译正则；builtin 必须是
+		// 已注册识别器名。name 与内建种类重名同样拒绝（改成可区分的名字再采）。
+		pat := strings.TrimSpace(target.Pattern)
+		if target.Kind == "custom" {
+			if _, cerr := regexp.Compile(pat); cerr != nil || pat == "" {
+				writeErr(w, 400, "该建议的 pattern 不是可编译正则（「"+pat+"」）——请在采纳前补写正则，或把涉及的域名加进情报源白名单")
+				return
+			}
+			if reason, hit := sodpolicy.BaselineHit("Bash", []byte(pat)); reason != "" && target.Action == sodpolicy.CategoryActionPass {
+				writeErr(w, 409, "pattern 含锁定基线特征（"+hit+"）不可配置为放行")
+				return
+			}
+		}
 		if _, err := pg.CreateSodCategory(sodpolicy.SodCategory{
-			Name: target.Name, Kind: target.Kind, Pattern: target.Pattern,
+			Name: target.Name, Kind: target.Kind, Pattern: pat,
 			Action: target.Action, Fallback: sodpolicy.CategoryFallbackAsk,
 			Enabled: true, Priority: 40, Reason: "auditor 建议采纳：" + target.Reason,
-			CreatedBy: strings.TrimSpace(req.Operator),
+			CreatedBy: strings.TrimSpace(req.Operator), SuggestionID: target.ID,
 		}); err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -324,4 +340,56 @@ func (s *Server) sodMergedGateSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "mode": s.mergedGateMode()})
+}
+
+// sodSuggestionRevoke 撤销采纳（方案 v6.1）：按回链删除采纳产生的种类行，
+// 建议状态回 pending（可修改 pattern 后重新采纳）。已手动删除/停用过的行
+// （回链查不到）只回状态不报错——撤销是幂等的整理动作。
+func (s *Server) sodSuggestionRevoke(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok || id <= 0 {
+		writeErr(w, 400, "id 不合法")
+		return
+	}
+	var req struct {
+		Operator string `json:"operator"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, "参数解析失败")
+		return
+	}
+	if strings.TrimSpace(req.Operator) == "" {
+		writeErr(w, 400, "必须留操作者身份（operator）")
+		return
+	}
+	// 回链定位种类行。
+	var catID int64
+	err := pg.QueryRow(`SELECT id FROM sod_categories WHERE suggestion_id=$1`, id).Scan(&catID)
+	removed := false
+	if err == nil && catID > 0 {
+		cur, gerr := pg.GetSodCategory(catID)
+		if gerr != nil {
+			writeErr(w, 500, gerr.Error())
+			return
+		}
+		if cur.Locked {
+			writeErr(w, 409, "该采纳产生的种类已是锁定基线，不可撤销（先在拦截页解除锁定）")
+			return
+		}
+		if derr := pg.DeleteSodCategory(catID); derr != nil {
+			writeErr(w, 500, derr.Error())
+			return
+		}
+		removed = true
+	}
+	// 建议回 pending（重新采纳入口；adopted→pending 是有意放开的状态回流）。
+	if _, uerr := pg.Exec(`UPDATE sod_category_suggestions SET status='pending', decided_at=NULL, decided_by='' WHERE id=$1 AND status='adopted'`, id); uerr != nil {
+		writeErr(w, 500, uerr.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "removed_category": removed})
 }

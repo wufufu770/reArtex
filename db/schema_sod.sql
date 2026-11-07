@@ -173,3 +173,7 @@ CREATE TABLE IF NOT EXISTS sod_category_suggestions (
     decided_at TIMESTAMPTZ,
     decided_by TEXT NOT NULL DEFAULT ''
 );
+
+-- 采纳回链（方案 v6.1）：种类 ← 采纳来源建议。不加外键（建表顺序在前，
+-- 引用后置表会让全新库 schema 应用整体失败）；回链完整性由采纳/撤销代码维护。
+ALTER TABLE sod_categories ADD COLUMN IF NOT EXISTS suggestion_id BIGINT;
