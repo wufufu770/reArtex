@@ -133,3 +133,18 @@ func TestAuditorRequestShape(t *testing.T) {
 		t.Fatal("sanity")
 	}
 }
+
+// TestStderrRedirectNotOutside v6.1 回归钉：stderr/stdout 重定向是 shell 常态，
+// 不得把 `2>/dev/null` 当「任务目录外出界路径」（线上实锤 21 次目录外写误判）。
+func TestStderrRedirectNotOutside(t *testing.T) {
+	body := `{"command": "ls -la /app/data/tasks/2/i89 2>/dev/null; echo ---; date -u"}`
+	cls := Classify(2, "Bash", []byte(body), intelStub)
+	if cls.Kind != ClassLocalSafe || len(cls.OutsidePaths) != 0 {
+		t.Fatalf("任务目录内 ls + 2>/dev/null 应判 local_safe：kind=%s outside=%v", cls.Kind, cls.OutsidePaths)
+	}
+	body2 := `{"command": "cat /app/data/tasks/1/i8/x.txt 2>/dev/null"}`
+	cls2 := Classify(2, "Bash", []byte(body2), intelStub)
+	if cls2.Kind != ClassOutsideWrite || len(cls2.OutsidePaths) != 1 {
+		t.Fatalf("真实跨任务目录读取仍应判 outside_write：kind=%s outside=%v", cls2.Kind, cls2.OutsidePaths)
+	}
+}

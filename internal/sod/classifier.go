@@ -86,6 +86,29 @@ var urlRe = regexp.MustCompile(`(?i)(?:https?|ftp|wss?)://([A-Za-z0-9._\-]+(?::\
 // （线上实锤 worker 全在 /tmp 里写脚本跑脚本——合法 scratch，不是攻击面）。
 var tempPrefixes = []string{"/tmp/", "/app/data/sessions/"}
 
+// harmlessSystemPaths 是 shell 常态下的无害系统路径（v6.1 修复：线上实锤
+// `ls /app/data/tasks/2/i89 2>/dev/null` 的 stderr 重定向被当成「任务目录外
+// 出界路径」，21 次目录外写误判 cap 洪泛）。这些路径要么是黑洞/流设备，要么
+// 是只读系统信息——出现在载荷里不构成出界读写。破坏面（dd of=/dev/sda 等）
+// 由锁定基线在更早层硬拦，与这里不冲突。
+var harmlessSystemPaths = map[string]bool{
+	"/dev/null": true, "/dev/stdin": true, "/dev/stdout": true, "/dev/stderr": true,
+	"/dev/zero": true, "/dev/random": true, "/dev/urandom": true, "/dev/tty": true,
+	"/dev/fd": true,
+}
+
+func harmlessSystemPath(tok string) bool {
+	if harmlessSystemPaths[tok] {
+		return true
+	}
+	for _, prefix := range []string{"/proc/self/", "/proc/cpuinfo", "/proc/meminfo", "/proc/version", "/proc/uptime", "/sys/class/net/"} {
+		if tok == prefix || len(tok) > len(prefix) && tok[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify 对一次受管调用做确定性分类。intelSource 为 nil 时不做情报源判定
 // （单测用；生产注入 settings 白名单）。调用方保证基线预检（sodpolicy.BaselineHit）
 // 已先行——破坏/平台配置类到不了这里。
@@ -294,7 +317,7 @@ func outsidePaths(taskID int64, text string) []string {
 				break
 			}
 		}
-		if temp {
+		if temp || harmlessSystemPath(tok) {
 			continue
 		}
 		out = append(out, tok)
@@ -312,6 +335,9 @@ func localPathsAllInside(taskID int64, text string) bool {
 	found := false
 	for _, m := range localPathTokenRe.FindAllStringSubmatch(text, -1) {
 		tok := m[1]
+		if harmlessSystemPath(tok) {
+			continue // stderr/stdout 重定向等 shell 常态不计入
+		}
 		if tok != prefix && !strings.HasPrefix(tok, prefix+"/") {
 			return false
 		}
