@@ -4,13 +4,26 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ScrollTextIcon } from "lucide-react";
+import { GavelIcon, ScrollTextIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { SodShadowCard } from "@/components/sod-shadow-card";
+import { SodSuggestionCard } from "@/components/sod-suggestion-card";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
@@ -30,7 +43,7 @@ const POLL_MS = 10_000;
 //
 // 分层（tier）是**读时推导**的（下界，不是真值），所以这一列只呈现后端给的
 // 结论，不在这里重新解释「所以其实更严」—— 那是后端 tier_note 的口径。
-function DecisionRow({ row }: { row: SodDecision }) {
+function DecisionRow({ row, onReview }: { row: SodDecision; onReview?: (row: SodDecision) => void }) {
   return (
     <TableRow>
       <TableCell>
@@ -98,12 +111,27 @@ function DecisionRow({ row }: { row: SodDecision }) {
           <span className="text-muted-foreground text-xs tabular-nums">{fmtLatency(row.latency_ms)}</span>
         </div>
       </TableCell>
+      <TableCell>
+        {(row.verdict === "deny" || row.verdict === "needs_review") && onReview && (
+          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onReview(row)}>
+            <GavelIcon /> 人工复核
+          </Button>
+        )}
+      </TableCell>
     </TableRow>
   );
 }
 
 // DecisionList 是账本表的渲染：加载中 / 空态 / 表格三种。
-function DecisionList({ rows, loaded }: { rows: SodDecision[]; loaded: boolean }) {
+function DecisionList({
+  rows,
+  loaded,
+  onReview,
+}: {
+  rows: SodDecision[];
+  loaded: boolean;
+  onReview?: (row: SodDecision) => void;
+}) {
   if (!loaded) {
     return <p className="py-6 text-center text-muted-foreground text-sm">加载中…</p>;
   }
@@ -130,15 +158,24 @@ function DecisionList({ rows, loaded }: { rows: SodDecision[]; loaded: boolean }
           <TableHead>分层</TableHead>
           <TableHead className="hidden lg:table-cell">载荷</TableHead>
           <TableHead>缓存 / 延迟</TableHead>
+          <TableHead>操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {rows.map((row) => (
-          <DecisionRow key={row.id} row={row} />
+          <DecisionRow key={row.id} row={row} onReview={onReview} />
         ))}
       </TableBody>
     </Table>
   );
+}
+
+// F3：人工复核弹窗的状态与提交。
+interface ReviewDraft {
+  decision: SodDecision;
+  scope: "once" | "task";
+  reason: string;
+  operator: string;
 }
 
 export default function SodLedgerPage() {
@@ -147,6 +184,8 @@ export default function SodLedgerPage() {
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [ledger, setLedger] = React.useState<SodDecisionLedger | null>(null);
   const [loaded, setLoaded] = React.useState(false);
+  const [review, setReview] = React.useState<ReviewDraft | null>(null);
+  const [reviewing, setReviewing] = React.useState(false);
 
   // 内容没变就不 setState，避免整页重渲染（与策略库页同一套做法）。
   const lastRef = React.useRef<string>("");
@@ -203,6 +242,10 @@ export default function SodLedgerPage() {
       <SodNav current="decisions" />
 
       <ChainStatusCard compact />
+
+      {/* v4.1 合并闸观测面：auditor 建议队列（人工裁决沉淀规则）+ 影子对照（切 enforce 前核对）。 */}
+      <SodSuggestionCard />
+      <SodShadowCard />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card size="sm" className="gap-1">
@@ -279,15 +322,104 @@ export default function SodLedgerPage() {
               </SelectContent>
             </Select>
           </div>
-          <DecisionList rows={rows} loaded={loaded} />
+          <DecisionList
+            rows={rows}
+            loaded={loaded}
+            onReview={(row) => setReview({ decision: row, scope: "once", reason: "", operator: "sir" })}
+          />
         </CardContent>
       </Card>
+
+      {/* F3 人工复核改判弹窗：once=用后即焚（默认）/ task=随任务终态过期。
+          Tier3 高危后端 409 拒绝，前端照实展示。 */}
+      <Dialog open={review !== null} onOpenChange={(open) => !open && setReview(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>人工复核改判</DialogTitle>
+            <DialogDescription>
+              对裁决 #{review?.decision.id}（{review?.decision.tool_name} · {review?.decision.verdict}）发放
+              call-precision 放行凭据：只有载荷完全一致的这次调用会被放行，改一个字节就不命中。
+            </DialogDescription>
+          </DialogHeader>
+          {review && (
+            <div className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label htmlFor="rv-scope">放行范围</Label>
+                <Select
+                  value={review.scope}
+                  onValueChange={(v) => setReview({ ...review, scope: v as "once" | "task" })}
+                >
+                  <SelectTrigger id="rv-scope">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="once">单次（用后即焚，推荐）</SelectItem>
+                    <SelectItem value="task">本任务内（随任务终态过期）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="rv-reason">改判理由（审计留痕）</Label>
+                <Input
+                  id="rv-reason"
+                  value={review.reason}
+                  onChange={(e) => setReview({ ...review, reason: e.target.value })}
+                  placeholder="例：规整器故障导致的误拒，动作本身合法"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="rv-operator">操作者</Label>
+                <Input
+                  id="rv-operator"
+                  value={review.operator}
+                  onChange={(e) => setReview({ ...review, operator: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReview(null)}>
+              取消
+            </Button>
+            <Button
+              disabled={reviewing || !review?.operator.trim()}
+              onClick={() => {
+                if (!review) return;
+                setReviewing(true);
+                api
+                  .sodDecisionReview(review.decision.id, {
+                    scope: review.scope,
+                    reason: review.reason.trim(),
+                    operator: review.operator.trim(),
+                  })
+                  .then((r) => {
+                    if (r.suggest_trust_rule) {
+                      toast.info(
+                        `该工具已被改判 ${r.override_count_same_tool} 次——建议把它沉淀为信任规则（拦截规则页）`,
+                      );
+                    } else {
+                      toast.success("已登记放行凭据：worker 重试同一调用将直接放行");
+                    }
+                    setReview(null);
+                    lastRef.current = "";
+                    void load();
+                  })
+                  .catch((e) => toast.error(`改判失败：${(e as Error).message}`))
+                  .finally(() => setReviewing(false));
+              }}
+            >
+              确认放行
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {ledger?.tier_note && <p className="text-muted-foreground text-xs">{ledger.tier_note}</p>}
 
       <p className="text-muted-foreground text-xs">
         <ScrollTextIcon className="mr-1 inline size-3.5 align-text-bottom" />
-        账本是审计记录：同一笔裁决只此一条，改不了也不重跑 —— 所以这里没有「重新裁决」这种按钮。 「待证伪」的那几笔要去
+        账本是审计记录：同一笔裁决只此一条，本身不可改写；但 deny / 待证伪的裁决可以走「人工复核」发放 call-precision
+        放行凭据（改判历史落 sod_manual_overrides，Tier3 高危不可改判）。「待证伪」的那几笔要去
         <Link href="/sod/review-queue" className="mx-0.5 underline underline-offset-4">
           对抗复核队列
         </Link>

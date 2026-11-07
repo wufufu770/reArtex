@@ -239,6 +239,40 @@ export function groupSessions(sessions: Session[]): SessionSection[] {
   return sections;
 }
 
+// groupSessionsByKind 是 A3 的形态四分区：总控 / 群聊 / 大厅 / 旧会话。
+// kind 缺省（旧数据）或不认识的值一律归入「旧会话」，不是群聊。这里只给会话分桶：
+// 认领了旧对话的会话照常按 kind 进桶（旧对话挂在会话的「旧对话记录」页签）；没被认领
+// 的旧对话不归这里管，在列表下方单独的「旧对话」块（chat/page.tsx）。
+// 分区本身不带折叠态 —— 分区头的折叠由 SessionList 渲染、ChatPage 持有（按视图前缀存本地）。
+export function groupSessionsByKind(sessions: Session[]): SessionSection[] {
+  const buckets: Record<string, Session[]> = {
+    master: [],
+    chat: [],
+    task_hall: [],
+    legacy: [],
+  };
+  for (const session of sessions) {
+    const k = session.kind;
+    if (k === "master") buckets.master.push(session);
+    else if (k === "task_hall") buckets.task_hall.push(session);
+    else if (k === "chat") buckets.chat.push(session);
+    else buckets.legacy.push(session);
+  }
+  const sections: SessionSection[] = [];
+  const labelOf: Record<string, string> = {
+    master: "总控",
+    chat: "群聊",
+    task_hall: "大厅",
+    legacy: "旧会话",
+  };
+  for (const key of ["master", "chat", "task_hall", "legacy"] as const) {
+    if (buckets[key].length > 0) {
+      sections.push({ key: `kind:${key}`, label: labelOf[key], sessions: buckets[key] });
+    }
+  }
+  return sections;
+}
+
 // groupSessionsByAgent 是**可选视图**（§9 定稿 4：保留为可选开关，默认关闭）。
 export function groupSessionsByAgent(sessions: Session[], agentByKey: Map<string, Agent>): SessionSection[] {
   const buckets = new Map<string, Session[]>();

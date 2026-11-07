@@ -99,10 +99,14 @@ func TestAdvisoryAgentsCannotWriteSharedGraph(t *testing.T) {
 //
 // 顾问 agent 的绑定是【纯追加】：既有 agent 在同一个 agents 数组里的条目一个都
 // 不能动。钉住代表性工具的完整数组，任何对既有绑动的改动都会在这里暴露。
+//
+// recon（资产收集 agent，方案 v4 §3-C）是有意识新增的内置 agent：它只在
+// list_findings / insert_assets / list_assets / record_fact / list_companies 的数组
+// 尾部追加了自己，既有 agent 的条目一个没动。
 func TestExistingAgentToolBindingsUnchanged(t *testing.T) {
 	want := map[string][]string{
 		"graph_overview":           {"mainagent", "planner", "creative"},
-		"list_findings":            {"mainagent", "planner", "worker", "pentest", "verifier", "redteam"},
+		"list_findings":            {"mainagent", "planner", "worker", "pentest", "recon", "verifier", "redteam"},
 		"list_facts":               {"mainagent", "planner"},
 		"node_detail":              {"mainagent", "planner", "worker"},
 		"expand_digest":            {"mainagent", "planner"},
@@ -114,18 +118,18 @@ func TestExistingAgentToolBindingsUnchanged(t *testing.T) {
 		"steer_work":               {"mainagent", "planner"},
 		"set_goals":                {"mainagent", "goals"},
 		"set_constraints":          {"mainagent", "goals"},
-		"insert_assets":            {"mainagent", "worker", "auto", "pentest"},
+		"insert_assets":            {"mainagent", "worker", "auto", "pentest", "recon"},
 		"add_company_scope":        {"mainagent", "planner", "auto"},
-		"list_assets":              {"mainagent", "planner", "worker", "auto", "pentest", "creative"},
+		"list_assets":              {"mainagent", "planner", "worker", "auto", "pentest", "recon", "creative"},
 		"report_finding":           {"mainagent", "planner", "worker", "auto", "pentest"},
-		"record_fact":              {"mainagent", "worker"},
+		"record_fact":              {"mainagent", "worker", "recon"},
 		"add_task_scope":           {"mainagent", "planner"},
 		"list_untested_assets":     {"mainagent", "planner"},
 		"list_goals":               {"planner"},
 		"prove_goal":               {"planner"},
 		"goal_met":                 {},
 		"kill_work":                {"planner"},
-		"list_companies":           {"planner", "auto", "pentest"},
+		"list_companies":           {"planner", "auto", "pentest", "recon"},
 	}
 	byTool := seedAgentsByTool(BuiltinToolSeeds())
 	for key, agents := range want {
@@ -143,7 +147,7 @@ func TestExistingAgentToolBindingsUnchanged(t *testing.T) {
 // TestAdvisoryBindingsAreAdditive 保证顾问 agent 的绑定是【追加】在既有条目之后：
 // 数组里既有 agent 的相对顺序不变，顾问 agent 只出现在尾部。
 func TestAdvisoryBindingsAreAdditive(t *testing.T) {
-	legacy := map[string]bool{"mainagent": true, "goals": true, "planner": true, "worker": true, "auto": true, "pentest": true}
+	legacy := map[string]bool{"mainagent": true, "goals": true, "planner": true, "worker": true, "auto": true, "pentest": true, "recon": true}
 	for _, s := range BuiltinToolSeeds() {
 		lastLegacy, firstAdvisory := -1, -1
 		for i, a := range s.Agents {

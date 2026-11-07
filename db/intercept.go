@@ -274,6 +274,36 @@ func firstAudit(audits []*InterceptAudit) any {
 	return raw
 }
 
+// ListInterceptsByStatus 按状态列拦截/审批记录（方案 v3 缺陷 F1——审批历史
+// 黑洞的库层补口：resolved 行此前只有 history 入口能翻到）。
+// status 为空 ⇒ 等价 ListAllIntercepts 语义（全部，上限 limit）。
+func (d *DB) ListInterceptsByStatus(status string, limit int) ([]InterceptApprovalRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	q := approvalRowSelect
+	args := []any{}
+	if status != "" {
+		q += ` WHERE ip.status=$1`
+		args = append(args, status)
+	}
+	q += fmt.Sprintf(` ORDER BY ip.created_at DESC LIMIT %d`, limit)
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []InterceptApprovalRow
+	for rows.Next() {
+		var r InterceptApprovalRow
+		if err := scanInterceptApprovalRow(rows, &r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ListAllIntercepts returns up to limit intercept_pending rows (newest first)
 // joined with conversation and rule info.
 func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {

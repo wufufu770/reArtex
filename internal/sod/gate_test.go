@@ -278,3 +278,178 @@ func TestSoDGateZeroValueFailsClosed(t *testing.T) {
 		t.Fatalf("reason_code=%q want %q", out.ReasonCode, sodpolicy.ReasonScopeUnavailable)
 	}
 }
+
+// TestSoDGateTaskInternalWriteBypassesScopeLookup 钉住 B2：任务内结构化写
+// （record_fact / record_progress / add_hint / message_group）跳过 LLM 规整、
+// scope 按构造通过（理由码 pass(task_internal_write)），**其余检查照跑**。
+//
+// 为什么这组断言重要：
+//   - 这些动作没有外部 host 可判范围——拿空 target_hint 去跑老逻辑，它们会被
+//     out_of_scope 拒掉（规整器一抖整条写回链路瘫痪的根因之一）；
+//   - 但「跳过 scope 查找」绝不能演变成「跳过闸门」：熔断 / 额度检查必须还在。
+func TestSoDGateTaskInternalWriteBypassesScopeLookup(t *testing.T) {
+	stub := gateStubAllowAll()
+	g := &Gate{deps: stub}
+
+	// 零值 NormalizerResult（没有模型产出）+ TaskInternalWrite ⇒ scope 按构造通过。
+	in := GateInput{
+		ToolName:          "record_fact",
+		SourceAgent:       "worker",
+		TaskID:            42,
+		Normalized:        NormalizerResult{},
+		TaskInternalWrite: true,
+	}
+	out := g.Evaluate(context.Background(), in)
+	if out.Verdict != sodpolicy.VerdictApprove {
+		t.Fatalf("任务内结构化写应放行，verdict=%q reason=%q", out.Verdict, out.ReasonCode)
+	}
+	if out.Checks["scope_check"] != "pass(task_internal_write)" {
+		t.Fatalf("scope_check=%q，want pass(task_internal_write)", out.Checks["scope_check"])
+	}
+	if stub.scopeCalls != 0 {
+		t.Fatalf("任务内写不应查范围表，scope 查询次数=%d", stub.scopeCalls)
+	}
+	if stub.circuitCalls == 0 || stub.quotaCalls == 0 {
+		t.Fatal("熔断/额度检查必须照跑（跳过的是规整，不是闸门）")
+	}
+
+	// 反向：同类工具若熔断，照样拒绝——旁路不豁免其余检查。
+	stub2 := gateStubAllowAll()
+	stub2.circuitState = sodpolicy.CircuitOpen
+	g2 := &Gate{deps: stub2}
+	out2 := g2.Evaluate(context.Background(), in)
+	if out2.Verdict != sodpolicy.VerdictDeny || out2.ReasonCode != sodpolicy.ReasonToolCircuitOpen {
+		t.Fatalf("熔断的工具必须照拒，verdict=%q reason=%q", out2.Verdict, out2.ReasonCode)
+	}
+}
+
+// TestTaskInternalWriteClassifier 钉住分类器：四工具入列，扩权工具与 shell 家族
+// 绝不入列（它们照旧走完整链）。
+func TestTaskInternalWriteClassifier(t *testing.T) {
+	for _, name := range []string{"record_fact", "record_progress", "add_hint", "message_group"} {
+		if !TaskInternalWrite(name) {
+			t.Errorf("%q 应判为任务内结构化写", name)
+		}
+	}
+	for _, name := range []string{"Bash", "insert_assets", "add_task_scope", "add_company_scope",
+		"report_finding", "shell_open", "WebFetch", ""} {
+		if TaskInternalWrite(name) {
+			t.Errorf("%q 不应判为任务内结构化写（扩权/出网/有外部目标的动作照旧进规整）", name)
+		}
+	}
+}
+
+// TestSoDGateLocalTaskDirScope 钉住 B5：本地任务目录 Bash 的 scope 按构造通过
+//（pass(local_task_dir)），且熔断/额度检查照跑。
+func TestSoDGateLocalTaskDirScope(t *testing.T) {
+	stub := gateStubAllowAll()
+	g := &Gate{deps: stub}
+	in := GateInput{
+		ToolName:     "Bash",
+		SourceAgent:  "worker",
+		TaskID:       42,
+		Normalized:   NormalizerResult{},
+		LocalTaskDir: true,
+	}
+	out := g.Evaluate(context.Background(), in)
+	if out.Verdict != sodpolicy.VerdictApprove {
+		t.Fatalf("本地任务目录读应放行，verdict=%q reason=%q", out.Verdict, out.ReasonCode)
+	}
+	if out.Checks["scope_check"] != "pass(local_task_dir)" {
+		t.Fatalf("scope_check=%q，want pass(local_task_dir)", out.Checks["scope_check"])
+	}
+}
+
+// TestBashLocalTaskDirClassifier 钉住 B5 的路径抽取与出界判定。
+func TestBashLocalTaskDirClassifier(t *testing.T) {
+	ok := []string{
+		`{"command":"grep -r flag /app/data/tasks/10"}`,
+		`{"command":"cat /app/data/tasks/10/i94/output.txt | head"}`,
+		`{"command":"ls /app/data/tasks/10 /app/data/tasks/10/i94"}`,
+	}
+	bad := []string{
+		`{"command":"grep -r flag /app/data/tasks/10 /etc/passwd"}`,   // 混入出界路径
+		`{"command":"cat /app/data/tasks/10-evil/x"}`,                 // 前缀混淆
+		`{"command":"curl -s http://203.0.113.10:8090/ --output /app/data/tasks/10/x"}`, // 含外部目标（URL 不算路径但命令非纯本地……URL 不被抽为路径 ⇒ 仍判 true？）
+		`{"command":"echo hello"}`,                                    // 无路径 token ⇒ 不豁免
+		`{"command":"cat /etc/passwd"}`,                               // 纯出界
+	}
+	for _, p := range ok[:3] {
+		if !BashLocalTaskDir(10, []byte(p)) {
+			t.Errorf("应判本地任务目录: %s", p)
+		}
+	}
+	for _, p := range bad[:2] {
+		if BashLocalTaskDir(10, []byte(p)) {
+			t.Errorf("不应豁免: %s", p)
+		}
+	}
+	if BashLocalTaskDir(10, []byte(bad[3])) {
+		t.Error("无路径 token 不应豁免")
+	}
+	if BashLocalTaskDir(10, []byte(bad[4])) {
+		t.Error("纯出界不应豁免")
+	}
+	if BashLocalTaskDir(0, []byte(ok[0])) {
+		t.Error("taskID=0 不应豁免")
+	}
+}
+
+func TestBashLocalTaskDirNetworkGuard(t *testing.T) {
+	// 网络指示符守卫：出网藏在本地产物后面必须被拦住。
+	notLocal := []string{
+		`{"command":"curl -s http://203.0.113.10:8090/ --output /app/data/tasks/10/x"}`,
+		`{"command":"wget -q https://example.com/a -O /app/data/tasks/10/x"}`,
+		`{"command":"curl example.com:8080 > /app/data/tasks/10/x"}`,
+		`{"command":"nc 203.0.113.10 8090"}`,
+	}
+	for _, p := range notLocal {
+		if BashLocalTaskDir(10, []byte(p)) {
+			t.Errorf("含网络指示符不应豁免: %s", p)
+		}
+	}
+	// 纯本地照旧豁免。
+	if !BashLocalTaskDir(10, []byte(`{"command":"grep -r flag /app/data/tasks/10/i94"}`)) {
+		t.Error("纯本地任务目录命令应豁免")
+	}
+}
+
+// TestDegradeTrackerLifecycle 钉住 B4 状态机：连续 unavailable 达阈值进降级、
+// 开关关闭立即退出、任一次成功退出并清零。
+func TestDegradeTrackerLifecycle(t *testing.T) {
+	enabled := func() bool { return true }
+	onChangeCalls := 0
+	onChange := func(bool) { onChangeCalls++ }
+
+	var tr degradeTracker
+	for i := 0; i < degradeThreshold-1; i++ {
+		tr.recordUnavailable(enabled, onChange)
+		if tr.isActive(enabled) {
+			t.Fatalf("第 %d 次失败不应进降级", i+1)
+		}
+	}
+	tr.recordUnavailable(enabled, onChange)
+	if !tr.isActive(enabled) {
+		t.Fatal("达到阈值应进降级")
+	}
+	// 关闭开关 ⇒ 立即退出（fail-closed 回来）。
+	off := func() bool { return false }
+	if tr.isActive(off) {
+		t.Fatal("开关关闭必须立即退出降级")
+	}
+	// 再开开关（连续计数还在阈值上）⇒ 仍处降级。
+	if !tr.isActive(enabled) {
+		t.Fatal("重开开关且未恢复时应仍在降级")
+	}
+	// 成功一次 ⇒ 退出降级并清零。
+	tr.recordAvailable(enabled, onChange)
+	if tr.isActive(enabled) {
+		t.Fatal("恢复后必须退出降级")
+	}
+	for i := 0; i < degradeThreshold-1; i++ {
+		tr.recordUnavailable(enabled, onChange)
+	}
+	if tr.isActive(enabled) {
+		t.Fatal("清零后重新计数，阈值前不应进降级")
+	}
+}

@@ -240,10 +240,11 @@ func (s *Server) toolListLLMProfiles() actool.CoreTool {
 
 func (s *Server) toolSpawnTask() actool.CoreTool {
 	return wrTool("spawn_task",
-		"新建一个子任务并启动探索引擎，返回 task_id。用于把一件事(如一道题/一个目标)派成独立任务。parent_ref 可选：填当前编排关联的父任务 id 做父子关联。",
+		"新建一个子任务并启动探索引擎，返回 task_id。用于把一件事(如一道题/一个目标)派成独立任务。parent_ref 可选：填当前编排关联的父任务 id 做父子关联。category 可选：任务类别名(资产收集/渗透测试/漏洞验证，见 list_task_categories 不存在则报错)；类别决定引擎给 worker 注入的纪律段——资产收集类任务的 worker 被结构性禁止利用类动作。",
 		objSchema(map[string]any{
 			"description":            strParam("任务描述(简短标题)"),
 			"goal":                   strParam("任务目标(要达成什么)"),
+			"category":               strParam("可选：任务类别名(如「资产收集」)。按名字解析(空白折叠、不分大小写)；不存在则整个 spawn 失败"),
 			"parent_ref":             strParam("可选：父任务 id(做父子关联)"),
 			"source_task_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": fmt.Sprintf("可选：只读继承的来源任务 id 列表(最多 %d 个)。子任务可只读引用这些任务已探明的资产/结论作为起点；与 parent_ref 的纯父子指针不同，这是内容继承。", db.MaxTaskSourceCount)},
 			"llm_profile_id":         map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
@@ -252,23 +253,38 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：对于简单任务可开启，创建时直接下发一条种子意图(内容=描述+目标)让 worker 免等首轮 planner 直接开跑测试；默认 false(走标准先规划再执行)。"},
 		}, "description", "goal"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct {
-				Description          string          `json:"description"`
-				Goal                 string          `json:"goal"`
-				ParentRef            string          `json:"parent_ref"`
-				SourceTaskIDs        []string        `json:"source_task_ids"`
-				LLMProfileID         json.RawMessage `json:"llm_profile_id"`
-				TimeoutSeconds       int             `json:"timeout_seconds"`
-				PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
-				SeedFirstIntent      bool            `json:"seed_first_intent"`
+		var a struct {
+			Description          string          `json:"description"`
+			Goal                 string          `json:"goal"`
+			Category             string          `json:"category"`
+			ParentRef            string          `json:"parent_ref"`
+			SourceTaskIDs        []string        `json:"source_task_ids"`
+			LLMProfileID         json.RawMessage `json:"llm_profile_id"`
+			TimeoutSeconds       int             `json:"timeout_seconds"`
+			PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
+			SeedFirstIntent      bool            `json:"seed_first_intent"`
+		}
+		_ = json.Unmarshal(in, &a)
+		if strings.TrimSpace(a.Description) == "" {
+			a.Description = "未命名任务"
+		}
+		if strings.TrimSpace(a.Goal) == "" {
+			return actool.Errorf("goal 为必填"), nil
+		}
+		// 类别按名字解析（模型记得住「资产收集」，记不住库里的 id）：nkey 口径
+		// （空白折叠+小写）。不存在 ⇒ 明确报错，静默降级成未分类会让「资产收集」
+		// 任务的收集纪律悄悄失效。
+		var categoryID *int64
+		if name := strings.TrimSpace(a.Category); name != "" {
+			category, err := s.m.pg.TaskCategoryByName(name)
+			if err != nil {
+				return actool.Errorf("查任务类别失败: " + err.Error()), nil
 			}
-			_ = json.Unmarshal(in, &a)
-			if strings.TrimSpace(a.Description) == "" {
-				a.Description = "未命名任务"
+			if category == nil {
+				return actool.Errorf(fmt.Sprintf("任务类别 %q 不存在（可用：资产收集/渗透测试/漏洞验证）", name)), nil
 			}
-			if strings.TrimSpace(a.Goal) == "" {
-				return actool.Errorf("goal 为必填"), nil
-			}
+			categoryID = &category.ID
+		}
 			if a.TimeoutSeconds < 0 {
 				a.TimeoutSeconds = 0
 			}
@@ -306,6 +322,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 				llmIDs = []int64{*pin}
 			}
 			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
+				CategoryID:           categoryID,
 				SourceTaskIDs:        sourceIDs,
 				LLMProfileIDs:        llmIDs,
 				TimeoutSeconds:       a.TimeoutSeconds,
@@ -517,9 +534,28 @@ func (s *Server) seedOrchestrationTools() {
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
+	s.seedReconDefaultBindings() // recon 的 spawn_task 补绑(一次性):领域工具由 BuiltinToolSeeds 播种,编排工具在此迁移
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
+}
+
+// seedReconDefaultBindings gives the recon (资产收集) agent its spawn_task binding
+// ONCE (guarded by a settings flag): spawn_task is a server-side orchestration tool
+// whose row is seeded by seedOrchestrationTools with bindings=["auto"] only, so a
+// fresh BuiltinToolSeeds pass can never carry the binding. recon 是能兜底建任务的
+// 承办位（方案 v4 §3-C2/B1）；领域工具（list_assets/insert_assets/…）不在这里——
+// 它们的默认绑定已在 BuiltinToolSeeds 里，老库也随首次播种落行。
+func (s *Server) seedReconDefaultBindings() {
+	const flag = "recon_default_bindings_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("recon", agent.ReconDefaultToolKeys()); err != nil {
+		log.Printf("[recon] 默认绑定失败: %v", err)
+		return // 出错则不落 flag，下次启动重试
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // refreshBuiltinToolSchemas propagates code schema/description changes on the
@@ -528,7 +564,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v7_list_facts_paging"
+	const flag = "tool_schema_refresh_v8_spawn_task_category" // v8: spawn_task 新增 category 入参
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}

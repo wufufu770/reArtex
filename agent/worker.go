@@ -89,6 +89,11 @@ type Worker struct {
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
 	maxTokensFn func() int
+	// categoryDisciplineFn resolves the per-category discipline block appended to
+	// the worker system prompt (server/task_llm.go 的 workerCategoryDiscipline)。
+	// Read per run so a mid-task category change takes effect on the next intent;
+	// nil/empty = no extra block (通用渗透纪律，现状不变).
+	categoryDisciplineFn func() string
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -144,6 +149,20 @@ func (w *Worker) SetConstraintInject(fn func() bool) { w.injectConstraints = fn 
 
 // wantConstraints reports whether constraint injection is enabled (default yes).
 func (w *Worker) wantConstraints() bool { return w.injectConstraints == nil || w.injectConstraints() }
+
+// SetCategoryDiscipline wires a resolver returning the per-task-category discipline
+// block appended to the worker system prompt (nil or empty string = no block).
+// Read per run like the other resolvers, so re-categorizing a live task re-targets
+// the very next intent without rebuilding the agent bundle.
+func (w *Worker) SetCategoryDiscipline(fn func() string) { w.categoryDisciplineFn = fn }
+
+// categoryDiscipline returns the discipline block for THIS run ("" = none).
+func (w *Worker) categoryDiscipline() string {
+	if w.categoryDisciplineFn == nil {
+		return ""
+	}
+	return w.categoryDisciplineFn()
+}
 
 // SetRunTimeout configures the per-intent wall-clock budget for the main
 // exploration (0 = unlimited). When it fires, the SDK settlement phase still runs
@@ -333,7 +352,10 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	// C6 写回纪律：收工前必须有写回——0 写回的收工让规划者无法判断进展
+	//（实测 3 个意图 done 0 写回带真结果，规划者据此开接续意图空转）。
+	const writeBackDiscipline = "\n\n【写回纪律（收工前的最后一步）】结束前必须把本次结论用 record_fact 写回（含否定结论：\"端口关闭\"\"参数不可注入\"\"未发现登录入口\"同样是结论）。哪怕本次产出很少，也要写一条 summary 如实收尾——0 写回的收工会让规划者误判进展并重复派工。"
+	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir) + writeBackDiscipline
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -428,7 +450,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	ctx = WithAgentKey(WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID}), "worker")
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
@@ -444,9 +466,20 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
+	// P3 继任注入（方案 v3.1 §7.4）：本图最新一条 handoff 事实的摘要随启动消息下发
+	// —— 跨模型/跨厂商接管不丢上下文。正文按不可信数据围栏处理（读图即消费不可信输入）。
+	if h := tsx.latestHandoffSummary(); h != "" {
+		overview += "\n\n" + h
+	}
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
+	}
+	// 任务类别纪律段（server 侧按类别拼，见 task_llm.go 的 workerCategoryDiscipline）：
+	// 资产收集类任务在这里拿到「只收集不利用」的结构性约束 —— goal 文本拦不住的事
+	// （任务 14 实锤：worker 跑着跑着开始做漏洞验证）由提示词结构兜住。
+	if d := w.categoryDiscipline(); d != "" {
+		sysBody += d
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)
@@ -588,6 +621,59 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// enters the wrap-up phase on the live ctx, so a run whose tool overran the budget
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
-	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	// P3：水位拦截——最后一次 per-turn 输入 tokens（当前上下文水位的近似口径）≥ 0.85×
+	// 窗口时，本 run 结束后触发一次 handoff 生成轮（方案 v3.1 §7.2）。
+	var lastTurnInput int64
+	var prevCum int64
+	wrapEmit := func(r db.Activity) {
+		if r.Kind == "usage" && r.InputTokens != nil {
+			cur := int64(*r.InputTokens)
+			if cur >= prevCum {
+				lastTurnInput = cur - prevCum
+			} else {
+				// compaction 后累计口径回落：当次输入未知，保守取本条累计值。
+				lastTurnInput = cur
+			}
+			prevCum = cur
+		}
+		emitWrap(r)
+	}
+	_, reason, err := captureRunSession(ctx, s, input, wrapEmit)
+	// handoff 触发（三种退出路径之二三：水位超限 / 受阻收场；正常完成不交接）。
+	needHandoff := err != nil ||
+		reason == harness.ReasonMaxTurns ||
+		reason == harness.ReasonTimeout ||
+		(w.window > 0 && lastTurnInput >= int64(float64(w.window)*0.85))
+	if needHandoff {
+		w.generateHandoff(ctx, s, intent, emitWrap, err)
+	}
 	return reason, tsx.Writes(), err
+}
+
+// handoffPromptText 是交接轮的注入提示（方案 v3.1 §7.3 结构要求的模型侧表达）。
+func handoffPromptText(intentID int64) string {
+	return "\n\n【交接（handoff）——本轮只做这一件事】本条意图的本次 run 即将结束但未能正常收尾。" +
+		"请立即调用一次 record_fact，写入一条交接事实：summary=当前推理状态一句话（如 \"卡在 X，已排除 Y\"）；" +
+		"detail=交接正文（≤4000 字符）：①当前进展 ②已排除的假设（每条注明对应的证据）③下一步建议；" +
+		"evidence=最关键的一条证据引用；intent_id=" + strconv.FormatInt(intentID, 10) +
+		"。没有证据引用的交接不会落图——如果确实一无所获，evidence 写 \"无产出：本次 run 未执行任何有效探测\" 并说明原因。" +
+		"写完这一条事实后立即停止，不要再做任何其他操作。"
+}
+
+// generateHandoff 在同 session 上跑一轮交接生成（best-effort：失败只记日志——
+// 图轨迹（derived_from 链）本就是部分 handoff，显式交接是其上的优化而非唯一机制）。
+func (w *Worker) generateHandoff(ctx context.Context, s *agentcore.Session, intent *db.Node, emit func(db.Activity), runErr error) {
+	if s == nil || intent == nil {
+		return
+	}
+	cause := "context pressure"
+	if runErr != nil {
+		cause = "run error: " + runErr.Error()
+	}
+	prompt := handoffPromptText(intent.ID) + "\n（触发原因：" + cause + "）"
+	hctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if _, _, err := captureRunSession(hctx, s, prompt, emit); err != nil {
+		log.Printf("[handoff] intent #%d 交接轮失败（图轨迹兜底）: %v", intent.ID, err)
+	}
 }

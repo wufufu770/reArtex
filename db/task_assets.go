@@ -124,6 +124,7 @@ SET source=EXCLUDED.source,
 	if rows == 0 {
 		return fmt.Errorf("%w: task or asset association does not exist", ErrTaskAssetInvalid)
 	}
+	s.markScopeConfigured(taskID) // 任务挂上资产 = scope 已配置（H1 横幅消除）
 	return nil
 }
 

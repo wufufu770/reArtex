@@ -2,9 +2,17 @@
 
 import * as React from "react";
 
-import { PanelRightIcon } from "lucide-react";
+import { ArrowDownIcon, PanelRightIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+  useMessageScroller,
+} from "@/components/ui/message-scroller";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
 import type { Session, SessionMember, SessionMessage } from "@/lib/session-types";
@@ -24,6 +32,17 @@ function mergeMessages(prev: SessionMessage[], next: SessionMessage[]): SessionM
   for (const message of prev) byId.set(message.id, message);
   for (const message of next) byId.set(message.id, message);
   return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
+// ScrollToEndOnSend：自己发出消息后回到底部 —— 哪怕之前翻到了上面，发出去的话也得
+// 看得见；回到底部的同时恢复贴底跟随，这一回合陆续到的回复会接着往下贴。
+// useMessageScroller 只能在 MessageScrollerProvider 里调用，所以单拎成一个组件。
+function ScrollToEndOnSend({ seq }: { seq: number }) {
+  const { scrollToEnd } = useMessageScroller();
+  React.useEffect(() => {
+    if (seq > 0) scrollToEnd();
+  }, [seq, scrollToEnd]);
+  return null;
 }
 
 export interface SessionViewProps {
@@ -58,6 +77,8 @@ export function SessionView({
   const [tab, setTab] = React.useState<"stream" | "legacy">("stream");
   const [uploading, setUploading] = React.useState(false);
   const [pendingAttachments, setPendingAttachments] = React.useState<ChatAttachment[]>([]);
+  // 每成功发出一条消息 +1，驱动 ScrollToEndOnSend 回到底部（0 = 本次挂载还没发过）。
+  const [sentSeq, setSentSeq] = React.useState(0);
   const cursorRef = React.useRef(0);
 
   // 换会话时重置：消息、名册、页签。
@@ -268,6 +289,7 @@ export function SessionView({
       setPendingAttachments([]);
       setRunning(true);
       setTab("stream");
+      setSentSeq((seq) => seq + 1);
     } catch (error) {
       toast.error(`发送失败：${(error as Error).message}`);
     }
@@ -331,13 +353,42 @@ export function SessionView({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{legacyPanel}</div>
       ) : (
         <>
-          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-3">
-            <SessionTimeline
-              messages={messages}
-              agentByKey={agentByKey}
-              emptyHint="这个会话还没有消息 —— 在下面输入，或 @ 一个 agent 让它加入。"
-            />
-          </div>
+          {/* 消息流：打开即落在最新消息（defaultScrollPosition="end"，换会话 = 重新挂载 = 重新落底）；
+              停在底部时新消息自动跟随（autoScroll —— 用户往上翻了就不再拽回去）；离开顶 / 底端时
+              浮出「回到顶部 / 回到底部」，贴端自动隐藏（显隐由组件按可滚方向切换）。 */}
+          <MessageScrollerProvider autoScroll defaultScrollPosition="end">
+            <MessageScroller className="min-w-0 flex-1">
+              <MessageScrollerViewport aria-label="会话消息">
+                <MessageScrollerContent className="gap-3 px-4 py-3">
+                  <SessionTimeline
+                    messages={messages}
+                    agentByKey={agentByKey}
+                    emptyHint="这个会话还没有消息 —— 在下面输入，或 @ 一个 agent 让它加入。"
+                  />
+                </MessageScrollerContent>
+              </MessageScrollerViewport>
+              {/* 两个按钮都给 ArrowDown：start 方向由 MessageScrollerButton 的样式自动转 180°。
+                  常驻可见（用户要求一键直达，不要「滚离才浮现」的智能显隐）：覆盖库默认的
+                  data-[active=false] 隐藏态（透明+平移出界+禁点）。 */}
+              <MessageScrollerButton
+                direction="start"
+                title="回到顶部"
+                className="data-[active=false]:pointer-events-auto data-[active=false]:translate-y-0 data-[active=false]:scale-100 data-[active=false]:opacity-100"
+              >
+                <ArrowDownIcon />
+                <span className="sr-only">回到顶部</span>
+              </MessageScrollerButton>
+              <MessageScrollerButton
+                direction="end"
+                title="回到底部（最新消息）"
+                className="data-[active=false]:pointer-events-auto data-[active=false]:translate-y-0 data-[active=false]:scale-100 data-[active=false]:opacity-100"
+              >
+                <ArrowDownIcon />
+                <span className="sr-only">回到底部</span>
+              </MessageScrollerButton>
+              <ScrollToEndOnSend seq={sentSeq} />
+            </MessageScroller>
+          </MessageScrollerProvider>
           <SessionComposer
             members={members}
             candidates={candidates}

@@ -29,6 +29,16 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	if !s.engine.beginTaskOperation(t.ID) {
 		return
 	}
+	// P5 传承图：新任务规划前检索 accepted 经验注入任务书（≤12K、top-5；
+	// 匹配=goal 文本重叠，创建时点无指纹可查——如实口径）。无命中不注入。
+	if s.m.pg != nil {
+		if block := s.legacyInjectionBlock(seedText, nil, func() int64 {
+			id, _ := strconv.ParseInt(t.ID, 10, 64)
+			return id
+		}()); block != "" {
+			seedText += block
+		}
+	}
 	s.seed(t, seedText)
 	if seedFirstIntent {
 		s.seedFirstIntent(t)

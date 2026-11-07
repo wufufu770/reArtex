@@ -9,6 +9,8 @@ package sessionwake
 //   - 分工不表达权限，但 dispatcher 不与成员抢活、observer 不接活；
 //   - 退席的人谁都不当；
 //   - 被拦下的消息与收据条不唤醒任何人（fail-closed）；
+//   - 被点名但不在席的目标进未投递回执（Undelivered）——「没送到」必须记账，
+//     转交不允许静默消失（B4）；
 //   - 同一个输入永远得到同一个输出（确定性）。
 
 import (
@@ -198,6 +200,123 @@ func TestDecideEmptyRosterWakesNobody(t *testing.T) {
 	d := Decide(Message{Body: "@pentest 在吗"}, nil)
 	if len(d.MustWake) != 0 || len(d.SelfServe) != 0 {
 		t.Fatalf("空名册不该唤醒任何人: %+v", d)
+	}
+	// 空名册 = 没人可投递：点名目标全部进未投递回执。
+	if !reflect.DeepEqual(d.Undelivered, []string{"pentest"}) {
+		t.Fatalf("空名册的点名应记入未投递回执: %v", d.Undelivered)
+	}
+}
+
+// TestDecideUndeliveredReceipt 未投递回执（B4）：被点名但不在席（名册里没有 /
+// 已退席 / 显式 to_agent 指了不存在的人）的目标进 Undelivered —— 不唤醒，但
+// 「没送到」必须记账，执行方据此给群播报「无人接手」的 note。
+func TestDecideUndeliveredReceipt(t *testing.T) {
+	// 名册里没有的 key：不叫醒，但回执要记上。
+	d := Decide(Message{Body: "@ghost 在吗"}, roster())
+	if len(d.MustWake) != 0 {
+		t.Fatalf("不在席的成员不应被叫醒: %v", d.MustWake)
+	}
+	if !reflect.DeepEqual(d.Undelivered, []string{"ghost"}) {
+		t.Fatalf("未投递回执不对: %v（想要 [ghost]）", d.Undelivered)
+	}
+	// 退席成员 / 不存在的 key / 显式收件人三类都算未投递，保序。
+	members := []Member{
+		{AgentKey: "gone", Role: RoleMember, Presence: PresenceListening, Left: true},
+		member("here", RoleMember, PresenceListening),
+	}
+	d = Decide(Message{Body: "@gone @ghost 收一下", ToAgent: "missing"}, members)
+	if !reflect.DeepEqual(d.Undelivered, []string{"gone", "ghost", "missing"}) {
+		t.Fatalf("未投递回执应覆盖退席/不存在/显式收件人: %v", d.Undelivered)
+	}
+	// 同一个 key 被正文 @ 与 to_agent 双重点名只记一次（去重）。
+	d = Decide(Message{Body: "@ghost 看下", ToAgent: "ghost"}, roster())
+	if !reflect.DeepEqual(d.Undelivered, []string{"ghost"}) {
+		t.Fatalf("未投递回执应去重: %v", d.Undelivered)
+	}
+	// 发起者 @ 自己不算未投递（说话人本来就是自己）。
+	d = Decide(Message{Body: "@self @ghost 说话", FromAgent: "self"}, members)
+	if !reflect.DeepEqual(d.Undelivered, []string{"ghost"}) {
+		t.Fatalf("发起者本人不应进未投递回执: %v", d.Undelivered)
+	}
+	// 在席的点名不进回执（它在必醒集合里）。
+	d = Decide(Message{Body: "@pentest 看一下"}, roster())
+	if len(d.Undelivered) != 0 {
+		t.Fatalf("在席的点名不是未投递: %v", d.Undelivered)
+	}
+}
+
+// TestDecideUndeliveredFailClosed 被拦下的消息根本没有进入投递 ⇒
+// 既不唤醒也没有未投递回执（fail-closed 的完整口径）。
+func TestDecideUndeliveredFailClosed(t *testing.T) {
+	d := Decide(Message{Body: "@ghost 看下", Blocked: true}, roster())
+	if len(d.MustWake) != 0 || len(d.Undelivered) != 0 {
+		t.Fatalf("被拦下的消息没有投递，也就没有未投递回执: must=%v undelivered=%v",
+			d.MustWake, d.Undelivered)
+	}
+	d = Decide(Message{Body: "@ghost 看下", Kind: KindReceipt}, roster())
+	if len(d.MustWake) != 0 || len(d.Undelivered) != 0 {
+		t.Fatalf("收据条没有投递，也就没有未投递回执: must=%v undelivered=%v",
+			d.MustWake, d.Undelivered)
+	}
+}
+
+// TestDecideHostWakePinsDispatcher 主持补位：人的非定向消息落到分发者头上 ——
+// 「人一说话群里就有人接」的裁决口径（执行方用主持提示词起 turn）。
+func TestDecideHostWakePinsDispatcher(t *testing.T) {
+	d := Decide(Message{Body: "大家好，今天我们测 192.168.1.1"}, roster())
+	if !reflect.DeepEqual(d.HostWake, []string{"auto"}) {
+		t.Fatalf("人的非定向消息应由分发者补位: %v", d.HostWake)
+	}
+	if len(d.MustWake) != 0 {
+		t.Fatalf("主持补位不应产生必醒集合: %v", d.MustWake)
+	}
+	// @everyone 是广播（非定向）⇒ 同样由分发者兜底。
+	d = Decide(Message{Body: "@everyone 同步一下"}, roster())
+	if !reflect.DeepEqual(d.HostWake, []string{"auto"}) {
+		t.Fatalf("@everyone 应由分发者补位: %v", d.HostWake)
+	}
+}
+
+// TestDecideHostWakeDirectedSuppressesHost 定向消息不再补位：@ 是显式请求，
+// 分发者不该再被拖进来抢这一轮。
+func TestDecideHostWakeDirectedSuppressesHost(t *testing.T) {
+	d := Decide(Message{Body: "@pentest 看一下这个"}, roster())
+	if len(d.HostWake) != 0 {
+		t.Fatalf("定向消息不应触发主持补位: %v", d.HostWake)
+	}
+	d = Decide(Message{Body: "帮我看看", ToAgent: "reporter"}, roster())
+	if len(d.HostWake) != 0 {
+		t.Fatalf("显式 to_agent 不应触发主持补位: %v", d.HostWake)
+	}
+}
+
+// TestDecideHostWakeAgentSenderNeverHosts agent 的非定向发言不补位 —— 防的是
+// 「A 回复 → 兜底叫醒分发者 → 分发者回复 → 又兜底」的乒乓。
+func TestDecideHostWakeAgentSenderNeverHosts(t *testing.T) {
+	d := Decide(Message{Body: "我这边侦察完了，一切正常", FromAgent: "pentest"}, roster())
+	if len(d.HostWake) != 0 {
+		t.Fatalf("agent 发言不应触发主持补位: %v", d.HostWake)
+	}
+	if len(d.MustWake) != 0 {
+		t.Fatalf("agent 的非定向发言不该必醒任何人: %v", d.MustWake)
+	}
+}
+
+// TestDecideHostWakeNeedsDispatcher 名册里没有分发者 ⇒ 补位落空（谁都不叫，
+// 与旧行为一致）；被拦下的消息/收据条同样不补位。
+func TestDecideHostWakeNeedsDispatcher(t *testing.T) {
+	members := []Member{member("pentest", RoleMember, PresenceListening)}
+	d := Decide(Message{Body: "有人在吗"}, members)
+	if len(d.HostWake) != 0 {
+		t.Fatalf("没有分发者不应补位: %v", d.HostWake)
+	}
+	d = Decide(Message{Body: "有人在吗", Blocked: true}, roster())
+	if len(d.HostWake) != 0 {
+		t.Fatalf("被拦下的消息不应补位: %v", d.HostWake)
+	}
+	d = Decide(Message{Body: "收到", Kind: KindReceipt}, roster())
+	if len(d.HostWake) != 0 {
+		t.Fatalf("收据条不应补位: %v", d.HostWake)
 	}
 }
 

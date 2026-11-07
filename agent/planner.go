@@ -234,6 +234,12 @@ func renderTriggers(ts *db.ExplorationStore, evs []TriggerEvent) string {
 				sm = intentSummary(ts, ev.IntentID)
 			}
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d 由用户删除，意图内容是：%s、删除原因是：%s。该意图已删除（不再执行）；请据此重新规划。", ev.IntentID, sm, ev.Detail))
+		case "wrapup":
+			// C4/C5 收尾评估轮的触发文案：硬底线在本轮让位——0 意图是允许且预期的。
+			b.WriteString("\n- 【收尾评估】连续多个意图零产出（写回 0 事实 0 资产 0 漏洞），已进入收尾评估。本轮的特殊规则：" +
+				"目标已实质达成就用 prove_goal（带证据）；否则【不要】再派与既有意图重复/边际的新方向，0 意图产出是允许且预期的。" +
+				"如需如实记录部分结论，用 record_fact 写一条 subtype=conclusion 的事实（写明已确认的进展与未竟部分）。" +
+				"顶部硬底线（必须派新意图）在本轮【不适用】。")
 		default: // "done"
 			b.WriteString(fmt.Sprintf("\n- 意图 #%d（%s）的 worker 结束，输出结论：%s", ev.IntentID, intentSummary(ts, ev.IntentID), workerOutput(ts, ev.IntentID)))
 			if fids := factIDsYielded(ts, ev.IntentID); fids != "" {
@@ -346,10 +352,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
 
-3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
-   - 图里已有 worker 产出的 fact（facts>0 / recent_facts 非空）→【禁止】再自己探测，一切判断基于已有 fact，本轮产物只能是"派新意图"或"结束"；想深挖某线索 → 派意图让 worker 去查，不是自己 curl。
-   - 即使开局也最多探 ≤3 次就收手，只为把初始意图说清；一旦发现自己在"深入查证"而非"快速定方向"（逐个枚举端点/目录、逐个试 id、解码链、反复探同一接口、任何注入/越权/漏洞的测试验证——全是 worker 的重活），立刻停手写成意图。
-   - 能从现有事实/态势判断的，根本不必探测。
+3. **（已移除）探测理解**：规划者没有任何执行/探测工具（角色纪律，编译期白名单）——原"开局 1-2 次只读探测"的通道已整体移除。开局信息不足时，产物是一条把"先做一次轻量侦察"说清楚的**意图**（写明目标、成功标准），派 worker 执行；一切判断基于已有 fact 与态势。
 
 4. **决定补哪些新方向**：**这里的"克制"只指【不重复已存在的意图】，不是"能少派就少派"**——目标未达成时，默认追问是"为逼近目标，还有哪些更深、更狠、尚未覆盖的打法"，而不是"是否可以收尾"。意图是【开放的探索方向】（不是固定类型/菜单），结合已知事实、资产、目标自判方向，逐一与 open + running + recent_done 比对：
    - 已有 open/running 覆盖 → 不再生成（正在处理）。
@@ -404,15 +407,28 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ctx = WithAgentKey(WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)}), "planner")
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
-	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	// P0 扫描构成埋点：分桶计量本轮态势（方案 v3.1 §4——G4 验收的数据源）。
+	// graphOverviewData 的 map 是本次渲染的真身，直接按 key 分桶；系统提示长度
+	// 用 sysBody（含 constraintBlock，完整口径）。
+	scanData := tsx.graphOverviewData()
+	situational := renderTriggers(ts, triggers) + renderGraphOverview(scanData)
 	// 策略摘要：只注入摘要，不注入正文（反模式 8）。
 	situational += p.strategyContextBlock(taskID)
+	// C5 收尾评估轮例外：本轮触发里带 wrapup ⇒ 硬底线让位（0 意图允许且预期），
+	// planner 的任务改为「证成已有成果或如实给 partial 结论」。
+	wrapupRound := false
+	for _, ev := range triggers {
+		if ev.Kind == "wrapup" {
+			wrapupRound = true
+			break
+		}
+	}
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
@@ -427,6 +443,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
+	MeterPlannerScan(emit, scanData, len(sysBody))
 	system, boundary := deferredSystem(sysBody, def)
 	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
@@ -493,8 +510,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			lead = "本轮是**定时巡检（心跳到点）**的唤醒,且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向,探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图(不得产出 0 意图);先据下面的态势判定目标是否已达成,未达成则立即补方向："
 		}
 	}
-	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
-		renderPlannerTodos(opts.Todos.List())
+	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**"
+	if wrapupRound {
+		// C5：收尾评估轮——硬底线的确定性例外（触发文案已在 situational 里说明）。
+		input += "\n\n【收尾评估轮（本轮特殊规则，覆盖上一段的硬底线）】：本轮【允许且预期】产出 0 个新意图。你只应做两件事之一：① prove_goal（目标确已达成、有证据）；② 用 record_fact 写一条 subtype=conclusion 的如实 partial 结论（已确认什么/未竟什么/为什么停），然后直接结束本轮。禁止为了凑产出而派边际/重复意图。"
+	}
+	input += renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	_, _, err = captureRun(ctx, opts, input,

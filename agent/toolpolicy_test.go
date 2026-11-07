@@ -14,7 +14,15 @@ import (
 func TestAugmentToolsWrapsEveryToolWithPolicy(t *testing.T) {
 	for _, agentKey := range []string{"worker", "planner", "mainagent", "auto", "pentest", "reporter", "retester", "goals"} {
 		t.Run(agentKey, func(t *testing.T) {
-			tools, _, cleanup := AugmentTools(context.Background(), agentKey, actool.DefaultTools())
+			// P1 角色工具纪律：planner 的白名单（roledispatch.go）不含 DefaultTools 的
+			// 任何工具 ⇒ 生产装配里 planner 的 base 是 PlannerTools()（白名单内），这里
+			// 的 base 与生产同形，保证「过滤后非空」这个用例前提仍然成立。
+			base := actool.DefaultTools()
+			if agentKey == "planner" {
+				tsx := NewToolSet(nil, "planner")
+				base = append(tsx.PlannerTools(), base...)
+			}
+			tools, _, cleanup := AugmentTools(context.Background(), agentKey, base)
 			defer cleanup()
 			if len(tools) == 0 {
 				t.Fatalf("%s 工具表为空, 用例失去意义", agentKey)

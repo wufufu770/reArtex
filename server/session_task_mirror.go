@@ -39,11 +39,22 @@ const mirrorBodyMaxRunes = 800
 
 // taskSessionMirror 持有「任务 → 会话」的路由缓存与节流状态。挂在 Server 上，
 // 与唤醒器同款生命周期（in-memory；重启后由 loadTaskSessionBindings 从库里重建）。
+// mirrorMergeWindow 是 A6 的播报合并窗口：窗口内同键（task/worker/kind）的
+// 活动合并成一条播报（worker 三连发只出一条），窗口由定时器兜底冲刷——
+// 「压住等下一次」的旧法会在活动停了之后把尾巴永远留在 pending 里。
+const mirrorMergeWindow = 10 * time.Second
+
+// mirrorPending 是合并窗口的 accumulating 条目。
+type mirrorPending struct {
+	bodies []string     // 窗口内到达的正文（去重后合并）
+	timer  *time.Timer  // 窗口冲刷
+}
+
 type taskSessionMirror struct {
 	mu       sync.Mutex
-	bindings map[int64]int64         // task id -> session id
-	lastSay  map[string]time.Time    // 节流键 "task:worker:kind" -> 上次播报时刻
-	pending  map[string]db.Activity  // 节流窗口内被压住的最新一条（窗口结束时合并）
+	bindings map[int64]int64            // task id -> session id
+	lastSay  map[string]time.Time       // 节流键 "task:worker:kind" -> 上次播报时刻
+	pending  map[string]*mirrorPending  // 合并窗口内的条目（A6）
 }
 
 // newTaskSessionMirror 建空缓存；绑定从库里加载（loadTaskSessionBindings）。
@@ -51,7 +62,7 @@ func newTaskSessionMirror() *taskSessionMirror {
 	return &taskSessionMirror{
 		bindings: map[int64]int64{},
 		lastSay:  map[string]time.Time{},
-		pending:  map[string]db.Activity{},
+		pending:  map[string]*mirrorPending{},
 	}
 }
 
@@ -168,17 +179,59 @@ func (s *Server) onEngineTaskActivity(taskIDStr string, r db.Activity) {
 	if !ok {
 		return
 	}
+	// A6 合并：窗口内同键正文累计，窗口结束一次冲刷成一条（去重、正文封顶）。
+	// 节流（mirrorThrottleWindow）照旧管「上一条刚说过就别立刻再说」的高频类。
 	now := time.Now()
 	s.mirror.mu.Lock()
 	if last, seen := s.mirror.lastSay[key]; seen && now.Sub(last) < mirrorThrottleWindow {
-		s.mirror.pending[key] = r // 窗口内：压住，保留最新正文（下次播报时带上）
+		entry, ok := s.mirror.pending[key]
+		if !ok {
+			entry = &mirrorPending{}
+			s.mirror.pending[key] = entry
+			key, sessID, taskID := key, sessID, taskID
+			entry.timer = time.AfterFunc(mirrorMergeWindow, func() { s.flushMirrorPending(key, sessID, taskID, r.Worker) })
+		}
+		entry.bodies = append(entry.bodies, body)
 		s.mirror.mu.Unlock()
 		return
 	}
 	s.mirror.lastSay[key] = now
-	delete(s.mirror.pending, key)
 	s.mirror.mu.Unlock()
 	s.say(sessID, taskID, r.Worker, r.Worker, body)
+}
+
+// flushMirrorPending 把合并窗口内的正文一次性播出去（A6 的窗口冲刷）。
+func (s *Server) flushMirrorPending(key string, sessID, taskID int64, worker string) {
+	s.mirror.mu.Lock()
+	entry, ok := s.mirror.pending[key]
+	if !ok {
+		s.mirror.mu.Unlock()
+		return
+	}
+	delete(s.mirror.pending, key)
+	s.mirror.lastSay[key] = time.Now()
+	bodies := entry.bodies
+	s.mirror.mu.Unlock()
+	// 去重 + 保序合并，总长封顶。
+	seen := map[string]bool{}
+	merged := ""
+	for _, b := range bodies {
+		if seen[b] {
+			continue
+		}
+		seen[b] = true
+		if merged != "" {
+			merged += "\n·\n"
+		}
+		merged += b
+		if len([]rune(merged)) >= mirrorBodyMaxRunes {
+			merged = truncateRunes(merged, mirrorBodyMaxRunes)
+			break
+		}
+	}
+	if merged != "" {
+		s.say(sessID, taskID, worker, worker, merged)
+	}
 }
 
 // onEngineIntentClaim 是认领点的镜像 hook（engine.go runWorkerStep）：

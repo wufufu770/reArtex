@@ -23,13 +23,17 @@ type CommandRecord struct {
 // commandFilter builds the WHERE clause shared by the tool-execution list and
 // its per-tool tally, so the summary always describes exactly the rows the table
 // pages through. Returns the clause, its args, and the next placeholder index.
-func commandFilter(expID *int64, q string) (string, []any, int) {
+// status: "" 不过滤；"error" 只看失败；"ok" 只看成功（方案 v3 缺陷 G2）。
+func commandFilter(expID *int64, q, status string) (string, []any, int) {
 	where := `WHERE u.kind = 'tool_use'`
 	args := []any{}
 	argN := 1
 
 	if expID != nil {
-		where += fmt.Sprintf(` AND u.exploration_id = $%d`, argN)
+		// 语义：?task= 传的是【任务 id】（前端任务筛选框口径），不是 exploration
+		// id——两者是并排序列，数值经常错位，直接当 exploration_id 过滤会查空
+		// （全量测试抓到）。这里翻译：任务 id → 探索 id。
+		where += fmt.Sprintf(` AND u.exploration_id = (SELECT t.exploration_id FROM tasks t WHERE t.id=$%d AND t.deleted_at IS NULL)`, argN)
 		args = append(args, *expID)
 		argN++
 	}
@@ -37,6 +41,12 @@ func commandFilter(expID *int64, q string) (string, []any, int) {
 		where += fmt.Sprintf(` AND (u.tool ILIKE $%d OR u.detail ILIKE $%d)`, argN, argN)
 		args = append(args, "%"+q+"%")
 		argN++
+	}
+	switch status {
+	case "error":
+		where += ` AND COALESCE(r.is_error, false)`
+	case "ok":
+		where += ` AND NOT COALESCE(r.is_error, false)`
 	}
 	return where, args, argN
 }
@@ -52,7 +62,7 @@ type ToolStat struct {
 // ListCommands takes. Unpaginated on purpose: the tally describes the whole
 // filtered set, not the page currently on screen.
 func (d *DB) ToolStats(expID *int64, q string) ([]ToolStat, error) {
-	where, args, _ := commandFilter(expID, q)
+	where, args, _ := commandFilter(expID, q, "")
 
 	rows, err := d.Query(`
 SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool, COUNT(*) AS total,
@@ -81,7 +91,7 @@ ORDER BY total DESC, tool ASC`, args...)
 // ListCommands returns tool executions (tool_use + paired tool_result) across all
 // explorations, with optional filtering and pagination. Covers every tool, not
 // just Bash; q matches the tool name or its input.
-func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandRecord, int, error) {
+func (d *DB) ListCommands(expID *int64, q, status string, page, size int) ([]CommandRecord, int, error) {
 	if size <= 0 {
 		size = 50
 	}
@@ -90,11 +100,13 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 	}
 	offset := page * size
 
-	where, args, argN := commandFilter(expID, q)
+	where, args, argN := commandFilter(expID, q, status)
 
-	// count
+	// count：与数据查询同形的 JOIN（status 筛选引用配对结果行 r，count 也必须带）。
 	var total int
-	countQ := `SELECT COUNT(*) FROM activity u ` + where
+	countQ := `SELECT COUNT(*) FROM activity u
+LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
+` + where
 	if err := d.QueryRow(countQ, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -365,4 +377,39 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// RecentToolUseForPreview 取近 window 内某工具的 tool_use 明细（信任规则
+// 命中回放预览用，F2）。taskID>0 只看该任务的；limit 封顶防全表拖出。
+type ToolUsePreviewRow struct {
+	ID     int64
+	Detail string
+}
+
+func (d *DB) RecentToolUseForPreview(tool string, taskID int64, window time.Duration, limit int) ([]ToolUsePreviewRow, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 2000
+	}
+	q := `SELECT id, COALESCE(detail,'') FROM activity
+WHERE kind='tool_use' AND tool=$1 AND created_at > now() - $2::interval`
+	args := []any{tool, fmt.Sprintf("%.0f seconds", window.Seconds())}
+	if taskID > 0 {
+		q += ` AND exploration_id = (SELECT exploration_id FROM tasks WHERE id=$3)`
+		args = append(args, taskID)
+	}
+	q += fmt.Sprintf(` ORDER BY id DESC LIMIT %d`, limit)
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ToolUsePreviewRow{}
+	for rows.Next() {
+		var r ToolUsePreviewRow
+		if err := rows.Scan(&r.ID, &r.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

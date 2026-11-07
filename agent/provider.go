@@ -31,6 +31,13 @@ import (
 
 // Config describes the LLM backend resolved from the environment.
 type Config struct {
+	// SharedRateLimit（E1 多模型）：非 nil 时该 provider 用它当限流器，而不是
+	// 按本配置的 RatePer* 新建——同一 profile 的多个模型共享上游并发预算。
+	// 由 server 侧 provider 缓存按 profile 建一次、各模型变体复用。
+	SharedRateLimit *llm.RateLimit
+	// Models 是该 profile 的可用模型列表（E1 多模型；空=[Model]）。server 侧
+	// 解析 (profile, model) 时用它校验变体合法性。
+	Models  []string
 	Format  llm.Format
 	BaseURL string
 	APIKey  string
@@ -331,7 +338,11 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	lc.RetryInterval = c.Retry.ConnectInterval
 	lc.EmptyResponseRetries = c.Retry.EmptyAttempts
 	lc.EmptyResponseInterval = c.Retry.EmptyInterval
-	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
+	if c.SharedRateLimit != nil {
+		// E1 多模型：同一 profile 的多个模型变体共享同一个限流器（上游并发
+		// 预算属于 key，不属于模型）。SharedRateLimit 优先于按配置新建。
+		lc.RateLimit = c.SharedRateLimit
+	} else if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
 	return llm.NewProvider(lc)

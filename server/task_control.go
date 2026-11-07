@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -285,4 +286,24 @@ func (s *Server) controlTasksBatch(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+// taskSettle 人工有序收尾（方案 v3 缺陷 C7）：走完整 settle 时序落终态，
+// 区别于硬 cancel（control=pause）。已终态/删除中 → 409。
+func (s *Server) taskSettle(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeErr(w, 400, "任务 id 不合法")
+		return
+	}
+	t, exists := s.m.Task(strconv.FormatInt(id, 10))
+	if !exists || t == nil {
+		writeErr(w, 404, "任务不存在")
+		return
+	}
+	if !s.engine.SettleOrderly(t) {
+		writeErr(w, 409, "任务已处于终态或正在删除，无法收尾")
+		return
+	}
+	writeJSON(w, 202, map[string]any{"ok": true, "task_id": t.ID})
 }

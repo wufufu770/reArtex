@@ -541,21 +541,33 @@ func (d *DB) MarkQuotaReservationDispatched(reservationID int64) error {
 	return nil
 }
 
-// SettleGroupQuota 用**真实用量**结算一次预扣。
+// QuotaSettleInfo 是一次结算后的群组额度快照（方案 v3 缺陷 C2：50%/80% 预算
+// 预警与预算耗尽闸都从这里取数）。TaskID/GroupID 让通知能定位到任务与群组。
+type QuotaSettleInfo struct {
+	TaskID    string
+	GroupID   int64
+	PeriodKey string
+	Budget    int64 // budget_tokens；≤0 = 未配预算（Remaining 无意义）
+	Remaining int64 // budget - consumed - reserved（结算后的瞬时值）
+}
+
+// SettleGroupQuota 用**真实用量**结算一次预扣，返回结算后的群组额度快照。
 //
 // 口径：consumed += total（= input + output，缓存已含在 input 里，不重复计）。
 //   - 真实用量 > 估算：多出来的照记（consumed 可能越过预算）⇒ **不裁剪**。
 //     预算是"允许多少"，不是"记账上限"；裁掉差额等于让平台替供应商免单。
 //   - 真实用量 < 估算：估算占住的部分整块释放（reserved 归零），只记真实用量。
 //
-// 幂等：已结算/已释放的预扣再次结算是 no-op（重试结算不会双扣）。
-func (d *DB) SettleGroupQuota(reservationID int64, usage QuotaUsage) error {
+// 幂等：已结算/已释放的预扣再次结算是 no-op（重试结算不会双扣），此时返回
+// 零值快照 + nil 错误。
+func (d *DB) SettleGroupQuota(reservationID int64, usage QuotaUsage) (QuotaSettleInfo, error) {
+	var info QuotaSettleInfo
 	if err := d.ensureQuotaSchema(); err != nil {
-		return err
+		return info, err
 	}
 	tx, err := d.Begin()
 	if err != nil {
-		return fmt.Errorf("开启结算事务失败: %w", err)
+		return info, fmt.Errorf("开启结算事务失败: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -563,18 +575,18 @@ func (d *DB) SettleGroupQuota(reservationID int64, usage QuotaUsage) error {
 	var periodKey, status string
 	var reserved int64
 	err = tx.QueryRow(`
-SELECT group_id, period_key, status, reserved_tokens
+SELECT group_id, period_key, status, reserved_tokens, COALESCE(task_id,'')
 FROM group_quota_reservations WHERE id=$1 FOR UPDATE`, reservationID).
-		Scan(&groupID, &periodKey, &status, &reserved)
+		Scan(&groupID, &periodKey, &status, &reserved, &info.TaskID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrQuotaReservationNotHeld
+			return info, ErrQuotaReservationNotHeld
 		}
-		return fmt.Errorf("读取预扣记录失败: %w", err)
+		return info, fmt.Errorf("读取预扣记录失败: %w", err)
 	}
 	if status != "held" {
 		// 终态：已结算/已释放 ⇒ 幂等返回，什么都不改。
-		return tx.Commit()
+		return info, tx.Commit()
 	}
 	total := usage.TotalTokens
 	if total <= 0 {
@@ -586,18 +598,29 @@ UPDATE group_quota_periods
        consumed_tokens = consumed_tokens + $4,
        updated_at = now()
  WHERE group_id = $1 AND period_key = $2`, groupID, periodKey, reserved, total); err != nil {
-		return fmt.Errorf("结算额度周期计数失败: %w", err)
+		return info, fmt.Errorf("结算额度周期计数失败: %w", err)
 	}
 	if _, err := tx.Exec(`
 UPDATE group_quota_reservations
    SET status = 'settled', settled_input_tokens = $2, settled_output_tokens = $3, settled_total_tokens = $4
  WHERE id = $1`, reservationID, usage.InputTokens, usage.OutputTokens, total); err != nil {
-		return fmt.Errorf("标记预扣已结算失败: %w", err)
+		return info, fmt.Errorf("标记预扣已结算失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交结算事务失败: %w", err)
+		return info, fmt.Errorf("提交结算事务失败: %w", err)
 	}
-	return nil
+	// 结算后的瞬时剩余（供阈值预警）：budget - consumed - reserved(周期当前值，
+	// 含其它在途预扣)。
+	info.GroupID, info.PeriodKey = groupID, periodKey
+	var consumed int64
+	if qerr := d.QueryRow(`SELECT budget_tokens, consumed_tokens, reserved_tokens FROM group_quota_periods
+WHERE group_id=$1 AND period_key=$2`, groupID, periodKey).Scan(&info.Budget, &consumed, &reserved); qerr == nil {
+		info.Remaining = info.Budget - consumed - reserved
+		if info.Remaining < 0 {
+			info.Remaining = 0
+		}
+	}
+	return info, nil
 }
 
 // ReleaseGroupQuota 释放一次预扣（确定没有花出去时）。

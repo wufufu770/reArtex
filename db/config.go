@@ -21,6 +21,10 @@ type LLMProfile struct {
 	BaseURL    string `json:"base_url,omitempty"`
 	Proxy      string `json:"proxy,omitempty"` // LLM 出站代理(http/https/socks5);空=用环境变量
 	Model      string `json:"model"`
+	// Models 是该 profile 可用的模型列表（E1 多模型）。空/缺省视为 [Model]；
+	// Model 恒为「默认模型」——列表的第一个语义槽位。引用方可用列表里的任何
+	// 一个模型名构造变体（同 key/网关/限流，只换 model 参数）。
+	Models []string `json:"models,omitempty"`
 	APIKey     string `json:"-"` // never serialized to UI
 	APIKeyHint string `json:"api_key_hint,omitempty"`
 	// APIKeyCipher 是加密落库的 key（AAD 绑定 Name）。不序列化。
@@ -85,19 +89,38 @@ type RetryOverride struct {
 // profileCols is the read column list (hint variant, no api key) shared by the
 // list query; profileColsKey is the same with api_key for the single-row loads.
 const profileRetryCols = `COALESCE(retry_connect_attempts,0),COALESCE(retry_connect_interval_ms,0),COALESCE(retry_empty_attempts,0),COALESCE(retry_empty_interval_ms,0),COALESCE(retry_stream_attempts,0),COALESCE(retry_stream_interval_ms,0)`
-const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
-const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(models,'[]'::jsonb),COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(models,'[]'::jsonb),COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(api_key_cipher,'')`
 
 // scanProfile reads one row in the profileCols / profileColsKey column order. The
 // 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
 func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile) error {
-	return sc.Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, into,
+	var models []byte
+	if err := sc.Scan(&p.ID, &p.Name, &p.Format, &p.BaseURL, &p.Proxy, &p.Model, &models, into,
 		&p.RatePerSecond, &p.RatePerMinute, &p.ContextWindowK, &p.ReasoningEffort, &p.IsDefault, &p.Priority, &p.PoolExclude, &p.ThinkingType, &p.Streaming,
 		&p.MaxTokens, &p.MaxTokensField, &p.SessionHeaderKey,
 		&p.Retry.Connect.Attempts, &p.Retry.Connect.IntervalMS,
 		&p.Retry.Empty.Attempts, &p.Retry.Empty.IntervalMS,
 		&p.Retry.Stream.Attempts, &p.Retry.Stream.IntervalMS,
-		&p.APIKeyCipher)
+		&p.APIKeyCipher); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(models, &p.Models)
+	// 归一化：空列表 = [默认模型]；默认模型必须出现在列表里（迁移保证，写路径兜底）。
+	if len(p.Models) == 0 {
+		p.Models = []string{p.Model}
+	}
+	found := false
+	for _, m := range p.Models {
+		if m == p.Model {
+			found = true
+			break
+		}
+	}
+	if !found {
+		p.Models = append([]string{p.Model}, p.Models...)
+	}
+	return nil
 }
 
 func (d *DB) ListProfiles() ([]*LLMProfile, error) {
@@ -202,11 +225,26 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 			plainColumn = ""
 		}
 	}
+	// E1：models 归一化——空 = [默认模型]；默认模型必须存在于列表首位。
+	if len(p.Models) == 0 {
+		p.Models = []string{p.Model}
+	}
+	found := false
+	for _, m := range p.Models {
+		if m == p.Model {
+			found = true
+			break
+		}
+	}
+	if !found {
+		p.Models = append([]string{p.Model}, p.Models...)
+	}
+	modelsJSON, _ := json.Marshal(p.Models)
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,api_key_cipher)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NULLIF($25,'')) RETURNING id`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,models,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,api_key_cipher)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,NULLIF($26,'')) RETURNING id`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, string(modelsJSON), plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, cipherText).Scan(&id)
 		return id, err
 	}
@@ -217,13 +255,13 @@ VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$
 		if err := d.reencryptProfileKey(p.ID, p.Name); err != nil {
 			return p.ID, err
 		}
-		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11,thinking_type=$12,streaming=$13,max_tokens=$14,max_tokens_field=$15,session_header_key=$16,retry_connect_attempts=$17,retry_connect_interval_ms=$18,retry_empty_attempts=$19,retry_empty_interval_ms=$20,retry_stream_attempts=$21,retry_stream_interval_ms=$22 WHERE id=$23`,
-			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,models=$6,rate_per_second=$7,rate_per_minute=$8,context_window_k=$9,reasoning_effort=$10,priority=$11,pool_exclude=$12,thinking_type=$13,streaming=$14,max_tokens=$15,max_tokens_field=$16,session_header_key=$17,retry_connect_attempts=$18,retry_connect_interval_ms=$19,retry_empty_attempts=$20,retry_empty_interval_ms=$21,retry_stream_attempts=$22,retry_stream_interval_ms=$23 WHERE id=$24`,
+			p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, string(modelsJSON), p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.ID)
 		return p.ID, err
 	}
-	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,api_key_cipher=NULLIF($25,'') WHERE id=$26`,
-		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
+	_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,models=$6,api_key=$7,api_key_hint=$8,rate_per_second=$9,rate_per_minute=$10,context_window_k=$11,reasoning_effort=$12,priority=$13,pool_exclude=$14,thinking_type=$15,streaming=$16,max_tokens=$17,max_tokens_field=$18,session_header_key=$19,retry_connect_attempts=$20,retry_connect_interval_ms=$21,retry_empty_attempts=$22,retry_empty_interval_ms=$23,retry_stream_attempts=$24,retry_stream_interval_ms=$25,api_key_cipher=NULLIF($26,'') WHERE id=$27`,
+		p.Name, p.Format, p.BaseURL, p.Proxy, p.Model, string(modelsJSON), plainColumn, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
 		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, cipherText, p.ID)
 	return p.ID, err
 }

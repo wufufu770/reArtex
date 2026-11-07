@@ -1,6 +1,6 @@
 package server
 
-// 本文件是 SoD 链（职责分离）三个**只读**观测面的 HTTP 出口：
+// 本文件是 SoD 链（职责分离）三个**只读**观测面 + 人工复核改判（F3）的 HTTP 出口：
 //
 //   - 决策账本（sod_decisions）：每一次裁决的完整留痕；
 //   - 对抗复核队列（sod_adversarial_review_pending）：交给 redteam 证伪的清单；
@@ -15,12 +15,14 @@ package server
 //   - 工具熔断的作用是「把坏掉的工具关掉」。关掉了却没人看得见，它就只是一次
 //     静默的失败。
 //
-// 【只读】本文件一个字节都不写：三个面都是【观测到的状态】的出口。
+// 【只读】三个观测面一个字节都不写；唯一例外是 F3 的人工复核改判（写
+// sod_manual_overrides 放行凭据——它是人工意愿的登记，不是观测）。
 
 import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -497,4 +499,131 @@ func sodTimeRFC(t *time.Time) string {
 		return ""
 	}
 	return rfc3339(*t)
+}
+
+// sodDecisionReview 人工复核改判（方案 v3 缺陷 F3）：对一条 deny/needs_review
+// 裁决发放「call-precision 放行凭据」。
+//
+// POST /api/sod/decisions/{id}/review
+// 体：{"scope":"once|task","reason":"...","operator":"..."}
+//
+// 语义与边界：
+//   - 只允许对 deny / needs_review 裁决改判；approve 裁决本就放行，无需改判；
+//   - Tier3 保护面（agent.IsTier3ProtectedTool）拒绝改判 allow——四类高危任何
+//     机制都不可豁免（§4 不变式 1），只可转 ask（走拦截规则）；
+//   - 凭据四元组 (tool, task, agent, payload_digest) 全等才放行——换一个字节
+//     就不命中（call-precision）；
+//   - once 用后即焚；task 级随任务终态过期；
+//   - 同一 (task, tool) 第 ≥3 次改判时在响应里提示沉淀信任规则（F2）。
+func (s *Server) sodDecisionReview(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok || id <= 0 {
+		writeErr(w, 400, "id 不合法")
+		return
+	}
+	var req struct {
+		Scope    string `json:"scope"`
+		Reason   string `json:"reason"`
+		Operator string `json:"operator"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, "参数解析失败")
+		return
+	}
+	req.Scope = strings.TrimSpace(req.Scope)
+	if req.Scope == "" {
+		req.Scope = "once"
+	}
+	if req.Scope != "once" && req.Scope != "task" {
+		writeErr(w, 400, "scope 只能是 once|task")
+		return
+	}
+	if strings.TrimSpace(req.Operator) == "" {
+		writeErr(w, 400, "复核必须留操作者身份（operator）")
+		return
+	}
+	dec, err := pg.GetSoDDecision(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if dec == nil {
+		writeErr(w, 404, "裁决不存在")
+		return
+	}
+	if dec.Verdict == sodpolicy.VerdictApprove {
+		writeErr(w, 409, "该裁决本就是放行，无需改判")
+		return
+	}
+	if dec.TaskID == nil || *dec.TaskID <= 0 {
+		writeErr(w, 409, "该裁决没有任务上下文，无法发放任务级放行凭据")
+		return
+	}
+	if agent.IsTier3ProtectedTool(dec.ToolName) {
+		writeErr(w, 409, "Tier3 高危工具不可改判放行（只可转 ask 拦截规则）——出网/写宿主/裁决写/状态迁移任何机制都不可豁免")
+		return
+	}
+	// v4.1 §10-F1：锁定基线的拒绝不存在人工改判放行——删除/破坏、平台自身
+	// 配置是安全地板，override 机制对它们同样无权（与 guard 基线预检同源）。
+	if dec.ReasonCode == sodpolicy.ReasonDestructiveAction || dec.ReasonCode == sodpolicy.ReasonPlatformBaseline {
+		writeErr(w, 409, "锁定基线拒绝不可改判放行——删除/破坏与平台自身配置不可被任何机制豁免")
+		return
+	}
+	ovr := &db.SodManualOverride{
+		DecisionID:    dec.ID,
+		PayloadDigest: dec.PayloadDigest,
+		ToolKey:       dec.ToolName,
+		TaskID:        *dec.TaskID,
+		AgentKey:      dec.SourceAgent,
+		Scope:         req.Scope,
+		Reason:        strings.TrimSpace(req.Reason),
+		CreatedBy:     strings.TrimSpace(req.Operator),
+	}
+	oid, err := pg.CreateSodManualOverride(ovr)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// 改判后给任务一条提示：planner/worker 下轮可读，worker 会重试同一动作。
+	if t, exists := s.m.Task(strconv.FormatInt(*dec.TaskID, 10)); exists && t != nil && t.Store != nil {
+		_, _ = t.Store.AddNodeInScope(*dec.TaskID, db.KindHint,
+			map[string]any{"text": fmt.Sprintf("已人工批准重试：%s（载荷摘要 %s…）。请原样重试该调用，不要改动入参。", dec.ToolName, trunc(dec.PayloadDigest, 12))},
+			0, "active", "human", nil)
+	}
+	// 同一 (task, tool) 改判次数 ≥3 ⇒ 提示沉淀信任规则（F2 回放预览路径）。
+	prior, _ := pg.ListSodManualOverrides(*dec.TaskID, 200)
+	sameTool := 0
+	for _, o := range prior {
+		if o.ToolKey == dec.ToolName {
+			sameTool++
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "override_id": oid, "scope": ovr.Scope,
+		"override_count_same_tool": sameTool,
+		"suggest_trust_rule":       sameTool >= 3,
+	})
+}
+
+// sodOverrideList 人工改判历史（职责分离页的复核历史过滤）。
+// GET /api/sod/overrides?task_id=
+func (s *Server) sodOverrideList(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	taskID, ok := sodOptionalInt64(w, r.URL.Query().Get("task_id"), "task_id")
+	if !ok {
+		return
+	}
+	items, err := pg.ListSodManualOverrides(taskID, 100)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"overrides": items, "count": len(items)})
 }

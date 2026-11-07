@@ -6,6 +6,7 @@ import { Bot, CheckCheckIcon, ChevronDownIcon, ChevronRightIcon, UserIcon } from
 
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { MessageScrollerItem } from "@/components/ui/message-scroller";
 import type { SessionMessage, SessionMessageKind } from "@/lib/session-types";
 import type { Agent } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -155,6 +156,10 @@ function MessageBubble({
 // 两条渲染规则来自方案书 §4.1 / §2.3：
 //   · receipt_of 非空 ⇒ 收据条，贴在原消息下面，**不占气泡**；
 //   · parent_message_id 非空 ⇒ 线程回复，折叠在原消息下面。
+//
+// 必须渲染在 MessageScrollerContent 里（见 SessionView）：每条顶层消息是一个
+// MessageScrollerItem，直接挂在 Content 下、中间不再包容器 —— 滚动器靠 Content 的
+// 直接子节点变化感知「来了新消息」（贴底跟随、打开落底）。
 export function SessionTimeline({
   messages,
   agentByKey,
@@ -200,17 +205,14 @@ export function SessionTimeline({
     );
   }
 
-  return (
-    <div className="flex min-w-0 flex-col gap-3">
-      {topLevel.map((message) => (
-        <MessageBubble
-          key={message.id}
-          message={message}
-          agentByKey={agentByKey}
-          replies={repliesByParent.get(message.id) ?? []}
-          receipts={receiptsByTarget.get(message.id) ?? []}
-        />
-      ))}
-    </div>
-  );
+  return topLevel.map((message) => (
+    <MessageScrollerItem key={message.id} messageId={String(message.id)}>
+      <MessageBubble
+        message={message}
+        agentByKey={agentByKey}
+        replies={repliesByParent.get(message.id) ?? []}
+        receipts={receiptsByTarget.get(message.id) ?? []}
+      />
+    </MessageScrollerItem>
+  ));
 }

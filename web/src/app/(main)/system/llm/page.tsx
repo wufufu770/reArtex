@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { RolePolicyCard } from "@/app/(main)/system/llm/role-policy-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -332,6 +333,8 @@ function ProfileSheet({
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
+  // E1 多模型：本 profile 的模型列表（chips）。model 是默认模型，恒在列表里。
+  const [modelList, setModelList] = React.useState<string[]>([]);
   const [loadingModels, setLoadingModels] = React.useState(false);
   const [modelsOpen, setModelsOpen] = React.useState(false);
 
@@ -360,6 +363,7 @@ function ProfileSheet({
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
     setModelsOpen(false);
+    setModelList(profile?.models?.length ? profile.models : profile ? [profile.model] : []);
   }, [open, profile]);
 
   const profileId = profile ? Number(profile.id) : undefined;
@@ -445,6 +449,8 @@ function ProfileSheet({
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
         retry,
+        // E1：模型列表（默认模型恒在首位，后端也会归一化）。
+        models: Array.from(new Set([model.trim(), ...modelList].filter(Boolean))),
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
       else toast.success(profile?.is_default ? "已保存，激活配置即时生效，无需重启" : "已保存");
@@ -540,6 +546,7 @@ function ProfileSheet({
                         className="w-full shrink-0 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
                         onClick={() => {
                           setModel(m);
+                          setModelList((prev) => (prev.includes(m) ? prev : [...prev, m]));
                           setModelsOpen(false);
                         }}
                       >
@@ -551,6 +558,33 @@ function ProfileSheet({
               </Popover>
             </div>
           </div>
+
+          {/* E1 多模型 chips：默认模型（model 字段）恒在列表中；可增删。 */}
+          {modelList.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {modelList.map((m) => (
+                <Badge
+                  key={m}
+                  variant={m === model ? "default" : "outline"}
+                  className="gap-1 py-0.5 pl-2 pr-1 font-mono text-[10px]"
+                >
+                  {m === model ? "默认·" : ""}
+                  {m}
+                  {m !== model && (
+                    <button
+                      type="button"
+                      aria-label={`移除模型 ${m}`}
+                      className="ml-0.5 rounded px-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                      onClick={() => setModelList((prev) => prev.filter((x) => x !== m))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </Badge>
+              ))}
+              <span className="text-[10px] text-muted-foreground">点击列表项可加入；默认模型不可移除</span>
+            </div>
+          )}
 
           <div className="grid gap-2">
             <Label htmlFor="p-base-url">Base URL（可选）</Label>
@@ -879,6 +913,7 @@ export default function LLMPage() {
       <Tabs defaultValue="profiles" className="flex-1">
         <TabsList>
           <TabsTrigger value="profiles">模型配置</TabsTrigger>
+          <TabsTrigger value="roles">角色策略</TabsTrigger>
           <TabsTrigger value="retry">重试与退避</TabsTrigger>
         </TabsList>
 
@@ -978,6 +1013,9 @@ export default function LLMPage() {
           </div>
         </TabsContent>
 
+        <TabsContent value="roles" className="mt-4">
+          <RolePolicyCard profiles={profiles} onSaved={() => void load()} />
+        </TabsContent>
         <TabsContent value="retry" className="mt-4">
           <RetryPolicyPanel />
         </TabsContent>

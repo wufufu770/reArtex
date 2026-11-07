@@ -39,12 +39,12 @@ BEGIN
             (kind='begin'   AND state IN ('open')) OR
             (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
-            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin','candidate','verified','refuted')) OR
             (kind='finding' AND state IN ('pending','confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
             (kind='digest'  AND state IN ('active','superseded'))
         );
-    ELSIF curdef NOT LIKE '%pending%' THEN
+    ELSIF curdef NOT LIKE '%pending%' OR curdef NOT LIKE '%candidate%' THEN
         -- 只有 finding 分支新增了 'pending'，所以 'pending' 在本约束里只可能来自
         -- finding 分支 ⇒ 用它做判据不会误伤其他 kind。
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
@@ -52,7 +52,7 @@ BEGIN
             (kind='begin'   AND state IN ('open')) OR
             (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
-            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin','candidate','verified','refuted')) OR
             (kind='finding' AND state IN ('pending','confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
             (kind='digest'  AND state IN ('active','superseded'))

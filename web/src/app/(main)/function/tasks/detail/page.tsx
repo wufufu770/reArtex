@@ -141,7 +141,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
       setOpen(false);
       onUpdated();
     } catch (error) {
-      toast.error("更新失败：" + (error as Error).message);
+      toast.error(`更新失败：${(error as Error).message}`);
     } finally {
       setSaving(false);
     }
@@ -283,7 +283,24 @@ function TaskDetailInner() {
       setPaused(next);
       toast.success(next ? "已暂停探索" : "已恢复探索");
     } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+      toast.error(`操作失败：${(e as Error).message}`);
+    }
+  }
+
+  // C7：人工有序收尾（走完整 settle 时序，非硬杀）。
+  const [settling, setSettling] = React.useState(false);
+  async function settleOrderly() {
+    if (!task || terminal) return;
+    if (!window.confirm("有序收尾该任务？将停止派发新意图、等在跑 worker 收尾后判定终态（非硬取消）。")) return;
+    setSettling(true);
+    try {
+      await api.settleTask(id);
+      toast.success("已触发有序收尾：任务将走完整收尾时序");
+      load();
+    } catch (e) {
+      toast.error(`收尾失败：${(e as Error).message}`);
+    } finally {
+      setSettling(false);
     }
   }
 
@@ -358,10 +375,10 @@ function TaskDetailInner() {
               <ArrowLeftIcon />
             </Link>
           </Button>
-          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={task.name || task.description}>
+          <h1 className="min-w-0 flex-1 truncate font-semibold text-sm" title={task.name || task.description}>
             {task.name || task.description}
           </h1>
-          <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground sm:inline">
+          <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground text-xs sm:inline">
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
@@ -396,8 +413,26 @@ function TaskDetailInner() {
             {controlIcon}
             {controlLabel}
           </Button>
+          {!terminal && (
+            <Button size="sm" variant="outline" onClick={() => void settleOrderly()} disabled={settling}>
+              {settling ? <Spinner /> : null}
+              有序收尾
+            </Button>
+          )}
         </div>
-        <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
+        <p className="truncate text-muted-foreground text-xs">{task.goal}</p>
+        {/* H1：scope 未配置横幅——seed 解析不出目标时任务会以空范围跑，必须显性可见。
+            一键登记入口 = 资产 tab（在那里挂资产/关联公司范围，登记后后端自动消横幅）。 */}
+        {task.scope_configured === false && (
+          <Alert className="py-2">
+            <CircleAlertIcon />
+            <AlertTitle className="text-sm">scope 未配置</AlertTitle>
+            <AlertDescription className="text-xs">
+              创建任务时未能从描述/目标解析出目标资产，任务正在以空范围运行（多数动作会被范围闸拦下）。
+              前往「资产」页登记资产或关联公司范围，登记后横幅自动消除。
+            </AlertDescription>
+          </Alert>
+        )}
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">
@@ -405,7 +440,7 @@ function TaskDetailInner() {
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
                 {t.value === "intercept" && interceptPendingCount > 0 && (
-                  <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
+                  <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 font-semibold text-[10px] text-white leading-none">
                     {interceptPendingCount > 99 ? "99+" : interceptPendingCount}
                   </span>
                 )}

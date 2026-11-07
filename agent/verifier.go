@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"strings"
@@ -49,6 +50,9 @@ var findingVerdictValues = map[string]bool{
 
 // SetFindingValidator 注入 db 层的裁决实现（nil = 不校验复核）。
 func (t *ToolSet) SetFindingValidator(fn FindingValidator) { t.findingValidator = fn }
+
+// SetFactStateReviewer 注入 P4 fact 三态转移实现（nil = review_fact 不可用）。
+func (t *ToolSet) SetFactStateReviewer(fn FactStateReviewer) { t.factStateReviewer = fn }
 
 // validateFindingTool 返回「裁决一条 finding」的复核工具。
 //
@@ -114,3 +118,61 @@ func (t *ToolSet) validateFindingTool() actool.CoreTool {
 			return actool.Text("verdict recorded: " + verdict), nil
 		})
 }
+
+// ---------- P4 fact 三态：review_fact（candidate → verified | refuted）----------
+//
+// 与 validate_finding 同款纪律：工具不做裁决，把裁决送进确定性层（db.SetFactState
+// 挡下非 candidate 源态与缺理由的 refuted）。复核人身份 = ToolSet 的 member key。
+
+// FactStateReviewer 是 db 层 fact 状态转移的注入点（窄接口，不焊死 db 签名）。
+type FactStateReviewer func(factID int64, state, reason, reviewer string) error
+
+// reviewFactTool 返回「复核一条 fact」的工具。
+func (t *ToolSet) reviewFactTool() actool.CoreTool {
+	return t.writeExpTool("review_fact",
+		"【复核】给一条探索 fact 下验证裁决（candidate → verified | refuted）。\n"+
+			"verified：事实经证据核对成立；refuted：事实被证伪（必须写 reason，血缘保留可追溯）。\n"+
+			"fact_node_id 必填（fact 节点的 id，node_detail 可见 state）；只有 candidate 态的事实可裁决。\n"+
+			"⚠️只复核你基于证据能负责任裁定的条目；证据不足时保持 candidate 并派意图补证。",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"fact_node_id": map[string]any{"type": "integer", "description": "fact 节点的 id。"},
+				"state":        map[string]any{"type": "string", "description": "verified / refuted。"},
+				"reason":       map[string]any{"type": "string", "description": "裁决理由；refuted 必填。"},
+			},
+			"required": []any{"fact_node_id", "state"},
+		},
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.factStateReviewer == nil {
+				return actool.Text("fact 复核层未接线（确定性转移器不可用）"), nil
+			}
+			var a struct {
+				FactNodeID int64  `json:"fact_node_id"`
+				State      string `json:"state"`
+				Reason     string `json:"reason"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf("参数不合法: " + err.Error()), nil
+			}
+			state := strings.TrimSpace(a.State)
+			if state != "verified" && state != "refuted" {
+				return actool.Errorf("目标态只能是 verified / refuted"), nil
+			}
+			reason := strings.TrimSpace(a.Reason)
+			if state == "refuted" && reason == "" {
+				return actool.Errorf("refuted 必须写明理由"), nil
+			}
+			reviewer := strings.TrimSpace(t.memberAgentKey)
+			if reviewer == "" {
+				reviewer = strings.TrimSpace(t.worker)
+			}
+			if err := t.factStateReviewer(a.FactNodeID, state, reason, reviewer); err != nil {
+				return actool.Errorf("裁决被确定性层拒绝: " + err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("fact %d → %s", a.FactNodeID, state)), nil
+		})
+}
+
+// SetFactStateReviewer 给 MainAgent 注入 P4 fact 三态转移回调（nil = review_fact 不可用）。
+func (m *MainAgent) SetFactStateReviewer(fn FactStateReviewer) { m.factStateReviewer = fn }

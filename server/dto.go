@@ -61,6 +61,7 @@ type TaskDTO struct {
 	ArchiveBlockedBy   string             `json:"archive_blocked_by_task_id,omitempty"`
 	CompanyIDs         []int64            `json:"company_ids"`
 	CoverageEnabled    bool               `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+	ScopeConfigured    bool               `json:"scope_configured"` // seed 是否配好 scope;false=任务详情显示「scope 未配置」横幅（H1）
 }
 
 // FindingSeverityDTO 是任务列表里按严重度分档的漏洞计数（严重/高/中/低）。
@@ -131,9 +132,10 @@ func taskDTO(t *Task, status string) TaskDTO {
 		ActiveLLMProfileID: llmState.ActiveID,
 		LLMFailoverState:   llmState.FailoverState,
 		LLMFailoverReason:  llmState.FailoverReason,
-		SourceTaskIDs:      sourceIDs,
-		CompanyIDs:         lifecycle.CompanyIDs,
-		CoverageEnabled:    t.CoverageEnabled,
+	SourceTaskIDs:      sourceIDs,
+	CompanyIDs:         lifecycle.CompanyIDs,
+	CoverageEnabled:    t.CoverageEnabled,
+	ScopeConfigured:    t.ScopeConfigured,
 	}
 }
 
@@ -602,6 +604,7 @@ type LLMProfileDTO struct {
 	BaseURL         string  `json:"base_url,omitempty"`
 	Proxy           string  `json:"proxy,omitempty"`
 	Model           string  `json:"model"`
+	Models          []string `json:"models,omitempty"` // E1 多模型：可用模型列表（含默认）
 	APIKeyHint      string  `json:"api_key_hint,omitempty"`
 	RatePerSecond   float64 `json:"rate_per_second"`
 	RatePerMinute   float64 `json:"rate_per_minute"`
@@ -637,6 +640,7 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		BaseURL:          p.BaseURL,
 		Proxy:            p.Proxy,
 		Model:            p.Model,
+		Models:           p.Models,
 		APIKeyHint:       p.APIKeyHint,
 		RatePerSecond:    p.RatePerSecond,
 		RatePerMinute:    p.RatePerMinute,

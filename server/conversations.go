@@ -130,6 +130,7 @@ func (s *Server) pgUpdateConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		LLMProfileID *int64 `json:"llm_profile_id"` // null clears the override
+		LLMModel     *string `json:"llm_model"`     // E1：会话级模型（null=不改，""=清除）
 	}
 	if !decodeConversationRequest(w, r, &req) {
 		return
@@ -137,6 +138,47 @@ func (s *Server) pgUpdateConversation(w http.ResponseWriter, r *http.Request) {
 	if req.LLMProfileID != nil {
 		if _, ok := s.loadProfileConfig(*req.LLMProfileID); !ok {
 			writeErr(w, 400, "指定的 LLM 配置不存在或未设置 API Key")
+			return
+		}
+	}
+	// E1：模型变体校验——必须是该 profile 的 models 列表成员（空串=清除）。
+	// 会话没显式绑 profile 时，解析它的【生效 profile】（agent 绑定→全局激活），
+	// 校验不了的裸模型值不能静默通过——那会让会话悄悄跑在未知模型上。
+	if req.LLMModel != nil && strings.TrimSpace(*req.LLMModel) != "" {
+		want := strings.TrimSpace(*req.LLMModel)
+		profileID := req.LLMProfileID
+		if profileID == nil {
+			profileID = c.LLMProfileID
+		}
+		if profileID == nil {
+			profileID = s.effectiveProfileForAgent(c.AgentKey, nil)
+		}
+		if profileID == nil {
+			// 会话/agent 都没绑 profile ⇒ 生效档 = 全局激活 profile。
+			if active, aerr := pg.ActiveProfile(); aerr == nil && active != nil {
+				profileID = &active.ID
+			}
+		}
+		if profileID != nil {
+			cfg, ok := s.loadProfileConfig(*profileID)
+			if !ok {
+				writeErr(w, 400, "指定的 LLM 配置不存在或未设置 API Key")
+				return
+			}
+			found := false
+			for _, m := range cfg.Models {
+				if m == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				writeErr(w, 400, fmt.Sprintf("模型 %q 不在该配置的模型列表内（可用：%v）", want, cfg.Models))
+				return
+			}
+		}
+		if err := pg.UpdateConversationModel(c.ID, want); err != nil {
+			writeErr(w, 500, err.Error())
 			return
 		}
 	}
@@ -810,10 +852,18 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 		}
 	}()
 	pg := s.m.pg
-	c, err := pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
+	c, err := pg.CreateConversationOf(item.agentKey, firstLine(item.title, 60), nil, triggerOriginOf(item.title))
 	if err != nil {
 		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
 		return
+	}
+	// A1 挂靠：带任务的触发运行挂到任务的绑定会话（变成任务子记录，不占侧边栏）。
+	if item.taskID > 0 {
+		if sess, serr := pg.SessionByTask(item.taskID); serr == nil && sess != nil {
+			if aerr := pg.AttachConversationToSession(c.ID, sess.ID); aerr == nil {
+				log.Printf("[trigger] 对话 %d 已挂靠会话 %d（task %d）", c.ID, sess.ID, item.taskID)
+			}
+		}
 	}
 	msg := finalTriggerMessage(item) // prepend the task-context header for single (non-merged) fires
 	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
@@ -826,6 +876,15 @@ func (s *Server) runTriggeredRun(item triggeredRun) {
 	s.runConversationSync(c, msg, busyKey)
 }
 
+// triggerOriginOf 按触发标题推断对话来源（A1）：SoD 复核线程与普通触发在
+// 「系统运行」里分列。
+func triggerOriginOf(title string) string {
+	if strings.HasPrefix(strings.TrimSpace(title), "SoD 复核") {
+		return db.OriginSodReview
+	}
+	return db.OriginTrigger
+}
+
 // firstLine returns a single-line, length-capped preview (shared with summaries).
 func firstLine(s string, max int) string {
 	s = strings.TrimSpace(s)
@@ -836,4 +895,19 @@ func firstLine(s string, max int) string {
 		s = string([]rune(s)[:max]) + "…"
 	}
 	return s
+}
+
+// systemRunsList 是「系统运行」摘要（A3）：origin != human 的对话列表，
+// 侧边栏底部折叠入口消费。?origin= 可按 trigger/sod_review/wake/hall 过滤。
+func (s *Server) systemRunsList(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	runs, err := pg.ListSystemRuns(strings.TrimSpace(r.URL.Query().Get("origin")), 100)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"runs": runs, "count": len(runs)})
 }

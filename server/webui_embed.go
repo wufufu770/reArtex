@@ -31,6 +31,12 @@ func (s *Server) webuiHandler() http.Handler {
 		if p == "" {
 			p = "index.html"
 		}
+		// HTML 入口永不缓存（无 ETag/Last-Modified 的嵌入 FS 无法 revalidate，
+		// 浏览器会一直用旧文档 → 发版后用户永远看到旧界面）。带 hash 的
+		// /_next/* 资源文件名即版本，可长缓存。
+		if !strings.HasPrefix(p, "_next/") {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		// 1) exact file (assets: _next/*, favicon.ico, ...)
 		// 2) route dir → <p>/index.html (trailingSlash export)
 		// 3) <p>.html

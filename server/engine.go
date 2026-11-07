@@ -132,6 +132,23 @@ type Engine struct {
 	// 引擎侧不感知会话形态 —— 与 toolTableFallback（db 层注入回调）同一套手法。
 	ActivityMirror func(taskID string, r db.Activity)
 	ClaimMirror    func(taskID, workerKey string, intentID int64, summary string)
+	// LegacyDistiller 是 P5 传承图的终局蒸馏回调（server/legacy.go）：任务 done 的
+	// 三处终局点旁 best-effort 异步调用，nil = 未装配。与 freezeReplayCorpus 同点
+	// 同款一次性可重入语义（legacyDistilled 记账在 Server 侧）。
+	LegacyDistiller func(t *Task)
+	// DenialWatcher 是 B6 升级路径的观察者（server/denial_escalation.go）：
+	// 工具调用被拒（「Blocked by hook」）时回调 (taskID, toolName, denialMessage)。
+	// nil = 不观察。宿主（NewServer）装配。
+	DenialWatcher func(taskID, toolName, denialMessage string)
+	// AuditSummary 是 v4.1 收尾审计报告的回调（server/auditor_report.go）：
+	// 任务落终态（done/failed/timeout/cancelled）时 best-effort 调用，
+	// 产出《本任务操作审计摘要》播报到绑定会话 + 落审计页。nil = 不产出。
+	AuditSummary func(t *Task)
+
+	// C4 停滞闸：per-task 的零产出意图计数与收尾评估状态（进程内；重启即清，
+	// 计数从新任务的实际行为重新累积）。
+	stagnationMu sync.Mutex
+	stagnation   map[string]*taskStagnation
 
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
@@ -1061,6 +1078,16 @@ func (e *Engine) attributeSubTaskOutcome(taskID int64) {
 	}
 }
 
+// emitAuditSummary 在任务落终态时产出操作审计摘要（v4.1 §3 收尾报告）。
+// 回调未装配 / panic 都不影响终态主链路（best-effort）。
+func (e *Engine) emitAuditSummary(t *Task) {
+	if e == nil || e.AuditSummary == nil || t == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	e.AuditSummary(t)
+}
+
 // freezeReplayCorpus 冻结这个任务的重放语料（一次性、可重入）。
 //
 // 为什么在【任务】终态冻结而不是【意图】终态：语料是「一次运行的世界快照」，
@@ -1144,6 +1171,20 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 		r.CreatedAt = time.Now()
 	}
 	e.bc.Publish(t.ID, r)
+	// B6 升级路径观察点：工具调用被拒（拦截规则/SoD 链的「Blocked by hook」）
+	// 都从这里经过——同一 (task, tool, reason_code) 连续 ≥3 次 ⇒ 意图转 blocked
+	// + 会话播报，止损撞墙循环。异步、吞 panic（best-effort 观察者）。
+	if r.Kind == "tool_result" && r.IsError && strings.Contains(r.Summary, "Blocked by hook") && e.DenialWatcher != nil {
+		watcher := e.DenialWatcher
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[escalation] panic（task %s）: %v", t.ID, rec)
+				}
+			}()
+			watcher(t.ID, r.Tool, r.Summary)
+		}()
+	}
 	if e.ActivityMirror != nil {
 		// 总控/群聊播报：镜像规则在回调内部（session_task_mirror.go），这里只转发。
 		// best-effort：回调自身吞错，panic 也不能拖垮引擎主链路。
@@ -1244,6 +1285,112 @@ func (e *Engine) Ready() bool {
 func (e *Engine) ReadyFor(t *Task) bool {
 	p, w := e.snapshotFor(t)
 	return p != nil && w != nil
+}
+
+// stagnationThreshold 是 C4 停滞闸的阈值：连续这么多个「收尾写回 0 事实 0 资产
+// 0 漏洞」的意图 ⇒ 进入收尾评估（wrapup）。代码常量（安全/收敛语义不进配置面）。
+const stagnationThreshold = 6
+
+// wrapupConcludeRounds 是收尾评估轮的上限：连续这么多轮规划仍 0 新意图且未
+// prove_goal ⇒ 确定性落 done(concluded)——边际收益递减，继续规划只是烧钱。
+const wrapupConcludeRounds = 2
+
+// taskStagnation 是一个任务的停滞状态。
+type taskStagnation struct {
+	zeroWrites   int  // 连续零产出收尾的意图数
+	wrapup       bool // 收尾评估模式（planner 本轮允许 conclude/0 意图）
+	wrapupRounds int  // 进入收尾评估后跑了几轮规划（仍 0 产出则递增）
+}
+
+func (e *Engine) stagnationOf(taskID string) *taskStagnation {
+	e.stagnationMu.Lock()
+	defer e.stagnationMu.Unlock()
+	if e.stagnation == nil {
+		e.stagnation = map[string]*taskStagnation{}
+	}
+	if st, ok := e.stagnation[taskID]; ok {
+		return st
+	}
+	st := &taskStagnation{}
+	e.stagnation[taskID] = st
+	return st
+}
+
+// noteIntentWriteBack 是 C4 的记账点：意图终态收尾时按写回量更新停滞状态。
+// 有效写回（>0）清零并退出收尾评估；零产出递增，达阈值进收尾评估并注入
+// 【收尾评估】触发（planner 本轮允许 conclude/0 意图——C5 的例外）。
+func (e *Engine) noteIntentWriteBack(t *Task, wrote agent.WriteCounts) {
+	st := e.stagnationOf(t.ID)
+	e.stagnationMu.Lock()
+	if wrote.Total() > 0 {
+		*st = taskStagnation{} // 任何有效写回清零（真有进展的任务永不被误杀）
+		e.stagnationMu.Unlock()
+		return
+	}
+	st.zeroWrites++
+	if st.zeroWrites < stagnationThreshold || st.wrapup {
+		e.stagnationMu.Unlock()
+		return
+	}
+	st.wrapup = true
+	st.wrapupRounds = 0
+	e.stagnationMu.Unlock()
+	summary := fmt.Sprintf("【收尾评估】已连续 %d 个意图零产出（写回 0 事实 0 资产 0 漏洞）。进入收尾评估轮：请判定目标是否已实质达成——要么 prove_goal（有证据），要么停止派新方向并给出如实的 partial 结论；本轮允许 0 意图产出。", st.zeroWrites)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
+	// 注入 wrapup 触发：下一轮 planner 读到收尾评估指令（C5 的例外口）。
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{Kind: "wrapup",
+		Summary: "连续零产出，进入收尾评估"})
+	log.Printf("[stagnation] task %s 连续 %d 个零产出意图，进入收尾评估", t.ID, st.zeroWrites)
+}
+
+// noteWrapupRoundResult 是收尾评估轮的结算：0 新意图 ⇒ 轮数递增；达到上限 ⇒
+// 确定性收尾（done + concluded marker + 冻结 + 蒸馏）。有新意图 ⇒ 轮数清零
+// （规划仍在产出，给它继续的机会）。
+func (e *Engine) noteWrapupRoundResult(t *Task, intentsBefore int) {
+	st := e.stagnationOf(t.ID)
+	e.stagnationMu.Lock()
+	if !st.wrapup {
+		e.stagnationMu.Unlock()
+		return
+	}
+	after, err := t.Store.CountIntents()
+	if err != nil || after > intentsBefore {
+		st.wrapupRounds = 0 // 本轮产出了新意图：还在推进
+		e.stagnationMu.Unlock()
+		return
+	}
+	st.wrapupRounds++
+	shouldSettle := st.wrapupRounds >= wrapupConcludeRounds
+	if shouldSettle {
+		st.wrapup = false
+	}
+	e.stagnationMu.Unlock()
+	if !shouldSettle {
+		return
+	}
+
+	// 确定性收尾（C4）：concluded marker fact + 活动播报 + 守卫落 done + 冻结 + 蒸馏。
+	payload := map[string]any{
+		"subtype": "conclusion",
+		"summary": fmt.Sprintf("concluded: 连续 %d 个意图零产出、收尾评估 %d 轮无新方向——边际收益递减，任务有序收尾", stagnationThreshold, wrapupConcludeRounds),
+		"detail":  "确定性停滞闸判定（非模型自评）。partial 结论以图上已确认的事实/发现为准；后续可经 reviveTask 续跑。",
+	}
+	if id, aerr := t.Store.AddNode(db.KindFact, payload, 5, "confirmed", "stagnation_gate", nil); aerr == nil {
+		if origin, oerr := t.Store.OriginFactID(); oerr == nil && origin > 0 {
+			_ = t.Store.Link(origin, db.RelYields, id)
+		}
+	}
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+		Summary: fmt.Sprintf("【停滞闸】连续 %d 个零产出意图 + 收尾评估 %d 轮无新方向，任务收尾（done·concluded）", stagnationThreshold, wrapupConcludeRounds)})
+	if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil || !won {
+		log.Printf("[stagnation] task %s 落终态失败/已被判: %v", t.ID, err)
+		return
+	}
+	e.freezeReplayCorpus(t.ID)
+	if e.LegacyDistiller != nil {
+		e.LegacyDistiller(t)
+	}
+	e.emitAuditSummary(t)
 }
 
 // Run starts the planner loop + N worker loops for a task. The loops always run
@@ -1364,6 +1511,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
 					// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
 					e.freezeReplayCorpus(t.ID)
+					// P5 传承图：终局蒸馏（异步，draft 待人工评审）。
+					if e.LegacyDistiller != nil {
+						e.LegacyDistiller(t)
+					}
+					e.emitAuditSummary(t)
 				}
 			}
 			return // goalless 分支永不进入 planner.Plan
@@ -1388,9 +1540,13 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		// C4 收尾评估轮的结算基线：本轮之前图上意图总数。
+		intentsBefore, _ := t.Store.CountIntents()
 		e.BeginLLMCall(t.ID)
 		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
+		// C4：收尾评估模式下结算本轮（0 新意图累计，达上限确定性收尾）。
+		e.noteWrapupRoundResult(t, intentsBefore)
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
@@ -1402,6 +1558,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			} else {
 				// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
 				e.freezeReplayCorpus(t.ID)
+				// P5 传承图：终局蒸馏（异步，draft 待人工评审）。
+				if e.LegacyDistiller != nil {
+					e.LegacyDistiller(t)
+				}
+				e.emitAuditSummary(t)
 			}
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
@@ -1712,6 +1873,42 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
 		}
 	}
+	// C4 停滞闸记账：按写回量更新停滞状态（0 写回递增 / 有效写回清零）。
+	e.noteIntentWriteBack(t, wrote)
+	// P3 裸退出兜底（方案 v3.1 §7.2）：worker 层交接轮是 best-effort（崩溃/kill 时
+	// 预退出路径不保证执行）——终态 blocked/exhausted 且该意图没有任何 handoff 事实
+	// ⇒ 引擎补一条确定性"裸退出"标记，图轨迹本就是部分 handoff，这条只是把缺口
+	// 显式钉在图上（继承者知道前任没来得及交接）。
+	if state == "blocked" || state == "exhausted" {
+		// C6 写回纪律（引擎兜底）：0 写回但转录里有真实工具结果 ⇒ 自动补一条
+		// 结构化 marker（摘要=最后一条工具结果截断），让 planner 下轮态势可见。
+		if wrote.Total() == 0 {
+			if last := t.Store.LastIntentToolResult(intent.ID); last != "" {
+				payload := map[string]any{
+					"subtype": "handoff",
+					"summary": fmt.Sprintf("零写回收尾（%s）：最后产出——%s", state, truncateRunes(strings.TrimSpace(last), 200)),
+					"detail":  "worker 结束时未写回任何事实/资产/漏洞；此标记由引擎从转录补写，内容来自最后一条工具结果。",
+					"evidence": "engine deterministic marker（0 write-back）",
+				}
+				if id, aerr := t.Store.AddNode(db.KindFact, payload, 5, "confirmed", "handoff_missing", nil); aerr == nil {
+					_ = t.Store.Link(intent.ID, db.RelYields, id)
+					log.Printf("[handoff] task %s 意图 #%d 零写回，已补 marker fact #%d", t.ID, intent.ID, id)
+				}
+			}
+		}
+		if has, herr := t.Store.IntentHasHandoffFact(intent.ID); herr == nil && !has {
+			payload := map[string]any{
+				"subtype":  "handoff",
+				"summary":  fmt.Sprintf("裸退出：%s（%s）——本次 run 未能产出交接", state, terminateCauseLabel(err, reason)),
+				"detail":   "worker 的交接轮未执行（崩溃/超时/预算耗尽）。图上该意图的 tool_use/derived_from 链是仅存的上下文轨迹；继任者请从图轨迹重建态势，并把重建结论写成一条正式 handoff。",
+				"evidence": "engine deterministic marker（无 worker 产出）",
+			}
+			if id, aerr := t.Store.AddNode(db.KindFact, payload, 5, "confirmed", "handoff_missing", nil); aerr == nil {
+				_ = t.Store.Link(intent.ID, db.RelYields, id)
+				log.Printf("[handoff] task %s 意图 #%d 裸退出，已落兜底标记 fact #%d", t.ID, intent.ID, id)
+			}
+		}
+	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
 	e.touch(t.ID)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
@@ -1926,4 +2123,12 @@ func (e *Engine) claimIntent(t *Task, intentID int64, name string) bool {
 		return false
 	}
 	return claimed
+}
+
+// terminateCauseLabel 把终态原因渲染成一句人话（裸退出标记用）。
+func terminateCauseLabel(err error, reason harness.TerminalReason) string {
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return string(reason)
 }

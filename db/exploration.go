@@ -2820,3 +2820,130 @@ SELECT `+nodeCols+` FROM exploration_nodes
 	defer rows.Close()
 	return scanNodes(rows)
 }
+
+// LatestHandoffFact 返回本探索图里最新一条 subtype=handoff 的事实（P3 继任注入）。
+// 没有则 nil。范围：整个 exploration（跨意图）——继承语义是"分支上最新上下文"，
+// 简化为图内最新一条，够用且可预期（方案 v3.1 §7.4）。
+func (s *ExplorationStore) LatestHandoffFact() (*Node, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT n.id FROM exploration_nodes n
+WHERE n.exploration_id=$1 AND n.kind=$2 AND n.payload->>'subtype'='handoff'
+ORDER BY n.id DESC LIMIT 1`, s.expID, KindFact).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return s.GetNode(id)
+}
+
+// IntentHasHandoffFact 报某意图是否已产出 handoff 事实（engine 兜底裸退出判定）。
+func (s *ExplorationStore) IntentHasHandoffFact(intentID int64) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1
+FROM exploration_edges e
+JOIN exploration_nodes n ON n.id=e.dst_id AND n.exploration_id=e.exploration_id
+WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3 AND n.kind=$4
+  AND n.payload->>'subtype'='handoff')`,
+		s.expID, intentID, RelYields, KindFact).Scan(&ok)
+	return ok, err
+}
+
+// SetFactState 是 fact 三态（P4）的确定性转移：candidate → verified | refuted。
+// 纪律（方案 v3.1 §8.2）：模型不能自评门禁——调用方必须是复核 lane（review_fact
+// 工具只绑 mainagent）；refuted 必须带理由；旧值 confirmed/dismissed 不经本函数
+// 改动（惰性升级：读侧把 confirmed 视同 verified）。
+func (s *ExplorationStore) SetFactState(factID int64, state, reason, reviewer string) error {
+	if state != "verified" && state != "refuted" {
+		return fmt.Errorf("目标态只能是 verified|refuted，收到 %q", state)
+	}
+	if state == "refuted" && strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("refuted 必须带理由（保留血缘可追溯）")
+	}
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state=$2
+WHERE id=$1 AND kind=$3 AND state='candidate'`, factID, state, KindFact)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("fact #%d 不存在、不是 fact、或不在 candidate 态（只允许 candidate → verified/refuted）", factID)
+	}
+	_ = reviewer
+	return nil
+}
+
+// BlockedIntentIDs 列出 blocked 状态的意图 id（v4.1 收尾审计报告用：
+// done 不许掩盖没跑成的意图）。
+func (s *ExplorationStore) BlockedIntentIDs() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked' ORDER BY id`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// RunningIntentIDs 列出当前 running 状态的意图 id（B6 升级路径用：连续拒绝
+// 达阈值时把在跑的意图转 blocked）。
+func (s *ExplorationStore) RunningIntentIDs() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='running' ORDER BY id`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// SetIntentBlockedWithReason 把一个 open/running 的意图置为 blocked 并写明原因
+// （方案 v3 缺陷 B6：连续同类拒绝达阈值的升级出口——意图停在这里等人处理，
+// 而不是让 worker 继续撞同一堵墙）。幂等：已是终态的意图不再改写。
+func (s *ExplorationStore) SetIntentBlockedWithReason(id int64, reason string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state='blocked', blocked_reason=$2, content_version=content_version+1, completed_at=now()
+WHERE id=$1 AND exploration_id=$3 AND kind='intent' AND state IN ('open','running')`, id, reason, s.expID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// CountIntents 统计该探索图上意图节点的总数（不含 deleted）——C4 停滞闸用它
+// 对比规划轮前后的意图数量判断「本轮 0 意图产出」。
+func (s *ExplorationStore) CountIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state<>'deleted'`, s.expID).Scan(&n)
+	return n, err
+}
+
+// LastIntentToolResult 取该意图最近一条工具结果的摘要（C6 bare-exit marker 的
+// 摘要来源：转录里最后的真实产出）。没有返回 ""。
+func (s *ExplorationStore) LastIntentToolResult(intentID int64) string {
+	var summary sql.NullString
+	err := s.db.QueryRow(`SELECT summary FROM activity
+WHERE node_id=$1 AND kind='tool_result' ORDER BY id DESC LIMIT 1`, intentID).Scan(&summary)
+	if err != nil || !summary.Valid {
+		return ""
+	}
+	return summary.String
+}

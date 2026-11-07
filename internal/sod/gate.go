@@ -113,6 +113,27 @@ type GateInput struct {
 	Normalized     NormalizerResult
 	// FindingID 是本次调用关联的 finding（0 = 不关联）。
 	FindingID int64
+	// TaskInternalWrite 标记本次调用是「写目标固定在本任务图/回执/群信箱」的
+	// 结构化写（方案 v3 缺陷 B2）：这类动作没有外部 host 可判范围，scope 检查
+	// 按构造通过（写侧边界由工具实现保证），其余检查（熔断/额度/tier2）照跑。
+	// 它同时意味着本次调用**跳过了 LLM 规整**——审计会带 bypassed_normalizer 标记。
+	TaskInternalWrite bool
+	// LocalTaskDir 标记本次 Bash 调用引用的全部绝对路径都落在
+	// /app/data/tasks/<本任务id>/ 之内（方案 v3 缺陷 B5）：任务工作区是任务自己
+	// 的授权领地，读自己的工作文件不构成越界——scope 检查按构造通过（理由码
+	// pass(local_task_dir)）。链侧已保证「所有路径都在界内」，有任何出界路径
+	// 都不会置位此标志（照旧走完整 scope 判定）。
+	LocalTaskDir bool
+	// Degraded 标记本次调用处于规整器降级档（方案 v3 缺陷 B4）：规整器连续
+	// 不可用，Tier1/2 类动作确定性放行。链侧已用分级器保证到达这里的只有
+	// Tier1/2 类（无外部 host 目标的平台动作），scope 按构造通过；其余检查
+	// （熔断/额度/tier2）照跑。审计带 degraded 标记。
+	Degraded bool
+	// ScopePassReason 非空 ⇒ scope 检查按构造通过，理由如实进审计
+	// （v4.1 合并闸：pass 种类行 "category:<名>" / auditor 放行 "auditor" /
+	// ask 批准 "elevated_ask" / 兜底放行 "fallback_pass"）。其余检查照跑。
+	// 与上面三个布尔并存时布尔优先（保持既有审计口径不变）。
+	ScopePassReason string
 }
 
 // GateOutput 是闸门的产出。
@@ -139,27 +160,44 @@ func (g *Gate) Evaluate(ctx context.Context, in GateInput) GateOutput {
 
 	// ① scope —— 授权边界，最高优先级。
 	out.Checks["scope_check"] = "fail"
-	if in.Normalized.StructuredIntent.TargetHint == "" {
+	switch {
+	case in.TaskInternalWrite:
+		// 任务内结构化写（B2）：写目标 = 本任务自己的图/回执/群信箱，没有外部
+		// host 可判 —— scope 按构造通过，理由如实记进检查结果。
+		out.Checks["scope_check"] = "pass(task_internal_write)"
+	case in.LocalTaskDir:
+		// 本地任务目录（B5）：引用的全部路径都在任务工作区内（链侧确定性判定）。
+		out.Checks["scope_check"] = "pass(local_task_dir)"
+	case in.Degraded:
+		// 降级档（B4）：Tier1/2 类动作没有外部 host 目标（写侧边界由工具实现
+		// 保证），scope 按构造通过；Tier3 根本到不了这里（链侧分级器已拦）。
+		out.Checks["scope_check"] = "pass(degraded)"
+	case in.ScopePassReason != "":
+		// 合并闸（v4.1）：pass 种类行 / auditor 放行 / ask 批准 / 兜底放行——
+		// 理由由链侧给定，如实进审计；其余检查（熔断/额度/tier2/anomaly）照跑。
+		out.Checks["scope_check"] = "pass(" + in.ScopePassReason + ")"
+	case in.Normalized.StructuredIntent.TargetHint == "":
 		// 没有目标线索 ⇒ 无法判定范围 ⇒ **不放行**。
 		out.Verdict = sodpolicy.VerdictDeny
 		out.ReasonCode = sodpolicy.ReasonOutOfScope
 		out.Note = "本次动作没有可判定的目标线索，无法确认其在授权范围内"
 		return out
+	default:
+		ok, err := deps.scopeHostInScope(in.TaskID, in.Normalized.StructuredIntent.TargetHint)
+		if err != nil {
+			out.Verdict = sodpolicy.VerdictDeny
+			out.ReasonCode = sodpolicy.ReasonScopeUnavailable
+			out.Note = "范围判定不可用，按失败关闭处理"
+			return out
+		}
+		if !ok {
+			out.Verdict = sodpolicy.VerdictDeny
+			out.ReasonCode = sodpolicy.ReasonOutOfScope
+			out.Note = "目标不在本任务的授权范围内"
+			return out
+		}
+		out.Checks["scope_check"] = "pass"
 	}
-	ok, err := deps.scopeHostInScope(in.TaskID, in.Normalized.StructuredIntent.TargetHint)
-	if err != nil {
-		out.Verdict = sodpolicy.VerdictDeny
-		out.ReasonCode = sodpolicy.ReasonScopeUnavailable
-		out.Note = "范围判定不可用，按失败关闭处理"
-		return out
-	}
-	if !ok {
-		out.Verdict = sodpolicy.VerdictDeny
-		out.ReasonCode = sodpolicy.ReasonOutOfScope
-		out.Note = "目标不在本任务的授权范围内"
-		return out
-	}
-	out.Checks["scope_check"] = "pass"
 
 	// ② tool health —— 工具熔断。
 	state, err := deps.toolCircuitState(in.ToolName)

@@ -326,7 +326,7 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 大厅会话：分发者 auto 在这里接待人、布置任务、看全局。
-	hall, err := pg.CreateConversation("auto", name, nil)
+	hall, err := pg.CreateConversationOf("auto", name, nil, db.OriginHall)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -353,7 +353,7 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 		if key == "auto" {
 			continue
 		}
-		conv, err := pg.CreateConversation(key, name+"/"+key, nil)
+		conv, err := pg.CreateConversationOf(key, name+"/"+key, nil, db.OriginHall)
 		if err != nil {
 			_ = pg.DeleteChatGroup(gid)
 			writeErr(w, 500, err.Error())

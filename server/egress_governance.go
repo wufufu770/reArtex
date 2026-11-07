@@ -11,6 +11,7 @@ package server
 // 拿到 governed=false 与未覆盖通道清单，然后【必须】把清单显示出来。
 
 import (
+	"strings"
 	"encoding/json"
 	"net/http"
 )
@@ -64,11 +65,32 @@ var egressUncoveredChannels = []string{
 	"20 条内置 deny 规则只挡破坏性命令，不挡范围外出网；其中「数据外泄管道」规则出厂即 disabled，未在生效",
 }
 
+// egressConfigProbe 读运营方已配置的出口（B7：横幅随配置收敛）。
+// 由 server 装配注入（读 settings）；nil = 视为全未配置（横幅照旧全列）。
+var egressConfigProbe func() (webSearchProxy, globalProxy string, captureOn bool)
+
 // CurrentEgressGovernanceState 返回当前的出网治理状态。
 //
-// 这就是「怎么拿到它」：UI 调接口拿到的就是它，代码里也可以直接调。
+// B7：清单是【动态】的——运营方为某条通道配置了显式出口（web_search 的独立
+// 代理）或该通道的前提已变化（捕获开启 ⇒ Bash 走录制代理带范围判定），对应
+// 条目从横幅消失。剩余条目仍是代码事实，不会被配置抹掉。
 func CurrentEgressGovernanceState() EgressGovernanceState {
-	return newEgressGovernanceState(egressUncoveredChannels)
+	list := append([]string(nil), egressUncoveredChannels...)
+	if egressConfigProbe != nil {
+		wsProxy, _, captureOn := egressConfigProbe()
+		out := list[:0]
+		for _, ch := range list {
+			switch {
+			case strings.HasPrefix(ch, "web_search：") && strings.TrimSpace(wsProxy) != "":
+				continue // 已配置独立出口 ⇒ 不再是「未覆盖」的裸通道
+			case strings.HasPrefix(ch, "全局出网代理路径") && captureOn:
+				continue // 捕获开启 ⇒ Bash 走录制代理（带任务身份与范围判定）
+			}
+			out = append(out, ch)
+		}
+		list = out
+	}
+	return newEgressGovernanceState(list)
 }
 
 // newEgressGovernanceState 按清单构造状态：清单非空 ⇒ Governed=false。

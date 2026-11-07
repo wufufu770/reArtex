@@ -74,6 +74,9 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = ToolResolve(ctx, agentKey, out)
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	// P1 角色工具纪律（agent/roledispatch.go）：装配期主闸——白名单外工具在此
+	// 消失（模型不可见、系统提示不带其文档）。编译期常量，DB/settings 改不动。
+	out, def = filterToolsForRole(agentKey, out, def)
 	// 装饰顺序（由外到内）是刻意定的，不是随手写的：
 	//
 	//   enforceToolPolicy → guardPanic → 执行器 → 真实工具

@@ -39,6 +39,7 @@ const (
 	schedKeyLastTimeout    = "last_timeout_id"    // watermark: max task id fired for task timeout
 	schedKeyLastToolCall   = "last_toolcall_id"   // watermark: max activity id fired for tool call
 	schedKeyLastTaskCreate = "last_taskcreate_id" // watermark: max task id fired for task create
+	schedKeyLastRevSweep   = "last_review_sweep"  // unix sec: last stale needs_review sweep
 )
 
 func newScheduler(s *Server) *Scheduler {
@@ -129,6 +130,7 @@ func (sc *Scheduler) step() {
 	// 放在 step() 最前面：step() 在「一个 trigger 都没有」时会提前返回，curator
 	// 不能被这个提前返回挡掉（否则没配 trigger 时策略永远不晋级）。
 	sc.dispatchStrategyCurator()
+	sc.sweepStaleReviews()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return
@@ -166,6 +168,29 @@ func (sc *Scheduler) dispatchStrategyCurator() {
 		defer sc.curatorRunning.Store(false)
 		sc.runStrategyCurator()
 	}()
+}
+
+// sweepStaleReviews 每小时跑一次：把挂起超 24h 的 needs_review 项自动结案为
+// dismissed（方案 v3 缺陷 D4——对抗复核队列不能无限堆积）。水位未到点时是
+// 一次字符串比较，零开销。
+func (sc *Scheduler) sweepStaleReviews() {
+	if sc.pg == nil {
+		return
+	}
+	last, _ := strconv.ParseInt(sc.mustState(schedKeyLastRevSweep), 10, 64)
+	now := time.Now().Unix()
+	if now-last < int64(time.Hour/time.Second) {
+		return
+	}
+	_ = sc.pg.SetSchedState(schedKeyLastRevSweep, strconv.FormatInt(now, 10))
+	n, err := sc.pg.DismissStaleAdversarialReviews(24 * time.Hour)
+	if err != nil {
+		log.Printf("[scheduler] needs_review 过期结案失败: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[scheduler] needs_review 过期闸：自动结案 %d 条挂起超 24h 的复核项", n)
+	}
 }
 
 // fireIntervals fires triggers whose interval has elapsed since last_fire.

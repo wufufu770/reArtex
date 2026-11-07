@@ -436,6 +436,14 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureLLMUsageTable(); err != nil {
 			return fmt.Errorf("apply llm_usage schema: %w", err)
 		}
+		// 运行度量（P0）：llm_profile_prices 单价表，同为 Go 侧幂等 DDL。
+		if err := schemaDB.EnsureMetricsSchema(); err != nil {
+			return fmt.Errorf("apply metrics schema: %w", err)
+		}
+		// 传承图（P5，第三张图）：legacy_nodes/edges/usage。
+		if err := schemaDB.EnsureLegacySchema(); err != nil {
+			return fmt.Errorf("apply legacy schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
@@ -497,6 +505,10 @@ var builtinAgents = []builtinAgent{
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
 	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
+	// 资产收集(recon):内置「资产收集」agent(方案 v4 §3-C)。经对话页/群聊驱动,按 P0-P9 流程先被动后主动
+	// 地收集资产,一切发现结构化入库;只收集不利用。与 pentest 同属会话型长跑 agent:单次 run 不限时(0)。
+	// 不开交互式 shell(收集面用 Bash 一次性命令足够);联网搜索默认开见下方 recon_web_search_default_v1 块。
+	{"recon", "资产收集", "assistant", "资产收集 agent：按「授权确认→被动扩展→主动枚举→解析存活→端口服务→指纹→内容深挖→CDN 溯源→去重入库→汇总」走完收集链，先被动后主动，一切发现结构化入库；只收集不利用。", nil, false, intp(0)},
 	// 顾问型五件套（策略库 / 职责分离阶段）：只【提议】、不【裁决】。它们不参与渗透编排循环，
 	// 经对话页/触发器驱动，与 auto/pentest 同属「assistant」类会话型 agent。
 	// 工具绑定由 db 层策略决定（见 config.go 的 AdvisoryAgentToolPolicies）：
@@ -559,6 +571,20 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 		}
 		_ = d.SetSetting("interactive_shell_default_v1", "true")
 	}
+	// recon(资产收集)默认开联网搜索 ONCE:P1 被动扩展(搜索引擎/公开情报)离不开 web_search。
+	// 一次性(settings 旗标)——用户之后在 agent 页关掉不会被重启复活(同上方 interactive_shell 块)。
+	// 这里只开 per-agent 开关;搜索后端/Key 仍受系统全局联网搜索配置门控。
+	if v, _, _ := d.GetSetting("recon_web_search_default_v1"); v != "true" {
+		if _, err := d.Exec(`UPDATE agents SET web_search=true WHERE key='recon'`); err != nil {
+			return fmt.Errorf("seed recon web_search default: %w", err)
+		}
+		_ = d.SetSetting("recon_web_search_default_v1", "true")
+	}
+	// 内置任务类别(资产收集/渗透测试/漏洞验证,方案 v4 §3-C2):首次启动播一次,settings 旗标
+	// 防重播(用户删改不复活)。引擎按类别给 worker 拼纪律段,见 db/task_category_seed.go。
+	if err := d.seedDefaultTaskCategories(); err != nil {
+		return fmt.Errorf("seed task categories: %w", err)
+	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (用户
 	// 需要时自行启用), no proxy by default. The traffic-capture toggle injects/strips
 	// the recording proxy + CA at runtime (server.Manager.syncBrowserMCPProxy).
@@ -588,6 +614,11 @@ ON CONFLICT (name) DO NOTHING`,
 	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
+	}
+	// 拦截种类表种子（方案 v4.1 §2）：13+2 个内建种类的默认动作/上限——
+	// 「只硬拦删除，其余灵活」的出厂档；全部可在 UI 改（锁定行除外）。
+	if err := d.SeedSodCategories(); err != nil {
+		return fmt.Errorf("seed sod categories: %w", err)
 	}
 	// 顾问 agent 的工具绑定策略在这里落到 tools 表：老库补绑白名单工具、收回被
 	// 硬拒绝的工具、白名单里尚未注册的工具跳过并记录。新库的工具行是服务端

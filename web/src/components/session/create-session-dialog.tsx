@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { Session } from "@/lib/session-types";
@@ -60,6 +61,7 @@ export function CreateSessionDialog({
   const [form, setForm] = React.useState<FormKind>("chat");
   const [selected, setSelected] = React.useState<string[]>(["auto"]);
   const [goal, setGoal] = React.useState("");
+  const [sessionName, setSessionName] = React.useState("");
   const [legacyAgent, setLegacyAgent] = React.useState("auto");
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -68,6 +70,7 @@ export function CreateSessionDialog({
     if (open) {
       setForm("chat");
       setGoal("");
+      setSessionName("");
     }
   }, [open]);
 
@@ -98,6 +101,8 @@ export function CreateSessionDialog({
         kind: form === "master" ? "master" : "chat",
         agents: members,
         dispatcher: members.includes("auto") ? "auto" : members[0],
+        // 可选显式名（A4）：不填走三轨命名的自动档（首条人话生成标题）。
+        ...(sessionName.trim() !== "" ? { name: sessionName.trim() } : {}),
         ...(form === "master" && trimmedGoal !== "" ? { goal: trimmedGoal } : {}),
       });
       onCreated(created);
@@ -150,6 +155,18 @@ export function CreateSessionDialog({
 
         {form !== "legacy" ? (
           <div className="grid gap-2">
+            <div className="grid gap-1.5">
+              <label className="font-medium text-sm" htmlFor="session-name">
+                会话名称（可选）
+              </label>
+              <Input
+                id="session-name"
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+                placeholder="不填则用首条消息自动生成标题"
+                className="h-8"
+              />
+            </div>
             <div className="font-medium text-sm">成员（{selected.length} 人，分发者默认 auto）</div>
             <div className="flex flex-wrap gap-1.5">
               {agents.map((a) => (

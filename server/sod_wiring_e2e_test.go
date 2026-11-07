@@ -271,7 +271,7 @@ func sodWiringBindProvider(t *testing.T, s *Server, pg *db.DB, prov *sodWiringPr
 		t.Fatalf("激活 LLM profile 失败: %v", err)
 	}
 	s.provCacheMu.Lock()
-	s.provByProfile[id] = &provEntry{prov: prov, cfg: agent.Config{
+	s.provByProfile[provKey{id: id}] = &provEntry{prov: prov, cfg: agent.Config{
 		Format: llm.FormatOpenAI,
 		Model:  "fixture-model",
 		Stream: true,

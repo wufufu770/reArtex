@@ -18,7 +18,8 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	findingRecorder FindingRecorder
+	findingRecorder   FindingRecorder
+	factStateReviewer FactStateReviewer // P4 fact 三态转移（nil = review_fact 不可用）
 	prov            llm.Provider
 	model           string
 	tx              *transcript.Store                      // raw LLM conversation persistence (nil = off)
@@ -112,6 +113,7 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal, notifyHint func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
 	tsx.SetFindingRecorder(m.findingRecorder)
+	tsx.SetFactStateReviewer(m.factStateReviewer)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -125,7 +127,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ctx = WithAgentKey(WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)}), "mainagent")
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。

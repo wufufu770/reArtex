@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,12 @@ type reentrancyKey struct{}
 // 又会走执行器装饰器 → 执行器又要查凭证 → 没有凭证就拒绝 → 拒绝又可能再触发
 // 规整 ⇒ 无限递归。标记让执行器看到「这是链自己发起的调用」就直连。
 func withReentrancy(ctx context.Context) context.Context {
+	return WithReentrancy(ctx)
+}
+
+// WithReentrancy 是 withReentrancy 的导出形态：auditor 裁决岗（server 侧）
+// 发起的模型调用同样不得再进链（否则递归）。语义与私有版一致。
+func WithReentrancy(ctx context.Context) context.Context {
 	return context.WithValue(ctx, reentrancyKey{}, true)
 }
 
@@ -106,6 +113,70 @@ func AgentKeyFromContext(ctx context.Context) string {
 	return currentRunContext(ctx).AgentKey
 }
 
+// degradeThreshold 是进入降级所需的连续规整器 unavailable 次数（方案 v3 缺陷
+// B4，代码常量——安全语义的阈值不进可热改面）。
+const degradeThreshold = 5
+
+// degradeTracker 跟踪规整器连续不可用次数与降级态（进程内；重启即回 fail-closed
+// —— 降级是应急档，重启重置是保守方向）。
+//
+// 状态机：
+//
+//	开关关闭 ⇒ 永不进降级；在降级中关掉 ⇒ 立即退出（下一次读取即生效）。
+//	连续 unavailable ≥ degradeThreshold ⇒ 进降级（广播一次）。
+//	任一次规整成功 ⇒ 清零并退出降级（广播一次）。
+type degradeTracker struct {
+	mu          sync.Mutex
+	consecutive int
+	active      bool
+}
+
+var degrade degradeTracker
+
+// isActive 报告当前是否处于降级态（开关关闭 ⇒ 恒 false）。
+func (t *degradeTracker) isActive(enabled func() bool) bool {
+	if enabled == nil || !enabled() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active
+}
+
+// recordUnavailable 记一次规整失败；达到阈值进降级。
+func (t *degradeTracker) recordUnavailable(enabled func() bool, onChange func(bool)) {
+	if enabled == nil || !enabled() {
+		return
+	}
+	t.mu.Lock()
+	t.consecutive++
+	if t.consecutive >= degradeThreshold && !t.active {
+		t.active = true
+		t.mu.Unlock()
+		log.Printf("[sod] 规整器连续 %d 次不可用，进入降级档（Tier1/2 确定性放行，Tier3 照拒）", degradeThreshold)
+		if onChange != nil {
+			onChange(true)
+		}
+		return
+	}
+	t.mu.Unlock()
+}
+
+// recordAvailable 记一次规整成功；退出降级并清零。
+func (t *degradeTracker) recordAvailable(enabled func() bool, onChange func(bool)) {
+	t.mu.Lock()
+	wasActive := t.active
+	t.consecutive = 0
+	t.active = false
+	t.mu.Unlock()
+	if wasActive && enabled != nil && enabled() {
+		log.Printf("[sod] 规整器恢复，退出降级档")
+		if onChange != nil {
+			onChange(false)
+		}
+	}
+}
+
 // Chain 是 SoD 链本体：实现 harness.HookRunner。
 //
 // 它是【装饰器】：先问 inner（guard），inner 不 block 才跑链。
@@ -138,6 +209,38 @@ type ChainDeps struct {
 	// 这一条。反过来，链一旦被装上（AgentKeyOf 非 nil），其余任何部件缺失都
 	// 走 fail-closed 拒绝。
 	AgentKeyOf func(ctx context.Context) string
+
+	// DegradeEnabled 读降级开关（方案 v3 缺陷 B4，settings sod.degrade_enabled，
+	// 默认 false）。nil = 永不降级（fail-closed 原样）。
+	DegradeEnabled func() bool
+	// DegradedAllow 判定降级期哪些工具可以确定性放行。宿主注入分级器：
+	// 只有 Tier1/2 类（平台只读 + 结构化写）返回 true；Tier3（Bash/出网/
+	// MCP/扩权/状态迁移）必须 false —— 降级**永不**豁免 Tier3（§4 不变式 1）。
+	DegradedAllow func(toolName string) bool
+	// OnDegradeChange 降级态变化回调（进/出降级时各一次，宿主发通知用）。可为 nil。
+	OnDegradeChange func(active bool)
+
+	// ---- v4.1 合并闸（docs/方案-审计裁决与职责分离合并-v4.1.md §1）----
+	// MergedGateMode 读三态开关（off/shadow/enforce，settings sod.merged_gate）。
+	// nil = off（旧链原样——装配未完成时的安全默认）。
+	MergedGateMode func() string
+	// IntelSource 情报源白名单（settings sod.intel_sources，默认 17 源）。
+	// nil = 情报源放行不可用（crt.sh 等照旧进范围判定——方向安全）。
+	IntelSource func(host string) bool
+	// Categories 返回种类表快照。nil = 空表，全部走 auditor 默认裁量岗。
+	Categories func() ([]sodpolicy.SodCategory, uint64)
+	// Adjudicator 是 auditor 合并闸裁决岗（server 装配：并发闸+缓存+LLM+建议
+	// 队列）。与上面的 Auditor（审计账本）是两回事。nil = auditor 类动作走
+	// 种类 fallback。
+	Adjudicator func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error)
+	// ElevateAsk 人工 ask 通路（server 装配：interceptor.HandleAsk + 群聊卡）。
+	// nil = ask 一律视为未批准（fail-safe 拒绝）。
+	ElevateAsk func(ctx context.Context, req AskRequest) (approved bool, by string, err error)
+	// CategoryUsed 查询 (task, category) 的已用次数（账本计数，重启不丢）。
+	// nil = cap 不生效。
+	CategoryUsed func(ctx context.Context, taskID int64, category string) (int, error)
+	// RecordShadowDiff 影子模式对照账本。nil = 影子模式不记差异。
+	RecordShadowDiff func(ShadowDiff)
 }
 
 // NewChain 构造链。inner 为 nil 时链独立工作（测试用）。
@@ -245,20 +348,133 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 	call.scopeDigest = scopeDigest
 
-	// ⑥ 规整（失败 ⇒ fail-closed）。
-	normalized, cacheHit, err := c.normalize(ctx, call)
-	if err != nil {
-		reason := sodpolicy.ReasonNormalizerUnavailable
-		if errors.Is(err, ErrNormalizerMalformed) {
-			reason = sodpolicy.ReasonNormalizerMalformed
+	// ⑤.5 人工复核改判放行（方案 v3 缺陷 F3）：sod_manual_overrides 里的凭据
+	// 四元组 (tool, task, agent, payload_digest) 全等命中且未过期 ⇒ 跳过规整与
+	// 裁决，直接铸执行凭证放行。call-precision：换一个字节就不命中；once 型
+	// 用后即焚；DB 持久，重启不丢。审计如实记 override 放行（不变式 4）。
+	// Tier3 永不进这张表（review API 在写入侧拒绝）——链侧不做二次判断，表的
+	// 内容即人工意愿的完整边界。
+	if c.deps.DB != nil && call.taskID > 0 {
+		ovr, oerr := c.deps.DB.LookupSodManualOverride(call.toolName, call.taskID, call.sourceAgent, call.payloadDigest)
+		if oerr != nil {
+			log.Printf("[sod] 查人工改判凭据失败（按无凭据继续）: %v", oerr)
 		}
-		return c.deny(ctx, call, reason, "意图规整失败，按失败关闭处理")
+		if oerr == nil && ovr != nil {
+			if c.deps.Tokens == nil {
+				return c.deny(ctx, call, sodpolicy.ReasonTokenInvalid, "执行凭证存储未装配，按失败关闭处理")
+			}
+			_, digest, terr := c.deps.Tokens.Mint(call.payloadDigest, call.taskID, call.sourceAgent, call.toolName)
+			if terr != nil {
+				return c.deny(ctx, call, sodpolicy.ReasonTokenInvalid, "无法生成执行凭证，按失败关闭处理")
+			}
+			if ovr.Scope == "once" {
+				_ = c.deps.DB.ConsumeSodManualOverride(ovr.ID) // 用后即焚（焚不掉最多多放一次，凭证本身仍是一次性）
+			}
+			rec := &DecisionRecord{
+				TaskID:         call.taskID,
+				ConversationID: call.conversationID,
+				SourceAgent:    call.sourceAgent,
+				ToolName:       call.toolName,
+				Verdict:        sodpolicy.VerdictApprove,
+				ReasonCode:     sodpolicy.ReasonAllChecksPassed,
+				Note:           fmt.Sprintf("人工复核改判放行（override #%d，scope=%s，by=%s）", ovr.ID, ovr.Scope, ovr.CreatedBy),
+				PayloadDigest:  call.payloadDigest,
+				PayloadPreview: RedactPreview(call.payload, sodpolicy.PayloadPreviewMaxBytes),
+				Checks:         map[string]string{"manual_override": "true"},
+				ScopeDigest:    call.scopeDigest,
+				TokenDigest:    digest,
+				LatencyMs:      int(time.Since(call.started) / time.Millisecond),
+			}
+			c.record(ctx, rec)
+			return false, "", updated
+		}
+	}
+
+	// ⑤.8 锁定基线（v4.1 §10-F1 防御性复查）：guard 预检已在一切 allow 短路
+	// 之前拦过一次；这里兜「guard 未装配 / 被 env 停用」的路径，并让基线拒绝
+	// 也留 sod 账本行（可回放、可统计）。
+	if bReason, bHit := sodpolicy.BaselineHit(call.toolName, call.payload); bReason != "" {
+		return c.deny(ctx, call, bReason, "锁定基线命中（"+bHit+"）：删除/破坏、平台凭据与平台自身配置不可被任何机制放行")
+	}
+
+	// ⑥ 合并闸三态（v4.1 §1）。off=旧链；shadow=旧链权威+新链对照（§11-G1）；
+	// enforce=新链裁决（LLM 规整器退役，管线见 mergedgate.go）。
+	mode := sodpolicy.MergedGateOff
+	if c.deps.MergedGateMode != nil {
+		mode = c.deps.MergedGateMode()
+	}
+	if mode == sodpolicy.MergedGateEnforce {
+		return c.enforceGate(ctx, call, name)
+	}
+
+	// ---- 旧链（off / shadow 的权威路径）：规整 → 闸门 → 裁决 ----
+	// 规整（失败 ⇒ fail-closed）。两类确定性豁免跳过规整：
+	//   - 任务内结构化写（B2，见 taskInternalWriteTools）；
+	//   - 本地任务目录 Bash（B5）：命令引用的全部绝对路径都在任务工作区内——
+	//     出界路径只要有一个就走完整流程，绝不放宽。
+	localBash := name == "Bash" && BashLocalTaskDir(call.taskID, payload)
+	taskInternal := TaskInternalWrite(call.toolName)
+	var (
+		normalized NormalizerResult
+		cacheHit   bool
+	)
+	degradeOn := false
+	if !taskInternal && !localBash {
+		normalized, cacheHit, err = c.normalize(ctx, call)
+		if err != nil {
+			if errors.Is(err, ErrNormalizerUnavailable) {
+				// B4 降级档：开关开启且连续不可用达阈值 ⇒ Tier1/2 类动作确定性
+				// 放行（闸门其余检查照跑）；Tier3 照旧 fail-closed 拒绝。
+				degrade.recordUnavailable(c.deps.DegradeEnabled, c.deps.OnDegradeChange)
+				if degrade.isActive(c.deps.DegradeEnabled) && c.deps.DegradedAllow != nil && c.deps.DegradedAllow(call.toolName) {
+					degradeOn = true
+					normalized = NormalizerResult{}
+					cacheHit = false
+				} else {
+					c.shadowCompare(call, GateOutput{Verdict: sodpolicy.VerdictDeny, ReasonCode: sodpolicy.ReasonNormalizerUnavailable})
+					return c.deny(ctx, call, sodpolicy.ReasonNormalizerUnavailable, "意图规整失败，按失败关闭处理")
+				}
+			} else {
+				if errors.Is(err, ErrNormalizerMalformed) {
+					c.shadowCompare(call, GateOutput{Verdict: sodpolicy.VerdictDeny, ReasonCode: sodpolicy.ReasonNormalizerMalformed})
+					return c.deny(ctx, call, sodpolicy.ReasonNormalizerMalformed, "意图规整失败，按失败关闭处理")
+				}
+				degrade.recordUnavailable(c.deps.DegradeEnabled, c.deps.OnDegradeChange)
+				c.shadowCompare(call, GateOutput{Verdict: sodpolicy.VerdictDeny, ReasonCode: sodpolicy.ReasonNormalizerUnavailable})
+				return c.deny(ctx, call, sodpolicy.ReasonNormalizerUnavailable, "意图规整失败，按失败关闭处理")
+			}
+		} else {
+			degrade.recordAvailable(c.deps.DegradeEnabled, c.deps.OnDegradeChange)
+		}
 	}
 
 	// ⑦ 确定性闸门。**每次调用都重跑全部五道检查** —— 缓存里只有规整结果，
 	// 裁决依赖实时状态，缓存它等于用过期状态放行。
-	out := c.evaluate(ctx, call, normalized)
+	out := c.evaluate(ctx, call, normalized, degradeOn)
+	if mode == sodpolicy.MergedGateShadow {
+		// 影子对照（§11-G1）：新链只记差异，最终动作仍由旧链给出。
+		c.shadowCompare(call, out)
+	}
 
+	// §4 不变式 4：所有放行旁路带独立审计标记。任务内结构化写跳过了 LLM 规整
+	// —— 这件事必须能从审计里单独回放出来，而不是混在「全部通过」里。
+	markers := map[string]string{}
+	if taskInternal || localBash {
+		markers["bypassed_normalizer"] = "true"
+		if localBash {
+			markers["bypass_reason"] = "local_task_dir"
+		}
+	}
+	if degradeOn {
+		markers["degraded"] = "true"
+	}
+	return c.finalize(ctx, call, out, normalized, cacheHit, degradeOn, markers, updated)
+}
+
+// finalize 构建审计记录并执行裁决副作用（铸凭证 / 对抗复核 / 拒绝）。
+// 旧链（off/shadow）与合并闸（enforce）共用这一个出口——账本与凭证语义只有
+// 一份，两条管线不允许各自为政。
+func (c *Chain) finalize(ctx context.Context, call chainCall, out GateOutput, normalized NormalizerResult, cacheHit, degradeOn bool, extraChecks map[string]string, updated []byte) (bool, string, []byte) {
 	intentJSON, err := json.Marshal(normalized.StructuredIntent)
 	if err != nil {
 		intentJSON = []byte("{}")
@@ -281,6 +497,11 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		CacheHit:         cacheHit,
 		LatencyMs:        int(time.Since(call.started) / time.Millisecond),
 		StructuredIntent: intentJSON,
+	}
+	if len(extraChecks) > 0 && rec.Checks != nil {
+		for k, v := range extraChecks {
+			rec.Checks[k] = v
+		}
 	}
 
 	switch out.Verdict {
@@ -352,6 +573,11 @@ func (c *Chain) scopeDigest(taskID int64) (string, error) {
 //
 // 返回的第二个值是「是否命中缓存」—— 它进审计（cache_hit），让人能看出
 // 这次裁决是省了一次模型调用还是真跑了模型。
+//
+// malformed 重试一次（方案 v3 缺陷 B3③）：temperature=0 的输出仍可能偶发
+// 不合规（截断/漏字段）；同输入重试一次成本可控，能把一次抖动从
+// normalizer_malformed 拒绝里救回来。unavailable 不重试——那是模型侧故障，
+// 立即交给调用方的失败路径（信号量+独立档已在 B3①② 缓解它本身）。
 func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult, bool, error) {
 	if c.deps.Cache == nil || c.deps.Normalizer == nil {
 		return NormalizerResult{}, false, fmt.Errorf("%w: 规整器未装配", ErrNormalizerUnavailable)
@@ -360,13 +586,19 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 	if cached, ok := c.deps.Cache.Get(key); ok {
 		return cached, true, nil
 	}
-	normalized, err := c.deps.Normalizer.Normalize(ctx, NormalizeInput{
-		ToolName:       call.toolName,
-		RawPayload:     call.payload,
-		SourceAgent:    call.sourceAgent,
-		TaskID:         call.taskID,
-		ConversationID: call.conversationID,
-	})
+	doNormalize := func() (NormalizerResult, error) {
+		return c.deps.Normalizer.Normalize(ctx, NormalizeInput{
+			ToolName:       call.toolName,
+			RawPayload:     call.payload,
+			SourceAgent:    call.sourceAgent,
+			TaskID:         call.taskID,
+			ConversationID: call.conversationID,
+		})
+	}
+	normalized, err := doNormalize()
+	if errors.Is(err, ErrNormalizerMalformed) {
+		normalized, err = doNormalize()
+	}
 	if err != nil {
 		return NormalizerResult{}, false, err
 	}
@@ -374,8 +606,8 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 	return normalized, false, nil
 }
 
-// evaluate 跑确定性闸门。
-func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized NormalizerResult) GateOutput {
+// evaluate 跑确定性闸门。degraded 由调用方传入（B4 降级档放行的调用）。
+func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized NormalizerResult, degraded bool) GateOutput {
 	if c.deps.Gate == nil {
 		return GateOutput{
 			Verdict:    sodpolicy.VerdictDeny,
@@ -385,14 +617,17 @@ func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized Normali
 		}
 	}
 	return c.deps.Gate.Evaluate(ctx, GateInput{
-		ToolName:       call.toolName,
-		SourceAgent:    call.sourceAgent,
-		TaskID:         call.taskID,
-		ConversationID: call.conversationID,
-		PayloadDigest:  call.payloadDigest,
-		ScopeDigest:    call.scopeDigest,
-		Normalized:     normalized,
-		FindingID:      findingIDFromInput(call.payload),
+		ToolName:          call.toolName,
+		SourceAgent:       call.sourceAgent,
+		TaskID:            call.taskID,
+		ConversationID:    call.conversationID,
+		PayloadDigest:     call.payloadDigest,
+		ScopeDigest:       call.scopeDigest,
+		Normalized:        normalized,
+		FindingID:         findingIDFromInput(call.payload),
+		TaskInternalWrite: TaskInternalWrite(call.toolName),
+		LocalTaskDir:      call.toolName == "Bash" && BashLocalTaskDir(call.taskID, call.payload),
+		Degraded:          degraded,
 	})
 }
 
@@ -444,6 +679,68 @@ func (c *Chain) notifyReview(ctx context.Context, rec *DecisionRecord, intentJSO
 		ReasonCode:       rec.ReasonCode,
 		StructuredIntent: intentJSON,
 	})
+}
+
+// taskInternalWriteTools 是「写目标固定在本任务图/回执/群信箱」的结构化写工具
+// （方案 v3 缺陷 B2）：record_fact / record_progress 写任务探索图与回执表；
+// add_hint 追加任务提示；message_group 写群信箱。
+//
+// 为什么它们跳过 LLM 规整：规整器的职责是把「自由文本动作」转成带外部目标的
+// 结构化意图；这些动作没有外部目标（写进本任务自己的账本），LLM 在这里提供的
+// 唯一「价值」是把基础设施故障变成安全拒绝——实测一次任务 113 次 record_fact
+// 全走规整，规整器一抖（37/54 unavailable）整条写回链路瘫痪。
+//
+// ⚠️ 放行的是「跳过规整」，不是「跳过闸门」：熔断/额度/tier2 检查照跑，
+// scope 检查按构造通过（理由码 pass(task_internal_write)），审计带
+// bypassed_normalizer 标记（§4 不变式 4：所有放行旁路带独立审计标记）。
+// insert_assets / add_task_scope 等扩权工具**不在**本清单——它们照旧进规整。
+var taskInternalWriteTools = map[string]bool{
+	"record_fact":     true,
+	"record_progress": true,
+	"add_hint":        true,
+	"message_group":   true,
+}
+
+// TaskInternalWrite 报告该工具是否为任务内结构化写（跳过规整、scope 按构造通过）。
+func TaskInternalWrite(name string) bool { return taskInternalWriteTools[name] }
+
+// localPathTokenRe 抽取载荷里的绝对路径 token。前界排除 [A-Za-z0-9+:._\-/]：
+// 'http://host/x' 的 '/' 前是 ':' 或 '/' ⇒ 不算路径；'-o /tmp/x' 的 '/' 前是
+// 空白 ⇒ 算。B5 的判定输入。
+var localPathTokenRe = regexp.MustCompile(`(?:^|[^A-Za-z0-9+:._\-/])(/[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)*)`)
+
+// networkIndicatorRe 是「这条命令在碰网络」的确定性指示符（B5 的反向守卫）：
+// URL 方案 / IP 字面量 / host:port / 裸域名。命中任何一个 ⇒ 不豁免（照旧走
+// 完整 scope 判定——`curl http://x --output /app/data/tasks/10/x` 这种把出网
+// 藏在本地产物后面的写法必须被拦住）。裸域名的误伤（bare 文件名如 flag.txt
+// 被当域名）只影响「少一条豁免」，方向安全。
+var networkIndicatorRe = regexp.MustCompile(`(?i)(?:https?|ftp|wss?)://|\b\d{1,3}(?:\.\d{1,3}){3}\b|\b[a-z0-9.-]+\.[a-z]{2,}:\d{2,5}\b|(?:^|[^/A-Za-z0-9._\-])[a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z]{2,}\b`)
+
+// BashLocalTaskDir 判定一次 Bash 调用是否【只】引用本任务工作区内的绝对路径
+// （方案 v3 缺陷 B5）：载荷里抽出的每个绝对路径 token 都必须落在
+// /app/data/tasks/<taskID>/ 前缀下；一个都没有（纯相对路径/纯 flag 命令）或
+// 任何一个出界 ⇒ false（照旧走完整 scope 判定，宁多审不放松）。
+//
+// 出界判定示例：/app/data/tasks/10 不放行任务 11（前缀必须整段命中，后随字符
+// 是串尾或 '/'）——防 /app/data/tasks/10-evil 这类前缀混淆。
+func BashLocalTaskDir(taskID int64, payload []byte) bool {
+	if taskID <= 0 || len(payload) == 0 {
+		return false
+	}
+	// 反向守卫先判：任何网络指示符 ⇒ 不豁免（宁多审不放松）。
+	if networkIndicatorRe.Match(payload) {
+		return false
+	}
+	prefix := "/app/data/tasks/" + strconv.FormatInt(taskID, 10)
+	found := false
+	for _, m := range localPathTokenRe.FindAllStringSubmatch(string(payload), -1) {
+		tok := m[1]
+		if tok != prefix && !strings.HasPrefix(tok, prefix+"/") {
+			return false // 任何一个出界路径 ⇒ 整体不豁免
+		}
+		found = true
+	}
+	return found
 }
 
 // GatedTool 报告该工具是否要进 SoD 链。

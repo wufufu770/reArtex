@@ -198,7 +198,7 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
-        (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+        (kind='fact'    AND state IN ('confirmed','dismissed','origin','candidate','verified','refuted')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed')) OR
         (kind='digest'  AND state IN ('active','superseded'))
@@ -243,7 +243,7 @@ BEGIN
             (kind='begin'   AND state IN ('open')) OR
             (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
             (kind='goal'    AND state IN ('open','met','abandoned')) OR
-            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin','candidate','verified','refuted')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
             (kind='digest'  AND state IN ('active','superseded'))
@@ -422,6 +422,10 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default) WHERE is_default;
+-- E1 多模型：一个 profile（一份 key/网关）可带多个模型。models 是模型名数组，
+-- 迁移把旧行初始化为 [model]；model 列语义=默认模型（列表里必有它）。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS models JSONB NOT NULL DEFAULT '[]'::jsonb;
+UPDATE llm_profiles SET models = jsonb_build_array(model) WHERE models = '[]'::jsonb;
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -561,6 +565,10 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- seed 是否为任务配好了 scope(方案 v3 缺陷 H1)。默认 true(存量与正常路径不变);
+-- seed 解析不出目标且任务无 company scope 时置 false——任务详情横幅「scope 未配置」
+-- 的数据源。后续任何 scope 写入(task_scope 行 / 任务资产挂靠)自动翻回 true。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scope_configured BOOLEAN NOT NULL DEFAULT true;
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.
@@ -1010,6 +1018,12 @@ CREATE TABLE IF NOT EXISTS conversations (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+-- 对话来源（方案 v3 缺陷 A1）：human=人发起（进侧边栏/被回填）；trigger/sod_review/
+-- wake/hall=系统跑的（不进侧边栏、回填排除）。存量行按标题前缀迁移（见下）。
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'human';
+-- E1 会话级模型选择：可空=用 profile 的默认模型。仅当值在该 profile 的 models
+-- 列表内才生效（运行时校验，不命中回退默认）。
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS llm_model TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_conversations_llm_profile ON conversations(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_pinned ON conversations(pinned_at DESC) WHERE pinned_at IS NOT NULL;
 DROP TRIGGER IF EXISTS trg_conversations_upd ON conversations;
@@ -1452,3 +1466,26 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_seq ON audit_events(seq);
+
+-- ---------- P4 fact 三态（candidate / verified / refuted）----------
+-- 幂等约束迁移：老库的 ck_node_state 已含旧 fact 状态集，重建一次补新态。
+-- 判据 = 约束定义里是否已含 'candidate'（pg_get_constraintdef），重复启动零开销。
+DO $$
+DECLARE
+    v_def text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO v_def
+      FROM pg_constraint WHERE conname='ck_node_state' AND conrelid='exploration_nodes'::regclass;
+    IF v_def IS NOT NULL AND v_def NOT LIKE '%candidate%' THEN
+        EXECUTE 'ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state';
+        EXECUTE 'ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
+            (kind=''begin''   AND state IN (''open'')) OR
+            (kind=''intent''  AND state IN (''open'',''running'',''paused'',''done'',''blocked'',''exhausted'',''stopped'',''deleted'')) OR
+            (kind=''goal''    AND state IN (''open'',''met'',''abandoned'')) OR
+            (kind=''fact''    AND state IN (''confirmed'',''dismissed'',''origin'',''candidate'',''verified'',''refuted'')) OR
+            (kind=''finding'' AND state IN (''confirmed'',''dismissed'')) OR
+            (kind=''hint''    AND state IN (''active'',''consumed'')) OR
+            (kind=''digest''  AND state IN (''active'',''superseded''))
+        )';
+    END IF;
+END $$;

@@ -22,6 +22,16 @@ type policyTool struct{ actool.CoreTool }
 // 生效，而 Deny 恰好落在 Stage 1（工具自身决策优先于 mode 短路），任何权限模式都
 // 绕不过。
 func (p *policyTool) CheckPermissions(ctx context.Context, input json.RawMessage, pc acperm.Context) acperm.Decision {
+	// P1 角色工具纪律：调用期副闸（agent/roledispatch.go）。装配期已把白名单外
+	// 工具从 registry 剔除；这里挡的是 deferred unlock / MCP 注入等装配期旁路。
+	// 与装配闸共用同一份常量表（一致性由 roledispatch_test.go 钉死）。
+	if key := AgentKeyFrom(ctx); key != "" {
+		if allowed, constrained := RoleAllowsTool(key, p.Name()); constrained && !allowed {
+			reason := "[代码常量] 角色边界：" + key + " 不允许调用 " + p.Name()
+			recordToolDenial(ctx, p.Name(), reason, input)
+			return acperm.Denied(reason)
+		}
+	}
 	if err := pathguard.Check(p.Name(), input); err != nil {
 		recordToolDenial(ctx, p.Name(), err.Error(), input)
 		return acperm.Denied(err.Error())

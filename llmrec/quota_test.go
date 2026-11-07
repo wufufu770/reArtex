@@ -76,16 +76,17 @@ func quotaTextReq(text string, maxTokens int) llm.CompletionRequest {
 	}
 }
 
-// TestEstimateTokensCoversRetryBudget 钉住「估算必须覆盖重试预算」。
+// TestEstimateTokensCoversRetryBudget 钉住「重试预算只乘输入侧」（方案 v3 C1）。
 //
 // 为什么要这条：provider 内部的自动重试对闸门不可见 ⇒ 一次预扣可能对应多次
-// 真实请求 ⇒ 只按一次估算预扣 = 预算被低估（最坏是几次重试全部计费，账上只
-// 扣了一次）。
+// 真实请求，输入侧必须按 attempts 覆盖；但输出侧若也乘 attempts，一次 32K
+// MaxTokens 的调用会预扣 98K+，把 120K 群组预算的并发压成 1（假性额度耗尽）。
 //
-// 三条断言：
+// 断言：
 //   - 带重试预算的估算**严格大于**不带重试的估算；
-//   - 关系是**精确的倍数**（1 + maxRetries 次尝试），不是拍脑袋的加成；
-//   - 估算的输入/输出拆分与总量自洽（总量 = 输入 + 输出）。
+//   - 输入侧是**精确的倍数**（1 + maxRetries 次尝试）；
+//   - 输出侧不随 attempts 放大（单次 4096 上限）；
+//   - 拆分与总量自洽（总量 = 输入 + 输出）。
 func TestEstimateTokensCoversRetryBudget(t *testing.T) {
 	req := quotaTextReq("hello world", 1000)
 
@@ -100,8 +101,11 @@ func TestEstimateTokensCoversRetryBudget(t *testing.T) {
 	if got.TotalTokens <= one.TotalTokens {
 		t.Fatalf("带重试预算的估算 (%d) 必须严格大于单次估算 (%d)", got.TotalTokens, one.TotalTokens)
 	}
-	if want := one.TotalTokens * 3; got.TotalTokens != want {
-		t.Fatalf("重试预算为 2 时估算应为单次的 3 倍：got %d, want %d", got.TotalTokens, want)
+	if want := one.InputTokens * 3; got.InputTokens != want {
+		t.Fatalf("重试预算为 2 时输入侧估算应为单次的 3 倍：got %d, want %d", got.InputTokens, want)
+	}
+	if got.OutputTokens != one.OutputTokens {
+		t.Fatalf("输出侧不随重试预算放大：got %d, want %d", got.OutputTokens, one.OutputTokens)
 	}
 	if got.InputTokens+got.OutputTokens != got.TotalTokens {
 		t.Fatalf("拆分与总量不自洽：%d + %d != %d", got.InputTokens, got.OutputTokens, got.TotalTokens)
@@ -113,6 +117,37 @@ func TestEstimateTokensCoversRetryBudget(t *testing.T) {
 	}
 	if neg.TotalTokens != one.TotalTokens {
 		t.Fatalf("负的重试预算应按一次尝试算：got %d, want %d", neg.TotalTokens, one.TotalTokens)
+	}
+}
+
+// TestEstimateTokensCapsOutputAt4096 钉住「输出侧估算 4096 上限」（方案 v3 C1）。
+//
+// 请求侧 MaxTokens=32K 是模型允许的上限不是期望用量；按它整额预扣曾把 120K
+// 预算的并发压成 1。断言：无论 MaxTokens 是 0（未指定）还是 32768，输出侧都
+// 是 4096；小请求（1000）仍按请求值估。
+func TestEstimateTokensCapsOutputAt4096(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxTokens int
+	}{
+		{"未指定", 0},
+		{"请求上限32K", 32768},
+	} {
+		req := quotaTextReq("hello world", tc.maxTokens)
+		got, err := EstimateTokens(req, 0)
+		if err != nil {
+			t.Fatalf("%s: EstimateTokens: %v", tc.name, err)
+		}
+		if got.OutputTokens != defaultOutputTokenEstimate {
+			t.Fatalf("%s: 输出侧应按 4096 上限估：got %d", tc.name, got.OutputTokens)
+		}
+	}
+	small, err := EstimateTokens(quotaTextReq("hello world", 1000), 0)
+	if err != nil {
+		t.Fatalf("EstimateTokens: %v", err)
+	}
+	if small.OutputTokens != 1000 {
+		t.Fatalf("小请求应按请求值估：got %d, want 1000", small.OutputTokens)
 	}
 }
 
@@ -214,7 +249,7 @@ func TestQuotaLookupResolvesGroupAllocation(t *testing.T) {
 	}
 }
 
-// TestPreChargeCoversRetryBudget 钉住「**预扣**覆盖重试预算」。
+// TestPreChargeCoversRetryBudget 钉住「**预扣**覆盖重试预算（C1：只乘输入侧）」。
 //
 // 上面那条钉的是估算函数本身；这条钉的是**真实预扣**：闸门扣下去的那笔预算
 // 必须已经是乘过重试预算的数 —— 否则「估算覆盖了重试」只停留在纸面上。
@@ -232,7 +267,8 @@ func TestPreChargeCoversRetryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EstimateTokens: %v", err)
 	}
-	want := single.TotalTokens * int64(DefaultRetryBudget+1)
+	// C1 口径：输入侧 × attempts + 单次输出上限；输出侧不随 attempts 放大。
+	want := single.InputTokens*int64(DefaultRetryBudget+1) + single.OutputTokens
 
 	provider := NewQuotaProvider(completeProvider{}, NewQuotaGate(pg, nil))
 	ctx := WithTaskID(context.Background(), fmt.Sprintf("%d", taskID))
@@ -246,8 +282,8 @@ WHERE group_id=$1 ORDER BY id DESC LIMIT 1`, gid).Scan(&reserved); err != nil {
 		t.Fatalf("读预扣行: %v", err)
 	}
 	if reserved != want {
-		t.Fatalf("预扣额 = %d，期望 %d（单次估算 %d × %d 次尝试）",
-			reserved, want, single.TotalTokens, DefaultRetryBudget+1)
+		t.Fatalf("预扣额 = %d，期望 %d（输入估算 %d × %d 次尝试 + 输出 %d）",
+			reserved, want, single.InputTokens, DefaultRetryBudget+1, single.OutputTokens)
 	}
 }
 

@@ -93,12 +93,20 @@ type taskLLMSelection struct {
 	// retry 是这次选中的配置解析出来的重试参数(profile 覆盖 → 全局策略 → 内置默认)。
 	// 同 provider 安全窗口重试按它走,所以换了 profile 就换一套重试节奏。
 	retry agent.RetryConfig
+	// lanePolicy 非 nil 表示本次 selection 来自 role_policy（P2 分层经济，
+	// server/role_policy.go）：failover 走 lane 游标推进，不触碰任务链表。
+	// profileID 恒为 0（任务链推进的既有闸以 profileID==0 透传，正好绕开）。
+	lanePolicy *RoleLanePolicy
 }
 
 type taskLLMStreamHooks struct {
 	current    func() (taskLLMSelection, error)
 	exhaust    func(taskLLMSelection, error) (db.TaskLLMTransition, error)
 	transition func(taskLLMSelection, db.TaskLLMTransition, error)
+	// quotaOutcome 记录本次调用的最终结局（C2 预算僵尸闸的计数点）：nil=成功
+	// 清零；群组预算拒绝=计数 +1（连续达标 ⇒ 任务落终态）。其它错误不碰计数。
+	// 为 nil 时（部分测试直接构造 hooks）跳过计数。
+	quotaOutcome func(err error)
 }
 
 // current resolves the provider this role runs on, by precedence:
@@ -125,6 +133,11 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 	if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
+	}
+	// P2 分层经济：role_policy lane（server/role_policy.go）。无显式绑定时，
+	// 策略档优先于任务链；耗尽返回 chainExhausted（决策槽位=暂停+通知）。
+	if handled, perr := r.currentRoleLane(&sel); handled {
+		return sel, perr
 	}
 	if len(pt.LLMProfileIDs) > 0 {
 		if pt.ActiveLLMProfileID == nil {
@@ -203,6 +216,15 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 	return taskLLMStreamHooks{
 		current: r.current,
 		exhaust: func(selection taskLLMSelection, cause error) (db.TaskLLMTransition, error) {
+			// role_policy lane：走 lane 游标推进（不碰任务链表——红队 P0-2 修正）。
+			if selection.lanePolicy != nil {
+				transition, err := r.rotateRoleLane(selection, cause)
+				if err == nil && transition.ChainExhausted && decisionLanes[r.agentKey] {
+					// 决策槽位暂停：显式事件（toast 通道同款），语义=等人工改档。
+					r.s.emitRoleLanePaused(selection.task, r.agentKey, *selection.lanePolicy, cause)
+				}
+				return transition, err
+			}
 			taskNum, _ := parseTaskID(r.taskID)
 			transition, err := r.s.m.pg.MarkTaskLLMProfileQuotaExhaustedAtRevision(taskNum, selection.profileID, selection.revision, cause.Error())
 			if err != nil {
@@ -216,6 +238,7 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 		transition: func(selection taskLLMSelection, transition db.TaskLLMTransition, cause error) {
 			r.s.emitTaskLLMTransition(selection.task, transition, cause)
 		},
+		quotaOutcome: func(err error) { r.s.noteTaskQuotaOutcome(r.taskID, err) },
 	}
 }
 
@@ -264,7 +287,13 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 			break
 		}
 		if callErr == nil {
+			if hooks.quotaOutcome != nil {
+				hooks.quotaOutcome(nil)
+			}
 			return msg, sr, usage, nil
+		}
+		if hooks.quotaOutcome != nil {
+			hooks.quotaOutcome(callErr)
 		}
 		// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
 		if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
@@ -343,7 +372,13 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 						return
 					}
 				}
+				if hooks.quotaOutcome != nil {
+					hooks.quotaOutcome(nil)
+				}
 				return
+			}
+			if hooks.quotaOutcome != nil {
+				hooks.quotaOutcome(streamErr)
 			}
 			// profileID=0 means the explicit chain was cleared while this stable task
 			// bundle was still in use. Agent/global fallback errors follow the legacy
@@ -433,6 +468,12 @@ func isRetryableStreamError(err error) bool {
 		return false
 	}
 	if isQuotaExhaustedError(err) {
+		return false
+	}
+	// 群组预算拒绝是平台自己的确定性失败（C2）：预算不会在毫秒级退避窗口内
+	// 回来，同 provider 重试只会把同一笔预扣打满拒绝计数。交给上层按
+	// 「连续拒绝」处理（预算僵尸闸），这里不做无意义的重试。
+	if llmrec.IsGroupQuotaMessage(err.Error()) {
 		return false
 	}
 	s := strings.ToLower(err.Error())
@@ -549,6 +590,53 @@ func (s *Server) invalidateTaskAgents() {
 	s.taskAgentMu.Unlock()
 }
 
+// ---------- 按任务类别的 worker 纪律段（方案 v4 §3-C2）----------
+//
+// 任务 14 实锤：goal 文本写了「严禁渗透，只做资产收集」，但通用 worker 提示词没有
+// 收集纪律，worker 跑着跑着就开始对登录接口伪造 token 做漏洞验证——goal 约束只在
+// 任务文本里，worker 的系统提示词（每次 run 重新拼、永不入 compaction）里没有结构
+// 性支撑。类别纪律段就是那个支撑：任务绑「资产收集」类别 ⇒ 每轮 worker 的系统提示
+// 词尾部追加收集纪律。其它类别不追加（渗透/验证任务沿用通用纪律，一字不动）。
+
+// workerReconDiscipline 是「资产收集」类别的收集纪律段正文。
+//
+// 首行带 \n\n：与 constraintBlock 同一套追加法（拼在系统提示词尾部）。
+const workerReconDiscipline = "\n\n【收集纪律（本任务是「资产收集」类，最高优先级）】\n" +
+	"- **只收集，不利用**：禁止 sqlmap/nuclei/hydra/msf/metasploit 等利用类动作，禁止口令爆破、" +
+	"payload 注入、伪造 token/cookie、反弹 shell——一切验证/利用语义的动作都不做。\n" +
+	"- **发现即入库**：每个新发现（子域/IP/服务/端点/指纹）立即 insert_assets 结构化入库，" +
+	"来源（被动情报源/字典枚举/端口扫描/内容提取）与置信度如实标注；禁止只在文字总结里记发现——" +
+	"没入库 = 没发生。入库前先 list_assets 查重，不产生重复资产。\n" +
+	"- **被动优先**：被动源（证书透明/搜索引擎/公开档案/测绘反查）没榨干之前不发起任何主动探测；" +
+	"主动动作一次只对一个目标、限速进行，遇 429/封锁退避等待，绝不加倍重试。\n" +
+	"- **每轮以 insert_assets 为主要产出**：收工前先盘点本轮发现全部入库，再按通用纪律写 record_fact " +
+	"（含否定结论）；发现疑似漏洞只写 record_fact 交规划者，**不调 report_finding、不验证**。\n" +
+	"- **范围外只记录不探测**：任务范围外的资产登记时如实标注，不解析、不访问、不枚举。\n" +
+	"- **指纹不确定标 uncertain**：一切结论必须有工具原始输出为证据，禁止编造。"
+
+// workerCategoryDiscipline 按任务类别名返回要追加进 worker 系统提示词的纪律段。
+//
+// 纯函数（无 IO、无 LLM），表驱动单测钉住：资产收集 → 纪律段；其它类别/未分类 → ""。
+// 类别名按 nkey 口径比较（折叠空白+小写，db.SameTaskCategoryName），与 task_categories
+// 唯一键同一口径——用户改名「资产收集」为「资产收集 」不影响判定，改成别的名字则
+// 是显式选择、纪律随之不注入。
+func workerCategoryDiscipline(categoryName string) string {
+	if db.SameTaskCategoryName(categoryName, db.TaskCategoryAssetCollection) {
+		return workerReconDiscipline
+	}
+	return ""
+}
+
+// workerCategoryDisciplineOf returns the per-run resolver handed to the worker:
+// it reads the task's LIVE category name each run (lifecycleMu-guarded), so
+// re-categorizing a running task via SetTaskCategory re-targets the next intent
+// without rebuilding the agent bundle.
+func (s *Server) workerCategoryDisciplineOf(t *Task) func() string {
+	return func() string {
+		return workerCategoryDiscipline(t.lifecycleSnapshot().CategoryName)
+	}
+}
+
 func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	s.taskAgentMu.Lock()
 	defer s.taskAgentMu.Unlock()
@@ -571,6 +659,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetCategoryDiscipline(s.workerCategoryDisciplineOf(t)) // 任务类别纪律段(资产收集类追加,每轮读)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
@@ -588,6 +677,13 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
+	// P4 fact 三态：mainagent lane 是复核槽位（异层——facts 由 worker 产出，复核
+	// 决不落在产出者手里）。转移本体是 db.SetFactState 的确定性层。
+	if store := t.Store; store != nil {
+		main.SetFactStateReviewer(func(factID int64, state, reason, reviewer string) error {
+			return store.SetFactState(factID, state, reason, reviewer)
+		})
+	}
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)

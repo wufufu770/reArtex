@@ -50,6 +50,10 @@ type Task struct {
 	// list_untested_assets、态势里不注入 coverage 块(scope 字段仍保留)。company 关联
 	// (task_scope kind=company)与此开关无关，永不受影响。见 db/task_scope.go。
 	CoverageEnabled bool `json:"coverage_enabled"`
+	// ScopeConfigured 是「seed 是否给任务配好了 scope」(方案 v3 缺陷 H1)。默认 true;
+	// seed 解析不出目标且任务无 company scope 时置 false(任务详情横幅数据源)。
+	// 后续任何 scope 写入(task_scope 行 / 任务资产挂靠)自动翻回 true。
+	ScopeConfigured bool `json:"scope_configured"`
 }
 
 // TaskDeleteResult reports optional related-data cleanup performed in the same
@@ -388,11 +392,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), COALESCE(scope_configured,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ScopeConfigured, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil
@@ -402,6 +406,28 @@ func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 // SetParentRef records a task's parent task id (编排 agent spawn_task 关联).
 func (d *DB) SetParentRef(id int64, parentRef string) error {
 	_, err := d.Exec(`UPDATE tasks SET parent_ref=NULLIF($2,'') WHERE id=$1`, id, parentRef)
+	return err
+}
+
+// MarkTaskScopeConfigured 把任务的 scope_configured 翻回 true（方案 v3 缺陷 H1）。
+//
+// seed 失败置 false 后，任何后续 scope 写入（task_scope 行 / 任务资产挂靠）都调
+// 这里消横幅——横幅只说「创建时没配上 scope」，人补配后必须自动消失。
+// best-effort：翻不动不影响主写（横幅多显示一次不是数据错误）。
+func (d *DB) MarkTaskScopeConfigured(taskID int64) {
+	if taskID <= 0 {
+		return
+	}
+	_, _ = d.Exec(`UPDATE tasks SET scope_configured=true WHERE id=$1 AND NOT scope_configured`, taskID)
+}
+
+// SetTaskScopeConfigured 写 scope_configured 全值（seed 失败路径用 false；
+// MarkTaskScopeConfigured 是它的单向 true 特例，供 scope 写入点复用）。
+func (d *DB) SetTaskScopeConfigured(taskID int64, configured bool) error {
+	if taskID <= 0 {
+		return fmt.Errorf("task id 必须为正")
+	}
+	_, err := d.Exec(`UPDATE tasks SET scope_configured=$2 WHERE id=$1`, taskID, configured)
 	return err
 }
 

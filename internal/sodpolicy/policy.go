@@ -90,10 +90,14 @@ const (
 const (
 	// NormalizerTimeoutSeconds 是规整器（LLM）的同步调用上限。
 	//
-	// 一次规整往返的典型耗时是 1–4 秒（短提示 + 短 JSON 输出 + temperature=0），
-	// 20 秒留了约 5 倍余量：宁可慢一点把意图规整清楚，也不要在超时后放行一个
-	// 没被规整过的动作（超时是 fail-closed 拒绝，不是放行）。
-	NormalizerTimeoutSeconds = 20
+	// 一次规整往返的典型耗时是 1–4 秒（短提示 + 短 JSON 输出 + temperature=0）。
+	// 原值 20s 按「典型 1-4s × 5 倍余量」推导，但实测（v0.4.11 联动测试，
+	// mimo 网关 hy3）约一半规整调用超过 20s（llm_records 连续 context deadline
+	// exceeded，此前实测均值 17.8s）——网关延迟分布远比「典型」宽。超时是
+	// fail-closed 拒绝 ⇒ 每次超时都把一个正常动作打成拒绝并逼 worker 重试整轮。
+	// 提到 45s：仍远小于 worker 单轮预算，排队等待已被信号量隔离在超时之外，
+	// 这里只管模型往返本身。
+	NormalizerTimeoutSeconds = 45
 
 	// NormalizerMaxTokens 是规整器输出的 token 上限。
 	//
@@ -148,6 +152,14 @@ const (
 //
 // ⚠️ 平台只读那 5 个必须是 agent.Tier1ReadOnlyTools 的【子集】
 // （agent/approval_policy.go:37-43）—— 由 agent/sod_worker_prompt_test.go 断言。
+//
+// 方案 v3 缺陷 B1 扩容：清单原来只放行 5 个平台只读工具，于是
+// get_worker_trace / list_progress_receipts 这类【平台自己的只读/记账工具】
+// 也进链 → 被判 Tier3「未登记工具」→ 依赖规整器 → 规整器一抖全被拒
+// （远程实测一次任务 16 次 get_worker_trace 全 deny）。扩容只加两类：
+// 平台只读（图/链路/目标的读侧）与平台结构化记账（写的事实在任务图内，
+// 由 gate 的任务目录/写宿主检查兜底）。Bash/Write/MCP/自定义工具一律不进
+// 这份清单——它们仍走完整链。
 var NotGatedTools = []string{
 	// 本地只读：不派生进程、不外发、不改平台状态。
 	"Read", "LS", "Glob",
@@ -156,6 +168,15 @@ var NotGatedTools = []string{
 	"graph_overview", "list_untested_assets",
 	// 纯记账。
 	"TodoWrite", "Sleep",
+	// 平台只读扩容（B1）：探索图/执行链路的读侧与检索类。
+	// ⚠️ 交互 shell 全家族（shell_open/shell_send/shell_read/shell_close…）**不**
+	// 放行——internal/sod/sod_safety_pins_test.go 把「命令执行类必须进链」钉成
+	// 生死线，shell_read 虽只读输出缓冲，也随家族一起保持受管。
+	"get_worker_trace", "get_worker_output", "search_all_worker_traces",
+	"node_detail", "expand_digest", "list_goals", "recall_memory",
+	"list_companies",
+	// 平台结构化记账（B1）：写侧目标固定在任务图/回执表，不触宿主 FS、不出网。
+	"record_fact", "record_progress", "list_progress_receipts",
 }
 
 // NormalizerAgentKey 是意图规整 agent 的规范 key。
@@ -168,3 +189,8 @@ const NormalizerAgentKey = "intent_normalizer"
 //
 // 对抗证伪必须由**对抗者**做：needs_review 交回给提出者复核等于自证。
 const RedteamAgentKey = "redteam"
+
+// AuditorAgentKey 是合并闸裁决岗（auditor）的规范 agent key（方案 v4.1 §3）：
+// 它只提议不执行——裁决是写一条记录，不是替跑命令；它的每次裁决在审计里
+// 能被单独指认。
+const AuditorAgentKey = "auditor"
