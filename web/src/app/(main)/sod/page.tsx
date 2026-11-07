@@ -4,7 +4,7 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { GavelIcon, ScrollTextIcon } from "lucide-react";
+import { GavelIcon, MonitorPlayIcon, ScrollTextIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { SodShadowCard } from "@/components/sod-shadow-card";
@@ -232,11 +232,19 @@ export default function SodLedgerPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
-      <div>
-        <h1 className="font-semibold text-xl tracking-tight">职责分离链 · 决策账本</h1>
-        <p className="text-muted-foreground text-sm">
-          每一次工具裁决的完整留痕 · 放行 / 拒绝 / 待证伪 · 账本是只读的审计记录，没有重判入口
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="font-semibold text-xl tracking-tight">职责分离链 · 决策账本</h1>
+          <p className="text-muted-foreground text-sm">
+            每一次工具裁决的完整留痕 · 放行 / 拒绝 / 待证伪 · 账本是只读的审计记录，没有重判入口
+          </p>
+        </div>
+        {/* v6 主题 A：实时裁决大屏（三列，可挂副屏）的入口 */}
+        <Button asChild variant="outline">
+          <Link href="/sod/screen">
+            <MonitorPlayIcon /> 裁决大屏
+          </Link>
+        </Button>
       </div>
 
       <SodNav current="decisions" />

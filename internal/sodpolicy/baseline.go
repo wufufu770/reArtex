@@ -260,4 +260,6 @@ const (
 	RecognizeMCPCall        = "mcp_call"
 	RecognizeAssetInsert    = "asset_insert"
 	RecognizeFindingWrite   = "finding_write"
+	RecognizeBruteForce     = "brute_force"
+	RecognizeTargetWrite    = "target_write"
 )

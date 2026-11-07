@@ -33,6 +33,12 @@ const (
 	ClassUnclear        ClassKind = "unclear"
 )
 
+// bruteForceCmdRe 是爆破类命令特征（v6 主题 C，用户拍板到人工）：登录爆破
+// 工具 + 目录暴破的高速率形态（带字典/高并发）。低速率单目标目录枚举
+// （无字典参数的 gobuster/dirb）不算——归渗透测试动作。
+var bruteForceCmdRe = regexp.MustCompile(`(?i)(?:hydra|medusa|patator|ncrack|crowbar|brutespray)|(?:(?:ffuf|gobuster|dirb|dirsearch|wfuzz|feroxbuster|dirsearch)[^;
+]*(?:-w|--wordlist|-W|-D\s+\w+|rockyou|seclists))|spray[-_]?password`)
+
 // ClassResult 是分类的完整产物（审计与种类匹配都要用）。
 type ClassResult struct {
 	Kind ClassKind
@@ -45,6 +51,10 @@ type ClassResult struct {
 	OutsidePaths []string
 	// InnerTool 是 ExecuteExtraTool 里包着的真实工具名。
 	InnerTool string
+	// BruteForce 标记爆破类调用（命令面特征：登录爆破工具/带字典的目录暴破）。
+	BruteForce bool
+	// TargetWrite 标记对目标的写动作（POST/PUT/上传形态且带远端目标）。
+	TargetWrite bool
 }
 
 // stateChangeTools 是任务状态迁移工具（裁决写）：工具名即判定，无需看载荷。
@@ -103,10 +113,22 @@ func Classify(taskID int64, tool string, payload []byte, intelSource func(host s
 		// 不隐含放行。
 	}
 
+	// --- ②.5 爆破（用户拍板到人工；在基线之后、一切放行之前）。 ---
+	if commandBearer(tool) {
+		cmd := extractCommandField(text)
+		res.BruteForce = bruteForceCmdRe.MatchString(cmd)
+	}
+
 	// --- ③ 出网目标提取 + 形态判定。 ---
 	hosts := extractHosts(text)
 	res.Hosts = hosts
 	res.HTTPGet, res.DNSQuery = egressShape(tool, text)
+	// 对目标的写动作（POST/PUT/上传形态 + 有远端目标）——用户拍板到人工，
+	// 与是否在段内无关（授权面内写入也该过人）。
+	if commandBearer(tool) && len(hosts) > 0 {
+		cmd := extractCommandField(text)
+		res.TargetWrite = httpNotGetRe.MatchString(cmd)
+	}
 
 	// --- ④ 路径出界分析。 ---
 	outside := outsidePaths(taskID, text)

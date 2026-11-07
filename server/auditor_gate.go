@@ -33,7 +33,8 @@ import (
 
 // ---------- 并发闸（形态照抄 normalizerSema）----------
 
-var auditorSema = make(chan struct{}, 2)
+// cap 6（v6 B1 提量）：快模型批量裁决吞吐 ≈ 20+ 次/分钟，覆盖渗透峰值。
+var auditorSema = make(chan struct{}, 6)
 
 // ---------- 裁决缓存 ----------
 
@@ -89,16 +90,22 @@ func (c *auditorCache) put(k string, v sod.AuditorVerdict) {
 // ---------- 裁决岗 ----------
 
 // auditorPrompt 是裁决岗的系统提示词（内置兜底；DB 可覆盖，见 auditorPromptOf）。
-const auditorPrompt = `你是渗透测试平台的审计裁决岗（auditor）。平台把一次待裁决的工具调用交给你，你的职责：按任务目标与授权范围判断这次调用该放行（pass）、拒绝（deny）还是升级人工确认（ask）。
+const auditorPrompt = `你是渗透测试平台的审计裁决岗（auditor）。平台把一次待裁决的工具调用交给你，你的职责：判断这次调用是否【有利于漏洞挖掘且在授权范围内】，据此给出裁决。
+
+裁决哲学（v6，用户拍板）：
+- **渗透测试的绝大部分动作都该放行**：探测、扫描、枚举、指纹、目录遍历（低速率）、爬取、情报查询、漏洞探测 payload——只要目标是授权范围内或公开情报源，一律 pass。
+- **只有三类必须 ask（人工确认）**：① 对目标系统的写入（上传/创建资源/改配置）；② 爆破类（登录爆破/高速率暴破）；③ 授权边界变更（root_domain/公司级扩权）。删除/破坏类到不了你这里（锁定基线硬拦）。
+- **deny 只用于**：明显与任务无关的乱窜（探测平台自身、无关第三方）、以及有凭据外传/数据外泄痕迹的调用。
+- exploit_relevance 字段：判断该调用对漏洞挖掘的相关度（high=直接探测/验证漏洞面，medium=信息收集铺垫，none=与挖掘无关）——none 且不在情报源语义里的调用才考虑 deny。
 
 原则（按序）：
-1. 锁定基线（删除/破坏、平台凭据、平台自身配置）永远到不了你这里——你无需也无法放行它们。
-2. 不确定就 ask：宁可让多疑的人看一眼，也不猜。绝不编造目标或意图。
-3. deny 必须给可读理由与改道建议（worker 能看懂为什么、该怎么调整）。
-4. 高危疑似（凭据外传痕迹、破坏征兆、明显与任务无关的探测）→ anomaly_flag=true 并说明。
-5. 若你反复裁决同一形状的调用，用 suggest_category 建议把它沉淀为拦截种类（确定性规则），减少未来问你的次数。
+1. 锁定基线（删除/破坏、平台凭据、平台自身配置）永远到不了你这里。
+2. 不确定就 ask，但「不确定」的门槛是三类人工动作之外的真实疑点——不要把正常的渗透探测当成疑点。
+3. deny 必须给可读理由与改道建议。
+4. 高危疑似（凭据外传、破坏征兆、平台内省）→ anomaly_flag=true 并说明。
+5. 反复裁决同一形状时用 suggest_category 沉淀为拦截种类。
 
-输出契约：恰好一次 sod_auditor_verdict 工具调用。verdict 只能是 pass|deny|ask；reason 用中文一句话；pass 时 target_hint 给出本次调用的目标（域名/IP/路径），供范围审计。`
+输出契约：恰好一次 sod_auditor_verdict 工具调用。verdict 只能是 pass|deny|ask；reason 用中文一句话；pass 时 target_hint 给出目标；exploit_relevance 填 high|medium|none。`
 
 // auditorVerdictSchema 是裁决的工具调用契约。
 func auditorVerdictSchema() llm.ToolSchema {
@@ -108,13 +115,14 @@ func auditorVerdictSchema() llm.ToolSchema {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"verdict":        map[string]any{"type": "string", "enum": []string{"pass", "deny", "ask"}},
-				"reason_code":    map[string]any{"type": "string"},
-				"reason":         map[string]any{"type": "string"},
-				"category":       map[string]any{"type": "string"},
-				"target_hint":    map[string]any{"type": "string"},
-				"anomaly_flag":   map[string]any{"type": "boolean"},
-				"anomaly_reason": map[string]any{"type": "string"},
+				"verdict":           map[string]any{"type": "string", "enum": []string{"pass", "deny", "ask"}},
+				"reason_code":       map[string]any{"type": "string"},
+				"reason":            map[string]any{"type": "string"},
+				"category":          map[string]any{"type": "string"},
+				"target_hint":       map[string]any{"type": "string"},
+				"exploit_relevance": map[string]any{"type": "string", "enum": []string{"high", "medium", "none"}},
+				"anomaly_flag":      map[string]any{"type": "boolean"},
+				"anomaly_reason":    map[string]any{"type": "string"},
 				"suggest_category": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -171,9 +179,9 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 	case <-ctx.Done():
 		return sod.AuditorVerdict{}, fmt.Errorf("等待 auditor 并发槽时调用方取消: %w", ctx.Err())
 	}
-	// 45s：与 normalizer 同档——快模型在网关抖动时 20s 会被砍（实测），
-	// 超时→fallback ask→worker 步骤预算内等不到人→deny，等于 auditor 形同虚设。
-	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	// 30s（v6 B2 提速）：glm-5.3-flash 实测中位 ~7s；30s 兜底足够，超时更快
+	// 转下一通道（种类 fallback→ask），不让 worker 在单次裁决上吊死。
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	// 重入标记：auditor 自己的模型调用不得再进链。
 	cctx = sod.WithReentrancy(cctx)
@@ -230,14 +238,15 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 		return sod.AuditorVerdict{}, fmt.Errorf("auditor 输出不合规（tool_uses=%d）", len(uses))
 	}
 	var raw struct {
-		Verdict         string `json:"verdict"`
-		ReasonCode      string `json:"reason_code"`
-		Reason          string `json:"reason"`
-		Category        string `json:"category"`
-		TargetHint      string `json:"target_hint"`
-		AnomalyFlag     bool   `json:"anomaly_flag"`
-		AnomalyReason   string `json:"anomaly_reason"`
-		SuggestCategory *struct {
+		Verdict          string `json:"verdict"`
+		ReasonCode       string `json:"reason_code"`
+		Reason           string `json:"reason"`
+		ExploitRelevance string `json:"exploit_relevance"`
+		Category         string `json:"category"`
+		TargetHint       string `json:"target_hint"`
+		AnomalyFlag      bool   `json:"anomaly_flag"`
+		AnomalyReason    string `json:"anomaly_reason"`
+		SuggestCategory  *struct {
 			Name    string `json:"name"`
 			Pattern string `json:"pattern"`
 			Action  string `json:"action"`
@@ -252,15 +261,16 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 		return sod.AuditorVerdict{}, fmt.Errorf("auditor verdict 非法: %q", raw.Verdict)
 	}
 	out := sod.AuditorVerdict{
-		Verdict:       verdict,
-		ReasonCode:    firstNonEmptyStr(raw.ReasonCode, "auditor_"+verdict),
-		Reason:        strings.TrimSpace(raw.Reason),
-		Category:      strings.TrimSpace(raw.Category),
-		TargetHint:    strings.TrimSpace(raw.TargetHint),
-		AnomalyFlag:   raw.AnomalyFlag,
-		AnomalyReason: strings.TrimSpace(raw.AnomalyReason),
-		DecidedBy:     "auditor",
-		LatencyMs:     latency,
+		Verdict:          verdict,
+		ExploitRelevance: strings.TrimSpace(raw.ExploitRelevance),
+		ReasonCode:       firstNonEmptyStr(raw.ReasonCode, "auditor_"+verdict),
+		Reason:           strings.TrimSpace(raw.Reason),
+		Category:         strings.TrimSpace(raw.Category),
+		TargetHint:       strings.TrimSpace(raw.TargetHint),
+		AnomalyFlag:      raw.AnomalyFlag,
+		AnomalyReason:    strings.TrimSpace(raw.AnomalyReason),
+		DecidedBy:        "auditor",
+		LatencyMs:        latency,
 	}
 	s.recordAuditorLLM(req, out, latency)
 	if out.Reason == "" {

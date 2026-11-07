@@ -1144,6 +1144,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sod/decisions", s.sodDecisionList)
 	mux.HandleFunc("POST /api/sod/decisions/{id}/review", s.sodDecisionReview)
 	s.registerSodCategoryRoutes(mux)
+	s.registerSodFeedRoutes(mux)
 	mux.HandleFunc("GET /api/sod/overrides", s.sodOverrideList)
 	mux.HandleFunc("GET /api/sod/review-queue", s.sodReviewQueue)
 	mux.HandleFunc("GET /api/sod/circuit", s.sodCircuitList)

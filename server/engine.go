@@ -147,6 +147,9 @@ type Engine struct {
 
 	// C4 停滞闸：per-task 的零产出意图计数与收尾评估状态（进程内；重启即清，
 	// 计数从新任务的实际行为重新累积）。
+	// D2 三门收敛：任务级「最近结论物入账」时刻 + 意图延期计数（软着陆）。
+	lastConclusionAt map[string]time.Time
+	intentExtends    map[string]int
 	stagnationMu sync.Mutex
 	stagnation   map[string]*taskStagnation
 
@@ -1316,18 +1319,83 @@ func (e *Engine) stagnationOf(taskID string) *taskStagnation {
 	return st
 }
 
+// intentExtendBudget 是软着陆的延期上限（v6 用户拍板：3 次，每次满预算重开）。
+const intentExtendBudget = 3
+
+// tryExtendActiveIntent 判定「预算到线但正要出成果」的意图是否延期续跑：
+// 本轮有有效写回（事实/资产/finding 至少一项）且延期未超限 ⇒ 意图转回 open、
+// 播报延期、返回 true（调用方跳过 exhausted 落库）。
+func (e *Engine) tryExtendActiveIntent(t *Task, intentID int64, wrote agent.WriteCounts, workerName string, reason harness.TerminalReason) bool {
+	if wrote.Facts+wrote.Assets+wrote.Findings <= 0 {
+		return false // 本轮零产出：照旧 exhausted
+	}
+	e.stagnationMu.Lock()
+	if e.intentExtends == nil {
+		e.intentExtends = map[string]int{}
+	}
+	key := t.ID + ":" + fmt.Sprintf("%d", intentID)
+	if e.intentExtends[key] >= intentExtendBudget {
+		e.stagnationMu.Unlock()
+		return false
+	}
+	e.intentExtends[key]++
+	n := e.intentExtends[key]
+	e.stagnationMu.Unlock()
+	if err := transitionIntentState(t.Store, intentID, "running", "open"); err != nil {
+		log.Printf("[extend] task %s intent %d 转回 open 失败（照旧 exhausted）: %v", t.ID, intentID, err)
+		return false
+	}
+	why := "步数上限"
+	if reason == harness.ReasonTimeout {
+		why = "运行超时"
+	}
+	summary := fmt.Sprintf("【意图延期】意图 #%d 在 %s 到线前仍有持续产出（本轮写回 %s），已重开续跑（第 %d/%d 次延期）——有收获就让它跑完", intentID, why, wrote.String(), n, intentExtendBudget)
+	log.Printf("[extend] task %s %s", t.ID, summary)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
+	return true
+}
+
+// recentConclusionWindow 是三门收敛的「产出期」窗口：任务在该窗口内有过
+// 结论物写回 ⇒ 零产出到线不立即收尾。
+const recentConclusionWindow = 20 * time.Minute
+
+// recentConclusion 报告任务最近是否有结论物入账（锁外查询——调用方持有
+// stagnationMu，这里只读内存时间戳）。
+func (e *Engine) recentConclusion(t *Task) bool {
+	e.stagnationMu.Lock()
+	last, ok := e.lastConclusionAt[t.ID]
+	e.stagnationMu.Unlock()
+	return ok && time.Since(last) < recentConclusionWindow
+}
+
 // noteIntentWriteBack 是 C4 的记账点：意图终态收尾时按写回量更新停滞状态。
 // 有效写回（>0）清零并退出收尾评估；零产出递增，达阈值进收尾评估并注入
 // 【收尾评估】触发（planner 本轮允许 conclude/0 意图——C5 的例外）。
 func (e *Engine) noteIntentWriteBack(t *Task, wrote agent.WriteCounts) {
 	st := e.stagnationOf(t.ID)
 	e.stagnationMu.Lock()
+	if e.lastConclusionAt == nil {
+		e.lastConclusionAt = map[string]time.Time{}
+	}
 	if wrote.Total() > 0 {
 		*st = taskStagnation{} // 任何有效写回清零（真有进展的任务永不被误杀）
+		if wrote.Findings+wrote.Assets > 0 {
+			// D2 三门收敛：结论物（finding/资产）入账时刻——收尾判定的
+			// 「产出期」依据（事实量大不等于接近结论，结论物才算）。
+			e.lastConclusionAt[t.ID] = time.Now()
+		}
 		e.stagnationMu.Unlock()
 		return
 	}
 	st.zeroWrites++
+	// D2 三门收敛（d2d 借鉴）：零产出计数到线 ≠ 立即收尾——任务近期有过
+	// 结论物入账（finding/资产/事实）说明整体仍在产出期，「有 churn 不关」。
+	// 推迟本轮判定，不重置计数（连续性还在）。
+	if st.zeroWrites >= stagnationThreshold && !st.wrapup && e.recentConclusion(t) {
+		log.Printf("[stagnation] task %s 零产出到线但近期有结论物入账——收尾判定推迟（三门收敛）", t.ID)
+		e.stagnationMu.Unlock()
+		return
+	}
 	if st.zeroWrites < stagnationThreshold || st.wrapup {
 		e.stagnationMu.Unlock()
 		return
@@ -1855,10 +1923,18 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
+	// D1 活跃度软着陆（方案 v6，d2d 借鉴）：预算到线但本轮有有效写回（正要出
+	// 成果）⇒ 不掐——意图转回 open 由下一个 worker 带满预算续跑，最多延 3 次；
+	// 二次到线仍零写回才真的 exhausted。
 	state := "done"
 	switch {
 	case err != nil:
 		state = "blocked"
+	case (reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout) && e.tryExtendActiveIntent(t, intent.ID, wrote, name, reason):
+		// 已延期重开：跳过 exhausted 落库（意图已在 tryExtend 里转回 open），
+		// 本步返回 true（认领循环继续），记账照跑。
+		e.noteIntentWriteBack(t, wrote)
+		return true
 	case reason == harness.ReasonMaxTurns:
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)

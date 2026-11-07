@@ -148,7 +148,9 @@ func (d *DB) SeedSodCategories() error {
 		{Name: "目录外写", Kind: "builtin", Pattern: sodpolicy.RecognizeOutsideWrite, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 5, Fallback: "ask", Enabled: true, Priority: 60, Reason: "写宿主 FS 任务目录外（/tmp、/app/data/sessions 除外）"},
 		{Name: "敏感面读取", Kind: "builtin", Pattern: sodpolicy.RecognizeSensitiveRead, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 10, Fallback: "ask", Enabled: true, Priority: 65, Reason: "读宿主敏感面（/etc/shadow、~/.ssh 等；平台凭据由 pathguard 硬拦）"},
 		{Name: "状态迁移", Kind: "builtin", Pattern: sodpolicy.RecognizeStateChange, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 3, Fallback: "ask", Enabled: true, Priority: 60, Reason: "prove_goal/kill_work/goal_met 任务状态迁移"},
-		{Name: "大扩权", Kind: "builtin", Pattern: sodpolicy.RecognizeScopeExpansion, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 8, Fallback: "ask", Enabled: true, Priority: 60, Reason: "root_domain/company 扩权（subdomain 级仍走预算内直写）"},
+		{Name: "大扩权", Kind: "builtin", Pattern: sodpolicy.RecognizeScopeExpansion, Action: sodpolicy.CategoryActionAsk, CapPerTask: 0, Fallback: "deny", Enabled: true, Priority: 60, Reason: "root_domain/company 扩权=授权边界变更，由人工拍板（v6 用户拍板）"},
+		{Name: "爆破", Kind: "builtin", Pattern: sodpolicy.RecognizeBruteForce, Action: sodpolicy.CategoryActionAsk, CapPerTask: 0, Fallback: "deny", Enabled: true, Priority: 88, Reason: "登录爆破/高速率目录暴破到人工（v6 用户拍板）；低速率目录枚举不在此列"},
+		{Name: "目标写入", Kind: "builtin", Pattern: sodpolicy.RecognizeTargetWrite, Action: sodpolicy.CategoryActionAsk, CapPerTask: 0, Fallback: "deny", Enabled: true, Priority: 85, Reason: "对目标的写动作（POST/PUT/上传）到人工；平台资产库写入不在此列（pass）"},
 		{Name: "出网新主机", Kind: "builtin", Pattern: sodpolicy.RecognizeEgressNewHost, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 10, Fallback: "ask", Enabled: true, Priority: 60, Reason: "非情报源、非目标段的出网（决策点 1：deny→auditor/ask）"},
 		{Name: "MCP调用", Kind: "builtin", Pattern: sodpolicy.RecognizeMCPCall, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 0, Fallback: "ask", Enabled: true, Priority: 50, Reason: "MCP 任意名工具——不整体豁免，逐调用裁决"},
 	}

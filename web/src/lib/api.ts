@@ -95,6 +95,7 @@ import type {
   SodCategorySuggestion,
   SodCircuit,
   SodDecision,
+  SodFeed,
   SodMergedGateMode,
   SodReviewItem,
   SSProject,
@@ -1190,6 +1191,10 @@ export const api = {
   sodMergedGate: () => get<{ mode: SodMergedGateMode }>("/sod/merged-gate").then((r) => r.mode ?? "off"),
   setSodMergedGate: (mode: SodMergedGateMode, operator: string) =>
     post<{ ok: boolean; mode: SodMergedGateMode }>("/sod/merged-gate", { mode, operator }),
+
+  // 裁决大屏聚合 feed（方案 v6 主题 A）：recent + pending + stats + mode 一次拉全，
+  // 2s 轮询。决策动作不在这里——复用下面的 interceptDecide，不新开权限面。
+  sodFeed: () => get<SodFeed>("/sod/feed"),
 
   // 审计链校验。⚠️ 断链是**结论**（200 + intact=false），不是接口坏了 ——
   // 所以这里不把 intact=false 当异常抛出去。
