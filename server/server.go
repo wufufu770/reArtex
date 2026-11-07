@@ -720,6 +720,7 @@ func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, 
 // providerForProfileModelRaw 是不挂 Pool 的裸构建（Pool 成员构建专用——
 // 成员内部再嵌 Pool 会无限递归）。
 func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provider, agent.Config, bool) {
+	log.Printf("[boot] Raw(%d,%q) begin", id, model)
 	key := provKey{id: id, model: model}
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[key]; e != nil {
@@ -728,10 +729,12 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 	}
 	generation := s.provCacheGen
 	s.provCacheMu.Unlock()
+	log.Printf("[boot] Raw(%d) loadProfileConfig", id)
 	cfg, ok := s.loadProfileConfig(id)
 	if !ok {
 		return nil, agent.Config{}, false
 	}
+	log.Printf("[boot] Raw(%d) config loaded", id)
 	// E1：模型变体校验 + 覆盖。
 	if model != "" && model != cfg.Model {
 		found := false
