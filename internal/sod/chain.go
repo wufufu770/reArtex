@@ -742,6 +742,9 @@ func BashLocalTaskDir(taskID int64, payload []byte) bool {
 	found := false
 	for _, m := range localPathTokenRe.FindAllStringSubmatch(string(payload), -1) {
 		tok := m[1]
+		if harmlessSystemPath(tok) {
+			continue // stderr/stdout 重定向等 shell 常态不计入（v6.1 修复）
+		}
 		if tok != prefix && !strings.HasPrefix(tok, prefix+"/") {
 			return false // 任何一个出界路径 ⇒ 整体不豁免
 		}
