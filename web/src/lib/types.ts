@@ -1043,6 +1043,9 @@ export interface LLMProfile {
   name: string;
   format: "openai" | "anthropic" | "openai-responses";
   base_url?: string;
+  // 网关候选地址：完整候选列表（第一项 = 主地址，其余按序作为故障备选）。
+  // null/空 = 回落 base_url 单值（只用主地址）。后端未发版时缺省。
+  base_urls?: string[] | null;
   proxy?: string;
   model: string;
   models?: string[]; // E1 多模型：该 profile 可用模型列表（含默认模型）
@@ -1119,10 +1122,38 @@ export interface LLMPoolMember {
   last_at?: string;
 }
 
+// ---- LLM 网关候选地址（端点维度的探活与切换）----
+// 一个候选端点的探活状态。
+export interface LLMEndpointCandidate {
+  url: string;
+  alive: boolean; // true = 探活通过（绿点）；false = 不可达（红点）
+  latency_ms?: number;
+}
+
+// 一次端点自动切换的记录。
+export interface LLMEndpointSwitch {
+  at: string; // 切换时间
+  from: string; // 原端点
+  to: string; // 新端点
+  cause: string; // 切换原因（如 dial tcp 失败）
+}
+
+// 一个 profile 的端点维度状态：当前生效端点、候选红绿灯、最近切换（后端最多返回 20 条）。
+// candidates/switches 可缺省：Go 侧空列表会序列化成 null，按缺省处理。
+export interface LLMEndpointStatus {
+  profile_id: string;
+  current: string; // 当前生效端点
+  main: string; // 主地址（恢复回切目标）
+  candidates?: LLMEndpointCandidate[];
+  switches?: LLMEndpointSwitch[];
+}
+
 export interface LLMPoolStatus {
   enabled: boolean;
   bind_fallback: boolean;
   chain: LLMPoolMember[];
+  // 各 profile 的端点探活/切换状态（G1）。后端未发版时缺省，UI 优雅降级不渲染。
+  endpoints?: LLMEndpointStatus[];
 }
 
 // ---- Agents ----

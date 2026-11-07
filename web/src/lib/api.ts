@@ -1253,6 +1253,7 @@ export const api = {
     model: string;
     models?: string[]; // E1 多模型：该 profile 可用模型列表（含默认模型）
     base_url?: string;
+    base_urls?: string[]; // 网关候选地址：完整候选列表（第一项 = 主地址）；空数组 = 只用 base_url
     proxy?: string;
     api_key?: string; // blank on update keeps the existing key
     rate_per_second?: number;
