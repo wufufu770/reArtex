@@ -36,7 +36,7 @@ const (
 // bruteForceCmdRe 是爆破类命令特征（v6 主题 C，用户拍板到人工）：登录爆破
 // 工具 + 目录暴破的高速率形态（带字典/高并发）。低速率单目标目录枚举
 // （无字典参数的 gobuster/dirb）不算——归渗透测试动作。
-var bruteForceCmdRe = regexp.MustCompile(`(?i)(?:hydra|medusa|patator|ncrack|crowbar|brutespray)|(?:(?:ffuf|gobuster|dirb|dirsearch|wfuzz|feroxbuster|dirsearch)[^;
+var bruteForceCmdRe = regexp.MustCompile(`(?i)(?:hydra|medusa|patator|ncrack|crowbar|brutespray)|(?:(?:ffuf|gobuster|dirb|dirsearch|wfuzz|feroxbuster|dirsearch)[^;
 ]*(?:-w|--wordlist|-W|-D\s+\w+|rockyou|seclists))|spray[-_]?password`)
 
 // ClassResult 是分类的完整产物（审计与种类匹配都要用）。
@@ -100,6 +100,39 @@ var harmlessSystemPaths = map[string]bool{
 	"/dev/fd": true,
 }
 
+// dotSegmentToken 报告 token 是「纯点段」伪路径（v6.2 修复：sed 's#/.*##'
+// 里的 `/.` 被 localPathTokenRe 抽成绝对路径 token → 误判出界。真路径的
+// 段不会只有点——/. 与 /.. 在 shell 里也是琐碎物）。
+func dotSegmentToken(tok string) bool {
+	rest := strings.TrimPrefix(tok, "/")
+	if rest == "" {
+		return true
+	}
+	for _, seg := range strings.Split(rest, "/") {
+		nonDot := false
+		for _, ch := range seg {
+			if ch != '.' {
+				nonDot = true
+				break
+			}
+		}
+		if !nonDot {
+			return true
+		}
+	}
+	return false
+}
+
+// readOnlyCommand 报告命令面是否【无写指示符】（v6.2：读侧命令——ls/cat/
+// grep/head/python 读脚本等——对任务目录外的路径只读不写，按用户哲学
+// 「读尽量放行」，不判 outside_write；写指示符（> >> tee mv cp ln rm dd
+// shred chmod）出现才走 outside_write。
+var cmdWriteIndicatorRe = regexp.MustCompile(`(?:^|[;&|]\s*|sudo\s+|nohup\s+)(?:>{1,2}|tee|mv|cp|ln|rm|shred|dd|chmod|chown|truncate)|(?:rm|shred|dd|chmod|chown)`)
+
+func readOnlyCommand(cmd string) bool {
+	return !cmdWriteIndicatorRe.MatchString(cmd)
+}
+
 func harmlessSystemPath(tok string) bool {
 	if harmlessSystemPaths[tok] {
 		return true
@@ -156,8 +189,14 @@ func Classify(taskID int64, tool string, payload []byte, intelSource func(host s
 		res.TargetWrite = httpNotGetRe.MatchString(cmd)
 	}
 
-	// --- ④ 路径出界分析。 ---
+	// --- ④ 路径出界分析（v6.2：读侧命令不判 outside_write——ls/cat/grep
+	// 等对任何路径都只是「看」，越界读交给敏感面种类与锁定基线兜底）。 ---
 	outside := outsidePaths(taskID, text)
+	if len(outside) > 0 && commandBearer(tool) && readOnlyCommand(extractCommandField(text)) && sodpolicy.SensitiveHit([]byte(text)) == "" {
+		// 读侧命令且不触敏感面 ⇒ 出界路径只是「看一眼」，不判写越界
+		// （敏感面读取保留 outside 判定 → sensitive_read 种类 → auditor）。
+		outside = nil
+	}
 	res.OutsidePaths = outside
 
 	// --- ⑤ 汇总判定（顺序即优先级）。 ---
@@ -320,7 +359,7 @@ func outsidePaths(taskID int64, text string) []string {
 				break
 			}
 		}
-		if temp || harmlessSystemPath(tok) {
+		if temp || harmlessSystemPath(tok) || dotSegmentToken(tok) {
 			continue
 		}
 		out = append(out, tok)
