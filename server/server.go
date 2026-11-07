@@ -210,7 +210,6 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.engine.DenialWatcher = s.onToolDenial
 	go s.RunSupervisionLoop(s.ctx)
 	s.engine.AuditSummary = s.emitAuditSummary
-	log.Printf("[boot] pre-loadTaskSessionBindings")
 	s.loadTaskSessionBindings()
 	log.Printf("[boot] loadTaskSessionBindings ok")
 	s.initSideQuestions()
@@ -301,41 +300,31 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// = 所有工具调用都不受管 ⇒ 那是**比没有这个特性更危险**的状态（制造虚假
 		// 安全感）。宁可启动失败，让部署方看到明确原因。
 		sod.SetContextReader(agent.SodContextReader)
-		log.Printf("[boot] installSoDChain begin")
-		if err := s.installSoDChain(); err != nil {
+			if err := s.installSoDChain(); err != nil {
 			log.Fatalf("[sod] 安装 SoD 链失败: %v", err)
 		}
-		log.Printf("[boot] installSoDChain ok")
-		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
-		log.Printf("[boot] seedOrchestrationTools ok")
-		if err := s.seedFindingRetester(); err != nil {
+			s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+			if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
-		log.Printf("[boot] seedFindingRetester ok")
-		go s.evidenceStore().RunGC(s.ctx)
+			go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		log.Printf("[boot] seedPythonInterpreter ok")
-		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
-		log.Printf("[boot] scheduler started")
-		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
+			go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+			// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
 		go newNotifier(s).Run(s.ctx)
-		log.Printf("[boot] notifier started")
-		// Fill the tool cache for any enabled MCP that has none yet (notably the
+			// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
-	log.Printf("[boot] loadLLMConfig begin")
 	if cfg, ok := s.loadLLMConfig(); ok {
-		log.Printf("[boot] loadLLMConfig returned ok")
-		if err := s.applyLLM(cfg); err != nil {
+			if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] saved LLM config init failed — engine idle: %v", err)
 		} else {
 			log.Printf("[engine] LLM configured from DB: %s / %s", cfg.Provider(), cfg.Model)
-		log.Printf("[boot] loadLLMConfig ok (db)")
-		}
+			}
 	} else if cfg, ok := agent.FromEnv(); ok {
 		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] env provider init failed — engine idle: %v", err)
@@ -427,7 +416,6 @@ func (s *Server) agentRunSeconds(key string) int {
 
 // loadLLMConfig reads the active LLM profile from PG (llm_profiles).
 func (s *Server) loadLLMConfig() (agent.Config, bool) {
-	log.Printf("[boot] llm: ActiveProfile query")
 	p, err := s.m.pg.ActiveProfile()
 	if err != nil || p == nil {
 		return agent.Config{}, false
@@ -544,8 +532,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && reflect.DeepEqual(activeCfg, cfg) {
 			log.Printf("[boot] applyLLM: resolving provider for profile %d", active.ID)
 			prov, _, _ = s.providerForProfile(active.ID)
-			log.Printf("[boot] applyLLM: provider resolved")
-		}
+				}
 	}
 	if prov == nil {
 		var err error
@@ -780,6 +767,40 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 		log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
 	}
 	s.provCacheMu.Unlock()
+	return prov, cfg, true
+}
+
+
+// providerForProfileBare 是 Pool 成员的专用裸构建（v5.3 G-A 防互递归）：
+// loadProfileConfig + NewProvider + 记录/配额包装，**不含** endpoint 候选链、
+// **不含** poolForBinding、**不写** provByProfile 缓存——Pool 成员构建期间
+// 绝不重入其它 profile 的构建（两 profile 互填备用地址时，经缓存/候选链的
+// 构建会互相触发、无限乒乓——v0.9.3 启动挂死实锤）。
+func (s *Server) providerForProfileBare(id int64) (llm.Provider, agent.Config, bool) {
+	p, err := s.m.pg.ProfileByID(id)
+	if err != nil || p == nil {
+		return nil, agent.Config{}, false
+	}
+	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg.Models = p.Models
+	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
+	cfg.ContextWindowK = p.ContextWindowK
+	cfg.ThinkingType = p.ThinkingType
+	cfg.ReasoningEffort = p.ReasoningEffort
+	cfg.Stream = p.Streaming
+	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
+	cfg.SessionHeaderKey = p.SessionHeaderKey
+	s.applyProfileRetry(&cfg, p)
+	if cfg.APIKey == "" {
+		return nil, agent.Config{}, false
+	}
+	cfg.SharedRateLimit = s.sharedRateLimitFor(id, cfg)
+	prov, err := cfg.NewProvider()
+	if err != nil {
+		return nil, agent.Config{}, false
+	}
+	prov = llmrec.Wrap(installQuotaGate(prov, s.sharedQuotaGate()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+	prov = bindSideProvider(prov, cfg, id, p.Name)
 	return prov, cfg, true
 }
 
