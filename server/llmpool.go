@@ -59,7 +59,7 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 // provider cache so every agent pointing at the same profile shares one provider
 // (hence one rate limiter). Returns nil when the profile can't be built.
 func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
-	prov, cfg, ok := s.providerForProfileModelRaw(p.ID, "")
+	prov, cfg, ok := s.providerForProfileBare(p.ID)
 	if !ok {
 		return nil
 	}
