@@ -304,3 +304,21 @@ func (d *DB) CountSodCategoryUsed(taskID int64, category string) (int, error) {
 		taskID, category).Scan(&n)
 	return n, err
 }
+
+// ActiveTaskIDsForSupervision 列非终态任务的 id（v7 监督环扫描用）。
+func (d *DB) ActiveTaskIDsForSupervision() ([]string, error) {
+	rows, err := d.Query(`SELECT id::text FROM tasks WHERE deleted_at IS NULL AND status IN ('created','running') AND NOT paused ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
