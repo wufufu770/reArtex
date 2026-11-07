@@ -23,10 +23,15 @@ import (
 // asciiCharsPerToken 是 ASCII 文本"字符数/token"的经验值（4）。
 const asciiCharsPerToken = 4
 
-// defaultOutputTokenEstimate 是请求未指定 max_tokens 时的输出侧估算。
+// defaultOutputTokenEstimate 是请求未指定 max_tokens 时的输出侧估算，同时也是
+// 输出侧估算的**上限**（maxOutputTokenEstimate）。
 //
-// 取值偏保守：预扣宁多勿少 —— 少扣会让并发调用一起越过预算线，多扣只是暂时
-// 占住额度（结算时按真实用量退回）。
+// 为什么要有上限（方案 v3 缺陷 C1）：请求侧的 MaxTokens 是「模型允许写多长」的
+// 上限（常见 32K），不是「这次会写多长」的期望。按上限整额预扣 × 重试预算，
+// 一次调用就预扣掉 98K+ —— 120K 的群组预算并发容量直接变成 1，planner+worker
+// 全部被假性拒绝。输出侧估算改成「未指定按 4096，指定了也不超过 4096」：
+//   - 长输出场景被低估 ⇒ 结算按真实 usage 调整（预扣只是并发闸，不是计费）；
+//   - 超预算的真实用量由结算负差额与账本口径兜住，这里不为它预支整个预算。
 const defaultOutputTokenEstimate = 4096
 
 // DefaultRetryBudget 是预扣时假定的「provider 内部重试」预算（重试次数）。
@@ -50,14 +55,13 @@ type QuotaEstimate struct {
 	OutputTokens int64
 }
 
-// EstimateTokens 估算一次模型调用要花的 token：输入侧估算 + 输出侧上限，
-// **再乘上重试预算**。
+// EstimateTokens 估算一次模型调用要花的 token：输入侧估算 + 输出侧上限。
 //
-// 重试预算为什么要乘进来：provider 内部的自动重试对闸门不可见 ⇒ 一次预扣
-// 可能对应多次真实请求 ⇒ 只按一次估算预扣会低估预算（见 DefaultRetryBudget）。
-// 乘的是**整份估算**（输入侧与输出侧一起乘），不是只乘总量：预扣行的
-// 输入/输出拆分是「请求已发出但没有 usage 返回」时按输入侧结算的依据，
-// 两边必须自洽（总量 = 输入 + 输出）。
+// 重试预算只乘**输入侧**（方案 v3 缺陷 C1）：重试重发的是整份输入，输出是每次
+// 独立产生的——但输出侧已按 4096 上限估，若再乘 attempts，一次 32K MaxTokens
+// 的调用会预扣 98K+，把普通群组预算的并发压成 1（假性额度耗尽的根因）。
+// 取舍：输出侧按单次 4096 上限计入（长输出被低估的部分由结算按真实 usage
+// 调整兜底——预扣只是并发闸，不是计费）。
 //
 // 估不出来（checkEstimable 拒绝的请求形态）必须**返回错误**：调用方按
 // fail-closed 拒绝这次调用。绝不能退回一个「尽力而为」的数 —— 那正是
@@ -68,21 +72,21 @@ func EstimateTokens(req llm.CompletionRequest, maxRetries int) (QuotaEstimate, e
 	}
 	input := estimateInputTokens(req)
 	output := int64(req.MaxTokens)
-	if output <= 0 {
+	if output <= 0 || output > defaultOutputTokenEstimate {
 		output = defaultOutputTokenEstimate
 	}
 	attempts := int64(maxRetries) + 1
 	if attempts < 1 {
 		attempts = 1
 	}
-	total := (input + output) * attempts
+	total := input*attempts + output
 	if total <= 0 {
 		return QuotaEstimate{}, errors.New("无法估算本次模型请求的 token")
 	}
 	return QuotaEstimate{
 		TotalTokens:  total,
 		InputTokens:  input * attempts,
-		OutputTokens: output * attempts,
+		OutputTokens: output,
 	}, nil
 }
 

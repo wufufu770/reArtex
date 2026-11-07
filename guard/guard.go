@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/norma/hook"
 )
 
@@ -81,6 +82,19 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 // applyIntercept evaluates user-configured intercept rules against the tool call.
 // Both rules and the fallback judge receive the complete tool input.
 func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
+	// 锁定基线预检（方案 v4.1 §10-F1）：必须先于一切 allow 短路 / allow 规则。
+	// 基线凌驾于具名规则之上——allow 短路没有放行删除/破坏/平台自身配置的权利；
+	// 平台凭据另有 pathguard 在 Stage-1 更早拦（双保险）。
+	if reason, hit := sodpolicy.BaselineHit(ev.ToolName, ev.Input); reason != "" {
+		msg := systemBlockMessage("锁定基线命中（" + hit + "）：删除/破坏、平台凭据与平台自身配置不可被任何机制放行")
+		if g.interceptor != nil {
+			dec := intercept.Decision{Action: "deny", Message: msg}
+			g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
+			g.interceptor.AppendDecisionEvent(ctx, dec, ev.ToolName, ev.Input, "deny")
+		}
+		g.record(ev.ToolName, "block", msg, "")
+		return g.block(ev.ToolName, msg, "")
+	}
 	// 短路表须先于 IsToolEnabled 求值：不在 intercept_enabled_tools 名单内的工具
 	// 会在下一行直接放行，表排其后即失效。代码常量，不受 settings 覆盖。
 	if dec := shortCircuit(ev.ToolName, ev.Input); dec != nil {

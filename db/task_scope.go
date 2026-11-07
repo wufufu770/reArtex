@@ -100,7 +100,24 @@ ON CONFLICT DO NOTHING`
 		return false, err
 	}
 	rows, err := result.RowsAffected()
+	if rows > 0 {
+		s.markScopeConfigured(ts.TaskID) // seed 失败置 false 的横幅在人/系统补配 scope 后自动消除（H1）
+	}
 	return rows > 0, err
+}
+
+// markScopeConfigured 把 scope_configured 翻回 true，与主写在同一连接/事务上
+//（AssetStore 可能持有 tx）。best-effort：失败不影响主写。
+func (s *AssetStore) markScopeConfigured(taskID int64) {
+	if taskID <= 0 {
+		return
+	}
+	q := `UPDATE tasks SET scope_configured=true WHERE id=$1 AND NOT scope_configured`
+	if s.tx != nil {
+		_, _ = s.tx.Exec(q, taskID)
+		return
+	}
+	_, _ = s.db.Exec(q, taskID)
 }
 
 func (s *AssetStore) upsertTaskScope(ts TaskScope) error {
@@ -289,6 +306,7 @@ VALUES ($1, 'asset', $2, 'manual', '任务大厅按资产发布')
 ON CONFLICT DO NOTHING`, taskID, assetID); err != nil {
 		return fmt.Errorf("写入任务资产范围失败: %w", err)
 	}
+	d.MarkTaskScopeConfigured(taskID)
 	return nil
 }
 

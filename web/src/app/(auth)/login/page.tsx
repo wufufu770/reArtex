@@ -47,7 +47,8 @@ export default function LoginPage() {
       // localStorage 可能仍有凭据但 cookie 已丢失。先同步，再发起全新请求，
       // 避免服务端守卫或路由缓存把跳转送回仍处于 checking 状态的登录页。
       auth.setToken(token);
-      window.location.replace("/function/tasks");
+      // 登录落地对话页（A5）：任务大厅不是日常首页，工作台从「回到上次会话」开始。
+      window.location.replace("/chat");
       return;
     }
     api
@@ -70,7 +71,7 @@ export default function LoginPage() {
     try {
       const { token } = await api.login("ARTEX", password);
       auth.setToken(token);
-      window.location.replace("/function/tasks");
+      window.location.replace("/chat");
     } catch {
       setError("用户名或密码错误");
     } finally {

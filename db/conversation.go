@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,6 +56,7 @@ type Conversation struct {
 	AgentKey     string     `json:"agent_key"`
 	Title        string     `json:"title"`
 	LLMProfileID *int64     `json:"llm_profile_id,omitempty"`
+	LLMModel     string     `json:"llm_model"` // E1：会话级模型选择；空=profile 默认
 	Pinned       bool       `json:"pinned"`
 	PinnedAt     *time.Time `json:"pinned_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
@@ -66,12 +69,12 @@ type ConversationPatch struct {
 	Pinned *bool
 }
 
-const convCols = `id, agent_key, title, llm_profile_id, pinned_at, created_at, updated_at`
+const convCols = `id, agent_key, title, llm_profile_id, COALESCE(llm_model,''), pinned_at, created_at, updated_at`
 
 func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 	var c Conversation
 	var pinnedAt sql.NullTime
-	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &pinnedAt, &c.CreatedAt, &c.UpdatedAt)
+	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &c.LLMModel, &pinnedAt, &c.CreatedAt, &c.UpdatedAt)
 	if pinnedAt.Valid {
 		c.Pinned = true
 		c.PinnedAt = &pinnedAt.Time
@@ -81,7 +84,27 @@ func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 
 // CreateConversation opens a new chat thread for agentKey with an initial title.
 // llmProfileID may be nil to use the globally active profile.
+// ConversationOrigin 是对话的来源词汇（方案 v3 缺陷 A1）：人发起的进侧边栏，
+// 系统跑的不进（回填/列表都按它分）。
+const (
+	OriginHuman     = "human"      // 人发起（旧对话 / DraftChat 懒创建）
+	OriginTrigger   = "trigger"    // P3 触发运行（合并触发/定时/事件）
+	OriginSodReview = "sod_review" // SoD 复核线程
+	OriginWake      = "wake"       // 会话唤醒 turn 的成员线程
+	OriginHall      = "hall"       // 任务大厅（大厅会话 + 成员会话）
+)
+
+// CreateConversation 建一条旧对话（origin 默认 human —— 向后兼容）。
 func (d *DB) CreateConversation(agentKey, title string, llmProfileID *int64) (*Conversation, error) {
+	return d.CreateConversationOf(agentKey, title, llmProfileID, OriginHuman)
+}
+
+// CreateConversationOf 建一条带来源标记的对话（A1）：系统对话（trigger/
+// sod_review/wake/hall）不进侧边栏、不被回填成正式会话。
+func (d *DB) CreateConversationOf(agentKey, title string, llmProfileID *int64, origin string) (*Conversation, error) {
+	if origin == "" {
+		origin = OriginHuman
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -92,8 +115,8 @@ func (d *DB) CreateConversation(agentKey, title string, llmProfileID *int64) (*C
 	// by this transaction before it takes a profile lock, matching DeleteProfile's
 	// child-row -> profile-row protocol.
 	c, err := scanConv(tx.QueryRow(`
-INSERT INTO conversations(agent_key, title, llm_profile_id) VALUES ($1, $2, NULL)
-RETURNING `+convCols, agentKey, title))
+INSERT INTO conversations(agent_key, title, llm_profile_id, origin) VALUES ($1, $2, NULL, $3)
+RETURNING `+convCols, agentKey, title, origin))
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +134,13 @@ WHERE id=$1 RETURNING `+convCols, c.ID, llmProfileID))
 		return nil, err
 	}
 	return &c, nil
+}
+
+// UpdateConversationModel 设置（或清空）会话级模型选择（E1）。空串=清除。
+// 只在运行期校验（值必须在所选 profile 的 models 列表内），这里不做约束。
+func (d *DB) UpdateConversationModel(id int64, model string) error {
+	_, err := d.Exec(`UPDATE conversations SET llm_model=NULLIF($2,'') WHERE id=$1`, id, strings.TrimSpace(model))
+	return err
 }
 
 // UpdateConversationProfile sets (or clears) the LLM profile override for a conversation.
@@ -324,4 +354,64 @@ func (d *DB) ConvActivityDetail(convID, id int64) (string, error) {
 		return "", nil
 	}
 	return s.String, err
+}
+
+// AttachConversationToSession 把一条对话挂到会话名下（方案 v3 缺陷 A1 的挂靠步）：
+// 带 taskID 的系统对话（触发运行/SoD 复核）挂到任务的绑定会话 ⇒ 变成任务的
+// 子记录，在任务详情可回看，不再占侧边栏顶层。幂等（重复挂同值无害）。
+func (d *DB) AttachConversationToSession(convID, sessionID int64) error {
+	if convID <= 0 || sessionID <= 0 {
+		return fmt.Errorf("convID/sessionID 必须为正")
+	}
+	_, err := d.Exec(`UPDATE conversations SET session_id=$2 WHERE id=$1 AND session_id IS NULL`, convID, sessionID)
+	return err
+}
+
+// ListSystemRuns 是「系统运行」摘要列表（A3）：origin != human 的对话按时间
+// 倒序，带步数/来源/任务归属。侧边栏默认折叠，点开看明细。
+type SystemRun struct {
+	ID        int64     `json:"id"`
+	AgentKey  string    `json:"agent_key"`
+	Title     string    `json:"title"`
+	Origin    string    `json:"origin"`
+	TaskID    *int64    `json:"task_id,omitempty"`
+	SessionID *int64    `json:"session_id,omitempty"`
+	Steps     int64     `json:"steps"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (d *DB) ListSystemRuns(origin string, limit int) ([]SystemRun, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	q := `SELECT c.id, c.agent_key, c.title, c.origin, c.session_id,
+COALESCE((SELECT count(*) FROM conversation_activities a WHERE a.conversation_id=c.id),0) AS steps,
+c.created_at, c.updated_at
+FROM conversations c WHERE c.origin <> 'human'`
+	args := []any{}
+	if origin != "" {
+		q += ` AND c.origin=$1`
+		args = append(args, origin)
+	}
+	q += fmt.Sprintf(` ORDER BY c.id DESC LIMIT %d`, limit)
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SystemRun{}
+	for rows.Next() {
+		var r SystemRun
+		var sessID sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.AgentKey, &r.Title, &r.Origin, &sessID, &r.Steps, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if sessID.Valid {
+			v := sessID.Int64
+			r.SessionID = &v
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

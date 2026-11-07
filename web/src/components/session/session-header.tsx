@@ -134,9 +134,12 @@ export function SessionHeader({
             {KIND_LABELS[session.kind]}
           </Badge>
         )}
-        <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
-          {sessionNameSourceLabel(session)}
-        </Badge>
+        {/* A4：默认名不算信息，不渲染徽章；只有用户命名/生成标题才值得占一格。 */}
+        {session.name_source !== "default" && (
+          <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
+            {sessionNameSourceLabel(session)}
+          </Badge>
+        )}
         <div className="ml-auto flex min-w-0 items-center gap-1.5">
           {tabs}
           {aside}

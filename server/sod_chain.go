@@ -12,6 +12,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
+	"github.com/Autumn-27/artex/notify"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 )
@@ -196,7 +197,19 @@ func (s *Server) installSoDChain() error {
 		DB:           pg,
 		NotifyReview: s.sodNotifyReview,
 		AgentKeyOf:   sod.AgentKeyFromContext,
+		// B4 降级档：开关每轮现读（热改即刻生效）；分级器只放 Tier1/2 结构化
+		// 写类（Tier3 永不豁免——§4 不变式 1）；降级态变化发一条通知事件。
+		DegradeEnabled:  s.sodDegradeEnabled,
+		DegradedAllow:   agent.IsTier2WriteTool,
+		OnDegradeChange: s.notifySodDegrade,
 	}
+	// 合并闸（方案 v4.1）：三态开关/情报源/种类表/auditor 裁决岗/人工 ask/
+	// cap 计数/影子对照——off 态这些通路全部闲置，行为与旧链一致。
+	if s.auditorCache == nil {
+		s.auditorCache = newAuditorCache()
+	}
+	s.ensureAuditorAgent()
+	s.wireMergedGateDeps(&deps)
 	if err := RegisterSoDChain(deps); err != nil {
 		return fmt.Errorf("SoD 链装配失败：%w", err)
 	}
@@ -298,9 +311,19 @@ func sodNormalizerProfileReady(pg *db.DB) error {
 // profile；解析不到 ⇒ 返回 ok=false ⇒ 规整器不可用 ⇒ 链按失败关闭拒绝。
 // 为什么不在这里缓存 provider：provider 由 Server 侧的 provider 缓存统一管
 // （providerForProfile），这里只做「profile id → provider」的解析。
+//
+// 独立模型档（方案 v3 缺陷 B3）：role_policy 配了 `normalizer` lane 时优先用
+// 它的 primary（backup 不在 provider 解析层做——lane 游标是 taskLLM 运行时的
+// 机制，规整器直接退回活动 profile 即可，fail-closed 语义不变）。
 func (s *Server) sodProviderFunc() sod.ProviderFunc {
 	return func(profileID int64) (llm.Provider, bool) {
 		if profileID == 0 {
+			if pol, ok := s.roleLanePolicy("normalizer"); ok {
+				if prov, _, pok := s.providerForProfile(pol.PrimaryID); pok && prov != nil {
+					return prov, true
+				}
+				log.Printf("[role-policy] normalizer lane 的 profile #%d 不可用，回退活动 profile", pol.PrimaryID)
+			}
 			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 				profileID = p.ID
 			}
@@ -327,6 +350,42 @@ func (s *Server) sodProviderFunc() sod.ProviderFunc {
 			return nil, false
 		}
 		return prov, true
+	}
+}
+
+// settingSodDegradeEnabled 是 B4 降级档的 settings 键（默认 false=fail-closed）。
+const settingSodDegradeEnabled = "sod.degrade_enabled"
+
+// sodDegradeEnabled 读降级档开关（链每轮现读；热改即刻生效）。
+func (s *Server) sodDegradeEnabled() bool {
+	if s.m == nil || s.m.pg == nil {
+		return false
+	}
+	return s.m.pg.GetBool(settingSodDegradeEnabled, false)
+}
+
+// isSodDegradableTool 是注入链的降级分级器（B4）：只有 Tier2 结构化写类可以
+// 在降级期确定性放行。单一真相源在 agent.IsTier2WriteTool（tier2WriteKinds），
+// 这里包一层便于测试与将来加白。
+func isSodDegradableTool(toolName string) bool {
+	return agent.IsTier2WriteTool(toolName)
+}
+
+// notifySodDegrade 把降级态变化写成一条通知事件（进/出各一次）——降级是安全
+// 语义变化，必须让人看见，不能只落 server 日志。
+func (s *Server) notifySodDegrade(active bool) {
+	if s.m == nil || s.m.pg == nil {
+		return
+	}
+	kind := "sod_degrade_entered"
+	summary := "SoD 规整器连续不可用，已进入降级档（Tier1/2 确定性放行、Tier3 照拒）。请检查规整模型可用性；恢复后自动退出降级。"
+	if !active {
+		kind = "sod_degrade_exited"
+		summary = "SoD 规整器已恢复，退出降级档（回到 fail-closed）。"
+	}
+	evt := notify.Snapshot{Kind: kind, Name: "SoD 降级档", Severity: "high", Summary: summary}
+	if _, err := s.m.pg.AddNotificationEvent(s.ctx, kind, 0, evt); err != nil {
+		log.Printf("[sod] 降级态通知写入失败: %v", err)
 	}
 }
 

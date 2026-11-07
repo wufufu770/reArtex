@@ -694,7 +694,7 @@ func TestProfileDeleteRestoresQuotaBlockedIntentWhenFallbackAvailable(t *testing
 		m:             m,
 		llmOn:         true,
 		llmProv:       &scriptedLLMProvider{},
-		provByProfile: map[int64]*provEntry{},
+		provByProfile: map[provKey]*provEntry{},
 	}
 	s.restoreTasksAfterProfileDelete(m.pg)
 

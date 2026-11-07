@@ -561,7 +561,7 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 		_ = m.pg.DeleteProfile(profileID)
 	}()
 
-	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	s := &Server{m: m, provByProfile: map[provKey]*provEntry{}}
 	got, err := s.resolveTaskRoleLLM(task, "worker")
 	if err != nil {
 		t.Fatal(err)
@@ -611,7 +611,7 @@ func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
 		_ = m.pg.DeleteProfile(chainID)
 	}()
 
-	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	s := &Server{m: m, provByProfile: map[provKey]*provEntry{}}
 	got, err := s.resolveTaskRoleLLM(task, "worker")
 	if err != nil {
 		t.Fatal(err)

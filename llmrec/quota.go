@@ -23,6 +23,7 @@ import (
 	"iter"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,67 @@ type QuotaGate struct {
 	pg      *db.DB
 	resolve QuotaResolver
 	seq     atomic.Uint64
+
+	// 预算阈值预警（方案 v3 缺陷 C2）：结算后按群组剩余额度跨线发一次通知。
+	// warned 的键是 (period, group, level)——周期换届后键自然失效（换新键）。
+	notifMu sync.Mutex
+	notif   QuotaBudgetNotifier
+	warned  map[string]struct{}
+}
+
+// QuotaBudgetNotifier 是预算阈值预警回调。level ∈ {"50","80"}（已消耗百分比档）。
+type QuotaBudgetNotifier func(info db.QuotaSettleInfo, level string)
+
+// SetBudgetNotifier 注册预警回调（server 装配时注入，把预警转成任务播报/通知
+// 事件）。nil = 不预警。必须在第一次 Reserve 之前注册才有完整效果（实际只在
+// 装配点调用一次）。
+func (g *QuotaGate) SetBudgetNotifier(fn QuotaBudgetNotifier) {
+	if g == nil {
+		return
+	}
+	g.notifMu.Lock()
+	defer g.notifMu.Unlock()
+	g.notif = fn
+}
+
+// noteThreshold 在一次结算后检查剩余额度：剩余 ≤20% 预算 = 80% 档预警，
+// ≤50% = 50% 档。每 (群组, 周期, 档) 至多发一次——跨线只报进入时刻，不逐调用刷屏。
+func (g *QuotaGate) noteThreshold(info db.QuotaSettleInfo) {
+	if g == nil || info.Budget <= 0 || info.GroupID == 0 {
+		return
+	}
+	g.notifMu.Lock()
+	defer g.notifMu.Unlock()
+	if g.notif == nil {
+		return
+	}
+	remaining := info.Remaining
+	if remaining < 0 {
+		remaining = 0
+	}
+	level := ""
+	switch pct := float64(remaining) / float64(info.Budget); {
+	case pct <= 0.2:
+		level = "80"
+	case pct <= 0.5:
+		level = "50"
+	default:
+		return
+	}
+	if g.warned == nil {
+		g.warned = map[string]struct{}{}
+	}
+	key := info.PeriodKey + "|" + strconv.FormatInt(info.GroupID, 10) + "|" + level
+	if _, done := g.warned[key]; done {
+		return
+	}
+	// 上限护栏：warned 只增不减（一天最多几十个键，正常部署远到不了），
+	// 但防呆——键数异常膨胀时整表重置，宁可多报一次也不无界吃内存。
+	if len(g.warned) > 4096 {
+		g.warned = map[string]struct{}{}
+	}
+	g.warned[key] = struct{}{}
+	g.notif(info, level)
 }
 
 // NewQuotaGate 建一个预算闸门。resolve 为 nil 时用 TaskGroupResolver（按 task
@@ -124,18 +186,24 @@ func (g *QuotaGate) newRequestID(taskID string) string {
 // Settle 按真实 usage 结算一次预扣。
 //
 // 口径：total = input + output（缓存已含在 input 里，不重复计）。
+// 结算成功后检查群组剩余额度，跨过 80%/50% 消耗线时各发一次预警（见
+// SetBudgetNotifier——每群组每周期每档至多一次）。
 func (g *QuotaGate) Settle(reservationID int64, usage llm.Usage) {
 	if g == nil || g.pg == nil || reservationID == 0 {
 		return
 	}
 	in, out := int64(usage.InputTokens), int64(usage.OutputTokens)
-	_ = g.pg.SettleGroupQuota(reservationID, db.QuotaUsage{
+	info, err := g.pg.SettleGroupQuota(reservationID, db.QuotaUsage{
 		InputTokens:  in,
 		OutputTokens: out,
 		CacheRead:    int64(usage.CacheReadTokens),
 		CacheWrite:   int64(usage.CacheWriteTokens),
 		TotalTokens:  in + out,
 	})
+	if err != nil {
+		return
+	}
+	g.noteThreshold(info)
 }
 
 // SettleDispatchedFailure 结算"请求已发出但没有 usage"的调用。
@@ -151,10 +219,14 @@ func (g *QuotaGate) SettleDispatchedFailure(reservationID int64, estimate QuotaE
 	if err != nil || input <= 0 {
 		input = estimate.InputTokens
 	}
-	_ = g.pg.SettleGroupQuota(reservationID, db.QuotaUsage{
+	info, err := g.pg.SettleGroupQuota(reservationID, db.QuotaUsage{
 		InputTokens: input,
 		TotalTokens: input,
 	})
+	if err != nil {
+		return
+	}
+	g.noteThreshold(info)
 }
 
 // Release 释放一次预扣（确定没有花出去）。

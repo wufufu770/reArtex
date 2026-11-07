@@ -510,11 +510,45 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "会话不存在")
 		return
 	}
+	// A2 删除守卫：master/task_hall 会话若有唤醒 turn 在跑（chatBusy 占用任一
+	// 成员线程）或待跟进队列非空，删除会让在跑 run 写进一张已消失的会话并触发
+	// 回填复活——拒绝并提示稍后再删。chat/chat 旧会话不受限（无唤醒机器）。
+	if sess.Kind == db.SessionKindMaster || sess.Kind == db.SessionKindTaskHall {
+		if running, err := s.sessionHasBusyWake(id); err == nil && running {
+			writeErr(w, 409, "会话有进行中的唤醒/待跟进消息，稍后再删（或在群里等本轮结束）")
+			return
+		}
+	}
 	if err := pg.DeleteSession(id); err != nil {
 		writeErr(w, 500, "删会话失败: "+err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "deleted": id, "id": id})
+}
+
+// sessionHasBusyWake 报告会话的任一成员对话线程是否正在跑唤醒 turn 或有挂起
+// 的待跟进消息（A2 守卫的判定）。
+func (s *Server) sessionHasBusyWake(sessionID int64) (bool, error) {
+	pg := s.m.pg
+	if pg == nil {
+		return false, nil
+	}
+	convs, err := pg.ConversationsForSession(sessionID)
+	if err != nil {
+		return false, err
+	}
+	s.chatMu.Lock()
+	defer s.chatMu.Unlock()
+	for _, c := range convs {
+		key := s.convBusyKey(c.ID)
+		if s.chatBusy[key] {
+			return true, nil
+		}
+		if len(s.sessionWakePending[key]) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // listSessionMessages 读会话消息流（含 agent 消息、收据条、线程回复）。
@@ -675,8 +709,9 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	sender := strings.TrimSpace(req.FromAgent)
 	mentions := db.ParseSessionAgentMentions(strings.TrimSpace(req.Body))
-	// 热加入：@ 到不在席的 agent ⇒ 先入席再被定向（§4.3）。
-	members = hotJoinMentioned(pg, id, mentions, members, sender)
+	// 热加入：@ 到不在席的 agent ⇒ 先入席再被定向（§4.3）。人的消息路径不消费
+	// 「不存在的 key」—— 它们会出现在裁决的 Undelivered 回执里，由执行处播报。
+	members, _ = hotJoinMentioned(pg, id, mentions, members, sender)
 
 	msg := &db.SessionMessage{
 		SessionID:       id,
@@ -695,6 +730,16 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "写会话消息失败: "+err.Error())
 		return
 	}
+	// 首条人话自动命名（方案 v3 缺陷 A4）：沿用 DraftChat 的口径——用户没显式
+	// 命名（name_source != 'user'）且标题还是空/占位时，用首条人类消息的首行
+	// 生成标题。UpdateSession 的三轨命名保证永不去抢 user 显式名。
+	if sender == "" && sess.NameSource != "user" && (sess.Title == "" || sess.Title == "新会话") {
+		if t := firstLine(msg.Body, 40); t != "" {
+			if _, err := pg.UpdateSession(id, db.SessionPatch{Title: &t}); err != nil {
+				log.Printf("[session] 会话 %d 自动命名失败: %v", id, err)
+			}
+		}
+	}
 	decision := sessionwake.Decide(sessionwake.Message{
 		Body:      msg.Body,
 		FromAgent: msg.FromAgent,
@@ -703,9 +748,15 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		Blocked:   msg.Status == db.SessionMessageBlocked,
 	}, sessionWakeMembers(members))
 	// 会话级唤醒器（server/session_waker.go）：本出口只报告 wake 集合；真正起 turn
-	// 在这里 —— @ 定向必醒（人发消息接力深度 0）。异步、尽力而为：起不起得动
+	// 在这里 —— @ 定向必醒 + 主持补位（人的非定向消息由分发者接话），人发消息
+	// 接力深度 0，整条链共用一个链身份做同边去重。异步、尽力而为：起不起得动
 	// 不影响本响应。
-	s.wakeSessionAgents(id, decision.MustWake, msg, 0)
+	chainID := wakeChainIDForMessage(msg)
+	s.wakeSessionAgents(id, decision.MustWake, msg, 0, chainID, "", false)
+	s.wakeSessionAgents(id, decision.HostWake, msg, 0, chainID, "", true)
+	// 未投递回执（B4）：@ 了却没送到（不在席 / agents 表里不存在）⇒ 给群播报
+	// 一条 note —— 转交不允许无回声地消失。
+	s.announceUndeliveredMentions(id, decision.Undelivered)
 	writeJSON(w, 201, map[string]any{
 		"status":            "ok",
 		"message":           msg,
@@ -713,6 +764,8 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 		"everyone":          decision.Everyone,
 		"designated":        decision.Designated,
 		"wake_agents":       decision.MustWake,
+		"host_wake":         decision.HostWake,
+		"undelivered":       decision.Undelivered,
 		"wake_states":       decision.WakeStates,
 		"self_serve_agents": decision.SelfServe,
 	})
@@ -725,16 +778,19 @@ func (s *Server) postSessionMessage(w http.ResponseWriter, r *http.Request) {
 // 人负责 —— 叫醒一个不在席的 agent 是白烧额度）。
 //
 // 不在 agents 表里的 agent 跳过（session_members.agent_key 有外键，硬写会
-// 失败）；退席过的 agent 重新入席（AddSessionMember 会把 left_at 清空）。
+// 失败），并作为「不存在的 key」返回给调用方：人的消息路径只消费 Undelivered
+// 回执做播报；agent 回复路径（唤醒器）拿它触发兜底建任务（B2）。
+// 退席过的 agent 重新入席（AddSessionMember 会把 left_at 清空）。
 //
-// 返回更新后的名册（就地追加，不重新查库）。
-func hotJoinMentioned(pg *db.DB, sessionID int64, mentions []string, members []db.SessionMember, sender string) []db.SessionMember {
+// 返回更新后的名册（就地追加，不重新查库）与不存在的 key 列表（保序去重）。
+func hotJoinMentioned(pg *db.DB, sessionID int64, mentions []string, members []db.SessionMember, sender string) ([]db.SessionMember, []string) {
 	inSeat := map[string]bool{}
 	for _, m := range members {
 		if !m.HasLeft {
 			inSeat[m.AgentKey] = true
 		}
 	}
+	missing := []string{}
 	for _, key := range mentions {
 		key = strings.TrimSpace(key)
 		if key == "" || key == sender || inSeat[key] {
@@ -742,6 +798,7 @@ func hotJoinMentioned(pg *db.DB, sessionID int64, mentions []string, members []d
 		}
 		a, err := pg.GetAgentByKey(key)
 		if err != nil || a == nil {
+			missing = append(missing, key)
 			continue
 		}
 		role := db.SessionRoleMember
@@ -759,7 +816,7 @@ func hotJoinMentioned(pg *db.DB, sessionID int64, mentions []string, members []d
 		})
 		inSeat[key] = true
 	}
-	return members
+	return members, missing
 }
 
 // sessionWakeMembers 把名册转成唤醒裁决层的输入（裁决层不认 db 的类型 ⇒ 转换

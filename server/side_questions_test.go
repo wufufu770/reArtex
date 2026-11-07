@@ -425,7 +425,7 @@ func TestSideRejectsDeletedOrChangedCachedProfile(t *testing.T) {
 	if !ok {
 		t.Fatal("profile unavailable")
 	}
-	f.s.provByProfile = map[int64]*provEntry{id: {prov: f.provider, cfg: cfg}}
+	f.s.provByProfile = map[provKey]*provEntry{{id: id}: {prov: f.provider, cfg: cfg}}
 	model := sideModel(cfg, id, p.Name)
 	if _, err = f.s.sideProvider(model); err != nil {
 		t.Fatal(err)

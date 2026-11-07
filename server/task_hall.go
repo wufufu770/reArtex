@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,17 +37,30 @@ var (
 // taskHallDefaultConcurrency 是群组并发上限的缺省值（与 db 层的默认一致）。
 const taskHallDefaultConcurrency = 3
 
+// taskHallDefaultTimeoutSeconds 是大厅任务的默认墙钟（方案 v3 缺陷 C3）：
+// 2 小时。没有它，发散型 goal 会跑成僵尸（远程 0.4.9 实测 25 轮规划不收敛）。
+// 到点走 engine_timeout 的 settle 管线有序收尾，不是硬杀。
+const taskHallDefaultTimeoutSeconds = 7200
+
 // PublishTaskRequest is the payload of POST /api/task-hall/tasks.
 type PublishTaskRequest struct {
-	Name                string   `json:"name"`
-	Description         string   `json:"description"`
-	Goal                string   `json:"goal"`
-	AssetIDs            []int64  `json:"asset_ids"`
-	Members             []string `json:"members"` // 空 = 交给 auto 兜底
-	PlanCode            string   `json:"plan_code,omitempty"`
-	ConcurrencyLimit    int      `json:"concurrency_limit,omitempty"`
-	BudgetTokens        *int64   `json:"budget_tokens,omitempty"`
-	EvidencePreservation bool    `json:"evidence_preservation,omitempty"`
+	Name                 string   `json:"name"`
+	Description          string   `json:"description"`
+	Goal                 string   `json:"goal"`
+	AssetIDs             []int64  `json:"asset_ids"`
+	Members              []string `json:"members"` // 空 = 交给 auto 兜底
+	PlanCode             string   `json:"plan_code,omitempty"`
+	ConcurrencyLimit     int      `json:"concurrency_limit,omitempty"`
+	BudgetTokens         *int64   `json:"budget_tokens,omitempty"`
+	EvidencePreservation bool     `json:"evidence_preservation,omitempty"`
+	// CategoryID 任务类别（task_categories.id；nil=未分类）。类别是 worker 纪律的
+	// 结构性开关（方案 v4 §3-C2）：资产收集类任务 ⇒ 引擎给 worker 追加收集纪律段
+	// （server/task_llm.go 的 workerCategoryDiscipline）。不存在 ⇒ 整个发布失败。
+	CategoryID *int64 `json:"category_id,omitempty"`
+	// TimeoutSeconds 是任务墙钟（秒）（方案 v3 缺陷 C3）：nil=默认 7200；
+	// 显式 0=不限时（防呆靠 C4 停滞闸兜底）。指针是刻意的——「没填」与「填了 0」
+	// 语义不同，不加指针就会把「不限时」变成事实默认。
+	TimeoutSeconds *int `json:"timeout_seconds,omitempty"`
 	// TaskID 指向一个**已有**任务发布（0 = 新建任务）。
 	//
 	// 为什么需要它：一个 task 至多一个大厅，而"发布"默认新建任务 ⇒ 只靠"发布"
@@ -99,8 +113,33 @@ func (s *Server) PublishTask(req PublishTaskRequest) (taskID int64, groupID int6
 	if req.EvidencePreservation {
 		return 0, 0, fmt.Errorf("%w: 证据保全策略尚未落地，暂不支持该开关", ErrTaskHallInvalidRequest)
 	}
-	if req.BudgetTokens != nil && *req.BudgetTokens <= 0 {
-		return 0, 0, fmt.Errorf("%w: 额度必须大于 0", ErrTaskHallInvalidRequest)
+	// 额度必填：大厅群挂了 fail-closed 的额度闸（无预算行=拒绝一切模型请求），
+	// 「可选额度」会让发布出来的大厅静默饿死——不如在门口就要求填。
+	if req.BudgetTokens == nil || *req.BudgetTokens <= 0 {
+		return 0, 0, fmt.Errorf("%w: 额度（budget_tokens）必填——大厅群组的模型请求走 fail-closed 额度闸", ErrTaskHallInvalidRequest)
+	}
+	// 任务墙钟（C3）：默认 7200s，显式 0=不限。负值是参数错误。
+	taskHallTimeout := taskHallDefaultTimeoutSeconds
+	if req.TimeoutSeconds != nil {
+		if *req.TimeoutSeconds < 0 {
+			return 0, 0, fmt.Errorf("%w: timeout_seconds 不能为负（0=不限时）", ErrTaskHallInvalidRequest)
+		}
+		taskHallTimeout = *req.TimeoutSeconds
+	}
+	// 类别（§3-C2）：给了就必须存在——建到一半才发现类别非法会让「什么都不创建」
+	// 的原子性语义靠回滚兜底，不如在校验段就拦下。这里只做存在性判定，落库交给
+	// CreateTaskWithOptions（同一事务内解析类别名）。
+	if req.CategoryID != nil {
+		if *req.CategoryID <= 0 {
+			return 0, 0, fmt.Errorf("%w: category_id 必须为正整数", ErrTaskHallInvalidRequest)
+		}
+		category, err := pg.GetTaskCategory(*req.CategoryID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("查任务类别失败: %w", err)
+		}
+		if category == nil {
+			return 0, 0, fmt.Errorf("%w: 任务类别 #%d 不存在", ErrTaskHallInvalidRequest, *req.CategoryID)
+		}
 	}
 
 	// ---- 2) 解析目标任务 ----
@@ -115,12 +154,16 @@ func (s *Server) PublishTask(req PublishTaskRequest) (taskID int64, groupID int6
 			return 0, 0, fmt.Errorf("%w: %d", ErrTaskHallTaskNotFound, req.TaskID)
 		}
 	} else {
-		task, err = pg.CreateTaskWithOptions(taskHallDescription(req), taskHallGoal(req),
-			db.TaskCreateOptions{Name: strings.TrimSpace(req.Name)})
-		if err != nil {
-			return 0, 0, fmt.Errorf("建任务失败: %w", err)
+		// 用 manager 层创建：任务必须进 Manager 内存注册表，否则 launchTask 的
+		// s.m.Task 查不到（实测：db 层创建的任务在 admitTaskWhen 被静默拒准入）。
+		mt, merr := s.m.CreateTaskWithOptions(taskHallDescription(req), taskHallGoal(req),
+			db.TaskCreateOptions{Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID, TimeoutSeconds: taskHallTimeout})
+		if merr != nil {
+			return 0, 0, fmt.Errorf("建任务失败: %w", merr)
 		}
 		createdTask = true
+		id64, _ := strconv.ParseInt(mt.ID, 10, 64)
+		task = &db.Task{ID: id64}
 	}
 	taskID = task.ID
 
@@ -162,7 +205,7 @@ func (s *Server) PublishTask(req PublishTaskRequest) (taskID int64, groupID int6
 	if name == "" {
 		name = "任务大厅"
 	}
-	hall, err := pg.CreateConversation("auto", name, nil)
+	hall, err := pg.CreateConversationOf("auto", name, nil, db.OriginHall)
 	if err != nil {
 		return 0, 0, fmt.Errorf("建大厅会话失败: %w", err)
 	}
@@ -190,7 +233,7 @@ func (s *Server) PublishTask(req PublishTaskRequest) (taskID int64, groupID int6
 	// 每个成员一个会话：conversations.agent_key 是单值列，一个会话只能跑一个
 	// agent ⇒ 成员各拿一个会话（独立 transcript，共享同一个 task 的探索图）。
 	for _, key := range members {
-		conv, err := pg.CreateConversation(key, name+"/"+key, nil)
+		conv, err := pg.CreateConversationOf(key, name+"/"+key, nil, db.OriginHall)
 		if err != nil {
 			return 0, 0, fmt.Errorf("建成员会话失败(%s): %w", key, err)
 		}
@@ -204,6 +247,12 @@ func (s *Server) PublishTask(req PublishTaskRequest) (taskID int64, groupID int6
 		if err = pg.SetGroupQuotaBudget(groupID, *req.BudgetTokens); err != nil {
 			return 0, 0, fmt.Errorf("设群组额度失败: %w", err)
 		}
+	}
+	// P5：发布即开工——launchTask 走 goalless 直投路径（goal=seedText），引擎启动、
+	// legacy 注入在 launchTask 种子阶段生效。任务失败回滚由上方 defer 处理。
+	if t, ok := s.m.Task(strconv.FormatInt(taskID, 10)); ok && t != nil {
+		// P5：发布即开工——launchTask 走 goalless 直投路径，legacy 注入随之生效。
+		s.launchTask(t, taskHallDescription(req)+" "+taskHallGoal(req), false)
 	}
 	return taskID, groupID, nil
 }

@@ -35,6 +35,13 @@ func taskHallPublishDo(t *testing.T, s *Server, method, path string, body any) (
 	return rec.Code, out
 }
 
+// taskHallBudget 是测试发布的额度（fail-closed 闸要求 budget_tokens 必填 ——
+// 大厅群组的模型请求没有额度行就一律被拒，这里给足让用例跑到要验证的分支）。
+func taskHallBudget() *int64 {
+	b := int64(500_000)
+	return &b
+}
+
 // taskHallInsertAsset 插一条资产行（操作者在资产图上勾选的资产）。
 //
 // 刻意不写 assets.task_ids：这样"在不在范围内"只由 task_scope 决定，断言不会被
@@ -79,6 +86,7 @@ func TestPublishTaskDeclaresAssetScopeAndCreatesGroup(t *testing.T) {
 		AssetIDs:         []int64{assetID},
 		Members:          []string{"pentest", "worker"},
 		ConcurrencyLimit: 2,
+		BudgetTokens:     taskHallBudget(),
 	})
 	if err != nil {
 		t.Fatalf("发布任务失败: %v", err)
@@ -138,10 +146,11 @@ func TestPublishTaskEmptyMembersStillCreatesGroup(t *testing.T) {
 	assetID := taskHallInsertAsset(t, pg, fmt.Sprintf("publish-auto-%d.example.test", time.Now().UnixNano()))
 
 	taskID, groupID, err := s.PublishTask(PublishTaskRequest{
-		Name:        "自动大厅",
-		Description: "交给 auto",
-		Goal:        "拿下资产",
-		AssetIDs:    []int64{assetID},
+		Name:         "自动大厅",
+		Description:  "交给 auto",
+		Goal:         "拿下资产",
+		AssetIDs:     []int64{assetID},
+		BudgetTokens: taskHallBudget(),
 	})
 	if err != nil {
 		t.Fatalf("成员为空也必须能发布: %v", err)
@@ -176,10 +185,11 @@ func TestPublishTaskInvalidAssetFailsWithoutCreatingAnything(t *testing.T) {
 	missing := int64(9_000_000_000)
 
 	_, _, err := s.PublishTask(PublishTaskRequest{
-		Description: desc,
-		Goal:        "拿下资产",
-		AssetIDs:    []int64{good, missing},
-		Members:     []string{"pentest"},
+		Description:  desc,
+		Goal:         "拿下资产",
+		AssetIDs:     []int64{good, missing},
+		Members:      []string{"pentest"},
+		BudgetTokens: taskHallBudget(), // 带足额度，让失败落在要验证的资产校验上
 	})
 	if err == nil {
 		t.Fatalf("非法资产 id 必须让整个发布失败")
@@ -221,11 +231,12 @@ func TestPublishTaskSecondPublishForSameTaskConflicts(t *testing.T) {
 	task := taskHallCreateTask(t, pg, "发布冲突测试")
 
 	taskID, groupID, err := s.PublishTask(PublishTaskRequest{
-		TaskID:   task.ID,
-		Name:     "冲突大厅",
-		Goal:     "拿下资产",
-		AssetIDs: []int64{assetID},
-		Members:  []string{"pentest"},
+		TaskID:       task.ID,
+		Name:         "冲突大厅",
+		Goal:         "拿下资产",
+		AssetIDs:     []int64{assetID},
+		Members:      []string{"pentest"},
+		BudgetTokens: taskHallBudget(),
 	})
 	if err != nil {
 		t.Fatalf("首次发布失败: %v", err)
@@ -236,11 +247,12 @@ func TestPublishTaskSecondPublishForSameTaskConflicts(t *testing.T) {
 
 	// 第二次发布同一个任务 ⇒ 冲突。
 	_, _, err = s.PublishTask(PublishTaskRequest{
-		TaskID:   task.ID,
-		Name:     "冲突大厅",
-		Goal:     "拿下资产",
-		AssetIDs: []int64{assetID},
-		Members:  []string{"worker"},
+		TaskID:       task.ID,
+		Name:         "冲突大厅",
+		Goal:         "拿下资产",
+		AssetIDs:     []int64{assetID},
+		Members:      []string{"worker"},
+		BudgetTokens: taskHallBudget(),
 	})
 	if err == nil {
 		t.Fatalf("同一任务重复发布必须报冲突")
@@ -274,6 +286,7 @@ func TestPublishTaskHTTPConflictAndRoutes(t *testing.T) {
 	code, out := taskHallPublishDo(t, s, "POST", "/api/task-hall/tasks", map[string]any{
 		"name": "HTTP 大厅", "description": "http 发布", "goal": "拿下资产",
 		"asset_ids": []int64{assetID}, "members": []string{"pentest"},
+		"budget_tokens": 500000,
 	})
 	if code != 200 {
 		t.Fatalf("发布: %d (%v)", code, out)
@@ -305,7 +318,7 @@ func TestPublishTaskHTTPConflictAndRoutes(t *testing.T) {
 	// 同一个任务再发一次 ⇒ 409 冲突（HTTP 层也要看得见冲突，不能是 500）。
 	code, out = taskHallPublishDo(t, s, "POST", "/api/task-hall/tasks", map[string]any{
 		"task_id": taskID, "name": "HTTP 大厅", "goal": "拿下资产",
-		"asset_ids": []int64{assetID},
+		"asset_ids": []int64{assetID}, "budget_tokens": 500000,
 	})
 	if code != 409 {
 		t.Fatalf("同一任务重复发布应 409, got %d (%v)", code, out)

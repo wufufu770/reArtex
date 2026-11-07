@@ -50,7 +50,33 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 		// pentest（独立渗透 agent）默认绑：查资产 / 插资产 / 报漏洞 / 查漏洞 / 查企业。
 		// 新库由此 seed 写入；老库由 seedPentestDefaultBindings 迁移。
 		"pentest": {ts.listAssets(), ts.insertAssets(), ts.addFinding(), ts.listFindings(), ts.listCompanies()},
+		// recon（资产收集 agent，方案 v4 §3-C）默认绑：查企业 / 查资产 / 插资产 / 查漏洞 /
+		// 记事实 / 记进度回执。record_fact / record_progress / list_findings 读写探索图，
+		// 只在任务上下文里可用（无任务时由 needExploration 给出明确拒绝，不会崩）。
+		// Bash / WebFetch 是会话型 agent 的固定底座（DefaultTools + EnableWebFetch，无 tools 行）；
+		// web_search 由 agents.web_search 开关门控（db 种子一次性默认开）；spawn_task 是
+		// server 侧编排工具，不在本表——见 reconHostToolKeys。
+		// 新库由此 seed 写入；老库由 server 侧 seedReconDefaultBindings 一次性迁移。
+		"recon": {ts.listCompanies(), ts.listAssets(), ts.insertAssets(), ts.listFindings(), ts.recordFact(), ts.recordProgress()},
 	}
+}
+
+// reconHostToolKeys 是 recon 默认绑定、但不属于 ToolSet 领域工具的 tools 表 key：
+// spawn_task 是 server 侧编排工具（tools 行由 seedOrchestrationTools 播种、默认只绑 auto）。
+// recon 是能兜底建任务的承办位（方案 v4 §3-C2 / B1）：群里没人接、或收集面大到该交给
+// 任务引擎长跑时，它用 spawn_task 建「资产收集」类任务。
+var reconHostToolKeys = []string{"spawn_task"}
+
+// ReconDefaultToolKeys 返回 recon 默认绑定的全部 tools 表 key：领域工具取自
+// builtinToolsByAgent 的 recon 一行（与新库播种同一份列表，不另抄），外加 server 侧
+// 编排工具。server 侧老库迁移（seedReconDefaultBindings）按它补绑。
+func ReconDefaultToolKeys() []string {
+	domain := builtinToolsByAgent()["recon"]
+	keys := make([]string, 0, len(domain)+len(reconHostToolKeys))
+	for _, t := range domain {
+		keys = append(keys, t.Name())
+	}
+	return append(keys, reconHostToolKeys...)
 }
 
 // defaultUnbound：这些 system 工具会照常入目录（web 端可见、可手动按 agent 勾选），但
@@ -69,7 +95,7 @@ var defaultUnbound = map[string]bool{"goal_met": true, "strategy_get": true}
 // 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则强制绑定为空。
 func BuiltinToolSeeds() []ToolSeed {
 	byAgent := builtinToolsByAgent()
-	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
+	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest", "recon"}
 
 	type acc struct {
 		tool   actool.CoreTool

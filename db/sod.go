@@ -366,6 +366,35 @@ UPDATE sod_adversarial_review_pending
 	return nil
 }
 
+// DismissStaleAdversarialReviews 把挂起超过 ttl 的 needs_review 项批量结案为
+// dismissed（方案 v3 缺陷 D4：对抗复核队列不能无限堆积——没有 redteam 认领的
+// 项挂 24h 后自动过期，resolution 里留痕「过期自动结案」）。
+//
+// 谁来调：scheduler 周期任务（不是 redteam）——scheduler 不是提出人，不触自证
+// 守卫；行本身保留（status=dismissed 即留痕），不物理删除。
+// 返回本次结案的行数。
+func (d *DB) DismissStaleAdversarialReviews(ttl time.Duration) (int64, error) {
+	if err := d.ensureSoDSchema(); err != nil {
+		return 0, err
+	}
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	res, err := d.Exec(`
+UPDATE sod_adversarial_review_pending
+   SET status=$1, claimed_by='scheduler', resolution=$2, updated_at=now()
+ WHERE status=$3 AND created_at < now() - $4::interval`,
+		SoDReviewDismissed,
+		fmt.Sprintf("pending 超过 %s 无对抗者认领，调度器自动结案（needs_review 过期闸）", ttl),
+		SoDReviewPending,
+		fmt.Sprintf("%.0f seconds", ttl.Seconds()))
+	if err != nil {
+		return 0, fmt.Errorf("过期对抗复核项结案失败: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ToolCircuitState 读某个工具的熔断状态。
 //
 // 没有行 ⇒ closed（该工具还没出过事）。
@@ -535,4 +564,162 @@ func (d *DB) GetFindingReplayEvidence(findingID int64) (*ReplayEvidence, error) 
 		ReplayEvidenceID: evidenceID,
 		AssetIDs:         ids,
 	}, nil
+}
+
+// ---------- 裁决人工复核改判（方案 v3 缺陷 F3） ----------
+
+// SodManualOverride 是一条人工改判的放行凭据（call-precision：四元组全等命中）。
+type SodManualOverride struct {
+	ID            int64      `json:"id"`
+	DecisionID    int64      `json:"decision_id"`
+	PayloadDigest string     `json:"payload_digest"`
+	ToolKey       string     `json:"tool_key"`
+	TaskID        int64      `json:"task_id"`
+	AgentKey      string     `json:"agent_key"`
+	Scope         string     `json:"scope"` // once | task
+	Reason        string     `json:"reason"`
+	CreatedBy     string     `json:"created_by"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	UseCount      int        `json:"use_count"`
+	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
+}
+
+// CreateSodManualOverride 登记一条人工改判放行凭据（review API 的写入口）。
+func (d *DB) CreateSodManualOverride(o *SodManualOverride) (int64, error) {
+	if err := d.ensureSoDSchema(); err != nil {
+		return 0, err
+	}
+	if o.PayloadDigest == "" || o.ToolKey == "" || o.TaskID <= 0 {
+		return 0, fmt.Errorf("override 需要 payload_digest/tool_key/task_id")
+	}
+	if o.Scope != "once" && o.Scope != "task" {
+		return 0, fmt.Errorf("scope 只能是 once|task")
+	}
+	var id int64
+	err := d.QueryRow(`
+INSERT INTO sod_manual_overrides(decision_id, payload_digest, tool_key, task_id, agent_key, scope, reason, created_by, expires_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+		o.DecisionID, o.PayloadDigest, o.ToolKey, o.TaskID, o.AgentKey, o.Scope,
+		o.Reason, o.CreatedBy, o.ExpiresAt).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("写人工改判凭据失败: %w", err)
+	}
+	return id, nil
+}
+
+// LookupSodManualOverride 链侧步骤⑤.5 的查表：四元组全等 + 未过期 ⇒ 放行凭据。
+// 命中即把 use_count+1 并盖章 last_used_at（once 用后即焚由 Consume 完成）。
+func (d *DB) LookupSodManualOverride(toolKey string, taskID int64, agentKey, payloadDigest string) (*SodManualOverride, error) {
+	if err := d.ensureSoDSchema(); err != nil {
+		return nil, err
+	}
+	var o SodManualOverride
+	var expires, lastUsed sql.NullTime
+	err := d.QueryRow(`
+SELECT id, decision_id, payload_digest, tool_key, task_id, agent_key, scope, reason, created_by, created_at, expires_at, use_count, last_used_at
+FROM sod_manual_overrides
+WHERE tool_key=$1 AND task_id=$2 AND payload_digest=$3 AND agent_key=$4
+  AND (expires_at IS NULL OR expires_at > now())
+ORDER BY id DESC LIMIT 1`, toolKey, taskID, payloadDigest, agentKey).
+		Scan(&o.ID, &o.DecisionID, &o.PayloadDigest, &o.ToolKey, &o.TaskID, &o.AgentKey,
+			&o.Scope, &o.Reason, &o.CreatedBy, &o.CreatedAt, &expires, &o.UseCount, &lastUsed)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if expires.Valid {
+		t := expires.Time
+		o.ExpiresAt = &t
+	}
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		o.LastUsedAt = &t
+	}
+	return &o, nil
+}
+
+// ConsumeSodManualOverride once 型改判的用后即焚：删除该行（消费即焚的语义
+// 与执行凭证一致——行存在即代表还有一次放行额度）。
+func (d *DB) ConsumeSodManualOverride(id int64) error {
+	if err := d.ensureSoDSchema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`DELETE FROM sod_manual_overrides WHERE id=$1 AND scope='once'`, id)
+	return err
+}
+
+// ExpireTaskSodOverrides 任务终态时把 task 级改判一并过期（随任务生命周期）。
+func (d *DB) ExpireTaskSodOverrides(taskID int64) error {
+	if err := d.ensureSoDSchema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`UPDATE sod_manual_overrides SET expires_at=now() WHERE task_id=$1 AND scope='task' AND expires_at IS NULL`, taskID)
+	return err
+}
+
+// ListSodManualOverrides 复核历史回放（职责分离页的过滤器）。
+func (d *DB) ListSodManualOverrides(taskID int64, limit int) ([]*SodManualOverride, error) {
+	if err := d.ensureSoDSchema(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	q := `SELECT id, decision_id, payload_digest, tool_key, task_id, agent_key, scope, reason, created_by, created_at, expires_at, use_count, last_used_at
+FROM sod_manual_overrides`
+	args := []any{}
+	if taskID > 0 {
+		q += ` WHERE task_id=$1`
+		args = append(args, taskID)
+	}
+	q += fmt.Sprintf(` ORDER BY id DESC LIMIT %d`, limit)
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*SodManualOverride{}
+	for rows.Next() {
+		var o SodManualOverride
+		var expires, lastUsed sql.NullTime
+		if err := rows.Scan(&o.ID, &o.DecisionID, &o.PayloadDigest, &o.ToolKey, &o.TaskID,
+			&o.AgentKey, &o.Scope, &o.Reason, &o.CreatedBy, &o.CreatedAt, &expires, &o.UseCount, &lastUsed); err != nil {
+			return nil, err
+		}
+		if expires.Valid {
+			t := expires.Time
+			o.ExpiresAt = &t
+		}
+		if lastUsed.Valid {
+			t := lastUsed.Time
+			o.LastUsedAt = &t
+		}
+		out = append(out, &o)
+	}
+	return out, rows.Err()
+}
+
+// GetSoDDecision 读单条决策账本（不存在返回 nil, nil）。
+func (d *DB) GetSoDDecision(id int64) (*SoDDecision, error) {
+	if err := d.ensureSoDSchema(); err != nil {
+		return nil, err
+	}
+	var rec SoDDecision
+	var checks []byte
+	err := d.QueryRow(`SELECT `+sodDecisionCols+` FROM sod_decisions WHERE id=$1`, id).
+		Scan(&rec.ID, &rec.TaskID, &rec.ConversationID, &rec.SourceAgent, &rec.ToolName,
+			&rec.Verdict, &rec.ReasonCode, &rec.PayloadDigest, &rec.PayloadPreview, &rec.IntentDigest,
+			&rec.AnomalyFlag, &rec.AnomalyReason, &checks, &rec.TokenDigest, &rec.ScopeDigest,
+			&rec.CacheHit, &rec.LatencyMs, &rec.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读 SoD 决策失败: %w", err)
+	}
+	rec.Checks = json.RawMessage(checks)
+	return &rec, nil
 }

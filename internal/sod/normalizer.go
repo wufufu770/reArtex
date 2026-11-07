@@ -123,6 +123,18 @@ type NormalizeInput struct {
 	ConversationID int64
 }
 
+// normalizerSema 规整器模型调用的并发闸（方案 v3 缺陷 B3①：并发 2）。
+//
+// 为什么要有它：worker×3 + planner 并发打同一个 profile 的规整接口，上游并发
+// 限制 → 20s 超时雪崩（远程实测单任务 37/54 次 unavailable、单次延迟 17.8s）。
+// 并发 2 的依据：规整是串行短调用（1-4s），2 路并发已能喂饱流水线，再多只会
+// 把上游限流打爆。
+//
+// 排队时间**不计入** 20s 调用超时：20s 管的是「模型往返」，拿到信号量之后
+// 才开始计时——否则排队本身就会制造超时假象（unavailable 越多 ⇒ 排队越长
+// ⇒ 更多超时 ⇒ 正反馈雪崩）。
+var normalizerSema = make(chan struct{}, 2)
+
 // Normalize 把一次工具调用转成结构化意图。
 //
 // ⚠️ **每一次失败都返回 error** —— 调用方（Chain）必须按
@@ -137,6 +149,13 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 	prov, ok := n.provider(n.profileID)
 	if !ok || prov == nil {
 		return NormalizerResult{}, fmt.Errorf("%w: 未找到可用的模型 profile %d", ErrNormalizerUnavailable, n.profileID)
+	}
+	// 先排队（B3①）：信号量等待只受调用方 ctx 取消约束，不吃 20s 模型超时。
+	select {
+	case normalizerSema <- struct{}{}:
+		defer func() { <-normalizerSema }()
+	case <-ctx.Done():
+		return NormalizerResult{}, fmt.Errorf("%w: 等待规整并发槽时调用方取消: %v", ErrNormalizerUnavailable, ctx.Err())
 	}
 	cctx, cancel := context.WithTimeout(ctx, n.timeout)
 	defer cancel()

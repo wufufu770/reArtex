@@ -65,6 +65,7 @@ import type {
   InterceptRule,
   JudgeConfig,
   JudgeUsage,
+  LegacyNode,
   LLMPoolStatus,
   LLMProfile,
   LLMRecordDetail,
@@ -85,10 +86,16 @@ import type {
   SessionTokenUsage,
   Settings,
   Severity,
+  ShadowDiff,
   SkillCall,
   SkillItem,
+  SodCategory,
+  SodCategoryAction,
+  SodCategoryFallback,
+  SodCategorySuggestion,
   SodCircuit,
   SodDecision,
+  SodMergedGateMode,
   SodReviewItem,
   SSProject,
   SSTask,
@@ -353,6 +360,8 @@ export const api = {
       active_llm_profile_id: activeLLMProfileId ?? null,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
+  // C7 人工有序收尾：走完整 settle 时序落终态（区别于硬 cancel）。
+  settleTask: (id: string) => post<{ ok: boolean }>(`/tasks/${id}/settle`, {}),
   controlTask: (id: string, action: "pause" | "resume") =>
     post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
@@ -948,6 +957,30 @@ export const api = {
   stopChat: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/chat/stop`, {}),
   gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
 
+  // ---- P2 分层经济 / P5 传承图 / P0 度量 ----
+  rolePolicy: () => get<{ llm_role_policy: string }>("/settings").then((r) => r.llm_role_policy ?? ""),
+  setRolePolicy: (llm_role_policy: string) => put<{ ok: boolean }>("/settings", { llm_role_policy }),
+  legacyNodes: (state = "") =>
+    get<{ nodes: LegacyNode[] | null }>(`/legacy/nodes${state ? `?state=${state}` : ""}`).then((r) => arr(r.nodes)),
+  // F3 人工复核改判：对一条 deny/needs_review 裁决发放 call-precision 放行凭据。
+  // Tier3 高危工具后端 409 拒绝；同工具改判 ≥3 次响应带 suggest_trust_rule。
+  sodDecisionReview: (id: number, body: { scope: "once" | "task"; reason?: string; operator?: string }) =>
+    post<{
+      ok: boolean;
+      override_id: number;
+      scope: string;
+      override_count_same_tool: number;
+      suggest_trust_rule: boolean;
+    }>(`/sod/decisions/${id}/review`, body),
+  // 人工改判历史（职责分离页复核历史过滤）。
+  sodOverrides: (taskId?: number) =>
+    get<{ overrides: unknown[]; count: number }>(`/sod/overrides${taskId ? `?task_id=${taskId}` : ""}`),
+  reviewLegacyNode: (id: number, state: "accepted" | "retired" | "draft") =>
+    post<{ ok: boolean }>(`/legacy/nodes/${id}/review`, { state, reviewer: "sir" }),
+  // 删除一条经验（draft/retired；accepted 后端 409）。操作者身份走 query（后端审计留人）。
+  deleteLegacyNode: (id: number) => del<{ ok: boolean }>(`/legacy/nodes/${id}?operator=${encodeURIComponent("sir")}`),
+  runMetrics: (taskId: number) => get<Record<string, unknown>>(`/metrics/run?task_id=${taskId}`),
+
   // ---- 任务大厅（群聊）----
   // 发布任务（POST /api/task-hall/tasks）：一次调用建任务 + 声明范围 + 建大厅 +
   // 可选开额度，返回 task_id 与 group_id。一个任务至多一个大厅（重复发布 409）。
@@ -959,6 +992,8 @@ export const api = {
     members?: string[];
     concurrency_limit?: number;
     budget_tokens?: number;
+    category_id?: number; // 任务类别(task_categories.id)；缺省=未分类。资产收集类 ⇒ worker 追加收集纪律
+    timeout_seconds?: number; // 任务墙钟(秒)；0=不限时，缺省由后端取 7200
   }) => post<{ task_id: number; group_id: number }>("/task-hall/tasks", input),
   // 大厅列表。/task-hall/tasks 带出成员与额度上限，/task-hall/groups 只有群本体，
   // 两个接口列的是同一批群（都读 chat_groups），这里用带成员的那个。
@@ -1102,6 +1137,60 @@ export const api = {
   // 单个工具的熔断状态。没有行 ⇒ closed（还没出过事），不是「查不到」。
   sodCircuit: (toolKey: string) =>
     get<{ circuit: SodCircuit }>(`/sod/circuit/${encodeURIComponent(toolKey)}`).then((r) => r.circuit),
+
+  // ---- 拦截种类 / auditor 建议队列 / 影子对照（方案 v4.1 §2/§3/§11-G1）----
+  // 种类表（含停用与锁定行）。version 是表版本号：任何 CRUD 都会 bump，链侧缓存
+  // 靠它失效；UI 只透传展示。
+  sodCategories: () =>
+    get<{ categories: SodCategory[] | null; version: string }>("/sod/categories").then((r) => ({
+      categories: arr(r.categories),
+      version: r.version ?? "",
+    })),
+  // 新建种类（custom 正则）。400=参数不合法；409=pattern 含锁定基线特征却想配成 pass——绕道不认。
+  createSodCategory: (body: {
+    name: string;
+    kind?: string;
+    pattern: string;
+    action: SodCategoryAction;
+    cap_per_task: number;
+    fallback: SodCategoryFallback;
+    priority: number;
+    reason: string;
+    created_by: string;
+  }) => post<{ ok: boolean; category: SodCategory }>("/sod/categories", body),
+  // 部分更新（动作/上限/兜底/启停/优先级/理由任选）。锁定行改动作后端 409，原文透传给 toast。
+  updateSodCategory: (
+    id: number,
+    body: {
+      action?: SodCategoryAction;
+      cap_per_task?: number;
+      fallback?: SodCategoryFallback;
+      enabled?: boolean;
+      priority?: number;
+      reason?: string;
+    },
+  ) => post<{ ok: boolean; category: SodCategory }>(`/sod/categories/${id}`, body),
+  // 删除种类。409 = 锁定基线行，不可删。
+  deleteSodCategory: (id: number) => del<{ ok: boolean }>(`/sod/categories/${id}`),
+  // auditor 的种类建议。status=pending 只看待裁决的；不传 = 全部。
+  sodCategorySuggestions: (status?: string) =>
+    get<{ suggestions: SodCategorySuggestion[] | null }>(
+      `/sod/category-suggestions${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ).then((r) => arr(r.suggestions)),
+  // 裁决一条建议：adopted=落成种类行（裁量经验沉淀为确定性规则）/ dismissed=忽略。
+  decideSodCategorySuggestion: (id: number, decision: "adopted" | "dismissed", operator: string) =>
+    post<{ ok: boolean; adopted: boolean }>(`/sod/category-suggestions/${id}/decide`, { decision, operator }),
+  // 影子对照：近期新旧链裁决差异（倒序，limit 后端截到 500）+ 当前合并闸 mode。
+  sodShadowDiffs: (limit = 100) =>
+    get<{ diffs: ShadowDiff[] | null; mode: SodMergedGateMode }>(`/sod/shadow?limit=${limit}`).then((r) => ({
+      diffs: arr(r.diffs),
+      mode: r.mode ?? "off",
+    })),
+  // 合并闸三态开关：off（旧链）/ shadow（灰度对照）/ enforce（新链接管）。推进与回退都走它。
+  sodMergedGate: () => get<{ mode: SodMergedGateMode }>("/sod/merged-gate").then((r) => r.mode ?? "off"),
+  setSodMergedGate: (mode: SodMergedGateMode, operator: string) =>
+    post<{ ok: boolean; mode: SodMergedGateMode }>("/sod/merged-gate", { mode, operator }),
+
   // 审计链校验。⚠️ 断链是**结论**（200 + intact=false），不是接口坏了 ——
   // 所以这里不把 intact=false 当异常抛出去。
   auditChain: () => get<AuditChainVerification>("/audit/chain"),
@@ -1162,6 +1251,7 @@ export const api = {
     name: string;
     format: string;
     model: string;
+    models?: string[]; // E1 多模型：该 profile 可用模型列表（含默认模型）
     base_url?: string;
     proxy?: string;
     api_key?: string; // blank on update keeps the existing key
@@ -1434,6 +1524,23 @@ export const api = {
 
   // ---- intercept rules ----
   interceptRules: () => get<{ rules: InterceptRule[] }>("/intercept/rules").then((r) => arr(r.rules)),
+  // F2 信任规则：allow 通路上的具名视图（^$ 锚定 + Tier3 拒绝 + 默认停用 + 上限 50）。
+  trustRules: () =>
+    get<{ rules: InterceptRule[]; count: number; max: number }>("/intercept/trust-rules").then((r) => arr(r.rules)),
+  createTrustRule: (body: {
+    tool: string;
+    pattern: string;
+    task_id?: number;
+    reason?: string;
+    operator?: string;
+    confirm?: boolean;
+  }) =>
+    post<{ ok: boolean; rule?: InterceptRule; enabled?: boolean; suggest?: boolean }>("/intercept/trust-rules", body),
+  previewTrustRule: (body: { tool: string; pattern: string; task_id?: number }) =>
+    post<{ would_allow: number; scanned: number; window_days: number; samples: { id: number; preview: string }[] }>(
+      "/intercept/trust-rules/preview",
+      body,
+    ),
   createInterceptRule: (rule: Omit<InterceptRule, "id" | "created_at" | "updated_at">) =>
     post<InterceptRule>("/intercept/rules", rule),
   updateInterceptRule: (id: number, rule: Omit<InterceptRule, "id" | "created_at" | "updated_at">) =>
@@ -1510,10 +1617,11 @@ export const api = {
   interceptJudgeUsage: (days = 30) => get<JudgeUsage>(`/intercept/judge/usage?days=${days}`),
 
   // ---- commands (tool execution history, any tool) ----
-  commands: (params?: { task?: string; q?: string; page?: number; size?: number }) => {
+  commands: (params?: { task?: string; q?: string; status?: "error" | "ok"; page?: number; size?: number }) => {
     const sp = new URLSearchParams();
     if (params?.task) sp.set("task", params.task);
     if (params?.q) sp.set("q", params.q);
+    if (params?.status) sp.set("status", params.status);
     sp.set("page", String(params?.page ?? 0));
     sp.set("size", String(params?.size ?? 50));
     return get<{ commands: CommandRecord[]; total: number }>(`/commands?${sp}`);

@@ -293,8 +293,26 @@ func (d *DB) backfillSessions() error {
 	}
 	defer tx.Rollback()
 
+	// A1 存量迁移：系统对话（升级前没有 origin 列）按标题前缀补 origin——
+	// 一次性、幂等（WHERE origin='human' 只补一次）。
+	for _, m := range []struct{ prefix, origin string }{
+		{"合并触发", "trigger"},
+		{"工具触发", "trigger"},
+		{"定时触发", "trigger"},
+		{"finding 触发", "trigger"},
+		{"目标触发", "trigger"},
+		{"超时触发", "trigger"},
+		{"任务创建触发", "trigger"},
+		{"SoD 复核", "sod_review"},
+	} {
+		_, _ = tx.Exec(`UPDATE conversations SET origin=$2
+WHERE origin='human' AND title LIKE $1||'%'`, m.prefix, m.origin)
+	}
+
+	// A1 回填收紧：只有人发起的对话才回填成正式会话。系统对话（trigger/
+	// sod_review/wake/hall）留在 conversations 表里（数据无损），不再刷屏侧边栏。
 	rows, err := tx.Query(`SELECT id, agent_key, title FROM conversations
-WHERE session_id IS NULL ORDER BY id`)
+WHERE session_id IS NULL AND origin='human' ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -1065,6 +1083,29 @@ WHERE session_id=$1 AND id > $2 ORDER BY id ASC LIMIT $3`, sessionID, sinceID, l
 	return out, rows.Err()
 }
 
+// SessionMessageByID 读会话流里的一条消息（不存在时返回 nil, nil）。
+//
+// 用途：唤醒器展开「内容与 #N 相同、已转交」这类**指针式转交说明**时，按 id 取
+// 被引用消息的原文内联进 wake 输入 —— 接单方拿到的是内容，不是指针。
+func (d *DB) SessionMessageByID(sessionID, id int64) (*SessionMessage, error) {
+	if err := d.ensureSessionSchema(); err != nil {
+		return nil, err
+	}
+	var m SessionMessage
+	err := d.QueryRow(`SELECT `+sessionMessageCols+` FROM session_messages
+WHERE session_id=$1 AND id=$2`, sessionID, id).Scan(&m.ID, &m.SessionID, &m.ParentMessageID, &m.FromAgent, &m.ToAgent,
+		&m.Kind, &m.Body, &m.TaskID, &m.IntentID, &m.FindingID, &m.Status,
+		&m.BlockedReason, &m.ClaimsAuthorization, &m.ReceiptOf, &m.ReceiptAction,
+		&m.CreatedAt, &m.ReadAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读会话消息失败: %w", err)
+	}
+	return &m, nil
+}
+
 // SessionConversationIDs 列这个会话背后的旧对话 id（迁移回填后，一个会话可以
 // 挂着多个对话 —— 每个成员 agent 一个）。
 //
@@ -1188,8 +1229,9 @@ ORDER BY id LIMIT 1`, sessionID, agentKey).Scan(&id)
 	if sessName == "" {
 		sessName = fmt.Sprintf("会话-%d", sessionID)
 	}
-	c, err := scanConv(d.QueryRow(`INSERT INTO conversations(agent_key, title, session_id)
-VALUES ($1, $2, $3) RETURNING `+convCols, agentKey, sessName+"/"+agentKey, sessionID))
+	// A1：唤醒线程标记 origin='wake'——它是会话的子记录，不是一级对话。
+	c, err := scanConv(d.QueryRow(`INSERT INTO conversations(agent_key, title, session_id, origin)
+VALUES ($1, $2, $3, $4) RETURNING `+convCols, agentKey, sessName+"/"+agentKey, sessionID, OriginWake))
 	if err != nil {
 		// 并发建线程没有 DB 约束兜底（session_id+agent_key 无 UNIQUE）⇒ 插入失败
 		// 回表重读一次；仍读不到就如实报错。
@@ -1369,4 +1411,22 @@ ORDER BY id DESC LIMIT $3`, sessionID, toAgent, limit)
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
+}
+
+// ConversationsForSession 列一个会话名下的全部对话线程（A2 删除守卫用）。
+func (d *DB) ConversationsForSession(sessionID int64) ([]*Conversation, error) {
+	rows, err := d.Query(`SELECT `+convCols+` FROM conversations WHERE session_id=$1 ORDER BY id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Conversation{}
+	for rows.Next() {
+		c, err := scanConv(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
 }

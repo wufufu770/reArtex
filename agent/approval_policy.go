@@ -1,5 +1,7 @@
 package agent
 
+import "strings"
+
 // 本文件是【自动权限分层】里 Tier 1 判定的唯一真相源。
 //
 // 分层模型（见 .omo/plans/2026-10-29-auto-permission-tiers.md §1）：
@@ -284,4 +286,50 @@ func init() {
 			panic("策略工具 " + k + " 不允许进 Tier1ReadOnlyTools：策略库跨任务、跨租户，读它不是「任务范围内的只读」")
 		}
 	}
+}
+
+// IsTier2WriteTool 报告某个工具 key 是否属于 Tier 2 结构化写类（方案 v3 缺陷
+// B4 降级档的分级器入口：降级期只有这类工具可被确定性放行——它们的写目标
+// 固定在任务图/回执/群信箱内，没有外部 host 目标可失控；Tier3（Bash/出网/
+// MCP/扩权/状态迁移）一律返回 false，降级永不豁免它们）。
+//
+// 供宿主（server/sod_chain.go）注入 sod.ChainDeps.DegradedAllow 使用——
+// internal/sod 是叶子包不能 import agent，分级判据的单一真相源仍在本文件。
+func IsTier2WriteTool(key string) bool {
+	_, ok := tier2WriteKinds[key]
+	return ok
+}
+
+// IsTier3ProtectedTool 报告某个工具是否属于 Tier3 高危保护面（方案 v3 缺陷
+// F3：人工复核改判的「只可转 ask、不可改判 allow」判定）。
+//
+// 覆盖 Tier3 的四类风险面 + 它们的载体工具：
+//   - 出网：tier3EgressTools（Bash/web_search）+ MCP 前缀；
+//   - 写宿主 FS：Write/Edit/MultiEdit（Bash 已在出网里，但单独兜一道）；
+//   - 裁决写/扩权：tier3ScopeExpansionTools；
+//   - 状态迁移：tier3StateChangeTools；
+//   - 交互 shell 家族（会派生进程/注入命令）。
+//
+// internal/sod 是叶子包不能 import agent ⇒ 改判 API（server 层）用它做写入闸。
+func IsTier3ProtectedTool(key string) bool {
+	for _, t := range tier3EgressTools {
+		if t == key {
+			return true
+		}
+	}
+	for _, t := range tier3ScopeExpansionTools {
+		if t == key {
+			return true
+		}
+	}
+	for _, t := range tier3StateChangeTools {
+		if t == key {
+			return true
+		}
+	}
+	switch key {
+	case "Write", "Edit", "MultiEdit", "shell_open", "shell_send", "shell_write":
+		return true
+	}
+	return strings.HasPrefix(key, tier3MCPToolPrefix)
 }

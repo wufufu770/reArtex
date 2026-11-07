@@ -160,7 +160,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	base := actool.DefaultTools()
 	// 合并而不是覆盖：调用方（群聊成员会话）可能已经把 TaskID/ExplorationID 放进
 	// ctx，覆盖掉会让群聊里的 agent 拿不到任务上下文（report_finding 会直接拒）。
-	ctx = WithRunInfoMerged(ctx, RunInfo{SessionID: sessionID})
+	ctx = WithAgentKey(WithRunInfoMerged(ctx, RunInfo{SessionID: sessionID}), agentKey)
 	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 

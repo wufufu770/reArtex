@@ -130,7 +130,7 @@ func TestGroupQuotaSettleReconcilesEstimate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("预扣: %v", err)
 	}
-	if err := d.SettleGroupQuota(id, QuotaUsage{InputTokens: 300, OutputTokens: 100, TotalTokens: 400}); err != nil {
+	if _, err := d.SettleGroupQuota(id, QuotaUsage{InputTokens: 300, OutputTokens: 100, TotalTokens: 400}); err != nil {
 		t.Fatalf("结算: %v", err)
 	}
 	quota, err := d.GetGroupQuota(gid)
@@ -151,7 +151,7 @@ func TestGroupQuotaSettleReconcilesEstimate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("预扣: %v", err)
 	}
-	if err := d.SettleGroupQuota(id, QuotaUsage{InputTokens: 1500, OutputTokens: 600, TotalTokens: 2100}); err != nil {
+	if _, err := d.SettleGroupQuota(id, QuotaUsage{InputTokens: 1500, OutputTokens: 600, TotalTokens: 2100}); err != nil {
 		t.Fatalf("结算: %v", err)
 	}
 	quota, err = d.GetGroupQuota(gid)

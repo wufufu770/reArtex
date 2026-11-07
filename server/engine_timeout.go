@@ -180,6 +180,23 @@ func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 	}
 }
 
+// SettleOrderly 触发一次任务的完整有序收尾时序（方案 v3 缺陷 C7：人工有序收尾
+// 入口——区别于硬 cancel：走 drain→终局 planner 轮→定终态的全套时序）。异步，
+// 返回是否成功受理（任务存在且非终态）。
+func (e *Engine) SettleOrderly(t *Task) bool {
+	if t == nil || e.IsDeleting(t.ID) {
+		return false
+	}
+	if isTerminalStatus(e.m.TaskStatus(t.ID)) {
+		return false
+	}
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+		Summary: "人工触发有序收尾：停领新意图 → 等在跑 worker 收尾 → 终局判定 → 落终态"})
+	// settleTask 内部的 sleep 都有界（drain grace / 终局轮），后台跑即可。
+	go e.settleTask(context.Background(), t)
+	return true
+}
+
 // settleTask runs the ordered settle sequence once (§4 steps ①–⑥).
 func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	if !e.markSettling(t.ID) {
@@ -221,6 +238,10 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 		log.Printf("[deadline] task %s 落终态失败: %v", t.ID, err)
 	case won:
 		log.Printf("[deadline] task %s 收尾完成,终态=%s", t.ID, status)
+		// P5 传承图：goalless/终局判定为 done 的超时收尾同样蒸馏（timeout 态不蒸馏）。
+		if status == "done" && e.LegacyDistiller != nil {
+			e.LegacyDistiller(t)
+		}
 	default:
 		log.Printf("[deadline] task %s 收尾时已是终态,保留原状态", t.ID)
 	}

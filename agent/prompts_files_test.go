@@ -20,7 +20,9 @@ import (
 // 种子就该跟着变（见 TestAdvisoryPromptSeedsMatchSourceFiles）。
 var builtinPromptDigestAnchors = map[string]string{
 	"goals":     "72a7a0159443b41dde29dfba8a3de6a2c8a15b273935495a7b88561fa708aa68",
-	"planner":   "14e163f4a44da9fee20a214048a607adc3659b2025275569eb512532ca8c15d5",
+	// P1 角色工具纪律（方案 v3.1 §5.1）：planner 移除 Bash 探测授权段（工具面编译期
+	// 白名单同步收口）——有意识的提示词行为变更，锚点随之更新（2026-11-05）。
+	"planner":   "763dbee0189fad8ad444f1efc5381a6630baeff8cb6a9c4e2e7acdbb277a8ed3",
 	"mainagent": "12bb69ee0886c4fb9beb936d882021a91104860f1da69a5e3eda3d9e345cd399",
 	"worker":    "80fbb1c610dd57e266c20b9145793339eee540b809f6db8f5336261b45879f08",
 	"auto":      "b2a71b82243607337b19f0642317fed88c144d536412d80eaaf90807f2905a1d",
@@ -63,12 +65,12 @@ func TestBuiltinPromptDigestAnchors(t *testing.T) {
 	}
 }
 
-// TestBuiltinPromptSeedsKeys 保证种子目录的构成是「六个既有 + 五个顾问」，不多不少。
+// TestBuiltinPromptSeedsKeys 保证种子目录的构成是「七个既有 + 五个顾问」，不多不少。
 func TestBuiltinPromptSeedsKeys(t *testing.T) {
 	seeds := BuiltinPromptSeeds()
 	want := map[string]bool{
 		"goals": true, "planner": true, "mainagent": true,
-		"worker": true, "auto": true, "pentest": true,
+		"worker": true, "auto": true, "pentest": true, "recon": true,
 		"curator": true, "verifier": true, "redteam": true, "creative": true,
 		"intent_normalizer": true,
 	}

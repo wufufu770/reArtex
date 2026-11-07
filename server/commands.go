@@ -9,13 +9,18 @@ import (
 )
 
 // pgListCommands returns tool executions (any tool) from the activity table.
+// status: "" 全部 / "error" 失败 / "ok" 成功（G2 状态筛选）。
 func (s *Server) pgListCommands(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page := atoiDefault(q.Get("page"), 0)
 	size := atoiDefault(q.Get("size"), 50)
 	keyword := q.Get("q")
+	status := q.Get("status")
+	if status != "error" && status != "ok" {
+		status = ""
+	}
 
-	records, total, err := s.m.PG().ListCommands(commandTaskFilter(q.Get("task")), keyword, page, size)
+	records, total, err := s.m.PG().ListCommands(commandTaskFilter(q.Get("task")), keyword, status, page, size)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"reflect"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -24,6 +26,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/internal/sod"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
@@ -82,6 +85,9 @@ type Server struct {
 	sessionWakePending map[string][]pendingWake
 	// sessionWakeChain 记每个对话线程上在跑唤醒 turn 的接力深度（封顶用）。
 	sessionWakeChain map[string]int
+	// wakeChains 是接力链「同边去重」账本（server/session_waker.go）：一次人发
+	// 消息引发的整条链上，「X 的回复叫醒 Y」只放行一次，掐断客套互 @ 的乒乓循环。
+	wakeChains wakeChainBook
 	// mirror 是任务→会话播报的路由缓存（server/session_task_mirror.go）。
 	mirror *taskSessionMirror
 
@@ -102,7 +108,7 @@ type Server struct {
 	// Built lazily on first use; invalidated when any profile is saved/activated/deleted
 	// so edits take effect.
 	profMu         sync.Mutex
-	profChatAgents map[int64]*agent.ChatAgent // per-profile ChatAgent cache (chat page)
+	profChatAgents map[profChatKey]*agent.ChatAgent // per-(profile,model) ChatAgent cache (chat page)
 
 	// provByProfile caches ONE provider per LLM profile id so every agent bound or
 	// pinned to the same profile shares a single provider instance — hence one rate
@@ -110,8 +116,22 @@ type Server struct {
 	// cache, so global fallback and task chains do not accidentally double the
 	// configured request rate. Cleared on profile edits, then repopulated by active reapply.
 	provCacheMu   sync.Mutex
-	provByProfile map[int64]*provEntry
-	provCacheGen  uint64
+	provByProfile map[provKey]*provEntry
+	// profileRateLimits 按 profile 持有限流器（E1：同 profile 的多个模型变体
+	// 共享同一份上游并发预算——预算属于 key，不属于模型）。
+	profileRateLimits map[int64]*llm.RateLimit
+	provCacheGen      uint64
+
+	// 合并闸（方案 v4.1）：auditor 裁决缓存 + 情报源白名单缓存 + 种类表快照。
+	// 版本号失配 / TTL 到期才重查 DB；字段在装配时初始化（setupSoDChain）。
+	auditorCache *auditorCache
+	intelMu      sync.Mutex
+	intelCache   []string
+	intelAt      time.Time
+	catMu        sync.Mutex
+	catCache     []sodpolicy.SodCategory
+	catVer       string
+	catVerNum    uint64
 
 	// llmHealth is the process-wide circuit-breaker state for LLM failover (轮询).
 	// It deliberately lives OUTSIDE the provider caches: rebuilding the chain
@@ -130,6 +150,21 @@ type Server struct {
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
 	side        *sideQuestionState
+
+	// quotaGate 是共享的群组预算闸门（C2）：所有 profile 的 provider 链共用同一个
+	// 实例——阈值预警的「已发过」记录与「预算耗尽」判定都靠它的持续记忆，每条
+	// provider 各建一个会把记忆打散。
+	quotaGateOnce sync.Once
+	quotaGate     *llmrec.QuotaGate
+
+	// quotaRefusals 记每任务的连续群组预算拒绝数（C2 预算僵尸闸）：连续 ≥3 次
+	// ⇒ 任务落终态 + 播报，不再无限重试。成功调用清零。
+	quotaRefusalMu     sync.Mutex
+	quotaRefusalCounts map[string]*atomic.Int64
+
+	// denials 是 B6 升级路径的计数器：同一 (task, tool, reason_code) 连续被拒
+	// ≥3 ⇒ 在跑意图转 blocked + 会话播报，止损撞墙循环。
+	denials *denialEscalation
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -156,17 +191,24 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	engine := NewEngine(m)
+	s := &Server{m: m, engine: engine, ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, sessionWakePending: map[string][]pendingWake{},
-		sessionWakeChain: map[string]int{}, mirror: newTaskSessionMirror(),
+		sessionWakeChain: map[string]int{}, mirror: newTaskSessionMirror(), denials: newDenialEscalation(),
 		triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
-		profChatAgents: map[int64]*agent.ChatAgent{},
-		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
+		profChatAgents: map[profChatKey]*agent.ChatAgent{},
+		provByProfile: map[provKey]*provEntry{}, profileRateLimits: map[int64]*llm.RateLimit{},
+		llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
 	s.engine.ClaimMirror = s.onEngineIntentClaim
+	// P5 传承图：任务终局蒸馏（server/legacy.go）。
+	s.engine.LegacyDistiller = s.DistillLegacyExperience
+	// B6：工具连续拒绝的升级观察者（意图转 blocked + 会话播报）。
+	s.engine.DenialWatcher = s.onToolDenial
+	s.engine.AuditSummary = s.emitAuditSummary
 	s.loadTaskSessionBindings()
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
@@ -377,6 +419,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg.Models = p.Models // E1：模型列表随配置走（模型变体校验/前端回显都要用）
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -481,7 +524,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
 	if active, _ := s.m.pg.ActiveProfile(); active != nil {
-		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
+		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && reflect.DeepEqual(activeCfg, cfg) {
 			prov, _, _ = s.providerForProfile(active.ID)
 		}
 	}
@@ -495,7 +538,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		s.cfgMu.Lock()
 		profName := s.llmProf
 		s.cfgMu.Unlock()
-		prov = llmrec.Wrap(installQuotaGate(prov, s.m.PG()), s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(installQuotaGate(prov, s.sharedQuotaGate()), s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, 0, profName)
 	}
 	s.cfgMu.Lock()
@@ -548,6 +591,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg.Models = p.Models // E1：模型列表随配置走（模型变体校验/前端回显都要用）
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -585,7 +629,8 @@ func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 
 func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
 	ca := s.chatAgentRef()
 	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
-		if pa := s.chatAgentForProfile(*eff); pa != nil {
+		// E1：会话级模型选择（空=profile 默认）。
+		if pa := s.chatAgentForProfileModel(*eff, c.LLMModel); pa != nil {
 			ca = pa
 		}
 	}
@@ -610,9 +655,38 @@ func (s *Server) chatUnavailableReason() string {
 // providerForProfile returns a cached provider+cfg for a profile id, so every agent
 // bound/pinned to the same profile shares one provider instance (one rate limiter).
 // ok=false when the profile is missing/invalid → caller falls back to the global pair.
+// provKey 是 provider 缓存键（E1 多模型）：(profile, model)。model 为空串 =
+// 该 profile 的默认模型——与旧的 (profile) 键完全等价，所有既有调用点透明。
+type provKey struct {
+	id    int64
+	model string
+}
+
+// sharedRateLimitFor 取（或建）profile 级共享限流器。E1：多模型变体共享同一
+// 份上游并发预算；清缓存（profile 编辑）时随 provByProfile 一起失效重建。
+func (s *Server) sharedRateLimitFor(id int64, cfg agent.Config) *llm.RateLimit {
+	if cfg.RatePerSecond <= 0 && cfg.RatePerMinute <= 0 {
+		return nil
+	}
+	if rl, ok := s.profileRateLimits[id]; ok {
+		return rl
+	}
+	rl := &llm.RateLimit{PerSecond: cfg.RatePerSecond, PerMinute: cfg.RatePerMinute}
+	s.profileRateLimits[id] = rl
+	return rl
+}
+
 func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
+	return s.providerForProfileModel(id, "")
+}
+
+// providerForProfileModel 解析 (profile, model) 的 provider（E1 多模型）。
+// model="" ⇒ 用 profile 默认模型；否则必须是该 profile models 列表里的一个
+// （不在列表 ⇒ 回退默认并记日志——fail-open 到可用模型而不是报错拒跑）。
+func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, agent.Config, bool) {
+	key := provKey{id: id, model: model}
 	s.provCacheMu.Lock()
-	if e := s.provByProfile[id]; e != nil {
+	if e := s.provByProfile[key]; e != nil {
 		s.provCacheMu.Unlock()
 		return e.prov, e.cfg, true
 	}
@@ -622,6 +696,23 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	if !ok {
 		return nil, agent.Config{}, false
 	}
+	// E1：模型变体校验 + 覆盖。
+	if model != "" && model != cfg.Model {
+		found := false
+		for _, m := range cfg.Models {
+			if m == model {
+				found = true
+				break
+			}
+		}
+		if found {
+			cfg.Model = model
+		} else {
+			log.Printf("[engine] profile %d 没有模型 %q（可用 %v），回退默认模型", id, model, cfg.Models)
+		}
+	}
+	// E1：共享限流器注入（同 profile 的所有模型变体共用）。
+	cfg.SharedRateLimit = s.sharedRateLimitFor(id, cfg)
 	prov, err := cfg.NewProvider()
 	if err != nil {
 		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
@@ -629,18 +720,18 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	}
 	// Wrap with recorder, tagged with this profile's name.
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
-		prov = llmrec.Wrap(installQuotaGate(prov, s.m.PG()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
+		prov = llmrec.Wrap(installQuotaGate(prov, s.sharedQuotaGate()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, id, p.Name)
 	}
 	s.provCacheMu.Lock()
 	if generation != s.provCacheGen {
 		s.provCacheMu.Unlock()
-		return s.providerForProfile(id)
+		return s.providerForProfileModel(id, model)
 	}
-	if e := s.provByProfile[id]; e != nil { // lost the race → keep the winner
+	if e := s.provByProfile[key]; e != nil { // lost the race → keep the winner
 		prov, cfg = e.prov, e.cfg
 	} else {
-		s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg}
+		s.provByProfile[key] = &provEntry{prov: prov, cfg: cfg}
 		log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
 	}
 	s.provCacheMu.Unlock()
@@ -649,14 +740,28 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 
 // chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached
 // per profile id. Returns nil if the profile is missing or has no API key.
+// profChatKey 是 ChatAgent 缓存键（E1）：(profile, model)，model 空=默认。
+type profChatKey struct {
+	id    int64
+	model string
+}
+
 func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
+	return s.chatAgentForProfileModel(id, "")
+}
+
+// chatAgentForProfileModel 解析 (profile, model) 的 ChatAgent（E1 会话级模型
+// 选择）。model 必须在该 profile 的 models 列表内（不命中回退默认——由
+// providerForProfileModel 统一裁决）。
+func (s *Server) chatAgentForProfileModel(id int64, model string) *agent.ChatAgent {
+	key := profChatKey{id: id, model: model}
 	s.profMu.Lock()
-	cached := s.profChatAgents[id]
+	cached := s.profChatAgents[key]
 	s.profMu.Unlock()
 	if cached != nil {
 		return cached
 	}
-	prov, cfg, ok := s.providerForProfile(id)
+	prov, cfg, ok := s.providerForProfileModel(id, model)
 	if !ok {
 		return nil
 	}
@@ -669,10 +774,10 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	ca.SetMaxTokens(maxTokensResolver(cfg))
 	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
 	s.profMu.Lock()
-	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
+	if ex := s.profChatAgents[key]; ex != nil { // lost the race → keep the winner
 		ca = ex
 	} else {
-		s.profChatAgents[id] = ca
+		s.profChatAgents[key] = ca
 	}
 	s.profMu.Unlock()
 	return ca
@@ -683,11 +788,12 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 // (and re-resolves each agent's bound model) on their next round.
 func (s *Server) invalidateProfileAgents() {
 	s.profMu.Lock()
-	s.profChatAgents = map[int64]*agent.ChatAgent{}
+	s.profChatAgents = map[profChatKey]*agent.ChatAgent{}
 	s.profMu.Unlock()
 	s.provCacheMu.Lock()
 	s.provCacheGen++
-	s.provByProfile = map[int64]*provEntry{}
+	s.provByProfile = map[provKey]*provEntry{}
+	s.profileRateLimits = map[int64]*llm.RateLimit{} // 限流器随缓存一起重建（配置可能改了速率）
 	s.provCacheMu.Unlock()
 	s.invalidateTaskAgents()
 }
@@ -709,6 +815,17 @@ func (s *Server) Handler() http.Handler {
 	s.RegisterTaskHallRoutes(mux)
 	s.RegisterTaskHallQuotaRoutes(mux)
 	RegisterEgressGovernanceRoutes(mux)
+	// B7：出网横幅随配置收敛——探针读 settings（web_search 独立出口/捕获开关）。
+	egressConfigProbe = func() (string, string, bool) {
+		wsProxy := ""
+		if v, ok, _ := s.m.pg.GetSetting(settingWebSearchProxy); ok {
+			wsProxy = strings.TrimSpace(v)
+		}
+		gp := strings.TrimSpace(s.m.GlobalProxy())
+		return wsProxy, gp, s.m.TrafficEnabled()
+	}
+	s.registerMetricsRoutes(mux) // 运行度量（P0 评估基线）
+	s.registerLegacyRoutes(mux)  // 传承图（P5 第三张图）
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -789,6 +906,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tasks/{id}/constraints/{cid}", s.editConstraint)    // 约束管理:修改约束
 	mux.HandleFunc("DELETE /api/tasks/{id}/constraints/{cid}", s.deleteConstraint) // 约束管理:删除约束
 	mux.HandleFunc("POST /api/tasks/{id}/control", s.control)
+	mux.HandleFunc("POST /api/tasks/{id}/settle", s.taskSettle)
 	mux.HandleFunc("PUT /api/tasks/{id}/llm", s.updateTaskLLMProfiles)
 	mux.HandleFunc("GET /api/tasks/{id}/llm/resolution", s.taskLLMResolutionHandler)
 	mux.HandleFunc("POST /api/tasks/{id}/intents/{iid}/control", s.controlIntent)
@@ -886,6 +1004,7 @@ func (s *Server) Handler() http.Handler {
 	// conversations (chat page)
 	mux.HandleFunc("GET /api/conversations", s.pgListConversations)
 	mux.HandleFunc("POST /api/conversations", s.pgCreateConversation)
+	mux.HandleFunc("GET /api/conversations/runs", s.systemRunsList)
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.pgRenameConversation)
 	mux.HandleFunc("PATCH /api/conversations/{id}/profile", s.pgUpdateConversation)
@@ -970,6 +1089,9 @@ func (s *Server) Handler() http.Handler {
 
 	// 拦截规则管理
 	mux.HandleFunc("GET /api/intercept/rules", s.interceptListRules)
+	mux.HandleFunc("GET /api/intercept/trust-rules", s.trustRuleList)
+	mux.HandleFunc("POST /api/intercept/trust-rules", s.trustRuleCreate)
+	mux.HandleFunc("POST /api/intercept/trust-rules/preview", s.trustRulePreview)
 	mux.HandleFunc("POST /api/intercept/rules", s.interceptCreateRule)
 	mux.HandleFunc("PUT /api/intercept/rules/{id}", s.interceptUpdateRule)
 	mux.HandleFunc("DELETE /api/intercept/rules/{id}", s.interceptDeleteRule)
@@ -1020,6 +1142,9 @@ func (s *Server) Handler() http.Handler {
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；
 	// 对抗复核队列是交给 redteam 证伪的清单，不是人工审批队列。
 	mux.HandleFunc("GET /api/sod/decisions", s.sodDecisionList)
+	mux.HandleFunc("POST /api/sod/decisions/{id}/review", s.sodDecisionReview)
+	s.registerSodCategoryRoutes(mux)
+	mux.HandleFunc("GET /api/sod/overrides", s.sodOverrideList)
 	mux.HandleFunc("GET /api/sod/review-queue", s.sodReviewQueue)
 	mux.HandleFunc("GET /api/sod/circuit", s.sodCircuitList)
 	mux.HandleFunc("GET /api/sod/circuit/{tool_key}", s.sodCircuitGet)
@@ -1760,11 +1885,13 @@ func (s *Server) seed(t *Task, text string) {
 	scheme, host, port, ok := parseTarget(text)
 	if !ok {
 		log.Printf("[seed] task %s: 未能从 %q 解析出目标 host/IP，不创建站点（请手动配置 scope）", t.ID, text)
+		s.seedScopeFailed(t, fmt.Sprintf("未能从任务描述/目标解析出目标 host/IP，scope 未配置——任务将以空范围运行。请手动登记资产或关联公司范围"))
 		return
 	}
 	// P0-1 guard: never treat the configured LLM gateway as a target.
 	if gw := s.llmHost(); gw != "" && host == gw {
 		log.Printf("[seed] task %s: 目标 %q 是 LLM 网关，拒绝作为渗透目标", t.ID, host)
+		s.seedScopeFailed(t, fmt.Sprintf("解析出的目标 %s 是 LLM 网关，已拒绝作为渗透目标，scope 未配置。请手动登记资产", host))
 		return
 	}
 
@@ -1797,6 +1924,40 @@ func (s *Server) seed(t *Task, text string) {
 	// 不在这里 Notify:首轮是否触发统一由 engine.Run 的 HasActiveIntent 决定(种子意图任务
 	// 跳过首轮)。seed 早于 Run 执行,若在此 Notify 会 buffered 到通道、被 plannerLoop 启动时
 	// 消费掉而绕过 Run 的门控 → 种子任务仍误触发首轮。
+}
+
+// seedScopeFailed 是 seed 失败的显性化出口（方案 v3 缺陷 H1——麦当劳任务空 scope
+// 无感知，只有 server 日志一条）。三路可见：
+//  1. tasks.scope_configured=false（持久，重启不丢，任务详情横幅数据源）；
+//  2. 任务活动流一条 IsError 活动（任务详情时间线可见）；
+//  3. 已绑定会话（总控/群聊）一条 note 播报——绑定可能晚于 seed（master 路径先
+//     BindSessionTask 后 launchTask，spawn 路径相反），所以内存绑定查不到时回源 DB。
+//
+// 任务创建时已带 company scope 的不算失败——scope 已经配置，横幅只会误导。
+func (s *Server) seedScopeFailed(t *Task, reason string) {
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	if len(t.CompanyIDs) > 0 {
+		return // company scope 已配，seed 失败不影响范围
+	}
+	if s.m != nil && s.m.pg != nil && taskID > 0 {
+		if err := s.m.pg.SetTaskScopeConfigured(taskID, false); err != nil {
+			log.Printf("[seed] task %s: scope_configured 标记失败: %v", t.ID, err)
+		}
+	}
+	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+		Summary: "scope 未配置：" + reason})
+	if s.m == nil || s.m.pg == nil {
+		return
+	}
+	var sessID int64
+	if id, ok := s.sessionForTask(taskID); ok {
+		sessID = id
+	} else if sess, err := s.m.pg.SessionByTask(taskID); err == nil && sess != nil {
+		sessID = sess.ID
+	}
+	if sessID > 0 {
+		s.say(sessID, taskID, "system", "system", "【任务 #"+t.ID+"】"+reason)
+	}
 }
 
 // seedFirstIntent writes ONE open intent (summary = 描述+目标) into the task's
@@ -3399,6 +3560,8 @@ func (s *Server) settingsPayload() map[string]any {
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
 		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
+		// P2 分层经济：当前生效的每角色模型策略（原样 JSON 字符串；空=未配置）。
+		"llm_role_policy": s.rolePolicyRaw(),
 		// 操作约束注入范围(默认都开):把本任务的 allow/deny 约束拼进对应 agent 的系统提示。
 		"constraints_inject_planner": s.constraintInjectPlanner(),
 		"constraints_inject_worker":  s.constraintInjectWorker(),
@@ -3410,6 +3573,10 @@ func (s *Server) settingsPayload() map[string]any {
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
 		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
 		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
+		// B4 降级档总开关（方案 v3）：默认关=规整器不可用一律 fail-closed 拒绝；
+		// 开启后连续 5 次不可用进入降级（Tier1/2 确定性放行、Tier3 照拒、审计带
+		// degraded 标记），任一次规整成功自动退出。链每轮现读（热改即刻生效）。
+		"sod_degrade_enabled": s.sodDegradeEnabled(),
 	}
 }
 
@@ -3477,11 +3644,16 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ConstraintsInjectWorker  *bool `json:"constraints_inject_worker"`
 		// 实验功能:noa 上下文压缩开关(默认关);每 run 读,对之后启动的 run 生效,无需重建 agent。
 		NoaCompaction *bool `json:"noa_compaction"`
+		// P2 分层经济：每角色模型策略（server/role_policy.go）。JSON 字符串，
+		// 形状校验+引用校验在写入闸；决策槽位 backup 结构性禁止。
+		RolePolicy *string `json:"llm_role_policy"`
 		// 漏洞 IM 推送的全局项。三者都由投递引擎每轮读一次，改完即时生效，
 		// 不需要重建 agent 或重启。
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
+		// B4 降级档总开关（方案 v3 缺陷 B4）。默认关；链每轮现读，热改即刻生效。
+		SodDegradeEnabled *bool `json:"sod_degrade_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3509,6 +3681,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	// 推送全局项:投递引擎每轮重新读取,所以即时生效、无需重启。
 	if req.NotifyEnabled != nil {
 		if err := s.m.pg.SetBool(settingNotifyEnabled, *req.NotifyEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.SodDegradeEnabled != nil {
+		if err := s.m.pg.SetBool(settingSodDegradeEnabled, *req.SodDegradeEnabled); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -3577,6 +3755,22 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	changed := false
+	if req.RolePolicy != nil {
+		// P2 写入闸：形状/引用校验（决策槽位 backup 结构性拒绝），变更入审计链。
+		if err := s.ValidateRolePolicyForSettings(*req.RolePolicy); err != nil {
+			writeErr(w, 400, "llm_role_policy 校验失败: "+err.Error())
+			return
+		}
+		if err := s.m.pg.SetSetting(RolePolicySettingKey, strings.TrimSpace(*req.RolePolicy)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if _, aerr := s.m.pg.AppendAuditEvent(db.AuditEvent{Actor: "settings", ToolName: RolePolicySettingKey,
+			Action: "update", Reason: "role_policy changed via settings API", Payload: json.RawMessage(*req.RolePolicy)}); aerr != nil {
+			log.Printf("[role-policy] audit append failed: %v", aerr)
+		}
+		changed = true
+	}
 	if req.LLMPoolEnabled != nil {
 		if err := s.m.SetLLMPoolEnabled(*req.LLMPoolEnabled); err != nil {
 			writeErr(w, 500, err.Error())

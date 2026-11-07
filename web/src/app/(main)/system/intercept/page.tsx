@@ -5,6 +5,8 @@ import * as React from "react";
 import { BotIcon, ListFilterIcon, PencilIcon, PlusIcon, ShieldAlertIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
+import { SodCategoryCard } from "@/components/sod-category-card";
+import { TrustRulesCard } from "@/components/trust-rules-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -621,6 +623,10 @@ export default function InterceptPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-6">
+      {/* F2 信任规则：allow 通路上的具名视图（先预览再保存） */}
+      <TrustRulesCard tools={allTools} />
+      {/* v4.1 拦截种类与裁决策略：合并闸三态 + 种类表（种类表管「该拦什么」，与具名规则同层并列） */}
+      <SodCategoryCard />
       {/* ---- header ---- */}
       <div className="flex items-center gap-2.5">
         <ShieldAlertIcon className="h-5 w-5 shrink-0" />

@@ -236,6 +236,60 @@ html {
 
 .disable-transitions * {
   transition: none !important;
+  animation: none !important;
+  animation-delay: 0s !important;
+}
+
+/* P4/P5 分层呈现的语义色（fact 三态）+ 动效 token（F1 动效基建）。
+   所有动画都挂在 prefers-reduced-motion 与 .disable-transitions 双开关之下。 */
+:root {
+  --motion-duration-fast: 120ms;
+  --motion-duration-base: 200ms;
+  --motion-duration-slow: 500ms;
+  --motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --fact-candidate: var(--muted-foreground);
+  --fact-verified: oklch(0.6 0.13 150);
+  --fact-refuted: oklch(0.6 0.15 25);
+}
+
+@keyframes artex-fade-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes artex-pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .artex-stream-in {
+    animation: artex-fade-slide-up var(--motion-duration-base) var(--motion-ease-out) both;
+  }
+  .artex-pulse {
+    animation: artex-pulse-dot 1.2s ease-in-out infinite;
+  }
+  .artex-meter {
+    transition: width var(--motion-duration-slow) var(--motion-ease-out);
+  }
+}
+.disable-transitions .artex-stream-in,
+.disable-transitions .artex-pulse {
+  animation: none !important;
+}
+.disable-transitions .artex-meter {
+  transition: none !important;
 }
 
 [data-print-root] {

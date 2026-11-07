@@ -45,6 +45,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupButton } from "@/components/ui/input-group";
+import { JumpToBottom } from "@/components/jump-to-bottom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -144,7 +145,8 @@ function emptyState(): SessionState {
 // sessionKeyOf routes an activity to its stable session key. worker="planner" covers
 // BOTH the Goal Agent's round-0 decomposition and the Planner (single Plan session).
 function sessionKeyOf(a: Activity): string {
-  if (a.worker === "system" || a.kind === "llm_switch" || a.kind === "llm_failover") return "system";
+  if (a.worker === "system" || a.kind === "llm_switch" || a.kind === "llm_failover" || a.kind === "llm_paused")
+    return "system";
   if (a.worker === "mainagent") return `main:${a.main_seg ?? 0}`; // one key per conversation segment
   if (a.worker === "planner") return "plan";
   if (a.intent_id) return `intent:${a.intent_id}`;
@@ -684,7 +686,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             systemItems = mergeBySeq(
               systemItems,
               page.items.filter(
-                (item) => item.worker === "system" || item.kind === "llm_switch" || item.kind === "llm_failover",
+                (item) =>
+                  item.worker === "system" ||
+                  item.kind === "llm_switch" ||
+                  item.kind === "llm_failover" ||
+                  item.kind === "llm_paused",
               ),
             );
             if (page.items.length < SYSTEM_SCAN_PAGE || page.cursor <= since) break;
@@ -982,7 +988,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           } catch {
             return; // ignore malformed frame
           }
-          if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
+          if (
+            (a.kind === "llm_switch" || a.kind === "llm_failover" || a.kind === "llm_paused") &&
+            !llmToastSeqRef.current.has(a.seq)
+          ) {
             llmToastSeqRef.current.add(a.seq);
             const transition = a.metadata?.llm_transition;
             if (transition?.mode === "exhausted" || a.is_error) {
@@ -1867,6 +1876,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             to block so wide/unbreakable steps (long commands, code, URLs) can't blow
             out the width and defeat the truncation below — the transcript wraps to
             the panel instead of overflowing horizontally. */}
+            <div className="relative flex min-h-0 min-w-0 flex-1">
             <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
               <div className="min-w-0 max-w-full p-4" ref={contentRef}>
                 {activeState?.loadingMore && (
@@ -1908,6 +1918,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 )}
               </div>
             </ScrollArea>
+            <JumpToBottom viewportOf={viewport} />
+            </div>
             {isMain ? (
               <div className="border-t p-3">
                 {attachments.length > 0 && (

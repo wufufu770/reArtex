@@ -27,11 +27,14 @@ function fmtTime(ts: string) {
 }
 
 // toolInput renders a tool's raw input for display. Bash's {"command":"..."} is
-// unwrapped to the bare command; other tools show their pretty-printed JSON args.
-function toolInput(raw: string): string {
+// unwrapped to the bare command; other tools show their JSON args.
+// singleLine=true（列表用）：JSON 压成单行——pretty-print 的首行只有一个 `{`，
+// 截断后列表就只剩 `{`（缺陷 G2 的根因）；详情弹层仍用多行 pretty。
+function toolInput(raw: string, singleLine = false): string {
   try {
     const obj = JSON.parse(raw);
     if (obj && typeof obj.command === "string") return obj.command;
+    if (singleLine) return JSON.stringify(obj);
     return JSON.stringify(obj, null, 2);
   } catch {
     /* not JSON */
@@ -39,11 +42,19 @@ function toolInput(raw: string): string {
   return raw;
 }
 
+// failureReason 从失败记录的输出里取第一行做原因预览（G2：失败无原因）。
+// 失败输出通常是「[SoD] out_of_scope: ...」这类单行判定，取首行已足够定位。
+function failureReason(output: string): string {
+  const first = (output || "").trim().split("\n")[0]?.trim() ?? "";
+  if (first.length > 120) return `${first.slice(0, 120)}…`;
+  return first;
+}
+
 // truncate clips a string to maxLen characters.
 function truncate(s: string, maxLen: number): string {
   const first = s.split("\n")[0]; // single-line preview
   if (first.length <= maxLen) return first;
-  return first.slice(0, maxLen) + "…";
+  return `${first.slice(0, maxLen)}…`;
 }
 
 const PAGE_SIZES = [25, 50, 100];
@@ -55,6 +66,7 @@ export default function CommandsPage() {
   const [query, setQuery] = React.useState("");
   const [queryQ, setQueryQ] = React.useState("");
   const [taskFilter, setTaskFilter] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState<"" | "error" | "ok">("");
 
   const [commands, setCommands] = React.useState<CommandRecord[]>([]);
   const [total, setTotal] = React.useState(0);
@@ -78,14 +90,20 @@ export default function CommandsPage() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: every filter change intentionally resets pagination.
   React.useEffect(() => {
     setPage(0);
-  }, [queryQ, taskFilter, size]);
+  }, [queryQ, taskFilter, size, statusFilter]);
 
   // Load data.
   React.useEffect(() => {
     let alive = true;
     setLoading(true);
     api
-      .commands({ task: taskFilter || undefined, q: queryQ || undefined, page, size })
+      .commands({
+        task: taskFilter || undefined,
+        q: queryQ || undefined,
+        status: statusFilter || undefined,
+        page,
+        size,
+      })
       .then((r) => {
         if (!alive) return;
         setCommands(r.commands ?? []);
@@ -100,7 +118,7 @@ export default function CommandsPage() {
     return () => {
       alive = false;
     };
-  }, [page, size, queryQ, taskFilter]);
+  }, [page, size, queryQ, taskFilter, statusFilter]);
 
   // 统计跟随筛选条件走，和表格描述的是同一批记录（但不分页）。
   React.useEffect(() => {
@@ -130,7 +148,7 @@ export default function CommandsPage() {
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <TerminalIcon className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-xl font-semibold tracking-tight">工具执行</h1>
+          <h1 className="font-semibold text-xl tracking-tight">工具执行</h1>
           <Badge variant="secondary">{total}</Badge>
         </div>
       </div>
@@ -152,6 +170,19 @@ export default function CommandsPage() {
           value={taskFilter}
           onChange={(e) => setTaskFilter(e.target.value.replace(/\D/g, ""))}
         />
+        <Select
+          value={statusFilter || "all"}
+          onValueChange={(v) => setStatusFilter(v === "all" ? "" : (v as "error" | "ok"))}
+        >
+          <SelectTrigger size="sm" className="w-24">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部状态</SelectItem>
+            <SelectItem value="ok">成功</SelectItem>
+            <SelectItem value="error">失败</SelectItem>
+          </SelectContent>
+        </Select>
         <Select value={String(size)} onValueChange={(v) => setSize(Number(v))}>
           <SelectTrigger size="sm" className="w-28">
             <SelectValue />
@@ -170,7 +201,7 @@ export default function CommandsPage() {
           统计
         </Button>
 
-        <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
           <span className="tabular-nums">
             {rangeStart}–{rangeEnd} / {total}
           </span>
@@ -210,19 +241,20 @@ export default function CommandsPage() {
                   <TableHead className="w-[90px]">Worker</TableHead>
                   <TableHead className="w-[110px]">工具</TableHead>
                   <TableHead>输入</TableHead>
-                  <TableHead className="w-[60px]">状态</TableHead>
+                  <TableHead className="w-[70px]">状态</TableHead>
+                  <TableHead className="w-[220px]">原因</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading && commands.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="py-12 text-center">
+                    <TableCell colSpan={7} className="py-12 text-center">
                       <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : commands.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="py-12 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={7} className="py-12 text-center text-muted-foreground text-sm">
                       暂无工具执行记录
                     </TableCell>
                   </TableRow>
@@ -233,23 +265,23 @@ export default function CommandsPage() {
                       className={cn("cursor-pointer", selected?.id === cmd.id && "bg-accent hover:bg-accent")}
                       onClick={() => setSelected(cmd)}
                     >
-                      <TableCell className="text-xs text-muted-foreground tabular-nums">
+                      <TableCell className="text-muted-foreground text-xs tabular-nums">
                         {fmtTime(cmd.created_at)}
                       </TableCell>
-                      <TableCell className="text-xs font-mono text-muted-foreground">#{cmd.exploration_id}</TableCell>
+                      <TableCell className="font-mono text-muted-foreground text-xs">#{cmd.exploration_id}</TableCell>
                       <TableCell>
-                        <Badge variant="outline" className="text-xs font-mono">
+                        <Badge variant="outline" className="font-mono text-xs">
                           {cmd.worker || "-"}
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <Badge variant="secondary" className="text-xs font-mono">
+                        <Badge variant="secondary" className="font-mono text-xs">
                           {cmd.tool || "-"}
                         </Badge>
                       </TableCell>
                       <TableCell className="max-w-0">
                         <code className="block truncate font-mono text-xs">
-                          {truncate(toolInput(cmd.command), CMD_MAX_LEN)}
+                          {truncate(toolInput(cmd.command, true), CMD_MAX_LEN)}
                         </code>
                       </TableCell>
                       <TableCell>
@@ -258,9 +290,18 @@ export default function CommandsPage() {
                             失败
                           </Badge>
                         ) : (
-                          <Badge variant="secondary" className="text-xs text-emerald-600">
+                          <Badge variant="secondary" className="text-emerald-600 text-xs">
                             成功
                           </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="max-w-0">
+                        {cmd.is_error ? (
+                          <span className="block truncate font-mono text-red-600 text-xs dark:text-red-400">
+                            {failureReason(cmd.output) || "（无输出）"}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">-</span>
                         )}
                       </TableCell>
                     </TableRow>
@@ -287,7 +328,7 @@ export default function CommandsPage() {
                   {statsErrors > 0 && (
                     <>
                       {" · 失败 "}
-                      <span className="tabular-nums text-red-600 dark:text-red-400">{statsErrors}</span>
+                      <span className="text-red-600 tabular-nums dark:text-red-400">{statsErrors}</span>
                     </>
                   )}
                 </>
@@ -300,16 +341,16 @@ export default function CommandsPage() {
               <Loader2Icon className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
             </div>
           ) : stats.length === 0 ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">暂无统计数据</div>
+            <div className="py-10 text-center text-muted-foreground text-sm">暂无统计数据</div>
           ) : (
             <div className="-mr-2 max-h-[55vh] space-y-1 overflow-auto pr-2">
               {stats.map((s) => (
                 <div key={s.tool} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md p-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="truncate font-mono text-xs font-medium">{s.tool}</span>
+                      <span className="truncate font-medium font-mono text-xs">{s.tool}</span>
                       {s.errors > 0 && (
-                        <span className="text-[11px] tabular-nums text-red-600 dark:text-red-400">失败 {s.errors}</span>
+                        <span className="text-[11px] text-red-600 tabular-nums dark:text-red-400">失败 {s.errors}</span>
                       )}
                     </div>
                     <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
@@ -320,8 +361,8 @@ export default function CommandsPage() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-xs font-semibold tabular-nums">{s.total}</div>
-                    <div className="text-[11px] tabular-nums text-muted-foreground">
+                    <div className="font-semibold text-xs tabular-nums">{s.total}</div>
+                    <div className="text-[11px] text-muted-foreground tabular-nums">
                       {statsTotal > 0 ? ((s.total / statsTotal) * 100).toFixed(1) : "0.0"}%
                     </div>
                   </div>
@@ -340,13 +381,13 @@ export default function CommandsPage() {
                 <SheetTitle className="pr-8">工具执行详情</SheetTitle>
                 <SheetDescription>{fmtTime(selected.created_at)}</SheetDescription>
                 <div className="flex flex-wrap items-center gap-2 pt-2">
-                  <Badge variant="outline" className="text-xs font-mono">
+                  <Badge variant="outline" className="font-mono text-xs">
                     #{selected.exploration_id}
                   </Badge>
-                  <Badge variant="outline" className="text-xs font-mono">
+                  <Badge variant="outline" className="font-mono text-xs">
                     {selected.worker || "-"}
                   </Badge>
-                  <Badge variant="secondary" className="text-xs font-mono">
+                  <Badge variant="secondary" className="font-mono text-xs">
                     {selected.tool || "-"}
                   </Badge>
                   {selected.is_error ? (
@@ -354,7 +395,7 @@ export default function CommandsPage() {
                       失败
                     </Badge>
                   ) : (
-                    <Badge variant="secondary" className="text-xs text-emerald-600">
+                    <Badge variant="secondary" className="text-emerald-600 text-xs">
                       成功
                     </Badge>
                   )}
@@ -362,19 +403,19 @@ export default function CommandsPage() {
               </SheetHeader>
               <div className="grid min-h-0 flex-1 grid-rows-2 divide-y">
                 <div className="flex min-h-0 min-w-0 flex-col">
-                  <div className="border-b px-5 py-2 text-xs font-medium text-muted-foreground">输入 Input</div>
+                  <div className="border-b px-5 py-2 font-medium text-muted-foreground text-xs">输入 Input</div>
                   <div className="min-h-0 flex-1 overflow-auto">
-                    <pre className="p-5 font-mono text-xs break-all whitespace-pre-wrap">
+                    <pre className="whitespace-pre-wrap break-all p-5 font-mono text-xs">
                       {toolInput(selected.command)}
                     </pre>
                   </div>
                 </div>
                 <div className="flex min-h-0 min-w-0 flex-col">
-                  <div className="border-b px-5 py-2 text-xs font-medium text-muted-foreground">输出 Output</div>
+                  <div className="border-b px-5 py-2 font-medium text-muted-foreground text-xs">输出 Output</div>
                   <div className="min-h-0 flex-1 overflow-auto">
                     <pre
                       className={cn(
-                        "p-5 font-mono text-xs break-all whitespace-pre-wrap",
+                        "whitespace-pre-wrap break-all p-5 font-mono text-xs",
                         selected.is_error && "text-red-600 dark:text-red-400",
                       )}
                     >

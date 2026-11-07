@@ -706,6 +706,27 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 	}
 }
 
+// timeoutActionLabel 把 ask 规则的超时动作翻成人话（F1 等待/结果活动共用）。
+func timeoutActionLabel(action string) string {
+	if action == "allow" {
+		return "放行"
+	}
+	return "拒绝"
+}
+
+// emitAskResultActivity 把审批的结果（人工决定/超时/取消）补写进等待发生时
+// 的同一条流（F1：挂起必须有下文）。会话与任务两路取其一，best-effort。
+func (i *Interceptor) emitAskResultActivity(convID int64, taskEmit func(db.Activity), pendingID int64, toolName, summary string, isError bool) {
+	activity := db.Activity{Kind: "intercept_result", Summary: summary, IsError: isError}
+	if convID != 0 {
+		_, _ = i.db.AppendConvActivity(convID, activity)
+		return
+	}
+	if taskEmit != nil {
+		taskEmit(activity)
+	}
+}
+
 // HandleAsk creates a pending approval record and blocks until the user decides
 // (via /api/intercept/pending/{id}/decide) or the per-rule timeout elapses.
 // Returns true if the user approved.
@@ -742,9 +763,15 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		"tool":       toolName,
 		"input":      json.RawMessage(input),
 	})
+	// F1：等待窗口显性化——活动里写明剩余秒数与到点策略，人不用翻规则就知道
+	// 不理会会发生什么。
+	timeoutNote := ""
+	if dec.TimeoutEnabled {
+		timeoutNote = fmt.Sprintf("，%d 秒内未处理将按「%s」处理", dec.TimeoutSeconds, timeoutActionLabel(dec.TimeoutAction))
+	}
 	activity := db.Activity{
 		Kind:    "intercept_request",
-		Summary: fmt.Sprintf("工具 %s 请求审批 (#%d)", toolName, pendingID),
+		Summary: fmt.Sprintf("工具 %s 请求审批 (#%d)%s", toolName, pendingID, timeoutNote),
 		Detail:  string(detail),
 	}
 
@@ -792,6 +819,9 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 			detail, err := i.db.GetInterceptDetail(pendingID)
 			return err == nil && detail != nil && (detail.Status == "allowed" || (detail.Audit != nil && detail.Audit.EffectiveAction == "allow"))
 		}
+		// F1：到点补一条结果活动——挂起的 intercept_request 不能没有下文。
+		i.emitAskResultActivity(convID, taskEmit, pendingID, toolName,
+			fmt.Sprintf("审批超时：已按「%s」处理 (#%d)", timeoutActionLabel(dec.TimeoutAction), pendingID), false)
 		return allowed
 	case <-ctx.Done():
 		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
@@ -820,5 +850,17 @@ func (i *Interceptor) Decide(pendingID int64, allowed bool) error {
 		return ErrAlreadyDecided
 	}
 	i.pending.resolve(pendingID, allowed)
+	// F1：人工决定也补结果活动（会话绑定的 ask 才有落点；任务路径的结果由
+	// HandleAsk 的超时分支/任务活动流自己兜）。best-effort。
+	if detail, err := i.db.GetInterceptDetail(pendingID); err == nil && detail != nil && detail.ConversationID != nil {
+		who := "人工"
+		verb := "拒绝"
+		if allowed {
+			verb = "允许"
+		}
+		i.emitAskResultActivity(*detail.ConversationID, nil, pendingID, detail.ToolName,
+			fmt.Sprintf("审批结果：%s执行 %s (#%d)", verb, detail.ToolName, pendingID), !allowed)
+		_ = who
+	}
 	return nil
 }

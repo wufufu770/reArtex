@@ -7,7 +7,7 @@
 
 import * as React from "react";
 
-import { RocketIcon } from "lucide-react";
+import { RocketIcon, WandSparklesIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -24,11 +24,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { Agent, Asset } from "@/lib/types";
+import type { Agent, Asset, TaskCategory } from "@/lib/types";
 
 export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: number, groupID: number) => void }) {
   const [open, setOpen] = React.useState(false);
@@ -39,8 +40,12 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
   const [picked, setPicked] = React.useState<string[]>([]);
+  const [categories, setCategories] = React.useState<TaskCategory[]>([]);
+  // 类别下拉的值："" = 未分类（NativeSelect 的空串选项，与任务模板同一交互）。
+  const [categoryId, setCategoryId] = React.useState("");
   const [concurrency, setConcurrency] = React.useState("3");
   const [budget, setBudget] = React.useState("");
+  const [timeoutSec, setTimeoutSec] = React.useState("7200");
   const [saving, setSaving] = React.useState(false);
 
   React.useEffect(() => {
@@ -54,6 +59,12 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
       .assets("", 200, 0)
       .then((r) => setAssets(r.assets))
       .catch(() => setAssets([]));
+    // 类别选项来自 task_categories（内置三类由后端首次启动播种）。拉不到就不阻塞
+    // 发布——类别是纪律开关不是必填项，下拉退化为「未分类」。
+    api
+      .taskCategories()
+      .then(setCategories)
+      .catch(() => setCategories([]));
   }, [open]);
 
   // auto 恒为分发者（后端发布流程自动写入），不在可选成员里。
@@ -67,14 +78,33 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
     setAssetPicked((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
   }
 
+  // applyReconTemplate 一键填「资产收集」快捷模板（方案 v4 §3-C3）：goal 模板 +
+  // 类别=资产收集。X 是占位——模板没法替用户猜目标，弹 toast 提醒替换。
+  function applyReconTemplate() {
+    setGoal(
+      "对目标 X 进行资产收集：覆盖根域名/子域名、IP 网段、应用指纹、对外服务与接口；" +
+        "先被动源（证书透明/测绘引擎/历史档案）后主动枚举；一切发现登记入库并标注来源与置信度；" +
+        "范围外资产只记录不探测；禁止利用类动作。",
+    );
+    const recon = categories.find((c) => c.name.trim().toLowerCase() === "资产收集");
+    if (recon) {
+      setCategoryId(String(recon.id));
+    } else {
+      toast.warning("类别列表里还没有「资产收集」——请确认后端已升级（首次启动自动播种三个内置类别）");
+    }
+    toast.info("已填入资产收集模板：把 goal 里的 X 替换成实际目标");
+  }
+
   function reset() {
     setGoal("");
     setName("");
     setDescription("");
     setPicked([]);
     setAssetPicked([]);
+    setCategoryId("");
     setConcurrency("3");
     setBudget("");
+    setTimeoutSec("7200");
   }
 
   async function submit() {
@@ -88,8 +118,23 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
       toast.error("至少勾选一个资产：成员只认任务范围内声明的资产");
       return;
     }
+    const budgetNum = Number(budget.trim());
+    if (!Number.isFinite(budgetNum) || budgetNum <= 0) {
+      toast.error("额度（tokens）必填：大厅群组的模型请求走 fail-closed 额度闸");
+      return;
+    }
     const limit = Number(concurrency.trim());
-    const budgetTokens = Number(budget.trim());
+    const _budgetTokens = Number(budget.trim());
+    // 任务墙钟（C3）：空 = 后端默认 7200；0 = 显式不限时；负数/非数字 = 参数错误。
+    let timeoutSeconds: number | undefined;
+    if (timeoutSec.trim() !== "") {
+      const t = Number(timeoutSec.trim());
+      if (!Number.isFinite(t) || t < 0) {
+        toast.error("任务时限必须是非负整数秒（0 = 不限时）");
+        return;
+      }
+      timeoutSeconds = Math.floor(t);
+    }
     setSaving(true);
     try {
       const r = await api.publishTaskHallTask({
@@ -99,7 +144,9 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
         ...(description.trim() ? { description: description.trim() } : {}),
         ...(picked.length > 0 ? { members: picked } : {}),
         ...(Number.isFinite(limit) && limit > 0 ? { concurrency_limit: limit } : {}),
-        ...(Number.isFinite(budgetTokens) && budgetTokens > 0 ? { budget_tokens: budgetTokens } : {}),
+        budget_tokens: budgetNum,
+        ...(categoryId !== "" ? { category_id: Number(categoryId) } : {}),
+        ...(timeoutSeconds !== undefined ? { timeout_seconds: timeoutSeconds } : {}),
       });
       toast.success(`任务 #${r.task_id} 已发布：大厅 #${r.group_id} 已建好，auto 开始派工`);
       setOpen(false);
@@ -134,26 +181,59 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
         </DialogHeader>
 
         <div className="grid gap-4 py-2">
-          <div className="grid gap-1.5">
+          <div className="flex items-center justify-between gap-2">
             <Label htmlFor="pub-goal">任务目标 *</Label>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="h-7 px-2 text-xs"
+              onClick={applyReconTemplate}
+              title="一键填入资产收集 goal 模板并把类别设为「资产收集」"
+            >
+              <WandSparklesIcon /> 资产收集模板
+            </Button>
+          </div>
+          <div className="grid gap-1.5">
             <Textarea
               id="pub-goal"
-              rows={3}
-              placeholder="例：对 192.168.132.77 做端口与服务探测，只针对这个 IP"
+              rows={4}
+              placeholder="例：对 192.168.132.77 做端口与服务探测，只针对这个 IP；或点上方「资产收集模板」一键填入"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
             />
           </div>
 
-          <div className="grid gap-1.5">
-            <Label htmlFor="pub-name">任务名称</Label>
-            <Input
-              id="pub-name"
-              placeholder="留空则用目标首行"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="pub-name">任务名称</Label>
+              <Input
+                id="pub-name"
+                placeholder="留空则用目标首行"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="pub-category">任务类别</Label>
+              <NativeSelect
+                id="pub-category"
+                className="w-full"
+                value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value)}
+              >
+                <NativeSelectOption value="">未分类</NativeSelectOption>
+                {categories.map((c) => (
+                  <NativeSelectOption key={c.id} value={String(c.id)}>
+                    {c.name}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </div>
           </div>
+          <p className="-mt-2 text-muted-foreground text-xs">
+            类别=资产收集时，引擎会给任务 worker 追加「只收集不利用、发现即入库」的收集纪律。
+          </p>
 
           <div className="grid gap-1.5">
             <Label htmlFor="pub-desc">补充说明</Label>
@@ -249,15 +329,25 @@ export function PublishTaskDialog({ onPublished }: { onPublished: (taskID: numbe
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="pub-budget">额度（tokens，可选）</Label>
+              <Label htmlFor="pub-budget">额度（tokens，必填）</Label>
               <Input
                 id="pub-budget"
                 inputMode="numeric"
-                placeholder="留空 = 不限"
+                placeholder="例：200000"
                 value={budget}
                 onChange={(e) => setBudget(e.target.value)}
               />
             </div>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="pub-timeout">任务时限（秒，到点有序收尾；0 = 不限时）</Label>
+            <Input
+              id="pub-timeout"
+              inputMode="numeric"
+              placeholder="默认 7200（2 小时）"
+              value={timeoutSec}
+              onChange={(e) => setTimeoutSec(e.target.value)}
+            />
           </div>
         </div>
 

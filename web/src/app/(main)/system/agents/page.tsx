@@ -74,6 +74,10 @@ function AgentGridCard({ agent, onOpen, onDeleted }: { agent: Agent; onOpen: () 
           {agent.description ? agent.description : "（无描述）"}
         </p>
         <div className="text-muted-foreground flex flex-wrap gap-1.5 text-[10px]">
+          {/* P2 分层经济：LLM 绑定一眼可见（绑定 profile id / 跟随默认） */}
+          <span className="rounded border px-1.5 py-0.5">
+            LLM {agent.llm_profile_id ? `#${agent.llm_profile_id}` : "跟随默认"}
+          </span>
           <span className="rounded border px-1.5 py-0.5">MCP {agent.mcp_count ?? 0}</span>
           <span className="rounded border px-1.5 py-0.5">Skill {agent.skill_count ?? 0}</span>
           <span className="rounded border px-1.5 py-0.5">工具 {agent.tool_count ?? 0}</span>

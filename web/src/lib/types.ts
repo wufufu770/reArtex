@@ -39,6 +39,7 @@ export interface Task {
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+  scope_configured?: boolean; // seed 是否配好 scope；false=详情页显示「scope 未配置」横幅（H1）
 }
 
 export interface TaskCategory {
@@ -626,6 +627,7 @@ export type ActivityKind =
   | "round" // planner round boundary marker (engine-emitted)
   | "usage" // live cumulative token usage (per model turn); not rendered
   | "llm_switch" // automatic/manual task-level LLM switch
+  | "llm_paused" // P2 分层经济：决策槽位（planner/mainagent）按策略暂停，等人工改档
   | "llm_failover" // task-level provider switch / chain exhaustion audit event
   | "intercept_request"; // user-approval request from the intercept layer
 
@@ -1043,6 +1045,7 @@ export interface LLMProfile {
   base_url?: string;
   proxy?: string;
   model: string;
+  models?: string[]; // E1 多模型：该 profile 可用模型列表（含默认模型）
   api_key_hint?: string;
   rate_per_second: number;
   rate_per_minute: number;
@@ -1961,6 +1964,73 @@ export interface SodCircuitList {
   note: string;
 }
 
+// ---- 拦截种类 / auditor 建议队列 / 影子对照（方案 v4.1 §2/§3/§11-G1）----
+
+// SodCategoryAction 是种类动作：hard_deny=硬拒 / ask=转人工 / auditor=送审计裁决 / pass=放行。
+// 快路径就是表里 action=pass 的行——改动作即全链生效（单一裁决面，v4.1 §10-F3）。
+export type SodCategoryAction = "hard_deny" | "ask" | "auditor" | "pass";
+
+// SodCategoryFallback 是 auditor 故障/超时/超限时该种类的兜底动作。
+// 默认 ask：绝不静默放行、也绝不变墙（§4 故障语义）。
+export type SodCategoryFallback = "deny" | "ask" | "pass";
+
+// SodMergedGateMode 是合并闸的三态开关（§11-G1）：
+// off=旧链裁决 / shadow=新旧并跑只记差异 / enforce=新链接管裁决。
+export type SodMergedGateMode = "off" | "shadow" | "enforce";
+
+// SodCategory 是拦截种类表的一行（种类 = 一类命令的名字 + 匹配器 + 动作 + 上限 + 兜底）。
+export interface SodCategory {
+  id: number;
+  name: string;
+  // kind：builtin=内置识别器（确定性分类器，pattern 为识别器名）/ custom=自定义正则。
+  kind: "builtin" | "custom";
+  pattern: string;
+  action: SodCategoryAction;
+  // 每任务上限；0 = 不限。超限自动升级为 ask（防橡皮图章）。
+  cap_per_task: number;
+  fallback: SodCategoryFallback;
+  // 锁定基线行（删除/破坏、平台凭据、平台自身配置）：UI 可见但动作不可改、不可删——安全地板。
+  locked: boolean;
+  enabled: boolean;
+  priority: number;
+  reason: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// SodCategorySuggestion 是 auditor 的一条种类建议——它观察到同类动作反复出现，
+// 建议沉淀成确定性种类（采纳后这类调用连 auditor 都不用再问，§3 建议循环）。
+export interface SodCategorySuggestion {
+  id: number;
+  name: string;
+  kind: "builtin" | "custom";
+  pattern: string;
+  action: SodCategoryAction;
+  // 证据链（G3）：最近 N 次同类裁决的 id + 样例预览，采纳时可回放。Go 侧空值序列化为 null。
+  evidence: unknown[] | null;
+  status: "pending" | "adopted" | "dismissed";
+  reason: string;
+  created_at: string;
+  decided_at?: string | null;
+  decided_by?: string;
+}
+
+// ShadowDiff 是影子模式的一行对照：旧链实际裁决 vs 新链「假如 enforce 会怎么判」。
+// ⚠️ shadow 态最终动作永远按旧链，这张表只是切换 enforce 前核对无误伤的依据。
+export interface ShadowDiff {
+  id: number;
+  task_id?: number;
+  tool_name: string;
+  payload_digest: string;
+  // 旧链词汇：approve | deny | needs_review；新链另可能给 gate（范围检查待跑）。
+  old_verdict: string;
+  old_reason: string;
+  new_verdict: string;
+  new_reason: string;
+  created_at: string;
+}
+
 // AuditChainVerification 是 GET /api/audit/chain 的响应。
 //
 // ⚠️ 断链不是接口故障：后端照样回 200，用 intact=false + broken_at_seq 表达
@@ -1970,4 +2040,21 @@ export interface AuditChainVerification {
   // broken_at_seq = 第一处断裂的位置（0 = 没有断裂）。
   broken_at_seq: number;
   error?: string;
+}
+
+// P5 传承图：一条跨任务经验（server/legacy.go）。state 词汇刻意与 fact 三态区分。
+export interface LegacyNode {
+  id: number;
+  company_id?: number | null;
+  kind: "experience" | "pitfall" | "fingerprint_summary";
+  title: string;
+  summary: string;
+  detail?: string;
+  fingerprint?: Record<string, string | number | boolean>;
+  state: "draft" | "accepted" | "retired";
+  source_task_id?: number | null;
+  source_task?: string;
+  created_at: string;
+  reviewed_at?: string | null;
+  reviewed_by?: string;
 }

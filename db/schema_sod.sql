@@ -92,3 +92,84 @@ CREATE TRIGGER trg_sod_circuit_upd BEFORE UPDATE ON sod_tool_circuit
 -- 它在 db/schema_sod.sql 里以 ADD COLUMN IF NOT EXISTS 引入，
 -- **不改 db/schema.sql**（那个文件由别的单元持有）。
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS replay_evidence_id TEXT NOT NULL DEFAULT '';
+
+-- ---------- sod_manual_overrides：裁决人工复核改判（方案 v3 缺陷 F3） ----------
+-- 人工对一条 deny/needs_review 裁决做「放行」改判后的放行凭据登记：
+--   * (tool_key, task_id, agent_key, payload_digest) 四元组全等命中且未过期 ⇒
+--     链在规整之前直接铸凭证放行（call-precision：换一个字节就不命中）；
+--   * scope='once' 用后即焚（use_count+1），scope='task' 随任务终态过期；
+--   * DB 持久 —— 重启不丢（与内存执行凭证表的本质区别）；
+--   * Tier3 四类（出网非目标段/写宿主 FS 任务目录外/读宿主敏感面/裁决写）
+--     在 API 层拒绝改判 allow（只可转 ask）——任何机制都不可豁免 Tier3。
+CREATE TABLE IF NOT EXISTS sod_manual_overrides (
+    id             BIGSERIAL PRIMARY KEY,
+    decision_id    BIGINT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    tool_key       TEXT NOT NULL,
+    task_id        BIGINT NOT NULL,
+    agent_key      TEXT NOT NULL DEFAULT '',
+    scope          TEXT NOT NULL DEFAULT 'once' CHECK (scope IN ('once','task')),
+    reason         TEXT NOT NULL DEFAULT '',
+    created_by     TEXT NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at     TIMESTAMPTZ,          -- NULL=不过期（task 级由任务终态清）
+    use_count      INTEGER NOT NULL DEFAULT 0,
+    last_used_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_sod_override_lookup
+    ON sod_manual_overrides(tool_key, task_id, agent_key, payload_digest);
+CREATE INDEX IF NOT EXISTS idx_sod_override_task ON sod_manual_overrides(task_id);
+
+-- ---------- 拦截种类表 + 影子对照 + auditor 建议队列（方案 v4.1）----------
+-- 种类表是用户可编辑的「该拦什么」配置：内建种类以确定性分类器为识别器，
+-- custom 是用户正则；每行 = 名字 + 匹配器 + 动作 + 每任务上限 + 兜底。
+-- locked 行是锁定基线（删除/破坏、平台自身配置）——动作不可改、不可删，
+-- guard 基线预检与链内复查共享同一判定（internal/sodpolicy/baseline.go）。
+CREATE TABLE IF NOT EXISTS sod_categories (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL DEFAULT 'builtin' CHECK (kind IN ('builtin','custom')),
+    pattern      TEXT NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('hard_deny','ask','auditor','pass')),
+    cap_per_task INTEGER NOT NULL DEFAULT 0,
+    fallback     TEXT NOT NULL DEFAULT 'ask' CHECK (fallback IN ('deny','ask','pass')),
+    locked       BOOLEAN NOT NULL DEFAULT false,
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    priority     INTEGER NOT NULL DEFAULT 50,
+    reason       TEXT NOT NULL DEFAULT '',
+    created_by   TEXT NOT NULL DEFAULT 'system',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sod_categories_priority ON sod_categories(priority DESC) WHERE enabled;
+
+-- 影子对照账本（§11-G1）：off→shadow→enforce 灰度期里，新旧链对同一调用的
+-- 裁决差异逐行落库；核对无误伤后切 enforce，本表转为历史证据。
+CREATE TABLE IF NOT EXISTS sod_gate_shadow (
+    id            BIGSERIAL PRIMARY KEY,
+    task_id       BIGINT,
+    tool_name     TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    old_verdict   TEXT NOT NULL,
+    old_reason    TEXT NOT NULL DEFAULT '',
+    new_verdict   TEXT NOT NULL,
+    new_reason    TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sod_shadow_task ON sod_gate_shadow(task_id, created_at DESC);
+
+-- auditor 的观察建议队列（§3）：auditor 在裁决里建议新增/调整种类，人工
+-- 一键采纳后沉淀为种类表行——裁量经验持续确定性化。
+CREATE TABLE IF NOT EXISTS sod_category_suggestions (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('builtin','custom')),
+    pattern    TEXT NOT NULL DEFAULT '',
+    action     TEXT NOT NULL DEFAULT 'pass' CHECK (action IN ('hard_deny','ask','auditor','pass')),
+    evidence   JSONB NOT NULL DEFAULT '[]'::jsonb,
+    status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','adopted','dismissed')),
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_at TIMESTAMPTZ,
+    decided_by TEXT NOT NULL DEFAULT ''
+);

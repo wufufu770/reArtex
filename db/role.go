@@ -215,4 +215,6 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	bgTaskSchemaReady.Store(pool, struct{}{})
 	llmRecordsSchemaReady.Store(pool, struct{}{})
 	llmUsageSchemaReady.Store(pool, struct{}{})
+	metricsSchemaReady.Store(pool, struct{}{})
+	legacySchemaReady.Store(pool, struct{}{})
 }

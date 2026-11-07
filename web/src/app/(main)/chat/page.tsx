@@ -29,14 +29,14 @@ import {
   bindLegacyConversations,
   DEFAULT_SESSION_LIST_QUERY,
   filterSessions,
-  groupSessions,
   groupSessionsByAgent,
   groupSessionsByAttachment,
+  groupSessionsByKind,
   type SessionListQuery,
   type SessionSection,
   sessionMembers,
 } from "@/components/session/session-format";
-import { SessionList } from "@/components/session/session-list";
+import { SessionList, SessionSectionHeader } from "@/components/session/session-list";
 import { SessionToolbar } from "@/components/session/session-toolbar";
 import { SessionView } from "@/components/session/session-view";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
@@ -63,6 +63,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { JumpToBottom } from "@/components/jump-to-bottom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
@@ -114,6 +115,23 @@ const CONVERSATION_POLL_MS = 5000;
 // rail looks the same after a reload; unknown keys are harmless (a deleted agent
 // simply never renders a group again).
 const COLLAPSED_AGENTS_KEY = "artex.chat.collapsed-agents";
+
+// 会话列表里被收起的分区，同样存本地、刷新后保持。键 = 视图前缀 + section.key
+// （sessionSectionStateKey）：分区数组随 3s 轮询整体重建，折叠态必须独立存；按 agent /
+// 按工件两个视图又都有 `__none__` 分区，不加视图前缀就会互相串。「旧对话」块用固定键。
+const COLLAPSED_SESSION_SECTIONS_KEY = "artex.chat.collapsed-session-sections";
+const LEGACY_CONVERSATIONS_SECTION = "legacy:conversations";
+
+function sessionSectionStateKey(view: SessionListQuery["view"], sectionKey: string): string {
+  return `${view}:${sectionKey}`;
+}
+
+// 首次（本地还没有记录）默认收起的分区：群聊是数量大头、旧会话是存量；总控 / 大厅 /
+// 置顶 / 今天 / 更早与「旧对话」块默认展开。点过一次之后整份折叠态写回本地，以记录为准。
+const DEFAULT_COLLAPSED_SESSION_SECTIONS: readonly string[] = [
+  sessionSectionStateKey("flat", "kind:chat"),
+  sessionSectionStateKey("flat", "kind:legacy"),
+];
 
 function conversationIsPinned(conversation: Conversation): boolean {
   return conversation.pinned ?? Boolean(conversation.pinned_at);
@@ -699,19 +717,28 @@ function ChatView({
     return () => vp.removeEventListener("scroll", onScroll);
   }, [viewport, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a conversation → jump to the latest (bottom)
+  const lastConvIdRef = React.useRef(conv.id);
+  const didInitialScrollRef = React.useRef(false);
   React.useLayoutEffect(() => {
-    const vp = viewport();
-    if (vp) {
-      vp.scrollTop = vp.scrollHeight;
-      atBottomRef.current = true;
+    // 消息是异步加载的：挂载瞬间 scrollHeight=0，等首批消息到达再落底；
+    // 换会话（非重挂载）时重置标记重新落底。
+    if (lastConvIdRef.current !== conv.id) {
+      lastConvIdRef.current = conv.id;
+      didInitialScrollRef.current = false;
     }
-  }, [viewport]);
+    if (didInitialScrollRef.current || messages.length === 0) return;
+    const vp = viewport();
+    if (!vp) return;
+    didInitialScrollRef.current = true;
+    vp.scrollTop = vp.scrollHeight;
+    atBottomRef.current = true;
+  }, [messages.length, viewport, conv.id]);
   // new activity → stick to bottom only if the user is already pinned there
   React.useLayoutEffect(() => {
     if (approvalFocus.state || !atBottomRef.current) return;
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [viewport, approvalFocus.state]);
+  }, [viewport, approvalFocus.state, messages]);
 
   // Per-conversation token total, live — same accounting as the main-agent
   // console: completed runs' `result` sum + the in-progress run's latest `usage`.
@@ -828,6 +855,7 @@ function ChatView({
       <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
 
       {/* messages */}
+      <div className="relative flex min-h-0 min-w-0 flex-1">
       <ScrollArea type="auto" className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
           {messages.length === 0 && !running ? (
@@ -850,6 +878,8 @@ function ChatView({
           )}
         </div>
       </ScrollArea>
+      <JumpToBottom viewportOf={viewport} />
+      </div>
 
       <Composer
         value={input}
@@ -1086,6 +1116,11 @@ export default function ChatPage() {
   const [visibleConversationCount, setVisibleConversationCount] = React.useState(CONVERSATION_LIST_PAGE);
   // Collapsed agent groups（只用于旧对话的「按 agent 分组」可选视图）。
   const [collapsedAgents, setCollapsedAgents] = React.useState<Set<string>>(() => new Set());
+  // 会话列表收起的分区（键见 sessionSectionStateKey）。初值是首次默认，本地有记录时由
+  // 下面的 effect 覆盖 —— 不在 useState 初始化里读 localStorage，免得水合不一致。
+  const [collapsedSessionSections, setCollapsedSessionSections] = React.useState<Set<string>>(
+    () => new Set(DEFAULT_COLLAPSED_SESSION_SECTIONS),
+  );
   // Pending text + uploaded attachments handed off from a draft that created a
   // conversation via the paperclip, keyed by the new conversation id (consumed once
   // by ChatView on mount; ids never repeat, so leftover entries are harmless).
@@ -1199,9 +1234,33 @@ export default function ChatPage() {
     });
   }, []);
 
+  React.useEffect(() => {
+    const raw = getLocalStorageValue(COLLAPSED_SESSION_SECTIONS_KEY);
+    // 没有记录 ⇒ 保持首次默认（群聊 / 旧会话收起）。
+    if (!raw) return;
+    try {
+      const keys = JSON.parse(raw);
+      if (Array.isArray(keys))
+        setCollapsedSessionSections(new Set(keys.filter((key): key is string => typeof key === "string")));
+    } catch {
+      // 记录损坏 ⇒ 保持首次默认。
+    }
+  }, []);
+
+  // stateKey 是带视图前缀的完整键；整份集合写回本地（含仍是默认收起的分区）。
+  const toggleSessionSection = React.useCallback((stateKey: string) => {
+    setCollapsedSessionSections((current) => {
+      const next = new Set(current);
+      if (!next.delete(stateKey)) next.add(stateKey);
+      setLocalStorageValue(COLLAPSED_SESSION_SECTIONS_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
   // Restore the open thread from the URL on mount, so a refresh returns to the
   // same session/conversation instead of the empty draft view. Runs after
   // hydration (not a lazy useState init) to avoid a server/client mismatch.
+  // 无 URL 参数时回退到 localStorage 的「上次会话」（A5：登录后回对话页能续上）。
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setSourceRequested(params.has("approval"));
@@ -1211,16 +1270,41 @@ export default function ChatPage() {
     const sessionId = s ? Number(s) : NaN;
     if (Number.isFinite(sessionId)) setSelectedSessionId(sessionId);
     else if (Number.isFinite(convId)) setSelectedConvId(convId);
+    else {
+      try {
+        const last = window.localStorage.getItem("artex_last_session");
+        if (last?.startsWith("c:")) {
+          const n = Number(last.slice(2));
+          if (Number.isFinite(n) && n > 0) setSelectedConvId(n);
+        } else if (last?.startsWith("s:")) {
+          const n = Number(last.slice(2));
+          if (Number.isFinite(n) && n > 0) setSelectedSessionId(n);
+        }
+      } catch {
+        /* localStorage 不可用（隐私模式等）——停在草稿区 */
+      }
+    }
   }, []);
-  // Mirror the current selection into the URL (replaceState → no history spam).
+  // Mirror the current selection into the URL (replaceState → no history spam)
+  // and persist it as「上次会话」。
   React.useEffect(() => {
     const url = new URL(window.location.href);
     if (selectedSessionId != null) {
       url.searchParams.set("s", String(selectedSessionId));
       url.searchParams.delete("c");
+      try {
+        window.localStorage.setItem("artex_last_session", `s:${selectedSessionId}`);
+      } catch {
+        /* ignore */
+      }
     } else if (selectedConvId != null) {
       url.searchParams.set("c", String(selectedConvId));
       url.searchParams.delete("s");
+      try {
+        window.localStorage.setItem("artex_last_session", `c:${selectedConvId}`);
+      } catch {
+        /* ignore */
+      }
     } else {
       url.searchParams.delete("s");
       url.searchParams.delete("c");
@@ -1251,8 +1335,24 @@ export default function ChatPage() {
   const sessionSections = React.useMemo<SessionSection[]>(() => {
     if (query.view === "by_agent") return groupSessionsByAgent(visibleSessions, agentByKey);
     if (query.view === "by_attachment") return groupSessionsByAttachment(visibleSessions);
-    return groupSessions(visibleSessions);
+    // A3：默认按形态四分区（总控/群聊/大厅/旧会话）——不同种类的会话不再混排。
+    return groupSessionsByKind(visibleSessions);
   }, [visibleSessions, query.view, agentByKey]);
+
+  // 当前视图下收起的分区：剥掉视图前缀交给 SessionList，它只认 section.key。
+  const collapsedSectionsInView = React.useMemo(() => {
+    const prefix = sessionSectionStateKey(query.view, "");
+    const keys = new Set<string>();
+    for (const key of collapsedSessionSections) {
+      if (key.startsWith(prefix)) keys.add(key.slice(prefix.length));
+    }
+    return keys;
+  }, [collapsedSessionSections, query.view]);
+  const toggleSectionInView = React.useCallback(
+    (sectionKey: string) => toggleSessionSection(sessionSectionStateKey(query.view, sectionKey)),
+    [toggleSessionSection, query.view],
+  );
+  const legacyCollapsed = collapsedSessionSections.has(LEGACY_CONVERSATIONS_SECTION);
 
   // 工具条的 agent 筛选选项：名册里出现过的 agent + 已知对话型 agent。
   const agentOptions = React.useMemo(() => {
@@ -1512,6 +1612,8 @@ export default function ChatPage() {
                   selectedId={selectedSessionId}
                   onSelect={selectSession}
                   agentByKey={agentByKey}
+                  collapsedSections={collapsedSectionsInView}
+                  onToggleSection={toggleSectionInView}
                   renamingId={renamingId}
                   renameText={renameText}
                   onStartRename={startRenameSession}
@@ -1525,74 +1627,82 @@ export default function ChatPage() {
               )}
               {legacyConversations.length > 0 && (
                 <>
-                  <div className="flex items-center gap-1.5 px-2 pt-2 font-medium text-[11px] text-muted-foreground">
-                    <ListChecksIcon className="size-3 shrink-0" />
-                    <span className="truncate">旧对话</span>
-                    <span className="shrink-0 tabular-nums opacity-60">{legacyConversations.length}</span>
-                  </div>
-                  {query.view === "by_agent"
-                    ? legacyGroups.map((group) => {
-                        const collapsed = collapsedAgents.has(group.key);
-                        return (
-                          <React.Fragment key={group.key}>
-                            <AgentGroupHeader
-                              group={group}
-                              collapsed={collapsed}
-                              hasActive={group.conversations.some((c) => c.id === selectedConvId)}
-                              onToggle={toggleAgentCollapsed}
+                  {/* 「旧对话」块同样是可折叠分区：固定键、各视图共用一份折叠态。 */}
+                  <SessionSectionHeader
+                    label="旧对话"
+                    count={legacyConversations.length}
+                    icon={<ListChecksIcon className="size-3 shrink-0" />}
+                    collapsed={legacyCollapsed}
+                    hasActive={legacyConversations.some((c) => c.id === selectedConvId)}
+                    onToggle={() => toggleSessionSection(LEGACY_CONVERSATIONS_SECTION)}
+                    className="mt-1"
+                  />
+                  {!legacyCollapsed &&
+                    (query.view === "by_agent"
+                      ? legacyGroups.map((group) => {
+                          const collapsed = collapsedAgents.has(group.key);
+                          return (
+                            <React.Fragment key={group.key}>
+                              <AgentGroupHeader
+                                group={group}
+                                collapsed={collapsed}
+                                hasActive={group.conversations.some((c) => c.id === selectedConvId)}
+                                onToggle={toggleAgentCollapsed}
+                              />
+                              {!collapsed &&
+                                group.conversations.map((c) => (
+                                  <ConversationItem
+                                    key={c.id}
+                                    conv={c}
+                                    agent={agentByKey.get(c.agent_key)}
+                                    showAgent={false}
+                                    active={selectedConvId === c.id}
+                                    renaming={renamingConvId === c.id}
+                                    renameText={renamingConvId === c.id ? renameConvText : ""}
+                                    onSelect={selectConversation}
+                                    onStartRename={startRename}
+                                    onRenameText={setRenameConvText}
+                                    onCommitRename={(id, title) => void commitRename(id, title)}
+                                    onCancelRename={cancelRename}
+                                    onTogglePinned={(conversation) => void togglePinned(conversation)}
+                                    onDelete={(id) => void del(id)}
+                                  />
+                                ))}
+                            </React.Fragment>
+                          );
+                        })
+                      : legacyConversations
+                          .slice(0, visibleConversationCount)
+                          .map((c) => (
+                            <ConversationItem
+                              key={c.id}
+                              conv={c}
+                              agent={agentByKey.get(c.agent_key)}
+                              active={selectedConvId === c.id}
+                              renaming={renamingConvId === c.id}
+                              renameText={renamingConvId === c.id ? renameConvText : ""}
+                              onSelect={selectConversation}
+                              onStartRename={startRename}
+                              onRenameText={setRenameConvText}
+                              onCommitRename={(id, title) => void commitRename(id, title)}
+                              onCancelRename={cancelRename}
+                              onTogglePinned={(conversation) => void togglePinned(conversation)}
+                              onDelete={(id) => void del(id)}
                             />
-                            {!collapsed &&
-                              group.conversations.map((c) => (
-                                <ConversationItem
-                                  key={c.id}
-                                  conv={c}
-                                  agent={agentByKey.get(c.agent_key)}
-                                  showAgent={false}
-                                  active={selectedConvId === c.id}
-                                  renaming={renamingConvId === c.id}
-                                  renameText={renamingConvId === c.id ? renameConvText : ""}
-                                  onSelect={selectConversation}
-                                  onStartRename={startRename}
-                                  onRenameText={setRenameConvText}
-                                  onCommitRename={(id, title) => void commitRename(id, title)}
-                                  onCancelRename={cancelRename}
-                                  onTogglePinned={(conversation) => void togglePinned(conversation)}
-                                  onDelete={(id) => void del(id)}
-                                />
-                              ))}
-                          </React.Fragment>
-                        );
-                      })
-                    : legacyConversations
-                        .slice(0, visibleConversationCount)
-                        .map((c) => (
-                          <ConversationItem
-                            key={c.id}
-                            conv={c}
-                            agent={agentByKey.get(c.agent_key)}
-                            active={selectedConvId === c.id}
-                            renaming={renamingConvId === c.id}
-                            renameText={renamingConvId === c.id ? renameConvText : ""}
-                            onSelect={selectConversation}
-                            onStartRename={startRename}
-                            onRenameText={setRenameConvText}
-                            onCommitRename={(id, title) => void commitRename(id, title)}
-                            onCancelRename={cancelRename}
-                            onTogglePinned={(conversation) => void togglePinned(conversation)}
-                            onDelete={(id) => void del(id)}
-                          />
-                        ))}
-                  {query.view !== "by_agent" && visibleConversationCount < legacyConversations.length && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="mt-1 w-full"
-                      onClick={() => setVisibleConversationCount((count) => count + CONVERSATION_LIST_PAGE)}
-                    >
-                      加载更多
-                    </Button>
-                  )}
+                          )))}
+                  {!legacyCollapsed &&
+                    query.view !== "by_agent" &&
+                    visibleConversationCount < legacyConversations.length && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1 w-full"
+                        onClick={() => setVisibleConversationCount((count) => count + CONVERSATION_LIST_PAGE)}
+                      >
+                        加载更多
+                      </Button>
+                    )}
                 </>
               )}
             </div>

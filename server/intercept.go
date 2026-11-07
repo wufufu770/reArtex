@@ -209,20 +209,45 @@ func (s *Server) interceptToggleRule(w http.ResponseWriter, r *http.Request) {
 
 // --- pending (ask) ---
 
+// interceptListPending 列审批/拦截记录（方案 v3 缺陷 F1）：
+//
+//	?status 缺省或 pending → 只列待审批（旧行为，UI 徽标口径不变）；
+//	?status=all            → 全部（含 allowed/denied/timeout 的 resolved 行）；
+//	?status=allowed|denied|timeout → 按终态过滤。
+//
+// resolved 行此前在审批页完全不可见（黑洞）：ask 一旦被处理，UI 再也找不到
+// 「刚才批了什么」——现在一行状态参数就能回放。
 func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
 		return
 	}
-	pending, err := pg.ListPendingIntercepts()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	switch status {
+	case "", "pending":
+		pending, err := pg.ListPendingIntercepts()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if pending == nil {
+			pending = []db.InterceptPending{}
+		}
+		writeJSON(w, 200, map[string]any{"pending": pending})
+	case "all", "allowed", "denied", "timeout":
+		q := status
+		if q == "all" {
+			q = ""
+		}
+		rows, err := pg.ListInterceptsByStatus(q, 200)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"pending": rows, "total": len(rows)})
+	default:
+		writeErr(w, 400, "status 只支持 all|pending|allowed|denied|timeout")
 	}
-	if pending == nil {
-		pending = []db.InterceptPending{}
-	}
-	writeJSON(w, 200, map[string]any{"pending": pending})
 }
 
 func (s *Server) interceptGetOne(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +559,9 @@ func normalizeAskTimeout(req *interceptRuleReq) {
 }
 
 // askRuleDefaultTimeoutSeconds 是 ask 规则未显式配置时的默认等待上限。
-const askRuleDefaultTimeoutSeconds = 60
+// 60s 对「人抬头看一眼审批页」太短（联动测试实测：worker 等 60s 就被超时拒绝，
+// 人根本来不及批）——300s 给够走过来点一次的窗口；仍可按规则显式覆盖。
+const askRuleDefaultTimeoutSeconds = 300
 
 func (s *Server) interceptDetail(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)

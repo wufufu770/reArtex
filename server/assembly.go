@@ -32,11 +32,14 @@ import (
 //
 // 闸门按 ctx 里的 task id 解析群组：不属于任何群组的调用（平台对话路径）
 // 一律不拦截，所以装在共享 provider 链上不会波及非大厅流量。
-func installQuotaGate(prov llm.Provider, pg *db.DB) llm.Provider {
-	if prov == nil || pg == nil {
+//
+// gate 由 Server 单例持有（C2）：阈值预警的已发记录必须跨 provider 重建存活，
+// 每条链各建一个 gate 会把「已预警」的记忆打散。
+func installQuotaGate(prov llm.Provider, gate *llmrec.QuotaGate) llm.Provider {
+	if prov == nil || gate == nil {
 		return prov
 	}
-	return llmrec.NewQuotaProvider(prov, llmrec.NewQuotaGate(pg, nil))
+	return llmrec.NewQuotaProvider(prov, gate)
 }
 
 // wireToolDenialRecorder 把工具层的拒绝接进审计链。
