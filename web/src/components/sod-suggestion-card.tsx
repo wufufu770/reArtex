@@ -169,7 +169,7 @@ export function SodSuggestionCard() {
           <p className="py-4 text-center text-muted-foreground text-xs">{EMPTY_TEXT[tab]}</p>
         )}
         {loaded && items.length > 0 && (
-          <div className="grid gap-2">
+          <div className="grid max-h-[60svh] gap-2 overflow-y-auto pr-1">
             {items.map((row) => {
               // 回链种类只在已采纳页有意义（其它页签 categories 恒为空，反查必不中）。
               const cat = categories.find((c) => c.suggestion_id === row.id);
@@ -205,7 +205,7 @@ export function SodSuggestionCard() {
                       {row.decided_by || "—"} · {fmtTime(row.decided_at)}
                     </span>
                   )}
-                  <span className="min-w-0 flex-1 basis-full truncate text-muted-foreground text-xs" title={row.reason}>
+                  <span className="min-w-0 basis-full truncate text-muted-foreground text-[11px]" title={row.reason}>
                     {row.reason || "—"}
                   </span>
                   {tab === "pending" && (
