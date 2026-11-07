@@ -106,18 +106,16 @@ func TestMergedVerdictCapExceeded(t *testing.T) {
 		{Name: "目录外写", Kind: "builtin", Pattern: sodpolicy.RecognizeOutsideWrite, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 1, Fallback: "ask", Enabled: true, Priority: 60},
 	}
 	body := `{"command":"cp /app/data/tasks/19/a.md /var/www/html/x"}`
-	// 配额用尽 + 人工不批 ⇒ 拒；auditor 不应被问到（上限即封顶）。
-	asked := false
+	// v6.1 语义：cap 用尽 ⇒ auditor 严格裁决（不直接问人）——pass 带标记放行。
 	c := mergedHarness(t, sodpolicy.MergedGateEnforce, cats, func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
-		asked = true
-		return AuditorVerdict{Verdict: "pass"}, nil
+		if req.Reason != "cap_exceeded_strict:目录外写" {
+			t.Fatalf("cap 严格裁决 reason 不符: %q", req.Reason)
+		}
+		return AuditorVerdict{Verdict: "pass", Reason: "目标是任务产物发布位"}, nil
 	}, map[string]int{"目录外写": 1})
 	d := c.mergedVerdict(context.Background(), chainCallFor(19, "Bash", body), "Bash")
-	if asked {
-		t.Fatal("cap 超限不应再问 auditor")
-	}
-	if d.kind != "deny" || d.reason != sodpolicy.ReasonCategoryCapExceeded {
-		t.Fatalf("cap 超限应拒：kind=%s reason=%s", d.kind, d.reason)
+	if d.kind != "gate" || d.gateIn.ScopePassReason != "auditor" || d.markers["cap_exceeded"] != "true" {
+		t.Fatalf("cap 超限应经 auditor pass 放行：kind=%s reason=%q markers=%v", d.kind, d.gateIn.ScopePassReason, d.markers)
 	}
 }
 

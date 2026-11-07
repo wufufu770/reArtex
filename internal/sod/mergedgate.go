@@ -402,7 +402,10 @@ func (c *Chain) elevateAsk(ctx context.Context, call chainCall, reason string) b
 	return err == nil && approved
 }
 
-// categoryCapOK 检查种类配额；超限就地转人工。返回 false 时 *d 已是最终裁决。
+// categoryCapOK 检查种类配额；配额内返回 true。超限时在 *d 上做「auditor
+// 严格裁决」并返回 false（v6.1：cap 的意义是防 auditor 橡皮图章洪泛，不是把
+// 人变成审批员——auditor pass 就放、deny 就拒、ask 才升级人工；auditor 不可
+// 用再按种类兜底）。返回 false 时 *d 已是最终裁决。
 func (c *Chain) categoryCapOK(ctx context.Context, call chainCall, cat *sodpolicy.SodCategory, used func(string) int, d *mergedDecision) bool {
 	if cat.CapPerTask <= 0 {
 		return true
@@ -410,19 +413,66 @@ func (c *Chain) categoryCapOK(ctx context.Context, call chainCall, cat *sodpolic
 	if used(cat.Name) < cat.CapPerTask {
 		return true
 	}
-	// 超限：升级人工一次，不批则拒。
-	if c.elevateAsk(ctx, call, "拦截种类「"+cat.Name+"」本任务配额已用尽，请求人工放行本次调用") {
-		d.kind = "gate"
-		d.gateIn = c.gateInput(call, NormalizerResult{}, "elevated_ask")
-		d.markers["category"] = cat.Name
-		d.markers["elevated_ask"] = "approved_cap_exceeded"
+	d.markers["category"] = cat.Name
+	d.markers["cap_exceeded"] = "true"
+	if c.deps.Adjudicator == nil {
+		// 无裁决岗：保持旧语义（转人工一次，不批则拒）。
+		if c.elevateAsk(ctx, call, "拦截种类「"+cat.Name+"」本任务配额已用尽，请求人工放行本次调用") {
+			d.kind = "gate"
+			d.gateIn = c.gateInput(call, NormalizerResult{}, "elevated_ask")
+			d.markers["elevated_ask"] = "approved_cap_exceeded"
+			return false
+		}
+		d.kind = "deny"
+		d.reason = sodpolicy.ReasonCategoryCapExceeded
+		d.note = "拦截种类「" + cat.Name + "」本任务配额已用尽且人工未批准"
 		return false
 	}
-	d.kind = "deny"
-	d.reason = sodpolicy.ReasonCategoryCapExceeded
-	d.note = "拦截种类「" + cat.Name + "」本任务配额已用尽且人工未批准"
-	d.markers["category"] = cat.Name
-	return false
+	verdict, err := c.deps.Adjudicator(ctx, AuditorRequest{
+		TaskID: call.taskID, ConversationID: call.conversationID,
+		ToolName: call.toolName, SourceAgent: call.sourceAgent,
+		PayloadPreview: RedactPreview(call.payload, sodpolicy.PayloadPreviewMaxBytes),
+		PayloadDigest:  call.payloadDigest,
+		ScopeDigest:    call.scopeDigest,
+		Reason:         "cap_exceeded_strict:" + cat.Name,
+	})
+	if err != nil {
+		// auditor 挂：按种类兜底（默认 ask；ask 无人则拒）。
+		if c.elevateAsk(ctx, call, "拦截种类「"+cat.Name+"」配额已用尽且 auditor 暂不可用（"+err.Error()+"），请求人工裁决") {
+			d.kind = "gate"
+			d.gateIn = c.gateInput(call, NormalizerResult{}, "elevated_ask")
+			d.markers["elevated_ask"] = "approved_cap_fallback"
+			return false
+		}
+		d.kind = "deny"
+		d.reason = sodpolicy.ReasonAuditorUnavailable
+		d.note = "拦截种类「" + cat.Name + "」配额已用尽，auditor 不可用且人工未响应：" + err.Error()
+		return false
+	}
+	switch verdict.Verdict {
+	case "pass":
+		d.kind = "gate"
+		d.gateIn = c.gateInput(call, NormalizerResult{}, "auditor")
+		d.markers["auditor"] = "pass"
+		d.markers["auditor_reason"] = clipStr(verdict.Reason, 120)
+		return false
+	case "deny":
+		d.kind = "deny"
+		d.reason = sodpolicy.ReasonAuditorDeny
+		d.note = "拦截种类「" + cat.Name + "」配额已用尽且 auditor 否决：" + verdict.Reason
+		return false
+	default: // ask——auditor 也拿不准，转人工
+		if c.elevateAsk(ctx, call, "拦截种类「"+cat.Name+"」配额已用尽且 auditor 建议人工确认："+verdict.Reason) {
+			d.kind = "gate"
+			d.gateIn = c.gateInput(call, NormalizerResult{}, "elevated_ask")
+			d.markers["elevated_ask"] = "approved_cap_strict"
+			return false
+		}
+		d.kind = "deny"
+		d.reason = sodpolicy.ReasonAskDeclined
+		d.note = "拦截种类「" + cat.Name + "」配额已用尽，auditor 建议人工确认但未被批准：" + verdict.Reason
+		return false
+	}
 }
 
 func mergeChecks(base, extra map[string]string) map[string]string {

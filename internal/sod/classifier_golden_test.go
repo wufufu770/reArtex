@@ -149,9 +149,43 @@ func TestStderrRedirectNotOutside(t *testing.T) {
 	if cls2.Kind != ClassBenign || len(cls2.OutsidePaths) != 0 {
 		t.Fatalf("跨任务读取（平台任务区）应判 benign：kind=%s outside=%v", cls2.Kind, cls2.OutsidePaths)
 	}
+	// v6.2 读侧豁免的边界：无害系统信息读取（/etc/hostname）放行；
+	// 敏感面（/etc/shadow）保留 outside 判定 → sensitive_read 种类 → auditor。
 	body3 := `{"command": "cat /etc/hostname 2>/dev/null"}`
 	cls3 := Classify(2, "Bash", []byte(body3), intelStub)
-	if cls3.Kind != ClassOutsideWrite {
-		t.Fatalf("宿主 /etc 读取仍应判 outside_write：kind=%s", cls3.Kind)
+	if cls3.Kind != ClassBenign {
+		t.Fatalf("无害系统信息读取应判 benign：kind=%s", cls3.Kind)
+	}
+	body4 := `{"command": "cat /etc/shadow 2>/dev/null"}`
+	cls4 := Classify(2, "Bash", []byte(body4), intelStub)
+	if cls4.Kind != ClassOutsideWrite {
+		t.Fatalf("敏感面读取应判 outside_write：kind=%s", cls4.Kind)
+	}
+}
+
+// TestTask4DenialRepro v6.2 回归钉：线上任务 4 的 4 次误拒——sed 伪路径（/.）
+// 与跨任务读取（平台任务区豁免）+ 读写豁免损坏的三个坑一次钉死。
+func TestTask4DenialRepro(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want ClassKind
+	}{
+		{"sed伪路径", `{"command": "cd /app/data/tasks/4/i113 && grep -rhoE 'https?://[A-Za-z0-9._-]*\\.(acmecorp\\.com\\.cn|acme.cn)[A-Za-z0-9._/~?=&%-]*' w2_*.html raw_bing_*.html 2>/dev/null | sed -E 's#https?://##; s#/.*##' | sort -rn"}`, ClassBenign},
+		{"ls跨任务", `{"command": "echo x; ls /app/data/tasks/1/ 2>/dev/null | head -50; echo y; ls -la /app/data/tasks/2/i95 2>/dev/null; python3 -c \"import mmh3; print('ok')\" 2>&1 | head -5; date -u +%Y-%m-%dT%H:%M:%SZ"}`, ClassBenign},
+		{"cp真越界", `{"command":"cp /app/data/tasks/19/a.md /var/www/html/x"}`, ClassOutsideWrite},
+		{"cat敏感面", `{"command": "cat /etc/shadow 2>/dev/null"}`, ClassOutsideWrite},
+		{"hydra爆破检出", `{"command": "hydra -L users.txt -P rockyou.txt ssh://10.0.0.5"}`, ClassUnclear},
+	}
+	for _, tc := range cases {
+		cls := Classify(4, "Bash", []byte(tc.body), nil)
+		if cls.Kind != tc.want {
+			t.Errorf("%s: got=%s want=%s outside=%v brute=%v", tc.name, cls.Kind, tc.want, cls.OutsidePaths, cls.BruteForce)
+		}
+	}
+	// 爆破识别器独立验证（种类层消费 brute 标记；分类整体因有目标走 target_known）。
+	bf := Classify(4, "Bash", []byte(`{"command": "hydra -L users.txt -P rockyou.txt ssh://10.0.0.5"}`), nil)
+	if !bf.BruteForce {
+		t.Fatal("hydra 载荷应打 brute 标记（种类爆破→人工）")
 	}
 }
