@@ -142,9 +142,16 @@ func TestStderrRedirectNotOutside(t *testing.T) {
 	if cls.Kind != ClassLocalSafe || len(cls.OutsidePaths) != 0 {
 		t.Fatalf("任务目录内 ls + 2>/dev/null 应判 local_safe：kind=%s outside=%v", cls.Kind, cls.OutsidePaths)
 	}
+	// v6.1：跨任务读取已按用户拍板放行——/app/data/tasks 是平台内部区
+	// （任务间共享收集产物不问人），真实宿主越界（/etc、/root）仍判 outside。
 	body2 := `{"command": "cat /app/data/tasks/1/i8/x.txt 2>/dev/null"}`
 	cls2 := Classify(2, "Bash", []byte(body2), intelStub)
-	if cls2.Kind != ClassOutsideWrite || len(cls2.OutsidePaths) != 1 {
-		t.Fatalf("真实跨任务目录读取仍应判 outside_write：kind=%s outside=%v", cls2.Kind, cls2.OutsidePaths)
+	if cls2.Kind != ClassBenign || len(cls2.OutsidePaths) != 0 {
+		t.Fatalf("跨任务读取（平台任务区）应判 benign：kind=%s outside=%v", cls2.Kind, cls2.OutsidePaths)
+	}
+	body3 := `{"command": "cat /etc/hostname 2>/dev/null"}`
+	cls3 := Classify(2, "Bash", []byte(body3), intelStub)
+	if cls3.Kind != ClassOutsideWrite {
+		t.Fatalf("宿主 /etc 读取仍应判 outside_write：kind=%s", cls3.Kind)
 	}
 }
