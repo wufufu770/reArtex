@@ -279,10 +279,33 @@ function TaskDetailInner() {
     if (task && ["done", "failed", "timeout"].includes(task.status)) return;
     const next = !paused;
     try {
-      await api.controlTask(id, next ? "pause" : "resume");
+      const r = await api.controlTask(id, next ? "pause" : "resume");
       setPaused(next);
-      toast.success(next ? "已暂停探索" : "已恢复探索");
+      if (next) {
+        toast.success("已暂停探索");
+        return;
+      }
+      // F1（方案 v9.2 §3.5）：恢复成功时后端带回 blocked 意图数。没有这个提示，
+      // 恢复后 planner 只派新方向、blocked 尾巴原地不动，任务看着在跑实则空转
+      // （2026-11-08 任务 #1 现场：18 个 blocked 意图无人认领）。一键带重跑。
+      if ((r.blocked_intents ?? 0) > 0) {
+        toast.success(`已恢复探索（发现 ${r.blocked_intents} 个被拦意图）`, {
+          duration: 12000,
+          action: {
+            label: `重跑 ${r.blocked_intents} 个被拦意图`,
+            onClick: () => {
+              api
+                .rerunBlocked(id)
+                .then(() => toast.success("已重开全部被拦意图，等待 worker 认领"))
+                .catch((e) => toast.error(`重跑失败：${(e as Error).message}`));
+            },
+          },
+        });
+      } else {
+        toast.success("已恢复探索");
+      }
     } catch (e) {
+      // 409（终态/已暂停/删除中）等失败必须可见——此前静默，点了没反应也无从排查。
       toast.error(`操作失败：${(e as Error).message}`);
     }
   }

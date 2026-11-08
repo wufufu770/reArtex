@@ -329,6 +329,23 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 	return out, nil
 }
 
+// recordNormalizerFailure 是 ChainDeps.OnNormalizerEvent 的落点（方案 v9.2
+// §3.5-F3）：规整器失败补记 llm_records（worker=normalizer，与 auditor 治理线
+// 同口径）。此前该通道只落 sod 的 reason_code——llm_records 里规整线一片空白，
+// 「malformed 有多少、都长什么样」无法从账面回答。失败不吞，落库失败也忽略。
+func (s *Server) recordNormalizerFailure(ev sod.NormalizerEvent) {
+	body, _ := json.Marshal(map[string]any{
+		"kind": ev.Kind, "tool": ev.ToolName, "task_id": ev.TaskID,
+	})
+	if err := s.m.pg.InsertLLMRecord(&db.LLMRecord{
+		Worker: "normalizer", Model: "normalizer-lane", Status: "error",
+		Error: trunc(ev.Detail, 200), LatencyMs: int(ev.LatencyMs),
+		RawResponse: string(body),
+	}); err != nil {
+		log.Printf("[sod] 规整器失败记录落库失败（忽略）: %v", err)
+	}
+}
+
 // recordAuditorFailure 把失败的裁决调用也记进 llm_records（不然黑盒）。
 func (s *Server) recordAuditorFailure(req sod.AuditorRequest, cause error, latencyMs int) {
 	body, _ := json.Marshal(map[string]any{

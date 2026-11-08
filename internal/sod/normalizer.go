@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/internal/sodpolicy"
@@ -29,6 +31,17 @@ var (
 	// 合法 JSON / 缺字段 / 动作类型无法解析。
 	ErrNormalizerMalformed = errors.New("意图规整输出不合规")
 )
+
+// NormalizerEvent 是规整器失败事件（方案 v9.2 §3.5-F3）：链侧经
+// ChainDeps.OnNormalizerEvent 回传宿主，宿主据此把 normalizer 调用补记进
+// llm_records（worker=normalizer，与 auditor 治理线同口径）。
+type NormalizerEvent struct {
+	Kind      string // "malformed"（输出不合规）| "unavailable"（模型侧故障）
+	ToolName  string // 触发规整的工具
+	TaskID    int64
+	Detail    string // 失败原因（截断到 200 字符）
+	LatencyMs int64 // 含 malformed 重试一次的总耗时
+}
 
 // 动作类型（代码常量）。
 //
@@ -78,6 +91,12 @@ type Normalizer struct {
 	schema       llm.ToolSchema
 	timeout      time.Duration
 	maxTokens    int
+
+	// F3 观测采样（方案 v9.2 §3.5-F3）：失败第 1 条 + 之后每第 10 条落一条
+	// 结构化日志。此前失败只落 reason_code——失败形态（空响应/坏 JSON/多工具）
+	// 不可见，本轮排障被迫反复盲放探针。进程内计数，重启归零（观测面，非裁决面）。
+	failsMu sync.Mutex
+	failsN  int
 }
 
 // NewNormalizer 构造规整器。
@@ -135,27 +154,69 @@ type NormalizeInput struct {
 // ⇒ 更多超时 ⇒ 正反馈雪崩）。
 var normalizerSema = make(chan struct{}, 2)
 
-// Normalize 把一次工具调用转成结构化意图。
+// Normalize 把一次工具调用转成结构化意图：内层 normalizeInner 跑真正的调用，
+// 外层负责失败观测（F3 采样日志——第 1 条 + 每 10 条一条，含响应形状）。
 //
 // ⚠️ **每一次失败都返回 error** —— 调用方（Chain）必须按
 // normalizer_unavailable / normalizer_malformed 拒绝，**绝不放行**。
-//
-// 调用形态照抄既有先例 intercept.Interceptor.Judge（intercept/intercept.go:447）
-// + server/intercept.go 的 reviewCompletion/streamCollectText：同步一次
-// llm.Provider.Stream + llm.CompletionRequest。唯一的差别是本函数额外带
+func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (NormalizerResult, error) {
+	out, acc, err := n.normalizeInner(ctx, in)
+	if err != nil {
+		kind := "unavailable"
+		if errors.Is(err, ErrNormalizerMalformed) {
+			kind = "malformed"
+		}
+		n.logFailSample(kind, acc, err)
+	}
+	return out, err
+}
+
+// logFailSample 是 F3 的采样日志：第 1 条 + 每第 10 条各落一条，带失败原因与
+// 响应形状（text 长度 / tool_use 数 / text 前 200 字符）——「空响应」「有话但
+// 不调工具」「坏 JSON」从此在日志里一眼可分，不必再放探针。acc 为 nil 表示
+// 流都没跑起来（provider 缺失/并发槽取消/输入构造失败），形状未知。
+func (n *Normalizer) logFailSample(kind string, acc *llm.Accumulator, err error) {
+	n.failsMu.Lock()
+	n.failsN++
+	seq := n.failsN
+	n.failsMu.Unlock()
+	if seq != 1 && seq%10 != 0 {
+		return
+	}
+	if acc == nil {
+		log.Printf("[sod] 规整器失败#%d kind=%s err=%v（流前失败，无响应形状）", seq, kind, err)
+		return
+	}
+	msg := acc.Message()
+	text := msg.Text()
+	uses := msg.ToolUses()
+	preview := text
+	if len(preview) > 200 {
+		preview = string([]rune(preview)[:200])
+	}
+	log.Printf("[sod] 规整器失败#%d kind=%s err=%v | 响应形状: text_len=%d tool_uses=%d text前200=%q",
+		seq, kind, err, len([]rune(strings.TrimSpace(text))), len(uses), preview)
+}
+
+// normalizeInner 是 Normalize 的实现体（调用形态照抄既有先例
+// intercept.Interceptor.Judge（intercept/intercept.go:447）+
+// server/intercept.go 的 reviewCompletion/streamCollectText：同步一次
+// llm.Provider.Stream + llm.CompletionRequest）。唯一的差别是本函数额外带
 // Tools —— 让模型**必须调用** emit_structured_intent 产出结构化意图，于是
 // 输出是结构化的，不需要从散文里抠 JSON。
-func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (NormalizerResult, error) {
+//
+// 第三个返回值是响应累积器（失败观测用；流前失败为 nil）。
+func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (NormalizerResult, *llm.Accumulator, error) {
 	prov, ok := n.provider(n.profileID)
 	if !ok || prov == nil {
-		return NormalizerResult{}, fmt.Errorf("%w: 未找到可用的模型 profile %d", ErrNormalizerUnavailable, n.profileID)
+		return NormalizerResult{}, nil, fmt.Errorf("%w: 未找到可用的模型 profile %d", ErrNormalizerUnavailable, n.profileID)
 	}
 	// 先排队（B3①）：信号量等待只受调用方 ctx 取消约束，不吃 20s 模型超时。
 	select {
 	case normalizerSema <- struct{}{}:
 		defer func() { <-normalizerSema }()
 	case <-ctx.Done():
-		return NormalizerResult{}, fmt.Errorf("%w: 等待规整并发槽时调用方取消: %v", ErrNormalizerUnavailable, ctx.Err())
+		return NormalizerResult{}, nil, fmt.Errorf("%w: 等待规整并发槽时调用方取消: %v", ErrNormalizerUnavailable, ctx.Err())
 	}
 	cctx, cancel := context.WithTimeout(ctx, n.timeout)
 	defer cancel()
@@ -171,7 +232,7 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 		"conversation_id": in.ConversationID,
 	})
 	if err != nil {
-		return NormalizerResult{}, fmt.Errorf("%w: 构造规整输入失败: %v", ErrNormalizerUnavailable, err)
+		return NormalizerResult{}, nil, fmt.Errorf("%w: 构造规整输入失败: %v", ErrNormalizerUnavailable, err)
 	}
 
 	temp := 0.0
@@ -196,28 +257,28 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 	}
 	if streamErr != nil {
 		if errors.Is(streamErr, context.DeadlineExceeded) || errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			return NormalizerResult{}, fmt.Errorf("%w: 模型调用超时（上限 %s）", ErrNormalizerUnavailable, n.timeout)
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用超时（上限 %s）", ErrNormalizerUnavailable, n.timeout)
 		}
-		return NormalizerResult{}, fmt.Errorf("%w: 模型调用失败: %v", ErrNormalizerUnavailable, streamErr)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用失败: %v", ErrNormalizerUnavailable, streamErr)
 	}
 	if err := cctx.Err(); err != nil {
-		return NormalizerResult{}, fmt.Errorf("%w: 模型调用超时（上限 %s）", ErrNormalizerUnavailable, n.timeout)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用超时（上限 %s）", ErrNormalizerUnavailable, n.timeout)
 	}
 
 	uses := acc.Message().ToolUses()
 	if len(uses) == 0 {
-		return NormalizerResult{}, fmt.Errorf("%w: 模型没有调用 %s 工具", ErrNormalizerMalformed, n.schema.Name)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型没有调用 %s 工具", ErrNormalizerMalformed, n.schema.Name)
 	}
 	if len(uses) > 1 {
-		return NormalizerResult{}, fmt.Errorf("%w: 模型调用了 %d 个工具，契约要求恰好一个 %s", ErrNormalizerMalformed, len(uses), n.schema.Name)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用了 %d 个工具，契约要求恰好一个 %s", ErrNormalizerMalformed, len(uses), n.schema.Name)
 	}
 	if uses[0].Name != n.schema.Name {
-		return NormalizerResult{}, fmt.Errorf("%w: 模型调用了 %s，契约要求 %s", ErrNormalizerMalformed, uses[0].Name, n.schema.Name)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用了 %s，契约要求 %s", ErrNormalizerMalformed, uses[0].Name, n.schema.Name)
 	}
 
 	var raw normalizerToolOutput
 	if err := json.Unmarshal(uses[0].Input, &raw); err != nil {
-		return NormalizerResult{}, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
 	}
 	out := NormalizerResult{
 		StructuredIntent: raw.StructuredIntent,
@@ -230,10 +291,10 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 		// 另外③「入参不是合法 JSON」也会落到这里：llm.Accumulator 会把非法
 		// JSON 兜底成 {}（见 third_party/norma/llm/accumulate.go 的 Message），
 		// 于是反序列化成功但字段全空 —— 结果一样是「不合规」，一样拒绝。
-		return NormalizerResult{}, fmt.Errorf("%w: 输出缺少 structured_intent / action_type", ErrNormalizerMalformed)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 输出缺少 structured_intent / action_type", ErrNormalizerMalformed)
 	}
 	if out.StructuredIntent.RawPayloadDigest == "" {
-		return NormalizerResult{}, fmt.Errorf("%w: 输出缺少 raw_payload_digest", ErrNormalizerMalformed)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 输出缺少 raw_payload_digest", ErrNormalizerMalformed)
 	}
 	if out.StructuredIntent.ActionType == actionTypeUnparseable {
 		// 原始动作根本解析不出来 ⇒ 没有可信的结构化意图 ⇒ 拒绝。
@@ -241,20 +302,20 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 		// policy gate 决定」，但闸门的裁决对 unparseable 同样是拒绝 ⇒ 落在
 		// 这里不会改变结局，只是把原因码落在更准确的一侧（输出不合规，
 		// 而不是「越界」）。
-		return NormalizerResult{}, fmt.Errorf("%w: 原始动作无法解析（action_type=unparseable）", ErrNormalizerMalformed)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 原始动作无法解析（action_type=unparseable）", ErrNormalizerMalformed)
 	}
 	if !knownActionTypes[out.StructuredIntent.ActionType] {
-		return NormalizerResult{}, fmt.Errorf("%w: 未知的 action_type=%q", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 未知的 action_type=%q", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
 	}
 	if requiresTarget(out.StructuredIntent.ActionType, in.RawPayload) && out.StructuredIntent.TargetHint == "" {
-		return NormalizerResult{}, fmt.Errorf("%w: 动作类型 %s 需要目标线索，但输出里没有 target_hint", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
+		return NormalizerResult{}, acc, fmt.Errorf("%w: 动作类型 %s 需要目标线索，但输出里没有 target_hint", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
 	}
 
 	// source_agent / task_id 由规整器自己盖上：模型说的不算数（它可能复述错，
 	// 也可能被原始动作里的文本诱导）。它们用于缓存键与审计归属。
 	out.SourceAgent = in.SourceAgent
 	out.TaskID = in.TaskID
-	return out, nil
+	return out, acc, nil
 }
 
 // normalizerToolOutput 是**模型工具入参**的解码目标。

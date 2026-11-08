@@ -20,6 +20,10 @@ type taskControlResult struct {
 	Paused bool   `json:"paused"`
 	Queued bool   `json:"queued"`
 	Status string `json:"status"`
+	// F1（方案 v9.2 §3.5）：resume 时带回当前 blocked 意图数——UI 据此提示
+	// 「有 N 个被拦意图，是否一并重跑」。不带这个数，恢复后任务容易空转：
+	// planner 派新方向，blocked 尾巴原地不动。pause 恒为 0。
+	BlockedIntents int `json:"blocked_intents,omitempty"`
 }
 
 type intentControlResult struct {
@@ -95,6 +99,29 @@ func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, er
 }
 
 func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause error) (taskControlResult, error) {
+	// F1（方案 v9.2 §3.5）：成功与失败都落显式日志。此前失败静默（错误只进
+	// HTTP 409 body）——用户点「重新开始」没生效时服务端一条日志都没有，排障
+	// 无从下手（2026-11-08 任务 #1 现场）。单点包裹覆盖 pause/resume 全部分支。
+	out, err := s.applyTaskControlInner(t, action, pauseCause)
+	if err != nil {
+		log.Printf("[task] #%s %s 失败: %v", t.ID, action, err)
+		return out, err
+	}
+	log.Printf("[task] #%s %s%s", t.ID,
+		map[string]string{"pause": "已暂停", "resume": "已继续"}[action],
+		resumeBlockedSuffix(out))
+	return out, nil
+}
+
+// resumeBlockedSuffix 是 resume 成功日志的补充段：blocked 尾巴数（0 不打）。
+func resumeBlockedSuffix(out taskControlResult) string {
+	if out.BlockedIntents > 0 {
+		return fmt.Sprintf("（另有 %d 个 blocked 意图未重跑）", out.BlockedIntents)
+	}
+	return ""
+}
+
+func (s *Server) applyTaskControlInner(t *Task, action string, pauseCause error) (taskControlResult, error) {
 	if t == nil {
 		return taskControlResult{}, fmt.Errorf("task not found")
 	}
@@ -143,10 +170,16 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		}
 		out.Queued = queued
 		out.Status = map[bool]string{true: "queued", false: "running"}[queued]
+		// F1 语义补全：恢复成功后统计 blocked 尾巴数带回 UI。计数失败不阻塞
+		// 恢复本身（best-effort——它只是提示，不是恢复链路的组成部分）。
+		if t.Store != nil {
+			if n, cerr := t.Store.CountIntentsInState("blocked"); cerr == nil && n > 0 {
+				out.BlockedIntents = n
+			}
+		}
 	default:
 		return out, fmt.Errorf("action must be pause|resume")
 	}
-	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "已暂停", "resume": "已继续"}[action])
 	return out, nil
 }
 

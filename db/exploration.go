@@ -589,6 +589,24 @@ WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
 	return n, nil
 }
 
+// CountIntentsInState counts intent nodes in one state (方案 v9.2 §3.5-F1：
+// 任务 resume 时统计 blocked 意图数，让 UI 提示「是否一并重跑」——否则恢复后
+// planner 只派新方向、blocked 尾巴原地不动，任务看似在跑实则空转）。
+func (s *ExplorationStore) CountIntentsInState(state string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state=$2`, s.expID, state).Scan(&n)
+	return n, err
+}
+
+// IntentState reads one intent node's current state (F2 finalize 幂等读回用).
+func (s *ExplorationStore) IntentState(id int64) (string, error) {
+	var state string
+	err := s.db.QueryRow(`SELECT state FROM exploration_nodes
+WHERE id=$1 AND exploration_id=$2 AND kind='intent'`, id, s.expID).Scan(&state)
+	return state, err
+}
+
 func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	// terminal states stamp completed_at; reopening (back to open/running) clears it.
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"

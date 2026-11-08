@@ -386,6 +386,14 @@ export default function MCPPage() {
                 <Badge variant="outline" className="uppercase">
                   {s.transport}
                 </Badge>
+                {/* F5（方案 v9.2 §3.5）：http/sse 传输但 URL 未配置的占位 server
+                    （如种子 ScopeSentry）——卡片直接标出「缺 URL」，不再只有日志里
+                    的周期性「连接失败」。补上 URL 徽标即消失。 */}
+                {(s.transport === "http" || s.transport === "sse") && !s.url && (
+                  <Badge variant="destructive" title="已启用但未配置 URL，发现被跳过；编辑本卡片补上 URL 即恢复">
+                    缺 URL
+                  </Badge>
+                )}
                 {/* biome-ignore lint/a11y/noStaticElementInteractions: 可点击卡片内的操作区，仅阻止冒泡，不做交互元素 */}
                 <div
                   className="ml-auto flex items-center gap-2"
