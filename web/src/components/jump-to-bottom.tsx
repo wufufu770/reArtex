@@ -8,8 +8,6 @@
 // 显隐——打开会话就停在底部，「到底」按钮若隐藏等于永远看不见。
 // viewportOf 返回滚动容器元素（可为 null；未挂载时按钮点不出效果但不报错）。
 
-import * as React from "react";
-
 import { ArrowDownIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";

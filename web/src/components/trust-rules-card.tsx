@@ -28,7 +28,7 @@ interface Preview {
 
 export function TrustRulesCard({ tools }: { tools: Tool[] }) {
   const [rules, setRules] = React.useState<InterceptRule[]>([]);
-  const [max, setMax] = React.useState(50);
+  const [max, _setMax] = React.useState(50);
   const [tool, setTool] = React.useState("");
   const [pattern, setPattern] = React.useState("");
   const [reason, setReason] = React.useState("");

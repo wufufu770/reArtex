@@ -387,7 +387,7 @@ function SessionItem({
       >
         {icon ?? <span className="size-3.5 shrink-0" />}
         {s.intent_id && (
-          <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+          <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground tabular-nums">
             #{s.intent_id}
           </span>
         )}
@@ -397,7 +397,7 @@ function SessionItem({
           </Badge>
         )}
         <span
-          className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}
+          className={cn("min-w-0 flex-1 truncate font-medium text-sm", deleted && "text-muted-foreground line-through")}
         >
           {displayTitle}
         </span>
@@ -408,12 +408,12 @@ function SessionItem({
         )}
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
-          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 font-medium text-[10px] text-blue-600 tabular-nums dark:text-blue-400">
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
         {s.live && (
-          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-[10px] text-blue-600 dark:text-blue-400">
             <span className="size-1 animate-pulse rounded-full bg-blue-500" />
             实时
           </span>
@@ -467,11 +467,11 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
           {displayAssets.map((asset) => (
             <div key={`${asset.intent_id}-${asset.asset_id}`} className="min-w-0">
               <div className="break-all font-mono text-xs">{asset.label.trim() || `#${asset.asset_id}`}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
+              <div className="mt-0.5 text-muted-foreground text-xs">
                 {taskAssetTypeLabel(asset.type)} · {taskAssetSourceLabel(asset.source)}
                 {asset.inherited ? ` · 来源任务 #${asset.source_task_id}` : ""}
               </div>
-              <div className="mt-0.5 [overflow-wrap:anywhere] text-xs">{asset.source_summary}</div>
+              <div className="mt-0.5 text-xs [overflow-wrap:anywhere]">{asset.source_summary}</div>
             </div>
           ))}
         </div>
@@ -1591,7 +1591,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 onClick={() => setListOpen((open) => !open)}
                 aria-expanded={listOpen}
                 aria-controls="session-list-panel"
-                className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground lg:pointer-events-none"
+                className="flex min-w-0 flex-1 items-center gap-1 text-left font-medium text-muted-foreground text-xs lg:pointer-events-none"
               >
                 <ChevronDownIcon
                   className={cn("size-3.5 shrink-0 transition-transform lg:hidden", !listOpen && "-rotate-90")}
@@ -1603,7 +1603,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       · {activeDisplayTitle}
                     </span>
                     {hiddenUnread > 0 && (
-                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
+                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 font-medium text-[10px] text-blue-600 tabular-nums lg:hidden dark:text-blue-400">
                         {hiddenUnread > 99 ? "99+" : hiddenUnread}
                       </span>
                     )}
@@ -1635,7 +1635,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             {taskTokens && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-muted-foreground text-xs">
                     <span>任务总计</span>
                     <span>·</span>
                     <TokenMetrics
@@ -1657,7 +1657,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             id="session-list-panel"
             type="auto"
             className={cn(
-              "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!",
+              "[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 flex-1",
               !listOpen && "max-lg:hidden",
             )}
           >
@@ -1668,7 +1668,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 const Meta = roleMeta[role];
                 return (
                   <div key={role} className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
+                    <div className="flex items-center gap-1.5 px-2 py-1 font-medium text-muted-foreground text-xs">
                       <Meta.icon className="size-3.5" />
                       {Meta.label}
                       {role === "mainagent" && (
@@ -1719,7 +1719,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         type="button"
                         onClick={loadOlderIntents}
                         disabled={loadingOlderIntents}
-                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-accent/50"
                       >
                         {loadingOlderIntents ? (
                           <Loader2Icon className="size-3.5 animate-spin" />
@@ -1733,7 +1733,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 );
               })}
               {mainLoaded && !workerSessions.length && (
-                <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
+                <div className="px-2 py-1 text-muted-foreground text-xs">暂无运行中的 Worker 会话。</div>
               )}
             </div>
           </ScrollArea>
@@ -1744,7 +1744,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           side={side}
           label={active.role === "worker" ? `Worker #${active.intent_id} · ${activeDisplayTitle}` : activeDisplayTitle}
         >
-          <div className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-2 sm:px-4 sm:py-2.5">
               {(() => {
                 const isWorker = active.role === "worker";
@@ -1752,7 +1752,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 // Worker: the intent moved into the transcript as a message, so the
                 // header shows a stable generic label (intent JSON stays on hover).
                 const title = isWorker ? "Worker 执行会话" : active.title;
-                const titleEl = <span className="min-w-0 truncate text-sm font-medium">{title}</span>;
+                const titleEl = <span className="min-w-0 truncate font-medium text-sm">{title}</span>;
                 return meta?.json ? (
                   <Tooltip>
                     <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
@@ -1792,7 +1792,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
               )}
               {active.live && (
-                <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-[10px] text-blue-600 dark:text-blue-400">
                   <span className="size-1 animate-pulse rounded-full bg-blue-500" />
                   实时
                 </span>
@@ -1802,7 +1802,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   ↑ 更早历史
                 </span>
               )}
-              <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
+              <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-muted-foreground text-xs max-sm:w-full max-sm:flex-wrap">
                 {tokenTotal.any && (
                   <Tooltip>
                     {/* 手机端用短标签（入/缓/出）：长标签会把这一行撑成两行，进一步压缩记录区。 */}
@@ -1845,7 +1845,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               const dm = active.role === "worker" ? sessionMeta.get(active.id) : undefined;
               if (!dm?.deleted) return null;
               return (
-                <div className="flex items-start gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2.5 text-xs">
+                <div className="flex items-start gap-2 border-destructive/30 border-b bg-destructive/5 px-4 py-2.5 text-xs">
                   <Trash2Icon className="mt-0.5 size-3.5 shrink-0 text-destructive" />
                   <div className="min-w-0">
                     <span className="font-medium text-destructive">此意图已被用户删除</span>
@@ -1879,22 +1879,22 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <div className="relative flex min-h-0 min-w-0 flex-1">
               <ScrollArea
                 type="auto"
-                className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+                className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1"
               >
                 <div className="min-w-0 max-w-full p-4" ref={contentRef}>
                   {activeState?.loadingMore && (
-                    <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
+                    <div className="flex items-center justify-center gap-2 pb-2 text-muted-foreground text-xs">
                       <Loader2Icon className="size-3.5 animate-spin" />
                       加载更早历史…
                     </div>
                   )}
                   {showLoader ? (
-                    <div className="flex items-center gap-2 pl-9 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 pl-9 text-muted-foreground text-xs">
                       <Loader2Icon className="size-3.5 animate-spin" />
                       加载活动流…
                     </div>
                   ) : activeState?.error ? (
-                    <div className="flex items-center gap-2 pl-9 text-xs text-red-500">
+                    <div className="flex items-center gap-2 pl-9 text-red-500 text-xs">
                       <CircleXIcon className="size-3.5" />
                       加载失败：{activeState.error}
                       <Button
@@ -1915,7 +1915,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
                     />
                   ) : (
-                    <div className="pl-9 text-xs text-muted-foreground">
+                    <div className="pl-9 text-muted-foreground text-xs">
                       {isMain ? "还没有对话。在下方给主 Agent 发消息，引导探索方向或介入流程。" : "暂无活动记录。"}
                     </div>
                   )}
@@ -2044,7 +2044,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   <InputGroupAddon align="block-end">
                     <span
                       className={cn(
-                        "px-1 text-[10px] tabular-nums text-muted-foreground",
+                        "px-1 text-[10px] text-muted-foreground tabular-nums",
                         workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS && "text-destructive",
                       )}
                     >
@@ -2130,7 +2130,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
             <AlertDialogHeader>
               <AlertDialogTitle>删除 Worker #{cancelIntent?.intent_id}？</AlertDialogTitle>
-              <AlertDialogDescription className="break-words whitespace-normal">
+              <AlertDialogDescription className="whitespace-normal break-words">
                 {deleteMode === "hard" ? (
                   <>
                     <strong>真删除</strong>会物理移除该意图，以及<strong>仅由它支撑</strong>
@@ -2156,7 +2156,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   )}
                 >
                   <div className="font-medium">假删除</div>
-                  <div className="text-xs text-muted-foreground">保留数据，可追溯</div>
+                  <div className="text-muted-foreground text-xs">保留数据，可追溯</div>
                 </button>
                 <button
                   type="button"
@@ -2167,11 +2167,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   )}
                 >
                   <div className="font-medium">真删除</div>
-                  <div className="text-xs text-muted-foreground">级联移除，不可恢复</div>
+                  <div className="text-muted-foreground text-xs">级联移除，不可恢复</div>
                 </button>
               </div>
               <div className="grid gap-2">
-                <label htmlFor="cancel-reason" className="text-sm font-medium">
+                <label htmlFor="cancel-reason" className="font-medium text-sm">
                   删除原因（必填）
                 </label>
                 <Textarea
@@ -2202,7 +2202,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           <AlertDialogContent className="max-w-[min(32rem,calc(100vw-2rem))]">
             <AlertDialogHeader>
               <AlertDialogTitle>开启新会话？</AlertDialogTitle>
-              <AlertDialogDescription className="break-words whitespace-normal">
+              <AlertDialogDescription className="whitespace-normal break-words">
                 当前会话会被归档（可随时切回），主 Agent 将以干净的上下文继续。任务的图谱、资产、目标不受影响。
               </AlertDialogDescription>
             </AlertDialogHeader>

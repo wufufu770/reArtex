@@ -151,7 +151,7 @@ function DecisionList({
   return (
     <div className="max-h-[65svh] overflow-y-auto rounded-md border">
       <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
-        <TableHeader className="[&_tr]:border-t sticky top-0 z-10 bg-card">
+        <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-t">
           <TableRow>
             <TableHead>时间</TableHead>
             <TableHead>工具 / 来源</TableHead>
