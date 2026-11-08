@@ -84,6 +84,43 @@ func (s *Server) fireSupervision(taskID string) {
 		numeric, true, "", "")
 }
 
+// eventSupervisionInterval 是事件驱动监督的最小间隔（v9 批次1⑥）：cap 命中等
+// 治理事件要求秒级响应，与 3min 轮询节流分离；30s/任务 上限防 cap 风暴。
+const eventSupervisionInterval = 30 * time.Second
+
+// eventSupervisionLast 记录每任务最近一次事件驱动监督（进程内即可，重启清零
+// 无碍——轮询环仍在兜底）。
+var eventSupervisionLast = map[string]time.Time{}
+
+// fireSupervisionEvent 事件直触一次监督轮（v9 批次1⑥，对齐 Claude Code hooks
+// 的事件驱动思想）：headline 置顶说明触发原因，快照照常拼装。
+func (s *Server) fireSupervisionEvent(taskID, headline string) {
+	if s.m == nil || s.m.pg == nil || s.chatAgentRef() == nil {
+		return
+	}
+	if s.engine.Drained(taskID) {
+		return
+	}
+	supervisionMu.Lock()
+	last, ok := eventSupervisionLast[taskID]
+	now := time.Now()
+	if ok && now.Sub(last) < eventSupervisionInterval {
+		supervisionMu.Unlock()
+		return
+	}
+	eventSupervisionLast[taskID] = now
+	supervisionMu.Unlock()
+	snapshot := s.buildSupervisionSnapshot(taskID)
+	if snapshot == "" {
+		return
+	}
+	numeric, _ := parseTaskID(taskID)
+	s.StartTriggeredRun(supervisionAgent,
+		fmt.Sprintf("监督·事件 · 任务#%s", taskID),
+		supervisionPrompt(headline+"\n\n"+snapshot),
+		numeric, true, "", "")
+}
+
 // buildSupervisionSnapshot 确定性组装任务快照（零 LLM）。
 func (s *Server) buildSupervisionSnapshot(taskID string) string {
 	t, ok := s.m.Task(taskID)

@@ -415,6 +415,11 @@ func (c *Chain) categoryCapOK(ctx context.Context, call chainCall, cat *sodpolic
 	}
 	d.markers["category"] = cat.Name
 	d.markers["cap_exceeded"] = "true"
+	// 事件直触（v9 批次1⑥）：cap 命中即刻通知宿主，监督轮不再等轮询空窗。
+	// 同任务多次命中由宿主侧节流合并。
+	if c.deps.OnCapHit != nil {
+		c.deps.OnCapHit(call.taskID, cat.Name)
+	}
 	if c.deps.Adjudicator == nil {
 		// 无裁决岗：保持旧语义（转人工一次，不批则拒）。
 		if c.elevateAsk(ctx, call, "拦截种类「"+cat.Name+"」本任务配额已用尽，请求人工放行本次调用") {

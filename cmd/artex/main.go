@@ -141,7 +141,15 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
-	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
+	// JWT keyDir 可经 ARTEX_KEY_DIR 覆盖（方案 v9 批次1③）：默认跟可执行文件
+	// 走（容器内=镜像层，重建即丢 key、全端掉线）。compose 用独立挂载卷
+	// /app/key 持久化——既不在镜像层，也不在可浏览的 dataDir（key 不可被
+	// 文件管理器列出）。
+	keyDir := os.Getenv("ARTEX_KEY_DIR")
+	if keyDir == "" {
+		keyDir = config.BaseDir()
+	}
+	srv := server.New(ctx, mgr, skillDir, *dataDir, keyDir)
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

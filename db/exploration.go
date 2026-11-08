@@ -498,6 +498,19 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 	return err
 }
 
+// StopNonTerminalIntents 任务收尾时把残留的非终态意图统一置 stopped（方案 v9
+// 批次1⑦：终态必须是终态——done 任务不再携带 open/blocked 尾巴污染监督快照
+// 与 rerun 队列）。返回清理条数。
+func (s *ExplorationStore) StopNonTerminalIntents(reason string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='stopped', blocked_reason=$2, content_version=content_version+1, completed_at=now()
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','blocked')`, s.expID, reason)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
