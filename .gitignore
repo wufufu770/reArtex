@@ -69,3 +69,7 @@ secrets/
 
 # 打了补丁的第三方框架（由 scripts/prepare-norma.sh 从模块缓存生成 + 打补丁）
 # 不入库：入库的是 patches/norma-privilege-drop.patch 这份可审阅的补丁本身。
+
+# node 容器崩溃残留
+core
+core.*
