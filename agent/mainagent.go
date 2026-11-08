@@ -167,6 +167,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
+	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
+	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
+	applyThinkingOverride(&opts, "mainagent")
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx
 		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still

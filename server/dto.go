@@ -561,6 +561,9 @@ type AgentDTO struct {
 	TriggerRunMode     string `json:"trigger_run_mode"`
 	TriggerMergeMode   string `json:"trigger_merge_mode"`
 	TriggerMaxParallel int    `json:"trigger_max_parallel"`
+	// agent 级思考档位覆盖(方案 v9.2 批次 B):''=跟随绑定 profile 默认;
+	// 'enabled'/'disabled'=强制思考开关;其余=effort 档位。
+	ThinkingEffort string `json:"thinking_effort"`
 	// binding counts (populated only by the list endpoint) — shown on agent cards.
 	McpCount   int `json:"mcp_count"`
 	SkillCount int `json:"skill_count"`
@@ -584,6 +587,7 @@ func agentDTO(a *db.Agent) AgentDTO {
 		TriggerRunMode:     a.TriggerRunMode,
 		TriggerMergeMode:   a.TriggerMergeMode,
 		TriggerMaxParallel: a.TriggerMaxParallel,
+		ThinkingEffort:     a.ThinkingEffort,
 	}
 }
 

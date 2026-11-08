@@ -144,6 +144,14 @@ type Options struct {
 	SystemReminderFunc func() string
 
 	MaxTurns int
+	// Thinking, when non-empty, overrides the provider's thinking mode for every
+	// model request of this session ("" inherits Config.ThinkingType;
+	// "enabled"/"disabled" force that mode). ReasoningEffort likewise overrides
+	// the reasoning-strength parameter ("" inherits Config.ReasoningEffort).
+	// Providers are cached and shared per profile, so per-agent settings must
+	// ride on the request — these two fields are that ride.
+	Thinking        string
+	ReasoningEffort string
 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
 	// mid-stream), so a run ends cleanly rather than being aborted in flight (0 = off).
 	MaxDuration time.Duration
@@ -525,6 +533,8 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		TokenBudget:        s.opts.TokenBudget,
 		EscalateMaxTokens:  s.opts.EscalateMaxTokens,
 		NonStreaming:       s.opts.NonStreaming,
+		Thinking:           s.opts.Thinking,
+		ReasoningEffort:    s.opts.ReasoningEffort,
 	}
 	if s.writer != nil {
 		in.Recorder = s.writer

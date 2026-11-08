@@ -44,6 +44,7 @@ import type {
   PromptVersion,
   Settings,
   SkillItem,
+  ThinkingCapability,
   Tool,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -51,6 +52,9 @@ import { cn } from "@/lib/utils";
 // Traffic tools are host tools gated by the global 流量捕获 switch: bindable, but
 // only usable when capture is on. Keep this list in sync with traffic.SeedToolMetas.
 const TRAFFIC_TOOL_KEYS = new Set(["traffic_search", "traffic_get"]);
+
+// 思考程度下拉的开关档显示名（方案 v9.2 批次 B）；其余档位原样展示。
+const THINKING_LEVEL_UI: Record<string, string> = { enabled: "开启思考", disabled: "关闭思考" };
 
 // AgentEditor is the tabbed editor for one agent, used inside the agents-page
 // drawer (and reused full-page for deep links). Tabs: 配置与提示词 / MCP / Skill /
@@ -75,6 +79,11 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   // "" = 跟随(未绑定)；否则为 profile id 字符串
   const [llmProfileId, setLlmProfileId] = React.useState("");
   const [llmProfiles, setLlmProfiles] = React.useState<NonNullable<AgentDetail["llm_profiles"]>>([]);
+  // agent 级思考档位覆盖（方案 v9.2 批次 B）：""=跟随绑定 profile 默认；
+  // "enabled"/"disabled"=开关(switch 形态)；其余=effort 档位。选项集按绑定
+  // profile 的模型从注册表取（thinkCap）。
+  const [thinkingEffort, setThinkingEffort] = React.useState("");
+  const [thinkCap, setThinkCap] = React.useState<ThinkingCapability | null>(null);
   const [webSearch, setWebSearch] = React.useState(false);
   const [interactiveShell, setInteractiveShell] = React.useState(false);
   const [wrapup, setWrapup] = React.useState("");
@@ -133,6 +142,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setRunSecs(String(d.agent?.run_seconds ?? 600));
         setLlmProfileId(d.agent?.llm_profile_id != null ? String(d.agent.llm_profile_id) : "");
         setLlmProfiles(d.llm_profiles ?? []);
+        setThinkingEffort(d.agent?.thinking_effort ?? "");
         setWebSearch(!!d.agent?.web_search);
         setInteractiveShell(!!d.agent?.interactive_shell);
         setWrapup(d.wrapup_prompt ?? "");
@@ -148,6 +158,30 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       .catch(() => setDetail(null))
       .finally(() => setLoaded(true));
   }, [agentKey]);
+  // 绑定模型变化 → 查注册表刷新思考档位选项（批次 B）。绑定=该 profile 的模型；
+  // 未绑定=default profile 的模型（近似「跟随任务/全局」时的真实落点）。
+  const boundModel = React.useMemo(() => {
+    if (llmProfileId) return llmProfiles.find((p) => String(p.id) === llmProfileId)?.model ?? "";
+    return llmProfiles.find((p) => p.is_default)?.model ?? "";
+  }, [llmProfileId, llmProfiles]);
+  React.useEffect(() => {
+    if (!boundModel) {
+      setThinkCap(null);
+      return;
+    }
+    let stale = false;
+    api
+      .thinkingLevels("", boundModel)
+      .then((c) => {
+        if (!stale) setThinkCap(c);
+      })
+      .catch(() => {
+        if (!stale) setThinkCap(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [boundModel]);
   React.useEffect(() => {
     reload();
   }, [reload]);
@@ -222,6 +256,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       // 只提交本 agent 实际展示的字段，避免把未显示项(如 goals 的 max_turns)覆盖成默认。
       const patch: Parameters<typeof api.saveAgentConfig>[1] = {
         llm_profile_id: llmProfileId === "" ? null : Number(llmProfileId),
+        thinking_effort: thinkingEffort,
       };
       if (showConfig) {
         patch.max_turns = Math.max(0, Math.floor(Number(maxTurns) || 0));
@@ -311,6 +346,15 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const showLLM = true;
   // triggers (P3) only attach to custom agents.
   const isCustom = !!detail && !detail.agent?.builtin;
+  // 思考程度注记（方案 v9.2 批次 B）：按注册表判定形状给一句说明。
+  let thinkNote = "";
+  if (thinkCap) {
+    if (thinkCap.shape === "switch") {
+      thinkNote = ` 该模型仅支持开关。${thinkCap.note ?? ""}`;
+    } else {
+      thinkNote = ` ${boundModel || "当前模型"} 档位：${thinkCap.levels.join(" / ")}${thinkCap.known ? "" : "（未收录，未验证）"}`;
+    }
+  }
 
   return (
     <Tabs defaultValue="prompt" className="flex min-h-0 flex-1 flex-col">
@@ -353,6 +397,35 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                     <span className="text-muted-foreground max-w-md text-xs">
                       为该 Agent 绑定固定 LLM 配置（点「保存配置」生效）。优先级：Agent 绑定 &gt; 任务/会话指定 &gt;
                       全局激活。
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="thinking-effort" className="text-xs">
+                        思考程度
+                      </Label>
+                      <Select
+                        value={thinkingEffort || "__follow__"}
+                        onValueChange={(v) => setThinkingEffort(v === "__follow__" ? "" : v)}
+                      >
+                        <SelectTrigger id="thinking-effort" className="h-8 w-72">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__follow__">跟随默认（用该配置的思考设置）</SelectItem>
+                          {(thinkCap && thinkCap.shape === "switch"
+                            ? ["enabled", "disabled"]
+                            : (thinkCap?.levels ?? ["low", "medium", "high", "xhigh", "max"])
+                          ).map((l) => (
+                            <SelectItem key={l} value={l}>
+                              {THINKING_LEVEL_UI[l] ?? l}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <span className="text-muted-foreground max-w-md text-xs">
+                      覆盖该 Agent 每次请求的思考档位（优先于配置默认；空=跟随）。{thinkNote}
                     </span>
                   </div>
                 </div>

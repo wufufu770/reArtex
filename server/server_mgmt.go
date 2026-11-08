@@ -367,6 +367,8 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		TriggerRunMode     *string `json:"trigger_run_mode"`
 		TriggerMergeMode   *string `json:"trigger_merge_mode"`
 		TriggerMaxParallel *int    `json:"trigger_max_parallel"`
+		// agent 级思考档位覆盖(方案 v9.2 批次 B):''=跟随 profile 默认。
+		ThinkingEffort *string `json:"thinking_effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -441,6 +443,19 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 思考档位覆盖(方案 v9.2 批次 B):白名单校验(库级无 CHECK,写入白名单兜底——
+	// 与 trigger_* 列同一纪律)。''=跟随默认;'enabled'/'disabled'=开关(switch 形态);
+	// 其余=effort 档位。未知值直接 400,不静默丢弃。
+	if req.ThinkingEffort != nil {
+		if !validThinkingEffort(*req.ThinkingEffort) {
+			writeErr(w, 400, "thinking_effort 只接受 空串(跟随默认)/enabled/disabled/none/minimal/low/medium/high/xhigh/max")
+			return
+		}
+		if err := pg.SetAgentThinkingEffort(a.Key, *req.ThinkingEffort); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	// an agent's LLM binding change also invalidates pinned-task / per-profile caches
 	// so their next round re-resolves each agent's bound model.
 	if profileChanged {
@@ -464,6 +479,18 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		resp["run_seconds"] = *req.RunSeconds
 	}
 	writeJSON(w, 200, resp)
+}
+
+// validThinkingEffort 是 thinking_effort 的写入白名单（方案 v9.2 批次 B）：
+// ''=跟随默认；enabled/disabled=开关（switch 形态模型：mimo/glm/deepseek）；
+// 其余=各厂 effort 档位（gpt-5.1 的 none、5.1 前的 minimal、xhigh/max 等）。
+// 未收录模型的值也在此集合内——前端对未知模型只提供这组保守全集。
+func validThinkingEffort(v string) bool {
+	switch v {
+	case "", "enabled", "disabled", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return true
+	}
+	return false
 }
 
 func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {

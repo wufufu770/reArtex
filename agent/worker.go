@@ -559,6 +559,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
+	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
+	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
+	applyThinkingOverride(&opts, "worker")
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
 	}

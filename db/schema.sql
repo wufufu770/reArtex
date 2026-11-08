@@ -844,6 +844,10 @@ CREATE TABLE IF NOT EXISTS agents (
     trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial'  CHECK (trigger_run_mode IN ('serial','parallel')),
     trigger_merge_mode   TEXT    NOT NULL DEFAULT 'all' CHECK (trigger_merge_mode IN ('by_task','all','none')),
     trigger_max_parallel INTEGER NOT NULL DEFAULT 5,
+    -- agent 级思考档位覆盖(方案 v9.2 批次 B):NULL/''=跟随绑定 profile 的默认;
+    -- 'enabled'/'disabled'=强制思考开关(switch 形态模型);其余=reasoning_effort 档位
+    -- (effort 形态模型)。写入口在服务端白名单校验,库级不加 CHECK(与上方迁移同一纪律)。
+    thinking_effort  TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant'))
@@ -854,6 +858,8 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NUL
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_max_parallel INTEGER NOT NULL DEFAULT 5;
 -- per-agent LLM 绑定(agent 级默认模型):列自初版即在上方 CREATE 中,此 ALTER 仅为极旧库兜底(幂等)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
+-- per-agent 思考档位覆盖(方案 v9.2 批次 B):NULL=跟随 profile 默认。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS thinking_effort TEXT;
 -- run_seconds 单次 run 墙钟默认 600→1200:只改列默认(影响将来新插入的行),不动旧库存量行。
 ALTER TABLE agents ALTER COLUMN run_seconds SET DEFAULT 1200;
 CREATE INDEX IF NOT EXISTS idx_agents_llm_profile ON agents(llm_profile_id) WHERE llm_profile_id IS NOT NULL;

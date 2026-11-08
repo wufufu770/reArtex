@@ -207,6 +207,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
+	// agent 级思考档位覆盖（方案 v9.2 批次 B）：会话成员各自的 thinking_effort
+	// 随每次请求生效（""=跟随 profile 默认）。
+	applyThinkingOverride(&opts, agentKey)
 	if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()
 	}

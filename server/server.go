@@ -278,6 +278,23 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 			return a.TaskTimeoutWrapupMaxTurns, true
 		}
+		// Wire DB-stored agent-level thinking effort overrides (方案 v9.2 批次 B).
+		// ''（NULL）= 跟随绑定 profile 的默认 ⇒ 返回全空 ⇒ 请求逐字节不变；
+		// enabled/disabled 是 switch 形态（强制思考开关），其余是 effort 档位。
+		agent.ThinkingOverride = func(key string) (string, string) {
+			a, err := m.pg.GetAgentByKey(key)
+			if err != nil || a == nil {
+				return "", ""
+			}
+			switch a.ThinkingEffort {
+			case "enabled", "disabled":
+				return a.ThinkingEffort, ""
+			case "":
+				return "", ""
+			default:
+				return "", a.ThinkingEffort
+			}
+		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
@@ -1005,6 +1022,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm", s.getLLM)
 	mux.HandleFunc("POST /api/llm", s.setLLM)
 	mux.HandleFunc("POST /api/llm/test", s.testLLM)
+	// 思考档位能力发现（方案 v9.2 批次 A）：注册表查询 + 逐档探测验证。
+	mux.HandleFunc("GET /api/llm/thinking-levels", s.pgThinkingLevels)
+	mux.HandleFunc("POST /api/llm/thinking-probe", s.pgThinkingProbe)
 
 	// asset system
 	mux.HandleFunc("GET /api/assets", s.listAssets)
