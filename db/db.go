@@ -302,10 +302,8 @@ func Open(dsn string) (*DB, error) {
 	sqlDB.SetMaxIdleConns(maxOpenConns)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
-	if err := sqlDB.Ping(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)
-	}
+	// 注意：这里【不】先 ping 运行期池——全新库上运行角色还不存在，得等下面
+	// 的迁移闭包自举（v9 批次1④）之后再验连通性，否则冷启动被误杀。
 	d := &DB{DB: sqlDB}
 	// 迁移连接池：只在配置了迁移连接串时存在。没有它 ⇒ schema 应用走运行期连接。
 	schemaPool := sqlDB
@@ -464,6 +462,14 @@ func Open(dsn string) (*DB, error) {
 			d.admin.Close()
 		}
 		return nil, err
+	}
+	// 运行期连通性校验：自举之后才 ping（全新库的角色此刻才刚建好）。
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		if d.admin != nil {
+			d.admin.Close()
+		}
+		return nil, fmt.Errorf("ping postgres (%s): %w", config.Redact(dsn), err)
 	}
 	// 各层 Ensure*Schema 的「已就位」标记按**运行期连接池**打上：运行期的懒
 	// 执行 DDL 因此变成空操作（受限角色跑不了 DDL）。
