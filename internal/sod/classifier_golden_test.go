@@ -35,17 +35,17 @@ func TestClassifyGoldenSamples(t *testing.T) {
 		{"crtsh查询", 19, "WebFetch", `{"url": "https://crt.sh/?q=rmhc.org&output=json"}`, ClassIntelSource},
 		{"webarchive", 19, "WebFetch", `{"url": "https://web.archive.org/web/2024/http://example.com"}`, ClassIntelSource},
 		{"dig被动查询", 19, "Bash", `{"command": "dig +short sub.example.com"}`, ClassIntelSource},
-		{"whois", 19, "Bash", `{"command": "whois acmecorp.com"}`, ClassIntelSource},
+		{"whois", 19, "Bash", `{"command": "whois acme-corp.example.com"}`, ClassIntelSource},
 		// —— 任务 20 取证：目标在范围内的 curl 被故障硬拒（现在分类为有目标，交给范围判定）——
-		{"目标curl", 20, "Bash", `{"command": "curl -I https://www.beta-portal.com/wheeling/login"}`, ClassTargetKnown},
-		{"shell_open目标", 20, "shell_open", `{"command": "curl -sS -I --max-time 15 https://www.beta-portal.com/wheeling/login", "mode": "hands-free"}`, ClassTargetKnown},
+		{"目标curl", 20, "Bash", `{"command": "curl -I https://www.beta-portal.example.net/wheeling/login"}`, ClassTargetKnown},
+		{"shell_open目标", 20, "shell_open", `{"command": "curl -sS -I --max-time 15 https://www.beta-portal.example.net/wheeling/login", "mode": "hands-free"}`, ClassTargetKnown},
 		// —— 任务 19 取证：往自己任务目录写 probe 文件被拒 ——
 		{"任务目录内Write", 19, "Write", `{"file_path": "/app/data/tasks/19/probe_write_ok.txt", "content": "probe ok\n"}`, ClassLocalSafe},
 		{"任务目录内Bash", 19, "Bash", `{"command": "cat /app/data/tasks/19/notes.md | head -5"}`, ClassLocalSafe},
 		// —— 任务 21 取证：留痕到 /app/data/sessions 是合法 scratch ——
 		{"sessions留痕", 21, "Write", `{"content": "# 登记尝试留痕\n", "file_path": "/app/data/sessions/conv-50/progress.md"}`, ClassBenign},
 		// —— 任务 19 取证：扩权请求（ExecuteExtraTool 包内层工具）——
-		{"大扩权", 19, "ExecuteExtraTool", `{"tool_name": "add_task_scope", "params": {"root_domains": ["acmecorp.com"]}}`, ClassScopeExpansion},
+		{"大扩权", 19, "ExecuteExtraTool", `{"tool_name": "add_task_scope", "params": {"root_domains": ["acme-corp.example.com"]}}`, ClassScopeExpansion},
 		// —— 敏感面 ——
 		{"读shadow", 19, "Bash", `{"command": "cat /etc/shadow"}`, ClassOutsideWrite}, // 敏感面由种类层 sensitive_read（priority 更高）接走；分类器给路径类结论
 		// —— 工具库检索（任务 19 取证被拒）——
@@ -171,7 +171,7 @@ func TestTask4DenialRepro(t *testing.T) {
 		body string
 		want ClassKind
 	}{
-		{"sed伪路径", `{"command": "cd /app/data/tasks/4/i113 && grep -rhoE 'https?://[A-Za-z0-9._-]*\\.(acmecorp\\.com\\.cn|acme.cn)[A-Za-z0-9._/~?=&%-]*' w2_*.html raw_bing_*.html 2>/dev/null | sed -E 's#https?://##; s#/.*##' | sort -rn"}`, ClassBenign},
+		{"sed伪路径", `{"command": "cd /app/data/tasks/4/i113 && grep -rhoE 'https?://[A-Za-z0-9._-]*\\.(acmecorp\\.com\\.cn|acme\\.cn)[A-Za-z0-9._/~?=&%-]*' w2_*.html raw_bing_*.html 2>/dev/null | sed -E 's#https?://##; s#/.*##' | sort -rn"}`, ClassBenign},
 		{"ls跨任务", `{"command": "echo x; ls /app/data/tasks/1/ 2>/dev/null | head -50; echo y; ls -la /app/data/tasks/2/i95 2>/dev/null; python3 -c \"import mmh3; print('ok')\" 2>&1 | head -5; date -u +%Y-%m-%dT%H:%M:%SZ"}`, ClassBenign},
 		{"cp真越界", `{"command":"cp /app/data/tasks/19/a.md /var/www/html/x"}`, ClassOutsideWrite},
 		{"cat敏感面", `{"command": "cat /etc/shadow 2>/dev/null"}`, ClassOutsideWrite},

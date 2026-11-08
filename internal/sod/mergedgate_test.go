@@ -137,11 +137,11 @@ func TestMergedVerdictUncategorizedGoesToAuditor(t *testing.T) {
 func TestMergedVerdictTargetKnownToGate(t *testing.T) {
 	// 有明确目标：交闸门做真实范围判定（TargetHint 已带上第一个 host）。
 	c := mergedHarness(t, sodpolicy.MergedGateEnforce, nil, nil, map[string]int{})
-	d := c.mergedVerdict(context.Background(), chainCallFor(20, "Bash", `{"command":"curl -I https://www.beta-portal.com/login"}`), "Bash")
+	d := c.mergedVerdict(context.Background(), chainCallFor(20, "Bash", `{"command":"curl -I https://www.beta-portal.example.net/login"}`), "Bash")
 	if d.kind != "gate" || d.gateIn.ScopePassReason != "" {
 		t.Fatalf("target_known 应交闸门：kind=%s reason=%q", d.kind, d.gateIn.ScopePassReason)
 	}
-	if d.gateIn.Normalized.StructuredIntent.TargetHint != "www.beta-portal.com" {
+	if d.gateIn.Normalized.StructuredIntent.TargetHint != "www.beta-portal.example.net" {
 		t.Fatalf("TargetHint 应为第一个 host，got %q", d.gateIn.Normalized.StructuredIntent.TargetHint)
 	}
 }
