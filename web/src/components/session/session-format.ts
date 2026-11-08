@@ -172,7 +172,7 @@ function matchesQuery(session: Session, needle: string, agentByKey: Map<string, 
   if (!needle) return true;
   const haystack = [
     session.name,
-    session.title ?? "",
+    session.title,
     ...sessionMembers(session).flatMap((member) => [member.agent_key, memberDisplayName(member, agentByKey)]),
     ...(session.attachments ?? []).flatMap((attachment) => [
       attachment.identity_key,

@@ -174,6 +174,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (r.status === 401) {
     if (typeof window !== "undefined") {
       localStorage.removeItem("artex_token");
+      // biome-ignore lint/suspicious/noDocumentCookie: 登出时清理 artex_token cookie
       document.cookie = "artex_token=; path=/; max-age=0";
       window.location.href = "/login";
     }
