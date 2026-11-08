@@ -438,7 +438,13 @@ function ProfileSheet({
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
     setModelsOpen(false);
-    setModelList(profile?.models?.length ? profile.models : profile ? [profile.model] : []);
+    let nextModels: string[] = [];
+    if (profile?.models?.length) {
+      nextModels = profile.models;
+    } else if (profile) {
+      nextModels = [profile.model];
+    }
+    setModelList(nextModels);
   }, [open, profile]);
 
   const profileId = profile ? Number(profile.id) : undefined;

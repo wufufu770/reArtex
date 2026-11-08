@@ -150,24 +150,24 @@ function DecisionList({
   }
   return (
     <div className="max-h-[65svh] overflow-y-auto rounded-md border">
-    <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
-      <TableHeader className="[&_tr]:border-t sticky top-0 z-10 bg-card">
-        <TableRow>
-          <TableHead>时间</TableHead>
-          <TableHead>工具 / 来源</TableHead>
-          <TableHead>裁决</TableHead>
-          <TableHead>分层</TableHead>
-          <TableHead className="hidden lg:table-cell">载荷</TableHead>
-          <TableHead>缓存 / 延迟</TableHead>
-          <TableHead>操作</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <DecisionRow key={row.id} row={row} onReview={onReview} />
-        ))}
-      </TableBody>
-    </Table>
+      <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
+        <TableHeader className="[&_tr]:border-t sticky top-0 z-10 bg-card">
+          <TableRow>
+            <TableHead>时间</TableHead>
+            <TableHead>工具 / 来源</TableHead>
+            <TableHead>裁决</TableHead>
+            <TableHead>分层</TableHead>
+            <TableHead className="hidden lg:table-cell">载荷</TableHead>
+            <TableHead>缓存 / 延迟</TableHead>
+            <TableHead>操作</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row) => (
+            <DecisionRow key={row.id} row={row} onReview={onReview} />
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }

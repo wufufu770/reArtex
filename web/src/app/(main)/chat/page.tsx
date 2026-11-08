@@ -23,6 +23,7 @@ import {
 import { toast } from "sonner";
 
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
+import { JumpToBottom } from "@/components/jump-to-bottom";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { CreateSessionDialog } from "@/components/session/create-session-dialog";
 import {
@@ -63,7 +64,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { JumpToBottom } from "@/components/jump-to-bottom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
@@ -856,29 +856,29 @@ function ChatView({
 
       {/* messages */}
       <div className="relative flex min-h-0 min-w-0 flex-1">
-      <ScrollArea type="auto" className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1">
-        <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
-          {messages.length === 0 && !running ? (
-            <div className="py-10 text-center text-muted-foreground text-sm">
-              开始和「{agent?.name ?? conv.agent_key}」对话
-            </div>
-          ) : (
-            <>
-              {hasMore && (
-                <div className="pb-2 text-center text-[11px] text-muted-foreground/70">向上滚动加载更早的消息…</div>
-              )}
-              <Transcript
-                activity={messages}
-                live={running}
-                chat
-                fetchDetail={fetchDetail}
-                focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
-              />
-            </>
-          )}
-        </div>
-      </ScrollArea>
-      <JumpToBottom viewportOf={viewport} />
+        <ScrollArea type="auto" className="[&_[data-slot=scroll-area-viewport]>div]:block! min-h-0 min-w-0 flex-1">
+          <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
+            {messages.length === 0 && !running ? (
+              <div className="py-10 text-center text-muted-foreground text-sm">
+                开始和「{agent?.name ?? conv.agent_key}」对话
+              </div>
+            ) : (
+              <>
+                {hasMore && (
+                  <div className="pb-2 text-center text-[11px] text-muted-foreground/70">向上滚动加载更早的消息…</div>
+                )}
+                <Transcript
+                  activity={messages}
+                  live={running}
+                  chat
+                  fetchDetail={fetchDetail}
+                  focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+                />
+              </>
+            )}
+          </div>
+        </ScrollArea>
+        <JumpToBottom viewportOf={viewport} />
       </div>
 
       <Composer

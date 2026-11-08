@@ -100,7 +100,8 @@ export function TrustRulesCard({ tools }: { tools: Tool[] }) {
           <ShieldCheckIcon className="size-4" /> 信任规则
         </CardTitle>
         <CardDescription>
-          命中即放行（先于职责分离链）。pattern 必须 ^ 开头 $ 结尾；Tier3 高危工具不可信任化；默认停用，确认后启用；上限 {max} 条。
+          命中即放行（先于职责分离链）。pattern 必须 ^ 开头 $ 结尾；Tier3 高危工具不可信任化；默认停用，确认后启用；上限{" "}
+          {max} 条。
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">
@@ -126,13 +127,18 @@ export function TrustRulesCard({ tools }: { tools: Tool[] }) {
               id="trust-pattern"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
-              placeholder={'例：^grep .* /app/data/tasks/\\d+.*$'}
+              placeholder={"例：^grep .* /app/data/tasks/\\d+.*$"}
               className="font-mono"
             />
           </div>
           <div className="grid min-w-52 flex-1 gap-1.5">
             <Label htmlFor="trust-reason">理由（审计留痕）</Label>
-            <Input id="trust-reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="为什么值得信任" />
+            <Input
+              id="trust-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="为什么值得信任"
+            />
           </div>
           <div className="flex items-center gap-2 pb-1">
             <Switch id="trust-confirm" checked={confirm} onCheckedChange={setConfirm} />
@@ -169,7 +175,9 @@ export function TrustRulesCard({ tools }: { tools: Tool[] }) {
             现有信任规则（{rules.length}/{max}）
           </p>
           {rules.length === 0 ? (
-            <p className="text-muted-foreground text-xs">还没有信任规则。高频被人工批准/反复误拒的动作适合沉淀到这里。</p>
+            <p className="text-muted-foreground text-xs">
+              还没有信任规则。高频被人工批准/反复误拒的动作适合沉淀到这里。
+            </p>
           ) : (
             rules.map((rule) => (
               <div key={rule.id} className="flex flex-wrap items-center gap-2 rounded-md border p-2">

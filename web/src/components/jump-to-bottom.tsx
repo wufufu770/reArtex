@@ -14,11 +14,7 @@ import { ArrowDownIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
-export function JumpToBottom({
-  viewportOf,
-}: {
-  viewportOf: () => HTMLElement | null;
-}) {
+export function JumpToBottom({ viewportOf }: { viewportOf: () => HTMLElement | null }) {
   const jump = (to: "start" | "end") => {
     const vp = viewportOf();
     if (!vp) return;
