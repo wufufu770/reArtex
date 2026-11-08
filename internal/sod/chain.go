@@ -245,6 +245,11 @@ type ChainDeps struct {
 	// C1，用户拍板「超出界限外的删除动作就停」）：宿主据此自动暂停任务+播报。
 	// nil = 只拦动作不停任务。guard 基线预检命中由宿主侧独立接同一语义。
 	OnBaselineDestructive func(taskID int64, toolName, hit string)
+
+	// OnCapHit 是种类配额触发的宿主回调（方案 v9 批次1⑥，业内对齐 Claude
+	// Code hooks 的事件驱动思想）：cap 命中即刻通知宿主直触一次监督轮，不再
+	// 等 3min 轮询空窗。nil = 只走裁决不通知。
+	OnCapHit func(taskID int64, category string)
 }
 
 // NewChain 构造链。inner 为 nil 时链独立工作（测试用）。

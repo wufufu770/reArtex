@@ -151,8 +151,8 @@ type Engine struct {
 	lastConclusionAt map[string]time.Time
 	intentExtends    map[string]int
 	drained          map[string]bool
-	stagnationMu sync.Mutex
-	stagnation   map[string]*taskStagnation
+	stagnationMu     sync.Mutex
+	stagnation       map[string]*taskStagnation
 
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
@@ -1459,6 +1459,7 @@ func (e *Engine) noteWrapupRoundResult(t *Task, intentsBefore int) {
 		log.Printf("[stagnation] task %s 落终态失败/已被判: %v", t.ID, err)
 		return
 	}
+	e.settleIntentsOnConclude(t, "停滞闸收尾：连续零产出意图判定终态，残留非终态意图统一 stopped")
 	e.freezeReplayCorpus(t.ID)
 	if e.LegacyDistiller != nil {
 		e.LegacyDistiller(t)
@@ -1976,9 +1977,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		if wrote.Total() == 0 {
 			if last := t.Store.LastIntentToolResult(intent.ID); last != "" {
 				payload := map[string]any{
-					"subtype": "handoff",
-					"summary": fmt.Sprintf("零写回收尾（%s）：最后产出——%s", state, truncateRunes(strings.TrimSpace(last), 200)),
-					"detail":  "worker 结束时未写回任何事实/资产/漏洞；此标记由引擎从转录补写，内容来自最后一条工具结果。",
+					"subtype":  "handoff",
+					"summary":  fmt.Sprintf("零写回收尾（%s）：最后产出——%s", state, truncateRunes(strings.TrimSpace(last), 200)),
+					"detail":   "worker 结束时未写回任何事实/资产/漏洞；此标记由引擎从转录补写，内容来自最后一条工具结果。",
 					"evidence": "engine deterministic marker（0 write-back）",
 				}
 				if id, aerr := t.Store.AddNode(db.KindFact, payload, 5, "confirmed", "handoff_missing", nil); aerr == nil {
@@ -2301,6 +2302,20 @@ func (e *Engine) StopIntent(taskID string, intentID int64, reason string) (bool,
 	return true, summary
 }
 
+// settleIntentsOnConclude 收尾清理（方案 v9 批次1⑦）：终态必须是终态——把残留
+// 的 open/blocked 意图统一置 stopped，done 任务不再带尾巴（监督快照/rerun 队列
+// 不再被旧尾巴污染）。best-effort：失败只记日志，不影响收尾本身。
+func (e *Engine) settleIntentsOnConclude(t *Task, reason string) {
+	if t == nil || t.Store == nil {
+		return
+	}
+	if n, err := t.Store.StopNonTerminalIntents(reason); err != nil {
+		log.Printf("[conclude] task %s 非终态意图清理失败: %v", t.ID, err)
+	} else if n > 0 {
+		log.Printf("[conclude] task %s 收尾清理非终态意图 %d 条", t.ID, n)
+	}
+}
+
 // ConcludeTask 收尾任务（v7 双签）：三门满足（无 running/open 意图 + 有产出）
 // ⇒ 直接 conclude；不满足 ⇒ 返回需人工（调用方转 ask）。
 func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
@@ -2321,6 +2336,7 @@ func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 	if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil || !won {
 		return false, "收尾落终态失败/已被判"
 	}
+	e.settleIntentsOnConclude(t, "任务收尾：治理判定终态，残留非终态意图统一 stopped")
 	e.freezeReplayCorpus(t.ID)
 	if e.LegacyDistiller != nil {
 		e.LegacyDistiller(t)
@@ -2330,4 +2346,3 @@ func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 		Summary: "【治理收尾】监督者判定目标实质达成（三门满足）：" + trunc(summary, 120)})
 	return true, "任务已收尾"
 }
-

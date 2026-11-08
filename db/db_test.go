@@ -76,8 +76,11 @@ func TestOpenSeed(t *testing.T) {
 	if err := d.QueryRow(`SELECT count(*) FROM agents WHERE builtin`).Scan(&agents); err != nil {
 		t.Fatal(err)
 	}
-	if agents != wantAgents {
-		t.Fatalf("want %d builtin agents, got %d", wantAgents, agents)
+	// 下限而非精确计数：server 侧还会播种 auditor 等 builtin=true 的内建行
+	// （ensureAuditorAgent），全量套件里 db/server 共库先后跑，精确计数会被
+	// 运行顺序翻转。名单内的逐 key 存在性由下方 catalog 校验承接。
+	if agents < wantAgents {
+		t.Fatalf("want at least %d builtin agents, got %d", wantAgents, agents)
 	}
 
 	// planner should have at least its seeded catalog vars

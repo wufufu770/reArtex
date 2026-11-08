@@ -150,6 +150,16 @@ func (s *Server) baselineDestructiveStopper(taskID int64, toolName, hit string) 
 	log.Printf("[baseline] task %d 删除/破坏命中，已自动暂停：tool=%s hit=%s", taskID, toolName, hit)
 }
 
+// capHitSupervisor 是 ChainDeps.OnCapHit 的落点（方案 v9 批次1⑥）：cap 命中
+// ⇒ 事件直触一次监督轮（30s/任务节流防风暴），auto 可即时 sod_adjust_cap。
+func (s *Server) capHitSupervisor(taskID int64, category string) {
+	if s.m == nil || taskID <= 0 {
+		return
+	}
+	headline := fmt.Sprintf("【cap 事件】拦截种类「%s」本任务配额触发（事件直触，非轮询）。请结合快照判断该 cap 是否误伤：误伤即用 sod_adjust_cap 放宽；合理则维持并考虑给剩余头部续派。", category)
+	s.fireSupervisionEvent(fmt.Sprintf("%d", taskID), headline)
+}
+
 // wireMergedGateDeps 把合并闸依赖补进 ChainDeps（装配点在 setupSoDChain）。
 func (s *Server) wireMergedGateDeps(deps *sod.ChainDeps) {
 	deps.MergedGateMode = s.mergedGateMode
@@ -159,6 +169,7 @@ func (s *Server) wireMergedGateDeps(deps *sod.ChainDeps) {
 	deps.ElevateAsk = s.elevateAsk
 	deps.CategoryUsed = s.sodCategoryUsed
 	deps.RecordShadowDiff = s.recordSodShadowDiff
+	deps.OnCapHit = s.capHitSupervisor
 	deps.OnBaselineDestructive = s.baselineDestructiveStopper
 }
 
