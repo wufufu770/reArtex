@@ -328,8 +328,11 @@ func TestSoDNormalizerNeverExecutesTheRawAction(t *testing.T) {
 	if !strings.Contains(body, "rm -rf /") {
 		t.Fatalf("原始动作没有作为数据传给模型: %s", body)
 	}
-	if p.got.Thinking != "disabled" {
-		t.Fatalf("thinking = %q, 期望 disabled", p.got.Thinking)
+	// v9-batch1e：不再强制 disabled——mimo 网关禁思考时对复杂规整任务输出
+	// 空响应（0 tool_use ⇒ normalizer_malformed）。思考模式交给 profile/网关
+	// 默认；此处只断言"未显式开启"。
+	if p.got.Thinking == "enabled" {
+		t.Fatalf("thinking = %q, 不应显式开启", p.got.Thinking)
 	}
 	if p.got.Temperature == nil || *p.got.Temperature != 0 {
 		t.Fatalf("temperature = %v, 期望 0", p.got.Temperature)
