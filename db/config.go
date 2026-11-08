@@ -549,14 +549,18 @@ type Agent struct {
 	TriggerRunMode     string `json:"trigger_run_mode"`
 	TriggerMergeMode   string `json:"trigger_merge_mode"`
 	TriggerMaxParallel int    `json:"trigger_max_parallel"`
+	// ThinkingEffort 是 agent 级思考档位覆盖（方案 v9.2 批次 B）：
+	// ''=跟随绑定 profile 的默认；'enabled'/'disabled'=强制思考开关（switch
+	// 形态模型）；其余=reasoning_effort 档位（effort 形态模型）。
+	ThinkingEffort string `json:"thinking_effort"`
 }
 
-const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),llm_profile_id`
+const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),llm_profile_id,COALESCE(thinking_effort,'')`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var prof sql.NullInt64 // llm_profile_id 可空:未绑定时为 NULL
-	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof)
+	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof, &a.ThinkingEffort)
 	if err == nil && prof.Valid {
 		v := prof.Int64
 		a.LLMProfileID = &v
@@ -726,6 +730,14 @@ func lockLLMProfileForReference(tx *sql.Tx, profileID *int64) error {
 // the global web-search master switch + backend/key config).
 func (d *DB) SetAgentWebSearch(key string, on bool) error {
 	_, err := d.Exec(`UPDATE agents SET web_search=$1 WHERE key=$2`, on, key)
+	return err
+}
+
+// SetAgentThinkingEffort stores the agent-level thinking-effort override
+// (方案 v9.2 批次 B). ''=跟随绑定 profile 默认；'enabled'/'disabled'=强制思考
+// 开关；其余=effort 档位。合法值由服务端白名单校验后传入。
+func (d *DB) SetAgentThinkingEffort(key, effort string) error {
+	_, err := d.Exec(`UPDATE agents SET thinking_effort=NULLIF($1,'') WHERE key=$2`, effort, key)
 	return err
 }
 

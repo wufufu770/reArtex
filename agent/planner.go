@@ -490,6 +490,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
+	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
+	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
+	applyThinkingOverride(&opts, "planner")
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
 		opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())

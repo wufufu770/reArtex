@@ -125,6 +125,7 @@ import type {
   TaskNode,
   TaskScopeRow,
   TaskTemplate,
+  ThinkingCapability,
   TokenTotal,
   TokenUsage,
   Tool,
@@ -365,7 +366,10 @@ export const api = {
   // C7 人工有序收尾：走完整 settle 时序落终态（区别于硬 cancel）。
   settleTask: (id: string) => post<{ ok: boolean }>(`/tasks/${id}/settle`, {}),
   controlTask: (id: string, action: "pause" | "resume") =>
-    post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+    post<{ id: string; paused: boolean; queued: boolean; status: string; blocked_intents?: number }>(
+      `/tasks/${id}/control`,
+      { action },
+    ),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
     post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
   taskArchives: (input?: { page?: number; size?: number; q?: string; state?: string }) => {
@@ -1256,6 +1260,31 @@ export const api = {
       session_header_key,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
+  // 思考档位能力发现（方案 v9.2 批次 A）：注册表查询 + 逐档探测验证。
+  thinkingLevels: (format: string, model: string) =>
+    get<ThinkingCapability>(
+      `/llm/thinking-levels?format=${encodeURIComponent(format)}&model=${encodeURIComponent(model)}`,
+    ),
+  thinkingProbe: (p: {
+    provider: string;
+    model: string;
+    base_url: string;
+    proxy?: string;
+    api_key?: string;
+    thinking_type?: string;
+    reasoning_effort?: string;
+    profile_id?: number;
+    streaming?: boolean;
+    session_header_key?: string;
+    shape?: string; // effort|switch（省略=按注册表）
+    levels: string[]; // 待探测档位（≤6，后端截断）
+  }) =>
+    post<{
+      ok: boolean;
+      error?: string;
+      shape?: string;
+      results: { level: string; ok: boolean; latency_ms?: number; reply?: string; error?: string }[];
+    }>("/llm/thinking-probe", p),
   saveLLMProfile: (p: {
     id?: number; // omit/0 = create; set = update that profile
     name: string;
@@ -1413,6 +1442,7 @@ export const api = {
       trigger_run_mode?: "serial" | "parallel";
       trigger_merge_mode?: "by_task" | "all" | "none";
       trigger_max_parallel?: number;
+      thinking_effort?: string; // ""=跟随绑定 profile 默认；"enabled"/"disabled"=开关；其余=effort 档位
     },
   ) => put<{ ok: boolean }>(`/agents/${key}/config`, patch),
   agentPromptVersions: (key: string) =>

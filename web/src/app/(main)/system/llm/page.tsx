@@ -30,7 +30,14 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { LLMEndpointStatus, LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
+import type {
+  LLMEndpointStatus,
+  LLMPoolMember,
+  LLMPoolStatus,
+  LLMProfile,
+  LLMRetryOverride,
+  ThinkingCapability,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
@@ -67,6 +74,19 @@ const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: "xhigh", label: "xhigh" },
   { value: "max", label: "max" },
 ];
+// 思考档位能力发现（方案 v9.2 批次 A）：注册表 + 探测两层。模型名/格式变化 →
+// 下拉按注册表重填（THINKING_REGISTRY 兜底：未收录/未取到时回退旧静态全集，
+// 行为不回归）；「测试思考档位」逐档实测，探测不过的档位灰显。
+const THINKING_REGISTRY_FALLBACK = EFFORT_LEVELS;
+const THINKING_LEVEL_LABELS: Record<string, string> = {
+  none: "none（完全关）",
+  minimal: "minimal",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
+};
 
 function cooldownText(secs: number) {
   if (secs <= 0) return "";
@@ -409,6 +429,10 @@ function ProfileSheet({
   const [modelList, setModelList] = React.useState<string[]>([]);
   const [loadingModels, setLoadingModels] = React.useState(false);
   const [modelsOpen, setModelsOpen] = React.useState(false);
+  // 思考档位能力（批次 A）：注册表查询结果 + 探测按钮状态 + 逐档实测结果。
+  const [thinkCap, setThinkCap] = React.useState<ThinkingCapability | null>(null);
+  const [probing, setProbing] = React.useState(false);
+  const [probeRes, setProbeRes] = React.useState<Record<string, { ok: boolean; error?: string }>>({});
 
   // 每次打开时从传入的 profile 灌一遍表单（新建则重置为默认值）。抽屉关掉再打开
   // 就是一次干净的开始，不会留下上一个配置的残影。
@@ -438,6 +462,8 @@ function ProfileSheet({
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
     setModelsOpen(false);
+    setThinkCap(null);
+    setProbeRes({});
     let nextModels: string[] = [];
     if (profile?.models?.length) {
       nextModels = profile.models;
@@ -448,6 +474,46 @@ function ProfileSheet({
   }, [open, profile]);
 
   const profileId = profile ? Number(profile.id) : undefined;
+
+  // 模型名/格式变化 → 查注册表重填档位下拉（批次 A 第一层）。查询失败静默回退
+  // 静态全集（fallback 兜底，不打扰保存流程）。模型名为空不发请求（回退全集）。
+  React.useEffect(() => {
+    if (!open || !model.trim()) {
+      setThinkCap(null);
+      return;
+    }
+    let stale = false;
+    api
+      .thinkingLevels(format, model.trim())
+      .then((c) => {
+        if (!stale) setThinkCap(c);
+      })
+      .catch(() => {
+        if (!stale) setThinkCap(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [open, format, model]);
+
+  // 强度下拉的选项集：注册表 levels（shape=effort）+ 「不发送」哨兵 + 当前已存值
+  // （自定义兜底：注册表没收录的档位仍可选择/回显，第三层手动兜底）。
+  const effortOptions = React.useMemo(() => {
+    const levels =
+      thinkCap && thinkCap.shape === "effort" && thinkCap.levels.length > 0
+        ? thinkCap.levels
+        : THINKING_REGISTRY_FALLBACK.filter((o) => o.value !== NONE).map((o) => o.value);
+    const opts = [{ value: NONE, label: "不发送（默认）" }];
+    for (const l of levels) {
+      const bad = probeRes[l] && !probeRes[l].ok;
+      opts.push({ value: l, label: (THINKING_LEVEL_LABELS[l] ?? l) + (bad ? "（实测失败）" : "") });
+    }
+    const cur = fromStore(effort);
+    if (cur !== NONE && !levels.includes(cur)) {
+      opts.push({ value: cur, label: `${cur}（自定义）` });
+    }
+    return opts;
+  }, [thinkCap, probeRes, effort]);
 
   async function loadModels() {
     if (loadingModels) return;
@@ -500,6 +566,56 @@ function ProfileSheet({
     }
   }
 
+  // 测试思考档位（批次 A 第二层）：对注册表给的每个候选档发一次最小请求，
+  // 以「非空响应」判定该档位实际可用；结果回填下拉（不过的档位灰显标注）。
+  // mimo 这类「effort 发了就空响应」的网关，在这里就被拦下来，不用等跑任务爆。
+  async function probeThinking() {
+    if (probing) return;
+    const levels =
+      thinkCap?.shape === "switch"
+        ? ["enabled", "disabled"]
+        : effortOptions.filter((o) => o.value !== NONE).map((o) => o.value);
+    if (!model.trim()) {
+      toast.error("先填模型名再测档位");
+      return;
+    }
+    setProbing(true);
+    try {
+      const r = await api.thinkingProbe({
+        provider: format,
+        model: model.trim(),
+        base_url: baseUrl,
+        proxy,
+        api_key: apiKey,
+        thinking_type: toStore(thinkingType),
+        reasoning_effort: toStore(effort),
+        profile_id: profileId,
+        streaming,
+        session_header_key: sessionHeaderKey.trim(),
+        shape: thinkCap?.shape,
+        levels,
+      });
+      if (!r.ok) {
+        toast.error(`探测失败：${r.error ?? "未知"}`);
+        return;
+      }
+      const next: Record<string, { ok: boolean; error?: string }> = {};
+      let okN = 0;
+      for (const item of r.results) {
+        next[item.level] = { ok: item.ok, error: item.error };
+        if (item.ok) okN++;
+      }
+      setProbeRes(next);
+      const failed = r.results.filter((x) => !x.ok).map((x) => x.level);
+      if (failed.length === 0) toast.success(`全部 ${r.results.length} 档实测可用`);
+      else toast.error(`${okN}/${r.results.length} 档可用，不可用：${failed.join("、")}`);
+    } catch (e) {
+      toast.error(`探测出错：${(e as Error).message}`);
+    } finally {
+      setProbing(false);
+    }
+  }
+
   async function save() {
     if (!name.trim() || !model.trim()) {
       toast.error("请填写名称与模型");
@@ -549,6 +665,16 @@ function ProfileSheet({
       toast.error(`保存失败：${(e as Error).message}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // 思考档位注记（方案 v9.2 批次 A）：注册表判定形状 → 一句说明。
+  let capNote = " 填写模型名后按注册表自动列出该模型支持的档位。";
+  if (thinkCap) {
+    if (thinkCap.shape === "switch") {
+      capNote = " 注册表判定该模型仅认思考开关，不支持强度档位。";
+    } else {
+      capNote = ` 注册表档位：${thinkCap.levels.join(" / ")}${thinkCap.default ? `（模型默认 ${thinkCap.default}）` : ""}${thinkCap.known ? "" : "（未收录模型，档位未验证）"}${thinkCap.note ? `。${thinkCap.note}` : ""}`;
     }
   }
 
@@ -865,6 +991,7 @@ function ProfileSheet({
                 <p className="text-muted-foreground text-xs">
                   控制是否发送 thinking 字段。不发送=不带该字段（兼容 MiniMax 等不支持 的模型）；关闭=发
                   disabled；开启=发 enabled。与下面的强度互相独立。
+                  {thinkCap?.shape === "switch" && thinkCap.note ? ` 注册表：${thinkCap.note}` : ""}
                 </p>
               </div>
               <Select value={thinkingType} onValueChange={setThinkingType}>
@@ -872,34 +999,54 @@ function ProfileSheet({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {THINKING_TYPES.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
+                  {THINKING_TYPES.map((o) => {
+                    const bad = thinkCap?.shape === "switch" && probeRes[o.value] && !probeRes[o.value].ok;
+                    return (
+                      <SelectItem key={o.value} value={o.value} disabled={!!bad}>
+                        {o.label + (bad ? "（实测失败）" : "")}
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
             </div>
             <div className="flex items-center justify-between gap-4 border-t pt-3">
-              <div className="grid gap-0.5">
+              <div className="grid min-w-0 gap-0.5">
                 <Label className="text-sm">思考强度 · reasoning_effort</Label>
                 <p className="text-muted-foreground text-xs">
                   独立的强度档位（OpenAI reasoning_effort / Anthropic output_config.effort）。 有些接口没有 thinking
                   字段、只靠强度即可激活思考，故可单独设置、不发送思考开关。
+                  {capNote}
                 </p>
               </div>
-              <Select value={effort} onValueChange={setEffort}>
-                <SelectTrigger className="w-32 shrink-0">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {EFFORT_LEVELS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={probeThinking}
+                  disabled={probing || !model.trim()}
+                  title="对每个候选档发一次最小请求，实测该模型真正支持的档位"
+                >
+                  {probing ? <Loader2Icon className="animate-spin" /> : <ZapIcon />}
+                  {probing ? "探测中…" : "测试档位"}
+                </Button>
+                <Select value={effort} onValueChange={setEffort} disabled={thinkCap?.shape === "switch"}>
+                  <SelectTrigger className="w-36 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {effortOptions.map((o) => {
+                      const bad = thinkCap?.shape === "effort" && probeRes[o.value] && !probeRes[o.value].ok;
+                      return (
+                        <SelectItem key={o.value} value={o.value} disabled={!!bad}>
+                          {o.label + (bad ? "（实测失败）" : "")}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           </div>
 

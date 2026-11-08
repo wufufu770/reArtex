@@ -251,10 +251,16 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 	if req.Thinking != "" {
 		thinkingType = req.Thinking
 	}
+	// Same precedence for the strength parameter: req.ReasoningEffort wins over
+	// Config.ReasoningEffort (mirrors req.Thinking above).
+	effort := p.cfg.ReasoningEffort
+	if req.ReasoningEffort != "" {
+		effort = req.ReasoningEffort
+	}
 	// The request is in thinking mode when either a thinking type is set (a
 	// `thinking` body field goes out) or a reasoning effort is configured — the
 	// same providers that then demand reasoning_content be echoed back.
-	thinking := thinkingType != "" || p.cfg.ReasoningEffort != ""
+	thinking := thinkingType != "" || effort != ""
 
 	msgs := toOpenAIMessages(joinSystem(req.System), req.Messages)
 	msgs = sanitizeOpenAIMessages(msgs, thinking)
@@ -282,7 +288,7 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 	if thinkingType != "" {
 		body.Thinking = &oaThinking{Type: thinkingType}
 	}
-	body.ReasoningEffort = p.cfg.ReasoningEffort // omitempty drops it when unset
+	body.ReasoningEffort = effort // omitempty drops it when unset
 	for _, t := range req.Tools {
 		var ot oaTool
 		ot.Type = "function"

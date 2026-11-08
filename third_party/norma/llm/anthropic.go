@@ -62,6 +62,12 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 		thinkingType = req.Thinking
 		thinkingEnabled = req.Thinking == "enabled"
 	}
+	// Effort follows the same override precedence: a non-empty per-request
+	// value wins over Config.ReasoningEffort (mirrors req.Thinking above).
+	effort := p.cfg.ReasoningEffort
+	if req.ReasoningEffort != "" {
+		effort = req.ReasoningEffort
+	}
 	body := anthropicReq{
 		Model:         p.cfg.Model,
 		Messages:      mergeAdjacentSameRole(filterThinkingBlocks(req.Messages, thinkingEnabled)),
@@ -77,8 +83,8 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	if thinkingType != "" {
 		body.Thinking = &anthropicThinking{Type: thinkingType}
 	}
-	if p.cfg.ReasoningEffort != "" {
-		body.OutputConfig = &anthropicOutputConfig{Effort: p.cfg.ReasoningEffort}
+	if effort != "" {
+		body.OutputConfig = &anthropicOutputConfig{Effort: effort}
 	}
 	return json.Marshal(body)
 }

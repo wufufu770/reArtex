@@ -188,4 +188,10 @@ type CompletionRequest struct {
 	// tokens on reasoning and never replays thinking blocks (which Anthropic
 	// rejects when thinking is off).
 	Thinking string
+	// ReasoningEffort overrides the provider's reasoning-strength parameter for
+	// THIS request only: "" inherits Config.ReasoningEffort. OpenAI maps it to
+	// the top-level reasoning_effort; Anthropic to output_config.effort. Hosts
+	// use it to apply per-agent effort on top of a provider that is cached and
+	// shared per profile (方案 v9.2 批次 B: agent-level thinking effort).
+	ReasoningEffort string
 }

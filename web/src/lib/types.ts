@@ -1174,10 +1174,24 @@ export interface Agent {
   trigger_run_mode?: "serial" | "parallel"; // 串行排队 / 每次触发各自并发一个会话
   trigger_merge_mode?: "by_task" | "all" | "none"; // 仅 serial：同任务合并 / 全部合并 / 不合并
   trigger_max_parallel?: number; // 仅 parallel：每 agent 并发上限；0=不限
+  // agent 级思考档位覆盖(方案 v9.2 批次 B)：""/absent=跟随绑定 profile 默认；
+  // "enabled"/"disabled"=强制思考开关(switch 形态模型)；其余=effort 档位
+  thinking_effort?: string;
   // 绑定数量(仅列表接口返回)：可见 MCP / 可见 Skill / 绑定工具
   mcp_count?: number;
   skill_count?: number;
   tool_count?: number;
+}
+
+// 思考档位能力(方案 v9.2 批次 A：注册表三层解法的第一层)。
+// shape="effort" → levels 是档位数组(reasoning_effort 参数)；"switch" → 只认
+// 开关(thinking.type)。known=false = 未收录模型(前端挂「未验证」注记)。
+export interface ThinkingCapability {
+  shape: "effort" | "switch";
+  levels: string[];
+  default?: string;
+  note?: string;
+  known: boolean;
 }
 
 export interface PromptVar {

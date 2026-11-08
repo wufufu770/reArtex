@@ -104,6 +104,14 @@ type QueryInput struct {
 	// findings instead of ending abruptly. The run still finishes with the budget's
 	// reason (ReasonMaxTurns/ReasonTimeout), never ReasonCompleted. Nil = off.
 	Settlement *Settlement
+
+	// Thinking / ReasoningEffort are per-request overrides applied to EVERY model
+	// call of this run ("" = inherit the provider's Config value). Hosts use them
+	// to apply per-agent settings on top of a provider that is cached and shared
+	// per profile — the request-level fields are the only per-agent knob that
+	// works with a shared provider instance.
+	Thinking        string
+	ReasoningEffort string
 }
 
 // Settlement configures the wrap-up phase that runs when a budget is hit.
@@ -791,6 +799,8 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		Tools:           schemas,
 		MaxTokens:       l.maxTokens(),
 		Temperature:     l.in.Temperature,
+		Thinking:        l.in.Thinking,
+		ReasoningEffort: l.in.ReasoningEffort,
 	}
 	if l.in.NonStreaming {
 		return l.completeAndExecute(req)
