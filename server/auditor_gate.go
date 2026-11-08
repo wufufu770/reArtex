@@ -189,7 +189,7 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 	}
 	// 30s（v6 B2 提速）：glm-5.3-flash 实测中位 ~7s；30s 兜底足够，超时更快
 	// 转下一通道（种类 fallback→ask），不让 worker 在单次裁决上吊死。
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 90*time.Second) // 90s（v9-batch1e）：网关默认开思考，30s 不够
 	defer cancel()
 	// 重入标记：auditor 自己的模型调用不得再进链。
 	cctx = sod.WithReentrancy(cctx)
@@ -218,7 +218,8 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 		System:      []string{s.auditorPromptText()},
 		Messages:    []llm.Message{llm.UserText(string(userPayload))},
 		Tools:       []llm.ToolSchema{auditorVerdictSchema()},
-		MaxTokens:   1024,
+		// 4096（v9-batch1e）：网关默认开思考，1024 会被 thinking 吃光（同规整器教训）
+		MaxTokens:   4096,
 		Temperature: &temp,
 		// 同 normalizer（v9-batch1e）：不强制 disabled，避免网关禁思考空响应。
 	}

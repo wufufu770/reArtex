@@ -97,7 +97,7 @@ const (
 	// fail-closed 拒绝 ⇒ 每次超时都把一个正常动作打成拒绝并逼 worker 重试整轮。
 	// 提到 45s：仍远小于 worker 单轮预算，排队等待已被信号量隔离在超时之外，
 	// 这里只管模型往返本身。
-	NormalizerTimeoutSeconds = 45
+	NormalizerTimeoutSeconds = 120
 
 	// NormalizerMaxTokens 是规整器输出的 token 上限。
 	//
