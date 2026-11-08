@@ -103,7 +103,11 @@ const (
 	//
 	// 规整器的产出是一份结构化意图（几百 token 量级），不是散文。上限压低是
 	// 刻意的：它同时限制了「模型开始长篇大论」与单次调用的成本。
-	NormalizerMaxTokens = 2048
+	// 4096（v9-batch1d）：mimo/网关家族模型即使 thinking=disabled 也会先吐
+	// 一段 reasoning 前缀（legacy.go 蒸馏同类坑的先例），2048 会被推理块整段
+	// 吃光 ⇒ tool_use 永远到不了 ⇒ 每次 Bash 都 normalizer_malformed。上限只
+	// 是天花板，不产生额外费用（按实际产出计费）。
+	NormalizerMaxTokens = 4096
 
 	// NormalizerCacheMaxEntries 是规整结果缓存的条目上限（进程内 LRU）。
 	//
