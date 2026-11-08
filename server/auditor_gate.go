@@ -220,7 +220,7 @@ func (s *Server) sodAuditorAdjudicator(ctx context.Context, req sod.AuditorReque
 		Tools:       []llm.ToolSchema{auditorVerdictSchema()},
 		MaxTokens:   1024,
 		Temperature: &temp,
-		Thinking:    "disabled",
+		// 同 normalizer（v9-batch1e）：不强制 disabled，避免网关禁思考空响应。
 	}
 	acc := llm.NewAccumulator()
 	var streamErr error

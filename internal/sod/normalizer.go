@@ -181,7 +181,9 @@ func (n *Normalizer) Normalize(ctx context.Context, in NormalizeInput) (Normaliz
 		Tools:       []llm.ToolSchema{n.schema},
 		MaxTokens:   n.maxTokens,
 		Temperature: &temp,
-		Thinking:    "disabled",
+		// Thinking 不再强制 disabled（v9-batch1e）：mimo 网关在禁思考下对
+		// 复杂规整任务输出空响应 ⇒ 0 tool_use ⇒ normalizer_malformed。不带该
+		// 字段时网关默认开思考（真 Anthropic 默认关），两边行为都正确。
 	}
 	acc := llm.NewAccumulator()
 	var streamErr error

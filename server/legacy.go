@@ -191,7 +191,7 @@ func legacyReq(prompt string) llm.CompletionRequest {
 		System:    []string{"你是渗透测试任务的经验归档员：只依据材料蒸馏可传承经验，输出 JSON 数组，不做任何工具调用。"},
 		Messages:  []llm.Message{llm.UserText(prompt)},
 		MaxTokens: 4096,
-		Thinking:  "disabled",
+		// 同 normalizer（v9-batch1e）：不强制 disabled，避免网关禁思考空响应。
 	}
 }
 
