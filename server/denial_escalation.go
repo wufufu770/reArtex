@@ -133,7 +133,7 @@ func suffixHint(hint string) string {
 func denialHintFor(reasonCode string) string {
 	switch reasonCode {
 	case "out_of_scope":
-		return "目标不在任务范围内——请用 add_task_scope/add_company_scope 走扩权请求，或调整任务范围后重跑"
+		return "目标不在任务范围内——请用 add_task_scope/add_company_scope 走扩权请求，或调整任务范围后重跑；若本次是文件操作：相对路径会按解析后的绝对路径判定出界，请先 cd 到目标目录再操作，或直接使用绝对路径（方案 v9.2 §3.5-F6 hint 案）"
 	case "destructive_action":
 		return "删除/破坏类动作被锁定基线硬拦且不可放行——请改用非破坏方式达成目的（例如查询代替删除）"
 	case "auditor_deny":

@@ -125,6 +125,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
+				// F5（方案 v9.2 §3.5）：http 传输但 URL 没配（如 schema 播种的
+				// ScopeSentry 占位行）⇒ 连接必然失败，跳过发现并只告警一次——
+				// 否则每个 agent 会话装配都刷一条「连接失败」（周期性噪音）。
+				// 补上 URL 后此处不再命中，发现自动恢复。
+				if m.Transport == "http" && m.URL == "" && warnMCPMissingURLOnce(m.Name) {
+					continue
+				}
 				cl, err := connectMCP(ctx, m)
 				if err != nil {
 					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)

@@ -202,6 +202,8 @@ func (s *Server) installSoDChain() error {
 		DegradeEnabled:  s.sodDegradeEnabled,
 		DegradedAllow:   agent.IsTier2WriteTool,
 		OnDegradeChange: s.notifySodDegrade,
+		// F3 观测（方案 v9.2 §3.5）：规整器失败补记 llm_records（worker=normalizer）。
+		OnNormalizerEvent: s.recordNormalizerFailure,
 	}
 	// 合并闸（方案 v4.1）：三态开关/情报源/种类表/auditor 裁决岗/人工 ask/
 	// cap 计数/影子对照——off 态这些通路全部闲置，行为与旧链一致。

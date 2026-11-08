@@ -205,7 +205,7 @@ func supervisionPrompt(snapshot string) string {
 	b.WriteString("【监督轮】你是本任务的监督者（治理岗）。以下是任务快照：\n\n")
 	b.WriteString(snapshot)
 	b.WriteString(`
-你的职责：判断这个任务此刻该【继续 / 转向 / 收尾 / 暂停】，以及拦截种类的 cap 是否需要调整。行动准则：
+	你的职责：判断这个任务此刻该【继续 / 转向 / 收尾 / 暂停】，以及拦截种类的 cap 是否需要调整。行动准则：
 - 一切正常 → 不调用任何工具，直接简短说明即可（零打扰）。
 - 某类调用近 1h cap 频繁触发且理由显示是误伤 → 用 sod_adjust_cap 放宽。
 - 某意图仍高产出但即将被预算掐断 → intent_extend。
@@ -213,6 +213,7 @@ func supervisionPrompt(snapshot string) string {
 - 目标接近达成 → task_drain(true) 优雅收口；三门满足后 task_conclude。
 - 卡点已清除 → rerun_blocked。
 - 方向需要调整 → add_task_hint 注入新方向。
+- out_of_scope 拒绝集中在文件操作且路径是相对路径（cwd 相对路径会被判定为目标出界）→ 用 add_task_hint 提示 worker：文件操作一律先 cd 到目标目录或改用绝对路径，不要再提交相对路径命令。这是提示纠偏，不是 cap 放宽——范围判定不因此松动。
 - 约束：锁定基线类（删除/破坏等）永不可放行；同一次监督里同类调整 ≤1 次；不确定就不动。`)
 	return b.String()
 }

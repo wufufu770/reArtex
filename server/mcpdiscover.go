@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -59,6 +60,21 @@ type mcpClient interface {
 	Close() error
 }
 
+// mcpMissingURLWarned 记录已就「缺 URL」告警过的 MCP 名（F5，方案 v9.2 §3.5）。
+// 占位行（如 schema 播种的 ScopeSentry：enabled=true、URL 空）会让每次会话装配
+// 都走一遍必然失败的拨号；去重后同名只告警一次，配置补全即自动恢复发现。
+var mcpMissingURLWarned sync.Map
+
+// warnMCPMissingURLOnce 报告是否应跳过该 server 的发现（true=跳过），并在首次
+// 命中时打一条告警。之后命中静默跳过。
+func warnMCPMissingURLOnce(name string) bool {
+	if _, loaded := mcpMissingURLWarned.LoadOrStore(name, struct{}{}); loaded {
+		return true
+	}
+	log.Printf("[mcp] %s 已启用但未配置 URL——跳过发现（补上 URL 后自动恢复；在 MCP 设置页配置）", name)
+	return true
+}
+
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 	switch m.Transport {
@@ -87,6 +103,11 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 // discoverAndCacheMCP connects to one MCP, lists its tools, and persists the tool
 // names to mcp_tools_cache so the UI shows them without a live connection.
 func (s *Server) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) error {
+	// F5：URL 没配的 http/sse 占位行在此同样跳过（启动自动发现也走这里），
+	// 「连接失败」的周期日志不再出现，只保留一次告警。
+	if (m.Transport == "http" || m.Transport == "sse") && m.URL == "" && warnMCPMissingURLOnce(m.Name) {
+		return fmt.Errorf("http/sse 传输缺少 URL")
+	}
 	cl, err := connectMCP(ctx, m)
 	if err != nil {
 		return err

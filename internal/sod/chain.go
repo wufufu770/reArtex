@@ -250,6 +250,12 @@ type ChainDeps struct {
 	// Code hooks 的事件驱动思想）：cap 命中即刻通知宿主直触一次监督轮，不再
 	// 等 3min 轮询空窗。nil = 只走裁决不通知。
 	OnCapHit func(taskID int64, category string)
+
+	// OnNormalizerEvent 是规整器失败事件回调（方案 v9.2 §3.5-F3）：宿主据此把
+	// normalizer 失败补记进 llm_records（worker=normalizer，与 auditor 治理线
+	// 同口径——此前该通道只落 reason_code，llm_records 黑盒）。nil = 只走日志
+	// 采样不落账。
+	OnNormalizerEvent func(ev NormalizerEvent)
 }
 
 // NewChain 构造链。inner 为 nil 时链独立工作（测试用）。
@@ -607,11 +613,30 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 			ConversationID: call.conversationID,
 		})
 	}
+	normalizeStarted := time.Now()
 	normalized, err := doNormalize()
 	if errors.Is(err, ErrNormalizerMalformed) {
 		normalized, err = doNormalize()
 	}
 	if err != nil {
+		// F3：失败事件回传宿主（llm_records 补记；日志采样在 normalizer 内）。
+		if c.deps.OnNormalizerEvent != nil {
+			kind := "unavailable"
+			if errors.Is(err, ErrNormalizerMalformed) {
+				kind = "malformed"
+			}
+			detail := err.Error()
+			if len(detail) > 200 {
+				detail = detail[:200]
+			}
+			c.deps.OnNormalizerEvent(NormalizerEvent{
+				Kind:      kind,
+				ToolName:  call.toolName,
+				TaskID:    call.taskID,
+				Detail:    detail,
+				LatencyMs: time.Since(normalizeStarted).Milliseconds(),
+			})
+		}
 		return NormalizerResult{}, false, err
 	}
 	c.deps.Cache.Put(key, normalized)

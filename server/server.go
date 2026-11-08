@@ -704,10 +704,21 @@ func (s *Server) providerForProfileModel(id int64, model string) (llm.Provider, 
 	return s.poolForBinding(id, prov, cfg), cfg, true
 }
 
+// llmDiag 是 provider 重建链路的诊断开关（方案 v9.2 §3.5-F4，ARTEX_LLM_DIAG=1）。
+// v5.3 排障遗留的 [boot] Raw(...) 日志原本打在缓存查询之前——claim tick 每 10s×
+// 并发数刷屏（启动以来 829 行）；现在默认静默，只在真重建（缓存未命中）且开诊断
+// 时才打。解析一次，运行期不再读 env。
+var llmDiag = func() bool {
+	switch os.Getenv("ARTEX_LLM_DIAG") {
+	case "1", "true", "TRUE", "yes", "on":
+		return true
+	}
+	return false
+}()
+
 // providerForProfileModelRaw 是不挂 Pool 的裸构建（Pool 成员构建专用——
 // 成员内部再嵌 Pool 会无限递归）。
 func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provider, agent.Config, bool) {
-	log.Printf("[boot] Raw(%d,%q) begin", id, model)
 	key := provKey{id: id, model: model}
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[key]; e != nil {
@@ -716,12 +727,17 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 	}
 	generation := s.provCacheGen
 	s.provCacheMu.Unlock()
-	log.Printf("[boot] Raw(%d) loadProfileConfig", id)
+	// 以下两条只在【真重建】路径上（缓存未命中之后）；ARTEX_LLM_DIAG=1 才可见。
+	if llmDiag {
+		log.Printf("[boot] Raw(%d,%q) cache miss, loadProfileConfig", id, model)
+	}
 	cfg, ok := s.loadProfileConfig(id)
 	if !ok {
 		return nil, agent.Config{}, false
 	}
-	log.Printf("[boot] Raw(%d) config loaded", id)
+	if llmDiag {
+		log.Printf("[boot] Raw(%d) config loaded", id)
+	}
 	// E1：模型变体校验 + 覆盖。
 	if model != "" && model != cfg.Model {
 		found := false

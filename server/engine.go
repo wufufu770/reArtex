@@ -154,6 +154,13 @@ type Engine struct {
 	stagnationMu     sync.Mutex
 	stagnation       map[string]*taskStagnation
 
+	// intentOps 是 per-task 的意图转换互斥锁（方案 v9.2 §3.5-F2）：串行化引擎
+	// 内部的终态落库（worker finalize）与延期/治理转换（D1 延期、监督者
+	// intent_extend/intent_stop）。TryLock 语义：抢不到 = 有转换在飞，调用方
+	// 按冲突处理（extend 放弃本轮 / finalize 幂等读回）。控制面（暂停/重跑等）
+	// 不持锁，仍由 CAS（CompareAndSetIntentState）守住状态边界。
+	intentOps sync.Map // taskID -> *sync.Mutex
+
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
@@ -1327,9 +1334,30 @@ const intentExtendBudget = 3
 // D1 软着陆的 3 次宽一档，第 6 次起转人工）。
 const intentExtendSupervisorBudget = 5
 
+// isTerminalIntentState 报告一个意图状态是否终态（与 db 层 CompareAndSetIntentState
+// 的 terminal 判定同口径；引擎侧只读，不重复造第二份 SQL）。
+func isTerminalIntentState(state string) bool {
+	return state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
+}
+
+// tryLockIntentOps 取该任务的意图转换互斥锁（方案 v9.2 §3.5-F2）。返回 nil =
+// 已有转换在飞（调用方按冲突处理：extend 放弃本轮、finalize 幂等读回）；
+// 非 nil = 已持锁，调用方负责 Unlock。
+func (e *Engine) tryLockIntentOps(taskID string) *sync.Mutex {
+	muAny, _ := e.intentOps.LoadOrStore(taskID, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	if mu.TryLock() {
+		return mu
+	}
+	return nil
+}
+
 // tryExtendActiveIntent 判定「预算到线但正要出成果」的意图是否延期续跑：
 // 本轮有有效写回（事实/资产/finding 至少一项）且延期未超限 ⇒ 意图转回 open、
 // 播报延期、返回 true（调用方跳过 exhausted 落库）。
+//
+// ⚠️ 调用方（worker finalize）必须已持有该任务的 intentOps 锁——本函数不再
+// 自取（重入 TryLock 必失败会把 D1 软着陆整个废掉）。
 func (e *Engine) tryExtendActiveIntent(t *Task, intentID int64, wrote agent.WriteCounts, workerName string, reason harness.TerminalReason) bool {
 	if wrote.Facts+wrote.Assets+wrote.Findings <= 0 {
 		return false // 本轮零产出：照旧 exhausted
@@ -1941,10 +1969,17 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// 成果）⇒ 不掐——意图转回 open 由下一个 worker 带满预算续跑，最多延 3 次；
 	// 二次到线仍零写回才真的 exhausted。
 	state := "done"
+	// F2（方案 v9.2 §3.5）：终态/延期转换互斥。持锁 = 本 worker 的 finalize 与
+	// D1 延期串行；抢不到 = 监督者转换正在飞 ⇒ 本轮放弃延期（照旧 exhausted），
+	// CAS 照跑（其冲突由下面的幂等读回兜住）。
+	intentOps := e.tryLockIntentOps(t.ID)
+	if intentOps != nil {
+		defer intentOps.Unlock()
+	}
 	switch {
 	case err != nil:
 		state = "blocked"
-	case (reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout) && e.tryExtendActiveIntent(t, intent.ID, wrote, name, reason):
+	case intentOps != nil && (reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout) && e.tryExtendActiveIntent(t, intent.ID, wrote, name, reason):
 		// 已延期重开：跳过 exhausted 落库（意图已在 tryExtend 里转回 open），
 		// 本步返回 true（认领循环继续），记账照跑。
 		e.noteIntentWriteBack(t, wrote)
@@ -1962,7 +1997,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			Summary: "【LLM 通道故障】意图 #" + fmt.Sprintf("%d", intent.ID) + " 因模型链耗尽转 blocked——请检查 LLM 配置（key/额度），或通过治理工具/设置页切换备用配置"})
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
+			// F2 finalize 幂等化：CAS 冲突时读回最终态——已是任一终态 ⇒ 另一写者
+			// 已把它收尾，本次写回放弃、产出经下方兜底标记并入 handoff（按
+			// IntentHasHandoffFact 去重），不再当故障处理（此前 #85 现场：done 落库
+			// 撞并发 ⇒ 日志喊「落库失败」+ 兜底标记 fact，看起来像丢产出）。
+			if cur, gerr := t.Store.IntentState(intent.ID); gerr == nil && isTerminalIntentState(cur) {
+				log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库冲突：已被并发落为 %s（幂等放弃本次写回，产出经兜底并入 handoff）", name, t.ID, intent.ID, state, cur)
+			} else {
+				log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
+			}
 		}
 	}
 	// C4 停滞闸记账：按写回量更新停滞状态（0 写回递增 / 有效写回清零）。
@@ -2267,6 +2310,15 @@ func (e *Engine) ExtendIntent(taskID string, intentID int64) (bool, string) {
 	if !ok || t == nil || t.Store == nil {
 		return false, "task 不存在"
 	}
+	// F2 互斥（先取锁后记账，放弃时延期配额不被空耗）：worker finalize 正在
+	// 转换同一意图时放弃本次延期，下轮监督重试即可——比把 running 意图强行
+	// 转 open 撞出竞态便宜。锁序 intentOps → stagnationMu，与 worker finalize
+	// 持锁后进 tryExtend（取 stagnationMu）一致，无死锁环。
+	ops := e.tryLockIntentOps(taskID)
+	if ops == nil {
+		return false, fmt.Sprintf("意图 #%d 的终态转换正在进行，本次延期放弃（下轮监督重试）", intentID)
+	}
+	defer ops.Unlock()
 	e.stagnationMu.Lock()
 	if e.intentExtends == nil {
 		e.intentExtends = map[string]int{}
@@ -2293,6 +2345,13 @@ func (e *Engine) StopIntent(taskID string, intentID int64, reason string) (bool,
 	if !ok || t == nil || t.Store == nil {
 		return false, "task 不存在"
 	}
+	// F2 互斥：与 worker finalize 同一把锁——worker 正落终态时本次停止放弃，
+	// 意图既然已在收尾，监督者下轮再看即可。
+	ops := e.tryLockIntentOps(taskID)
+	if ops == nil {
+		return false, fmt.Sprintf("意图 #%d 的终态转换正在进行，本次停止放弃（下轮监督重试）", intentID)
+	}
+	defer ops.Unlock()
 	if err := transitionIntentState(t.Store, intentID, "running", "exhausted"); err != nil {
 		return false, "停止失败（意图不在 running 态？）: " + err.Error()
 	}
