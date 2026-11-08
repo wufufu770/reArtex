@@ -24,6 +24,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -143,6 +144,76 @@ func RuntimeRoleName() string {
 		return v
 	}
 	return DefaultAppRole
+}
+
+// ensureRuntimeRole 冷启动自举（方案 v9 批次1④「已初始化库的探测兜底」）：
+// 迁移连接在位时，确保受限运行角色存在且口令与运行期 DSN 同源——
+// 全新库（initdb 完成、角色没建过）应用自身即可拉起，不再依赖手工
+// CREATE ROLE。幂等：角色在 ⇒ 只对齐口令（secret 是唯一真相源，漂移即自愈）。
+//
+// 注意 initdb.d 脚本路线不可靠：官方 entrypoint 全程以 postgres 用户跑，
+// docker secret 以宿主属主 0600 挂载，postgres 读不了 ⇒ 应用侧自举才是主路径。
+func ensureRuntimeRole(ctx context.Context, conn *sql.Conn, role, runtimeDSN string) error {
+	user, pass, err := dsnUserPassword(runtimeDSN)
+	if err != nil {
+		return fmt.Errorf("解析运行期 DSN 凭据: %w", err)
+	}
+	if user != "" && user != role {
+		// 运行期 DSN 用的不是受限角色（如超级用户直连的老部署）——无需自举。
+		return nil
+	}
+	var exists bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=$1)`, role).Scan(&exists); err != nil {
+		return fmt.Errorf("检查角色: %w", err)
+	}
+	if !exists {
+		if _, err := conn.ExecContext(ctx, `CREATE ROLE `+quoteIdent(role)+` LOGIN`); err != nil {
+			return fmt.Errorf("创建角色: %w", err)
+		}
+		log.Printf("[pg] 已自举受限运行角色 %s（冷启动自动化）", role)
+	}
+	if pass != "" {
+		// ALTER ROLE 是 utility 语句，不吃绑定参数 ⇒ 单引号字面量（' 翻倍），
+		// standard_conforming_strings=on（默认）下安全。
+		lit := "'" + strings.ReplaceAll(pass, "'", "''") + "'"
+		if _, err := conn.ExecContext(ctx, `ALTER ROLE `+quoteIdent(role)+` LOGIN PASSWORD `+lit); err != nil {
+			return fmt.Errorf("对齐角色口令: %w", err)
+		}
+	}
+	return nil
+}
+
+// dsnUserPassword 从连接串解析用户与口令：兼容 URL 形态（postgres://u:p@h/db）
+// 与 key=value 形态（host=... user=... password=...）。
+func dsnUserPassword(dsn string) (user, pass string, err error) {
+	s := strings.TrimSpace(dsn)
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", "", err
+		}
+		if u.User != nil {
+			user = u.User.Username()
+			pass, _ = u.User.Password()
+		}
+		return user, pass, nil
+	}
+	for _, kv := range strings.Fields(s) {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			switch k {
+			case "user":
+				user = v
+			case "password":
+				pass = v
+			}
+		}
+	}
+	return user, pass, nil
+}
+
+// quoteIdent 把标识符包成安全的双引号字面量（角色名是受控配置，这里只为规整）。
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // applyRuntimeRoleGrants 把受限运行角色的权限收敛到最小集（幂等）。

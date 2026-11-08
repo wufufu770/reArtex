@@ -447,6 +447,11 @@ func Open(dsn string) (*DB, error) {
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
+			// 冷启动自举（v9 批次1④）：角色缺失即自建、口令漂移即对齐——
+			// 全新库不再需要手工 CREATE ROLE。
+			if err := ensureRuntimeRole(context.Background(), conn, RuntimeRoleName(), dsn); err != nil {
+				log.Printf("[pg] 运行角色自举失败: %v（请重跑 scripts/db-role-bootstrap.sh）", err)
+			}
 			if err := applyRuntimeRoleGrants(context.Background(), conn, RuntimeRoleName()); err != nil {
 				log.Printf("[pg] 给受限运行角色 %s 授权失败: %v（请重跑 scripts/db-role-bootstrap.sh）", RuntimeRoleName(), err)
 			}
