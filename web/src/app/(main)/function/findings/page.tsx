@@ -54,6 +54,7 @@ import type {
 import { cn } from "@/lib/utils";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
+import { FindingsCards } from "./_components/findings-cards";
 import {
   FINDING_STATUSES,
   type FindingEdit,
@@ -67,6 +68,12 @@ import {
 } from "./_components/findings-table";
 
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
+
+// 平铺/资产视图的呈现形态:cards = 横向滑动卡片流(默认);table = 原表格。
+// 独立记忆在 "findings.view",与上面的列表偏好分开。
+type FindingsLayout = "cards" | "table";
+
+const FINDINGS_LAYOUT_KEY = "findings.view";
 
 // 列表视图:flat = 跨任务平铺大表(默认);grouped = 按任务分组折叠;
 // asset = 左侧资产树 + 右侧该子树下的发现。
@@ -132,6 +139,7 @@ const EMPTY_STATS: FindingStats = {
 
 export default function FindingsPage() {
   const [view, setView] = React.useState<FindingView>("flat");
+  const [layout, setLayout] = React.useState<FindingsLayout>("cards");
   const [severity, setSeverity] = React.useState<"all" | Severity>("all");
   const [status, setStatus] = React.useState<"all" | FindingStatus>("all");
   const [vulnclass, setVulnclass] = React.useState<string>("all");
@@ -230,6 +238,16 @@ export default function FindingsPage() {
       JSON.stringify({ view, severity, status, vulnclass, task, sort }),
     );
   }, [preferencesHydrated, severity, sort, status, task, view, vulnclass]);
+
+  // 卡片/表格布局的记忆:水合一次,之后每次变化都写回。
+  React.useEffect(() => {
+    const raw = getLocalStorageValue(FINDINGS_LAYOUT_KEY);
+    if (raw === "cards" || raw === "table") setLayout(raw);
+  }, []);
+
+  React.useEffect(() => {
+    setLocalStorageValue(FINDINGS_LAYOUT_KEY, layout);
+  }, [layout]);
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), 300);
@@ -789,7 +807,20 @@ export default function FindingsPage() {
     onDelete: deleteFinding,
   };
 
-  // 平铺视图与资产视图右侧是同一张表 + 同一份分页,只是筛选条件不同。
+  // 平铺视图与资产视图右侧是同一份列表 + 同一份分页,只是筛选条件不同;
+  // 卡片流与表格消费同一页数据,差异只在行渲染。
+  const flatListBody =
+    layout === "cards" ? (
+      <FindingsCards
+        items={flat.items}
+        activeRetests={activeRetests}
+        onRetest={setRetestFinding}
+        onDeepen={openDeepen}
+      />
+    ) : (
+      <FindingsTable items={flat.items} selectAllLabel="选择当前页全部" {...rowProps} />
+    );
+
   const flatListCard = (
     <Card className="gap-0 py-0">
       <CardContent className="px-0">
@@ -799,7 +830,7 @@ export default function FindingsPage() {
           </div>
         ) : (
           <>
-            <FindingsTable items={flat.items} selectAllLabel="选择当前页全部" {...rowProps} />
+            {flatListBody}
             <TablePagination
               page={flatPage}
               pageSize={flatPageSize}
@@ -952,6 +983,25 @@ export default function FindingsPage() {
               <SelectItem value="time">按时间</SelectItem>
             </SelectContent>
           </Select>
+
+          {/* 卡片/表格切换:只对平铺与资产视图生效,分组视图维持表格。 */}
+          {(view === "flat" || view === "asset") && (
+            <ToggleGroup
+              type="single"
+              value={layout}
+              onValueChange={(v) => v && setLayout(v as FindingsLayout)}
+              variant="outline"
+              size="sm"
+              spacing={0}
+            >
+              <ToggleGroupItem value="cards" aria-label="切换为卡片视图">
+                卡片
+              </ToggleGroupItem>
+              <ToggleGroupItem value="table" aria-label="切换为表格视图">
+                表格
+              </ToggleGroupItem>
+            </ToggleGroup>
+          )}
 
           <div className="ml-auto flex items-center gap-3">
             {selectedIds.size > 0 && (

@@ -1030,6 +1030,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/assets", s.listAssets)
 	mux.HandleFunc("GET /api/assets/counts", s.assetCounts)
 	mux.HandleFunc("POST /api/assets", s.insertAssets)
+	// E2-5：文件资产导入（xlsx/csv → 真实 host/IP，db 层域名校验兜底）。
+	mux.HandleFunc("POST /api/assets/import-file", s.assetImportFile)
 	mux.HandleFunc("DELETE /api/assets", s.deleteAssets)
 
 	// company system
@@ -1229,6 +1231,9 @@ func (s *Server) Handler() http.Handler {
 	// 哈希链；pin 复审队列只读（只提示、不自动解）。
 	mux.HandleFunc("GET /api/strategies", s.strategyList)
 	mux.HandleFunc("GET /api/strategies/{id}", s.strategyGet)
+	// E2-2/E2-3（方案 v10 §9）：策略摄入学习 + 宿主版本化编辑。
+	mux.HandleFunc("POST /api/strategies/ingest", s.strategyIngest)
+	mux.HandleFunc("PATCH /api/strategies/{id}", s.strategyEdit)
 	mux.HandleFunc("GET /api/strategy-proposals", s.strategyProposalList)
 	mux.HandleFunc("POST /api/strategy-proposals/{pid}/decide", s.strategyProposalDecide)
 	mux.HandleFunc("POST /api/strategies/{id}/pin", s.strategyPinSet)

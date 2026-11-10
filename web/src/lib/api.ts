@@ -567,6 +567,13 @@ export const api = {
   detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
   taskIntentAssets: (taskId: string) =>
     get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
+  // 文件导入资产：解析平台工作区内的上传件（uploads/…，表格主机清单），逐条过域名校验
+  // 后 upsert。skipped = 非法域名/写入失败的条数，notes 只留前 5 条原因。
+  assetImportFile: (task_id: string, path: string) =>
+    post<{ ok: boolean; imported: number; skipped: number; notes: string[] }>("/assets/import-file", {
+      task_id,
+      path,
+    }),
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
@@ -1083,6 +1090,14 @@ export const api = {
     }>("/strategy-pin-queue").then((r): StrategyPinQueue => ({ ...r, queue: arr(r.queue) })),
   // 刷新 utility 物化视图（权威 utility 在视图里，策略表上的那一列只是缓存）。
   refreshStrategyUtility: () => post<{ ok: boolean }>("/strategies/refresh-utility", {}),
+  // 摄入学习：报告/网页 URL 或粘贴的文本 → LLM 总结提炼 → 候选策略提议（进待裁决队列，
+  // 不直接入库）。proposals=0 时 note 说明原因（如「素材中没有可沉淀的内容」）。
+  strategyIngest: (body: { url?: string; text?: string }) =>
+    post<{ ok: boolean; proposals: number; ids?: number[]; note?: string }>("/strategies/ingest", body),
+  // 版本化编辑策略（name/summary/六元组 jsonb 列；jsonb 字段后端校验 JSON 合法性），
+  // version = version+1。空 patch 后端回 400「没有可更新字段」。
+  strategyEdit: (id: string | number, body: Record<string, unknown>) =>
+    patch<{ ok: boolean; version: number }>(`/strategies/${id}`, body),
 
   // ---- SoD 链（职责分离）----
   // 决策账本。task_id 是任务的**数字 id**（= Task.id 转数字，后端就是数字主键）。

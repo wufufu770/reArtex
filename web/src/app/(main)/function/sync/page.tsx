@@ -402,6 +402,9 @@ function SyncWorkbench() {
           </Button>
         </div>
 
+        {/* 结果摘要：紧贴同步按钮下方，同步完不用翻到页面底部看结果 */}
+        {result && <SyncResult result={result} />}
+
         {/* 列表 */}
         <div className="rounded-md border">
           <Table>
@@ -443,43 +446,54 @@ function SyncWorkbench() {
             下一页
           </Button>
         </div>
-
-        {/* 结果 */}
-        {result && <SyncResult result={result} />}
       </CardContent>
     </Card>
   );
 }
 
+// SyncResult 是同步完成后的结果摘要卡：各类型入库计数、企业数、警告（黄）、
+// 错误（红，逐条；errors 即被跳过的脏数据）。全干净时给一条绿色「全部成功」。
 function SyncResult({ result }: { result: Awaited<ReturnType<typeof api.ssSync>> }) {
   const synced = result.synced ?? {};
+  const companies = result.companies ?? [];
+  const warnings = result.warnings ?? [];
+  const errors = result.errors ?? [];
   const labels: Record<string, string> = { subdomain: "子域名", service: "服务", app: "App", ip: "IP" };
+  const clean = warnings.length === 0 && errors.length === 0;
   return (
     <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+      {clean ? (
+        <p className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-500">
+          <CheckCircle2Icon className="size-4" />
+          全部成功
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-3">
         {Object.entries(synced).map(([k, v]) => (
           <Badge key={k} variant="secondary">
             {labels[k] ?? k}: {v}
           </Badge>
         ))}
+        {companies.length > 0 && <Badge variant="secondary">企业: {companies.length}</Badge>}
       </div>
-      {result.companies && result.companies.length > 0 && (
-        <p className="text-muted-foreground">新建/更新企业：{result.companies.join("、")}</p>
-      )}
-      {result.warnings && result.warnings.length > 0 && (
+      {companies.length > 0 && <p className="text-muted-foreground">新建/更新企业：{companies.join("、")}</p>}
+      {warnings.length > 0 && (
         <ul className="list-inside list-disc text-amber-600 dark:text-amber-500">
-          {result.warnings.map((wm) => (
+          {warnings.map((wm) => (
             <li key={wm}>{wm}</li>
           ))}
         </ul>
       )}
-      {result.errors && result.errors.length > 0 && (
-        <ul className="list-inside list-disc text-destructive">
-          {result.errors.slice(0, 20).map((em) => (
-            <li key={em}>{em}</li>
-          ))}
-          {result.errors.length > 20 && <li>…共 {result.errors.length} 条错误</li>}
-        </ul>
+      {errors.length > 0 && (
+        <>
+          <p className="text-destructive">跳过 {errors.length} 条脏数据：</p>
+          <ul className="list-inside list-disc text-destructive">
+            {errors.slice(0, 20).map((em) => (
+              <li key={em}>{em}</li>
+            ))}
+            {errors.length > 20 && <li>…共 {errors.length} 条错误</li>}
+          </ul>
+        </>
       )}
     </div>
   );

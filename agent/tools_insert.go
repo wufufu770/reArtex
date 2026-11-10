@@ -375,6 +375,62 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 	)
 }
 
+// importAssetsFromFile 从工作区的 xlsx/csv 文件提取真实资产并入库（E2-5，方案
+// v10 §9）：解析文件内容得到 host/IP，逐条走 UpsertSubdomain/UpsertIP（db 层
+// 域名校验兜底），关联当前任务。这是「文件里的资产」的正规通路——不要再把
+// 文件名塞进 insert_assets 的 domain。
+func (t *ToolSet) importAssetsFromFile() actool.CoreTool {
+	return writeTool("import_assets_from_file", "从 xlsx/csv 文件提取资产（域名/IP/URL）并登记到当前任务。传文件的工作区绝对路径（上传文件在 <工作区>/uploads/ 下）。文件名本身不是资产——本工具解析文件【内容】；解析出的每条都会过域名校验。返回 imported/skipped 计数与样例。", obj(map[string]any{
+		"path": str("xlsx/csv 文件的工作区绝对路径"),
+	}, "path"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+		var a struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(in, &a); err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if t.as == nil {
+			return actool.Errorf("资产存储不可用"), nil
+		}
+		hits, err := ParseTabularHosts(strings.TrimSpace(a.Path))
+		if err != nil {
+			return actool.Errorf("解析失败: " + err.Error()), nil
+		}
+		imported, skipped := 0, 0
+		sample := []string{}
+		skippedNotes := []string{}
+		for _, h := range hits {
+			switch h.Kind {
+			case "ip":
+				if _, err := t.as.UpsertIP(db.UpsertIPReq{IP: h.Host, TaskID: t.taskID}); err != nil {
+					skipped++
+					if len(skippedNotes) < 5 {
+						skippedNotes = append(skippedNotes, h.Host+": "+err.Error())
+					}
+					continue
+				}
+			default: // domain | url → subdomain（副作用自动建根域，域名校验在 db 层）
+				if _, err := t.as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: h.Host, TaskID: t.taskID}); err != nil {
+					skipped++
+					if len(skippedNotes) < 5 {
+						skippedNotes = append(skippedNotes, h.Host+": "+err.Error())
+					}
+					continue
+				}
+			}
+			imported++
+			if len(sample) < 10 {
+				sample = append(sample, h.Host)
+			}
+		}
+		t.writes.Assets += imported
+		return jsonResult(map[string]any{
+			"imported": imported, "skipped": skipped, "sample": sample, "skipped_notes": skippedNotes,
+			"note": "已关联当前任务；根域名由子域名副作用自动补建",
+		})
+	})
+}
+
 // addCompanyScope writes to company_scope table and triggers asset attribution.
 func (t *ToolSet) addCompanyScope() actool.CoreTool {
 	return writeTool(
@@ -654,6 +710,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// worker（遇到范围闸才知道要扩什么）；它仍是 Tier3+「大扩权」种类，走
 		// ask 人工批准 + 扩张预算上限，不是自由放权。
 		t.addTaskScope(), t.insertAssets(), t.listAssets(),
+		// E2-5：文件资产导入（xlsx/csv → 真实 host/IP），「文件名≠域名」的正规通路。
+		t.importAssetsFromFile(),
 		// 跨 work 回看：worker 也可复用其他 work 的观察，避免重复劳动。
 		// search_all_worker_traces：不必先知道 intent_id，按关键字全局捞命中步骤；
 		// get_worker_trace：锁定某条 work 后列步骤/就地搜/取完整内容。

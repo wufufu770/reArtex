@@ -830,13 +830,32 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       <TabsContent value="skill" className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         <p className="text-muted-foreground mb-3 text-xs">勾选此 Agent 可见的 Skill。</p>
         <div className="grid gap-2">
-          {skills.map((s) => (
-            <span key={s.name} className="flex items-center gap-2 rounded-md border p-2 text-sm">
-              <Checkbox checked={skillVisible.includes(s.name)} onCheckedChange={() => toggleSkill(s.name)} />
-              <span className="font-mono text-xs">{s.name}</span>
-              {s.description && <span className="text-muted-foreground ml-auto truncate text-xs">{s.description}</span>}
-            </span>
-          ))}
+          {skills.map((s) => {
+            // skill 声明的 mcps（skill-gated 工具解锁的服务）里,没启用或缺席的要在行尾点名:
+            // 这类 skill 加载了也拿不到对应工具,只有启用并授权可见后才生效。
+            const missingMcps = (s.mcps ?? []).filter(
+              (name) => !mcp.some((server) => server.name === name && server.enabled),
+            );
+            return (
+              <span key={s.name} className="flex items-center gap-2 rounded-md border p-2 text-sm">
+                <Checkbox checked={skillVisible.includes(s.name)} onCheckedChange={() => toggleSkill(s.name)} />
+                <span className="font-mono text-xs">{s.name}</span>
+                {s.description && (
+                  <span className="text-muted-foreground ml-auto truncate text-xs">{s.description}</span>
+                )}
+                {missingMcps.map((name) => (
+                  <Badge
+                    key={name}
+                    variant="outline"
+                    className="border-destructive px-1 py-0 text-[9px] text-destructive"
+                    title="在 MCP 设置页启用并授权本 agent 可见后生效"
+                  >
+                    MCP 未启用：{name}
+                  </Badge>
+                ))}
+              </span>
+            );
+          })}
           {skills.length === 0 && <span className="text-muted-foreground text-xs">（暂无 Skill）</span>}
         </div>
       </TabsContent>
