@@ -586,15 +586,23 @@ type SodManualOverride struct {
 }
 
 // CreateSodManualOverride 登记一条人工改判放行凭据（review API 的写入口）。
+// scope 语义（E1-5，方案 v10 §9）：
+//   once      —— 四元组全等、用后即焚；
+//   task      —— 四元组全等、随任务终态过期；
+//   task_tool —— (task, tool, agent) 级通配（payload_digest 留空），ask 批准
+//                「同时放行本任务后续同类调用」时签发；仅限非基线工具（调用方校验）。
 func (d *DB) CreateSodManualOverride(o *SodManualOverride) (int64, error) {
 	if err := d.ensureSoDSchema(); err != nil {
 		return 0, err
 	}
-	if o.PayloadDigest == "" || o.ToolKey == "" || o.TaskID <= 0 {
-		return 0, fmt.Errorf("override 需要 payload_digest/tool_key/task_id")
+	if o.ToolKey == "" || o.TaskID <= 0 {
+		return 0, fmt.Errorf("override 需要 tool_key/task_id")
 	}
-	if o.Scope != "once" && o.Scope != "task" {
-		return 0, fmt.Errorf("scope 只能是 once|task")
+	if o.Scope != "once" && o.Scope != "task" && o.Scope != "task_tool" {
+		return 0, fmt.Errorf("scope 只能是 once|task|task_tool")
+	}
+	if o.Scope != "task_tool" && o.PayloadDigest == "" {
+		return 0, fmt.Errorf("override 需要 payload_digest/tool_key/task_id")
 	}
 	var id int64
 	err := d.QueryRow(`
@@ -608,7 +616,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
 	return id, nil
 }
 
-// LookupSodManualOverride 链侧步骤⑤.5 的查表：四元组全等 + 未过期 ⇒ 放行凭据。
+// LookupSodManualOverride 链侧步骤⑤.5 的查表：四元组全等 + 未过期 ⇒ 放行凭据；
+// 未命中时回落 task_tool 通配（(tool, task, agent) 全等、payload_digest=''）。
 // 命中即把 use_count+1 并盖章 last_used_at（once 用后即焚由 Consume 完成）。
 func (d *DB) LookupSodManualOverride(toolKey string, taskID int64, agentKey, payloadDigest string) (*SodManualOverride, error) {
 	if err := d.ensureSoDSchema(); err != nil {
@@ -624,6 +633,17 @@ WHERE tool_key=$1 AND task_id=$2 AND payload_digest=$3 AND agent_key=$4
 ORDER BY id DESC LIMIT 1`, toolKey, taskID, payloadDigest, agentKey).
 		Scan(&o.ID, &o.DecisionID, &o.PayloadDigest, &o.ToolKey, &o.TaskID, &o.AgentKey,
 			&o.Scope, &o.Reason, &o.CreatedBy, &o.CreatedAt, &expires, &o.UseCount, &lastUsed)
+	if errors.Is(err, sql.ErrNoRows) {
+		// E1-5：task_tool 通配回落——ask 批准「同类放行」后的第 2..N 次调用走这里。
+		err = d.QueryRow(`
+SELECT id, decision_id, payload_digest, tool_key, task_id, agent_key, scope, reason, created_by, created_at, expires_at, use_count, last_used_at
+FROM sod_manual_overrides
+WHERE tool_key=$1 AND task_id=$2 AND agent_key=$3 AND payload_digest='' AND scope='task_tool'
+  AND (expires_at IS NULL OR expires_at > now())
+ORDER BY id DESC LIMIT 1`, toolKey, taskID, agentKey).
+			Scan(&o.ID, &o.DecisionID, &o.PayloadDigest, &o.ToolKey, &o.TaskID, &o.AgentKey,
+				&o.Scope, &o.Reason, &o.CreatedBy, &o.CreatedAt, &expires, &o.UseCount, &lastUsed)
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -651,12 +671,12 @@ func (d *DB) ConsumeSodManualOverride(id int64) error {
 	return err
 }
 
-// ExpireTaskSodOverrides 任务终态时把 task 级改判一并过期（随任务生命周期）。
+// ExpireTaskSodOverrides 任务终态时把 task / task_tool 级改判一并过期（随任务生命周期）。
 func (d *DB) ExpireTaskSodOverrides(taskID int64) error {
 	if err := d.ensureSoDSchema(); err != nil {
 		return err
 	}
-	_, err := d.Exec(`UPDATE sod_manual_overrides SET expires_at=now() WHERE task_id=$1 AND scope='task' AND expires_at IS NULL`, taskID)
+	_, err := d.Exec(`UPDATE sod_manual_overrides SET expires_at=now() WHERE task_id=$1 AND scope IN ('task','task_tool') AND expires_at IS NULL`, taskID)
 	return err
 }
 

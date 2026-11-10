@@ -8,6 +8,7 @@ import {
   ArrowUpRightIcon,
   BugIcon,
   ChevronRightIcon,
+  CircleAlertIcon,
   ClockIcon,
   DownloadIcon,
   InfoIcon,
@@ -124,6 +125,7 @@ const EMPTY_STATS: FindingStats = {
   high: 0,
   medium: 0,
   low: 0,
+  info: 0,
   vulnclasses: [],
   tasks: [],
 };
@@ -757,7 +759,8 @@ export default function FindingsPage() {
     { label: "严重", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
     { label: "高危", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
     { label: "中危", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
-    { label: "低危", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
+    { label: "低危", value: stats.low, tone: "text-slate-500", icon: CircleAlertIcon },
+    { label: "信息", value: stats.info, tone: "text-muted-foreground", icon: InfoIcon },
   ];
 
   // 导出弹窗里「当前筛选」的条数:两个视图的筛选一致,只是统计口径来源不同。
@@ -830,7 +833,7 @@ export default function FindingsPage() {
         </Tabs>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
           {statCards.map((stat) => {
             const StatIcon = stat.icon;
             return (
@@ -876,6 +879,7 @@ export default function FindingsPage() {
                 ["high", "高危"],
                 ["medium", "中危"],
                 ["low", "低危"],
+                ["info", "信息"],
               ] as const
             ).map(([val, label]) => (
               <ToggleGroupItem key={val} value={val} aria-label={`按${label}等级筛选`}>

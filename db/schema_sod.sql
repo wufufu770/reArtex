@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS sod_manual_overrides (
     tool_key       TEXT NOT NULL,
     task_id        BIGINT NOT NULL,
     agent_key      TEXT NOT NULL DEFAULT '',
-    scope          TEXT NOT NULL DEFAULT 'once' CHECK (scope IN ('once','task')),
+    scope          TEXT NOT NULL DEFAULT 'once' CHECK (scope IN ('once','task','task_tool')),
     reason         TEXT NOT NULL DEFAULT '',
     created_by     TEXT NOT NULL DEFAULT '',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -177,3 +177,10 @@ CREATE TABLE IF NOT EXISTS sod_category_suggestions (
 -- 采纳回链（方案 v6.1）：种类 ← 采纳来源建议。不加外键（建表顺序在前，
 -- 引用后置表会让全新库 schema 应用整体失败）；回链完整性由采纳/撤销代码维护。
 ALTER TABLE sod_categories ADD COLUMN IF NOT EXISTS suggestion_id BIGINT;
+
+-- E1-5（方案 v10 §9）：放行凭据加 task_tool 档——ask 批准时可选「同时放行本任务
+-- 后续同类调用」：(task, tool, agent) 级通配（payload_digest=''），仅限非基线工具。
+-- 旧库 CHECK 迁移（约束名是内联 CHECK 的自动名）。
+ALTER TABLE sod_manual_overrides DROP CONSTRAINT IF EXISTS sod_manual_overrides_scope_check;
+ALTER TABLE sod_manual_overrides ADD CONSTRAINT sod_manual_overrides_scope_check
+    CHECK (scope IN ('once','task','task_tool'));

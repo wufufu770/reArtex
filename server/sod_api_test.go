@@ -245,11 +245,12 @@ func TestSodDecisionLedgerListsDecisions(t *testing.T) {
 	if row["tool_name"] != "Bash" {
 		t.Fatalf("账本里的工具名不对: %v", row)
 	}
-	// 分层信息：Bash 是出网工具 ⇒ 判定器给 Tier3/egress。
-	if row["tier"] != "Tier3" {
+	// 分层信息：Bash 是出网工具，fixture 的 scope_check=pass ⇒ E1-4 降标展示为
+	// Tier2/egress_in_scope（范围内出网）；未判定/越界才维持 Tier3（见下一条测试）。
+	if row["tier"] != "Tier2" {
 		t.Fatalf("决策没有带出分层（tier）: %v", row)
 	}
-	if row["tier_category"] != "egress" {
+	if row["tier_category"] != "egress_in_scope" {
 		t.Fatalf("决策的层类别不对: %v", row)
 	}
 	if _, ok := row["tier_host_only"]; !ok {
@@ -258,6 +259,39 @@ func TestSodDecisionLedgerListsDecisions(t *testing.T) {
 	if _, ok := row["tier_scope_in"]; !ok {
 		t.Fatalf("决策没有带出 tier_scope_in: %v", row)
 	}
+}
+
+// TestSodDecisionLedgerEgressOutOfScopeStaysTier3 钉住 E1-4 的另一半：越界/未判定
+// 的出网不降标，仍 Tier3/egress（范围内降标只发生在 scope_check=pass）。
+func TestSodDecisionLedgerEgressOutOfScopeStaysTier3(t *testing.T) {
+	pg, _, h, tok := sodAPIServer(t)
+	id := sodDecisionRowWithChecks(t, pg, "Bash", "deny", "out_of_scope", `{"scope_check":"fail"}`)
+
+	code, out := sodAPIDo(t, h, tok, "GET", "/api/sod/decisions", nil)
+	if code != 200 {
+		t.Fatalf("读决策账本应当成功，实际 %d %v", code, out)
+	}
+	row := sodFindDecision(t, out, id)
+	if row["tier"] != "Tier3" || row["tier_category"] != "egress" {
+		t.Fatalf("越界出网应维持 Tier3/egress: %v", row)
+	}
+}
+
+// sodDecisionRowWithChecks 是 sodDecisionRow 的自定义 checks 版本。
+func sodDecisionRowWithChecks(t *testing.T, pg *db.DB, toolName, verdict, reasonCode, checks string) int64 {
+	t.Helper()
+	id, err := pg.RecordSoDDecision(&db.SoDDecision{
+		SourceAgent:   "work#1",
+		ToolName:      toolName,
+		Verdict:       verdict,
+		ReasonCode:    reasonCode,
+		PayloadDigest: "digest-" + strconv.FormatInt(sodAPISuffix(), 10),
+		Checks:        json.RawMessage(checks),
+	})
+	if err != nil {
+		t.Fatalf("写决策账本: %v", err)
+	}
+	return id
 }
 
 // TestSodDecisionLedgerCarriesReadOnlyTier 钉住 Tier1 只读工具的分层。

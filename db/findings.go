@@ -65,12 +65,15 @@ const (
 	SeverityHigh     = "high"     // 高
 	SeverityMedium   = "medium"   // 中
 	SeverityLow      = "low"      // 低
+	// SeverityInfo 信息级（E1-7，方案 v10 §9）：未证实候选面/侦察线索/无直接
+	// 影响的暴露——大量低危实为信息级，虚高的主因就是缺这一档。
+	SeverityInfo = "info" // 信息
 )
 
 // ValidSeverity reports whether s is a known severity level.
 func ValidSeverity(s string) bool {
 	switch s {
-	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow:
+	case SeverityCritical, SeverityHigh, SeverityMedium, SeverityLow, SeverityInfo:
 		return true
 	}
 	return false
@@ -259,7 +262,7 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	order := "f.created_at DESC, f.id DESC"
 	if f.Sort == "severity" {
 		// critical > high > medium > low > 其它, then newest first.
-		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
+		order = `CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 WHEN 'info' THEN 0 ELSE 0 END DESC, f.created_at DESC, f.id DESC`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	q := fmt.Sprintf(`
@@ -290,6 +293,7 @@ type FindingGroup struct {
 	High            int       `json:"high"`
 	Medium          int       `json:"medium"`
 	Low             int       `json:"low"`
+	Info            int       `json:"info"`
 	LastFoundAt     time.Time `json:"last_found_at"`
 }
 
@@ -323,7 +327,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 
 	order := "MAX(f.created_at) DESC, t.id DESC NULLS LAST"
 	if f.Sort == "severity" {
-		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) DESC, MAX(f.created_at) DESC, t.id DESC NULLS LAST`
+		order = `MAX(CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 WHEN 'info' THEN 0 ELSE 0 END) DESC, MAX(f.created_at) DESC, t.id DESC NULLS LAST`
 	}
 	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
 	query := fmt.Sprintf(`SELECT t.id, COALESCE(t.name,''), COALESCE(t.description,''), COALESCE(
@@ -338,6 +342,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 		COUNT(*) FILTER (WHERE f.severity='high'),
 		COUNT(*) FILTER (WHERE f.severity='medium'),
 		COUNT(*) FILTER (WHERE f.severity='low'),
+		COUNT(*) FILTER (WHERE f.severity='info'),
 		MAX(f.created_at)%s
 		ORDER BY %s LIMIT $%d OFFSET $%d`, grouped, order, len(args)+1, len(args)+2)
 	rows, err := d.Query(query, pageArgs...)
@@ -350,7 +355,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 		var group FindingGroup
 		var taskID sql.NullInt64
 		if err := rows.Scan(&taskID, &group.TaskName, &group.TaskDescription, &group.TaskStatus, &group.Count,
-			&group.Critical, &group.High, &group.Medium, &group.Low, &group.LastFoundAt); err != nil {
+			&group.Critical, &group.High, &group.Medium, &group.Low, &group.Info, &group.LastFoundAt); err != nil {
 			return nil, 0, 0, err
 		}
 		if taskID.Valid {
@@ -470,7 +475,7 @@ RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8C
 // filter;ids 为空时按 filter 导出(导出当前筛选/全部)。结果按严重等级降序、
 // 再按时间倒序,与「导出汇总报告」的分组顺序一致。
 func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, error) {
-	const order = `ORDER BY CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, f.created_at DESC`
+	const order = `ORDER BY CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 WHEN 'info' THEN 0 ELSE 0 END DESC, f.created_at DESC`
 	cols := findingSelectCols + `, COALESCE(f.report, '')`
 
 	var q string
@@ -530,6 +535,7 @@ type FindingStats struct {
 	High        int                 `json:"high"`
 	Medium      int                 `json:"medium"`
 	Low         int                 `json:"low"`
+	Info        int                 `json:"info"`
 	VulnClasses []string            `json:"vulnclasses"`
 	Tasks       []FindingTaskOption `json:"tasks"` // 有漏洞的任务(供「按任务」下拉)
 }
@@ -555,8 +561,9 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 		COUNT(*) FILTER (WHERE severity = 'critical'),
 		COUNT(*) FILTER (WHERE severity = 'high'),
 		COUNT(*) FILTER (WHERE severity = 'medium'),
-		COUNT(*) FILTER (WHERE severity = 'low')
-		FROM findings`).Scan(&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low)
+		COUNT(*) FILTER (WHERE severity = 'low'),
+		COUNT(*) FILTER (WHERE severity = 'info')
+		FROM findings`).Scan(&st.Total, &st.Pending, &st.Critical, &st.High, &st.Medium, &st.Low, &st.Info)
 	if err != nil {
 		return nil, err
 	}

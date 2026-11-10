@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmrec"
@@ -385,6 +386,9 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Decision string `json:"decision"` // "allowed" | "denied"
+		// E1-5（方案 v10 §9）：批准时可选「同时放行本任务后续同类调用」——签发
+		// (task, tool, agent) 级 task_tool 通配凭据；仅限非基线工具，随任务终态过期。
+		TaskTool bool `json:"task_tool"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -402,7 +406,27 @@ func (s *Server) interceptDecide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	// task_tool 通配凭据：取 pending 行的任务/工具/agent，非基线工具才可签。
+	issued := false
+	if req.Decision == "allowed" && req.TaskTool && s.m != nil && s.m.pg != nil {
+		if p, err := s.m.pg.GetInterceptPending(id); err == nil && p != nil && p.TaskID != nil {
+			if taskID, perr := strconv.ParseInt(strings.TrimSpace(*p.TaskID), 10, 64); perr == nil && taskID > 0 {
+				if reason, _ := sodpolicy.BaselineHit(p.ToolName, []byte(p.ToolInput)); reason == "" {
+					if _, cerr := s.m.pg.CreateSodManualOverride(&db.SodManualOverride{
+						ToolKey:   p.ToolName,
+						TaskID:    taskID,
+						AgentKey:  p.AgentName,
+						Scope:     "task_tool",
+						Reason:    "ask 批准·同类放行（E1-5）",
+						CreatedBy: "operator",
+					}); cerr == nil {
+						issued = true
+					}
+				}
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "task_tool_issued": issued})
 }
 
 // --- tool-config (全局工具拦截范围) ---

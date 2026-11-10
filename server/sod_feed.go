@@ -28,6 +28,8 @@ type sodFeedRow struct {
 	Auditor    string            `json:"auditor"`
 	Relevance  string            `json:"relevance"`
 	Note       string            `json:"note"`
+	// E1-2（方案 v10 §9）：改判放行行在大屏可见——checks 里带 manual_override 标记。
+	Overridden string            `json:"overridden"`
 	Checks     map[string]string `json:"-"`
 }
 
@@ -39,7 +41,8 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	recent, err := pg.Query(`
 		SELECT id, to_char(created_at,'HH24:MI:SS'), COALESCE(source_agent,''), tool_name, verdict,
 		       COALESCE(reason_code,''), COALESCE(checks->>'category',''), COALESCE(checks->>'auditor',''),
-		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(note,120),'')
+		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(note,120),''),
+		       COALESCE(checks->>'manual_override','')
 		FROM sod_decisions ORDER BY id DESC LIMIT 50`)
 	if err == nil {
 		defer recent.Close()
@@ -48,7 +51,7 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	for recent != nil && recent.Next() {
 		var r sodFeedRow
 		if err := recent.Scan(&r.ID, &r.ToChar, &r.Agent, &r.Tool, &r.Verdict,
-			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.Note); err == nil {
+			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.Note, &r.Overridden); err == nil {
 			rows = append(rows, r)
 		}
 	}
@@ -74,6 +77,7 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 
 	stats := map[string]any{
 		"auto_pass_1h": 0, "auditor_deny_1h": 0, "human_1h": 0, "hard_deny_1h": 0, "blocked_intents": 0,
+		"override_1h": 0,
 	}
 	var n int
 	if pg.QueryRow(`SELECT count(*) FROM sod_decisions WHERE verdict='approve' AND created_at>now()-interval '1 hour'`).Scan(&n) == nil {
@@ -84,6 +88,10 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	}
 	if pg.QueryRow(`SELECT count(*) FROM sod_decisions WHERE checks->>'elevated_ask' IS NOT NULL AND created_at>now()-interval '1 hour'`).Scan(&n) == nil {
 		stats["human_1h"] = n
+	}
+	// E1-2：近 1h 人工改判放行数（此前改判在大屏上不可见）。
+	if pg.QueryRow(`SELECT count(*) FROM sod_decisions WHERE verdict='approve' AND checks->>'manual_override' IS NOT NULL AND created_at>now()-interval '1 hour'`).Scan(&n) == nil {
+		stats["override_1h"] = n
 	}
 	if pg.QueryRow(`SELECT count(*) FROM sod_decisions WHERE verdict='deny' AND reason_code IN ('destructive_action','platform_baseline','category_deny') AND created_at>now()-interval '1 hour'`).Scan(&n) == nil {
 		stats["hard_deny_1h"] = n

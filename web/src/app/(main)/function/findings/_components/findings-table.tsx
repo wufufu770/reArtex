@@ -40,7 +40,7 @@ import { statusMeta } from "@/lib/status";
 import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
+export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 
 export const FINDING_STATUSES: FindingStatus[] = [
   "pending",

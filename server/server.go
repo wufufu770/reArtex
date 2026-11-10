@@ -1253,6 +1253,10 @@ func (s *Server) Handler() http.Handler {
 	s.registerSodCategoryRoutes(mux)
 	s.registerSodFeedRoutes(mux)
 	mux.HandleFunc("GET /api/sod/overrides", s.sodOverrideList)
+	// 治理/审计聚合视图（方案 v10 §9 E1-6/E1-8，只读）。
+	mux.HandleFunc("GET /api/tasks/{id}/governance", s.taskGovernance)
+	mux.HandleFunc("GET /api/audit/events", s.auditEvents)
+	mux.HandleFunc("GET /api/sod/hookchain", s.hookChain)
 	mux.HandleFunc("GET /api/sod/review-queue", s.sodReviewQueue)
 	mux.HandleFunc("GET /api/sod/circuit", s.sodCircuitList)
 	mux.HandleFunc("GET /api/sod/circuit/{tool_key}", s.sodCircuitGet)

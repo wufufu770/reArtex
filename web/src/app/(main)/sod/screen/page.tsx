@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { api } from "@/lib/api";
 import type { SodFeed, SodFeedPending, SodFeedRow, SodFeedStats, SodMergedGateMode } from "@/lib/types";
@@ -110,6 +111,15 @@ function FeedRow({ row }: { row: SodFeedRow }) {
         >
           {meta.label}
         </span>
+        {/* E1-2：人工改判的放行必须在大屏可见——机器放行与人工改判不能混成一种绿。 */}
+        {row.verdict === "approve" && row.overridden && (
+          <Badge
+            variant="outline"
+            className="shrink-0 border-violet-500/30 bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-400"
+          >
+            人工改判
+          </Badge>
+        )}
       </div>
       <div className="mt-1 flex min-w-0 items-center gap-1.5">
         {row.category && (
@@ -128,7 +138,8 @@ function FeedRow({ row }: { row: SodFeedRow }) {
   );
 }
 
-// PendingCard 是中列的待人工裁决卡：工具 + agent + reason 全文 + 脱敏载荷（可展开）+ 大按钮。
+// PendingCard 是中列的待人工裁决卡：工具 + agent + reason 全文 + 脱敏载荷（可展开）+
+// 「同类放行」复选框（E1-5）+ 大按钮。
 function PendingCard({
   item,
   busy,
@@ -136,9 +147,11 @@ function PendingCard({
 }: {
   item: SodFeedPending;
   busy: boolean;
-  onDecide: (id: number, decision: "allowed" | "denied") => void;
+  onDecide: (id: number, decision: "allowed" | "denied", taskTool?: boolean) => void;
 }) {
   const [expanded, setExpanded] = React.useState(false);
+  // E1-5：勾选后允许时一并签发 task_tool 通配凭据（随任务终态过期；基线类永不放行）。
+  const [taskTool, setTaskTool] = React.useState(false);
   const hasInput = item.input.trim().length > 0;
 
   return (
@@ -175,12 +188,29 @@ function PendingCard({
           </div>
         )}
 
+        <label
+          htmlFor={`task-tool-${item.id}`}
+          className="flex cursor-pointer items-start gap-2 pt-1 text-muted-foreground text-xs"
+        >
+          <Checkbox
+            id={`task-tool-${item.id}`}
+            checked={taskTool}
+            onCheckedChange={(v) => setTaskTool(v === true)}
+            disabled={busy}
+            className="mt-0.5"
+          />
+          <span className="flex flex-col gap-0.5">
+            <span>同时放行本任务后续同类调用</span>
+            <span className="text-[11px]">签发 task_tool 凭据，随任务终态过期；基线类永不放行</span>
+          </span>
+        </label>
+
         <div className="grid grid-cols-2 gap-2 pt-1">
           <Button
             variant="outline"
             disabled={busy}
             className="border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400 dark:hover:text-emerald-400"
-            onClick={() => onDecide(item.id, "allowed")}
+            onClick={() => onDecide(item.id, "allowed", taskTool)}
           >
             <CircleCheckIcon /> 允许
           </Button>
@@ -260,7 +290,7 @@ function PendingList({
   items: SodFeedPending[];
   loaded: boolean;
   decidingId: number | null;
-  onDecide: (id: number, decision: "allowed" | "denied") => void;
+  onDecide: (id: number, decision: "allowed" | "denied", taskTool?: boolean) => void;
 }) {
   if (!loaded) {
     return <p className="py-6 text-center text-muted-foreground text-sm">加载中…</p>;
@@ -305,6 +335,11 @@ function StatsPanel({ stats, loaded }: { stats: SodFeedStats | null | undefined;
         />
       </div>
       <StatCard
+        label="人工改判 · 近1h"
+        value={stats.override_1h}
+        hint={stats.override_1h > 0 ? "有人工放行介入，裁决流里带「人工改判」徽标" : "近 1h 没有人工改判"}
+      />
+      <StatCard
         label="blocked 意图"
         value={stats.blocked_intents}
         hint={stats.blocked_intents > 0 ? "有意图被裁决挡住，去任务详情处理" : "没有意图被挡"}
@@ -342,6 +377,7 @@ export default function SodScreenPage() {
           auditor_deny_1h: r.stats?.auditor_deny_1h ?? 0,
           human_1h: r.stats?.human_1h ?? 0,
           hard_deny_1h: r.stats?.hard_deny_1h ?? 0,
+          override_1h: r.stats?.override_1h ?? 0,
           blocked_intents: r.stats?.blocked_intents ?? 0,
         },
         mode: r.mode ?? "off",
@@ -377,15 +413,19 @@ export default function SodScreenPage() {
     };
   }, [load]);
 
-  const decide = React.useCallback(async (id: number, decision: "allowed" | "denied") => {
+  const decide = React.useCallback(async (id: number, decision: "allowed" | "denied", taskTool = false) => {
     setDecidingId(id);
     try {
-      await api.interceptDecide(id, decision);
+      const r = await api.interceptDecide(id, decision, taskTool);
       decidedRef.current.add(id);
       setFeed((prev) => (prev ? { ...prev, pending: prev.pending.filter((p) => p.id !== id) } : prev));
-      toast.success(
-        decision === "allowed" ? `已允许 #${id}：worker 重试同一调用将放行` : `已拒绝 #${id}：worker 将收到拒绝`,
-      );
+      if (decision === "denied") {
+        toast.success(`已拒绝 #${id}：worker 将收到拒绝`);
+      } else if (r.task_tool_issued) {
+        toast.success(`已允许 #${id}：本次与本任务后续同类调用都将放行（随任务终态过期）`);
+      } else {
+        toast.success(`已允许 #${id}：worker 重试同一调用将放行`);
+      }
     } catch (e) {
       toast.error(`决策失败：${(e as Error).message}`);
     } finally {
@@ -468,7 +508,7 @@ export default function SodScreenPage() {
             items={pending}
             loaded={loaded}
             decidingId={decidingId}
-            onDecide={(id, d) => void decide(id, d)}
+            onDecide={(id, d, taskTool) => void decide(id, d, taskTool)}
           />
         </Column>
 

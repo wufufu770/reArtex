@@ -27,6 +27,7 @@ import type {
   AssetInterceptRuleInput,
   Audit,
   AuditChainVerification,
+  AuditEventsPage,
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
@@ -96,6 +97,7 @@ import type {
   SodCircuit,
   SodDecision,
   SodFeed,
+  SodHookChain,
   SodMergedGateMode,
   SodReviewItem,
   SSProject,
@@ -117,6 +119,7 @@ import type {
   TaskCategory,
   TaskConstraint,
   TaskGoal,
+  TaskGovernance,
   TaskHallGroupDetail,
   TaskHallMessage,
   TaskHallQuota,
@@ -1205,6 +1208,30 @@ export const api = {
   // 2s 轮询。决策动作不在这里——复用下面的 interceptDecide，不新开权限面。
   sodFeed: () => get<SodFeed>("/sod/feed"),
 
+  // 任务治理聚合视图（方案 v10 §9 E1-6，只读）：本任务裁决流 + 人工改判凭据 +
+  // 系统事件一次拉全，供任务详情「治理」tab。taskId 是任务的数字 id。
+  sodGovernance: (taskId: string | number) =>
+    get<TaskGovernance>(`/tasks/${taskId}/governance`).then((r) => ({
+      ...r,
+      decisions: arr(r.decisions),
+      overrides: arr(r.overrides),
+      system_events: arr(r.system_events),
+    })),
+  // 生效 hook 链的只读描述（E1-8）：可热改面 + 代码常量只读面。
+  hookChain: () =>
+    get<SodHookChain>("/sod/hookchain").then((r) => ({
+      editable: arr(r.editable),
+      readonly: arr(r.readonly),
+    })),
+
+  // 审计事件明细分页（方案 v10 §9 E1-8）：audit_events 哈希链逐条明细（倒序），
+  // 与 /audit/chain 的链校验同源。append-only，页面上没有任何写入口。
+  auditEvents: (page = 1, size = 50) =>
+    get<AuditEventsPage>(`/audit/events?page=${page}&size=${size}`).then((r) => ({
+      ...r,
+      items: arr(r.items),
+    })),
+
   // 审计链校验。⚠️ 断链是**结论**（200 + intact=false），不是接口坏了 ——
   // 所以这里不把 intact=false 当异常抛出去。
   auditChain: () => get<AuditChainVerification>("/audit/chain"),
@@ -1603,8 +1630,14 @@ export const api = {
   // ---- intercept pending (ask) ----
   interceptPending: () => get<{ pending: InterceptPending[] }>("/intercept/pending").then((r) => arr(r.pending)),
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
-  interceptDecide: (id: number, decision: "allowed" | "denied") =>
-    post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),
+  // E1-5（方案 v10 §9）：批准时可选「同时放行本任务后续同类调用」——taskTool=true
+  // 时 body 带 task_tool，签发 (task, tool, agent) 级通配凭据，随任务终态过期；
+  // 基线类工具后端照旧拒绝签发（响应 task_tool_issued=false）。仅 allowed 有意义。
+  interceptDecide: (id: number, decision: "allowed" | "denied", taskTool = false) =>
+    post<{ ok: boolean; task_tool_issued?: boolean }>(`/intercept/pending/${id}/decide`, {
+      decision,
+      ...(taskTool ? { task_tool: true } : {}),
+    }),
   interceptExecution: (id: number, conversationId?: number) =>
     get<import("@/lib/types").InterceptExecution>(
       `/intercept/history/${id}/execution${conversationId ? `?conversation=${conversationId}` : ""}`,
