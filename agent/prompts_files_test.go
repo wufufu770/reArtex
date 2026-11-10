@@ -22,7 +22,7 @@ var builtinPromptDigestAnchors = map[string]string{
 	"goals":     "72a7a0159443b41dde29dfba8a3de6a2c8a15b273935495a7b88561fa708aa68",
 	// P1 角色工具纪律（方案 v3.1 §5.1）：planner 移除 Bash 探测授权段（工具面编译期
 	// 白名单同步收口）——有意识的提示词行为变更，锚点随之更新（2026-11-05）。
-	"planner":   "763dbee0189fad8ad444f1efc5381a6630baeff8cb6a9c4e2e7acdbb277a8ed3",
+	"planner":   "4d1f7ca0282c577f09106f1e8c95b83b3aae03bacfb7dca722d4a7aeb0b84a42", // F1 许愿纪律（方案 v10 §12）：planner 提示词加预测字段与可证伪许愿段——有意识的变更，锚点随之更新（2026-11-11）。
 	"mainagent": "12bb69ee0886c4fb9beb936d882021a91104860f1da69a5e3eda3d9e345cd399",
 	"worker":    "80fbb1c610dd57e266c20b9145793339eee540b809f6db8f5336261b45879f08",
 	"auto":      "b2a71b82243607337b19f0642317fed88c144d536412d80eaaf90807f2905a1d",

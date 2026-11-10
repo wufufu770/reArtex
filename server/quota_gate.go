@@ -139,6 +139,11 @@ func (s *Server) noteTaskQuotaOutcome(taskID string, err error) bool {
 		log.Printf("[quota] task %s 落终态失败: %v", taskID, terr)
 	} else if won {
 		s.engine.cancelExec(taskID, agent.Causef("budget_exhausted", "群组预算耗尽", "%s", body))
+		// B①（方案 v10 §15）：终态洁癖补挂之一——预算僵尸落 failed 同样清残留意图
+		// （任务 #2 残留 19 意图的根因：5 条终态路径只接了 2 条）。
+		if t, ok := s.m.Task(taskID); ok {
+			s.engine.settleIntentsOnConclude(t, "预算耗尽落终态：残留非终态意图统一 stopped")
+		}
 	}
 	s.notifyTaskScoped(taskID, "task_budget_exhausted", "high", true, body)
 	return true

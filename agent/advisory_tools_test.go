@@ -123,7 +123,7 @@ func TestExistingAgentToolBindingsUnchanged(t *testing.T) {
 		"list_assets":              {"mainagent", "planner", "worker", "auto", "pentest", "recon", "creative"},
 		"report_finding":           {"mainagent", "planner", "worker", "auto", "pentest"},
 		"record_fact":              {"mainagent", "worker", "recon"},
-		"add_task_scope":           {"mainagent", "planner"},
+		"add_task_scope":           {"mainagent", "planner", "worker"}, // E1-5：恢复 worker 横向扩权执行端（仍走 ask+预算）
 		"list_untested_assets":     {"mainagent", "planner"},
 		"list_goals":               {"planner"},
 		"prove_goal":               {"planner"},

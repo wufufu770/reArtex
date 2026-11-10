@@ -270,20 +270,6 @@ func (d *DB) EnsureSessionSchema() error {
 // ensureSessionSchema 是访问层的幂等入口：首次调用时建表，之后只是一次 map 查表。
 func (d *DB) ensureSessionSchema() error { return d.EnsureSessionSchema() }
 
-// BackfillSessions 是 §4.7 的「加列 + 加行」回填：幂等、可重跑、不删数据。
-//
-//  1. 每条 conversations ⇒ 自成一个 session + 一行成员（agent_key = 会话的
-//     agent_key；auto 在会话内是 dispatcher，proposal §9 约束②）。
-//  2. 每个 chat_groups ⇒ 一个 kind='task_hall' 的 session，并回填
-//     chat_groups.session_id。
-//
-// 幂等靠「只处理 session_id IS NULL 的行」；回退只需停用新前端，旧数据无损。
-func (d *DB) BackfillSessions() error {
-	if err := d.ensureSessionSchemaTables(); err != nil {
-		return err
-	}
-	return d.backfillSessions()
-}
 
 // backfillSessions 只做回填（DDL 由调用方保证已应用）。
 func (d *DB) backfillSessions() error {

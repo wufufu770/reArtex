@@ -436,10 +436,13 @@ func (s *Server) ssIngest(as *db.AssetStore, assetType string, raw json.RawMessa
 		if it.Host == "" {
 			return ""
 		}
-		if _, err := as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: it.Host, RecordType: it.Type, RecordValue: it.Value}); err != nil {
+		sid, err := as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: it.Host, RecordType: it.Type, RecordValue: it.Value})
+		if err != nil {
 			return "subdomain " + it.Host + ": " + err.Error()
 		}
 		synced["subdomain"]++
+		// W7（方案 v10 §6）：平台侧入库成功后补全——新域名走 DNS 解析（best-effort）。
+		s.enrichPlatformAssets(0, []platformEnrichJob{{id: sid, domain: it.Host}})
 		for _, ip := range it.IP {
 			if ip != "" {
 				if _, err := as.UpsertIP(db.UpsertIPReq{IP: ip, BoundDomains: []string{it.Host}}); err == nil {
@@ -483,18 +486,26 @@ func (s *Server) ssIngest(as *db.AssetStore, assetType string, raw json.RawMessa
 			if it.URL == "" {
 				return ""
 			}
-			if _, err := as.UpsertHTTPService(db.UpsertHTTPServiceReq{
+			wid, err := as.UpsertHTTPService(db.UpsertHTTPServiceReq{
 				URL: it.URL, Technologies: it.Products, StatusCode: it.Status,
 				PageTitle: it.Title, FaviconMMH3: it.Icon, IP: it.IP,
-			}); err != nil {
+			})
+			if err != nil {
 				return "service " + it.URL + ": " + err.Error()
 			}
+			// W7（方案 v10 §6）：平台侧入库成功后补全——新 URL 走 HTTP 探测（best-effort）。
+			s.enrichPlatformAssets(0, []platformEnrichJob{{id: wid, url: it.URL}})
 		} else {
 			port, _ := strconv.Atoi(it.Port)
-			if _, err := as.UpsertOtherService(db.UpsertOtherServiceReq{
+			wid, err := as.UpsertOtherService(db.UpsertOtherServiceReq{
 				Domain: it.Domain, IP: it.IP, Port: port, ServiceName: it.Service,
-			}); err != nil {
+			})
+			if err != nil {
 				return "service " + it.IP + ":" + it.Port + ": " + err.Error()
+			}
+			if it.Domain != "" {
+				// W7（方案 v10 §6）：非 HTTP 服务挂在域名上——新域名同样走 DNS 补全。
+				s.enrichPlatformAssets(0, []platformEnrichJob{{id: wid, domain: it.Domain}})
 			}
 		}
 		synced["service"]++

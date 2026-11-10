@@ -298,6 +298,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
+		// W4（方案 v10 §6）：记忆检索的幂等 DDL 在启动时装一次（向量通道的表与索引）。
+		// 失败只记日志不阻断启动——全文通道不依赖这张表，检索侧会把缺表报成显式降级。
+		if err := m.pg.EnsureMemoryRetrievalSchema(); err != nil {
+			log.Printf("[boot] EnsureMemoryRetrievalSchema: %v（向量通道将不可用，全文检索不受影响）", err)
+		}
 		// 对抗复核队列的访问面。适配器把 db 的表形状挡在 agent 包之外 ——
 		// agent 只认「读队列 / 结案」这两个动作，不认表名与列名。
 		// 不注入时那两个工具会返回中文错误而不是崩，但 redteam 也就永远查不到队列。
@@ -334,6 +339,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
+	}
+	// W1（方案 v10 §6）：群信箱接线。此前 WireGroupMailbox 全仓零调用 ⇒
+	// agent.DefaultGroupMailbox 恒 nil，群成员会话每轮收信恒空。装配一次即可；
+	// 共享上下文句柄同点接上（W6 读线的前置，session_digest_api.go 同款纪律）。
+	if m.pg != nil {
+		WireGroupMailbox(m.pg)
+		WireSessionContext(m.pg)
 	}
 	// precedence: persisted DB config > env.
 	if cfg, ok := s.loadLLMConfig(); ok {
@@ -593,6 +605,9 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
 	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	// W5（方案 v10 §6）：记忆层接进 chat lane——chat 没有 ToolSet，句柄由装配段直给
+	// （同一 pg 通道；nil 时不注入，见 agent/chat.go 的 SystemReminderFunc 分支）。
+	s.chatAgent.SetMemoryDB(s.m.pg)
 	s.llmProv = prov
 	s.llmCfg = cfg
 	s.llmOn = true
@@ -872,6 +887,7 @@ func (s *Server) chatAgentForProfileModel(id int64, model string) *agent.ChatAge
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	ca.SetMaxTokens(maxTokensResolver(cfg))
 	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
+	ca.SetMemoryDB(s.m.pg)                     // W5（方案 v10 §6）：记忆层接进 chat lane（同全局 chat runner）
 	s.profMu.Lock()
 	if ex := s.profChatAgents[key]; ex != nil { // lost the race → keep the winner
 		ca = ex
@@ -1086,6 +1102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
+	mux.HandleFunc("GET /api/llm/totals", s.pgLLMTokenTotals)        // W9（方案 v10 §6）：全任务 token 总量（exploration_id → total）
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)

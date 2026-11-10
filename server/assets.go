@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -504,6 +506,7 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	var results []result
 	var errs []errEntry
+	var enrichJobs []platformEnrichJob // W7：入库成功的域名/URL，出循环后统一补全
 
 	for i, a := range req.Assets {
 		var id int64
@@ -545,6 +548,86 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 			_ = as.SetTaskAssetSource(req.TaskID, id, "api", "通过资产 API 登记", nil)
 		}
 		results = append(results, result{Index: i, ID: id, Type: a.Type})
+		// W7（方案 v10 §6）：入库成功即收集补全作业——新域名走 DNS 解析、带 URL 的走 HTTP 探测。
+		switch {
+		case (a.Type == "root_domain" || a.Type == "subdomain") && a.Domain != "":
+			enrichJobs = append(enrichJobs, platformEnrichJob{id: id, domain: a.Domain})
+		case a.URL != "" && (a.Type == "service" || a.Type == "endpoint"):
+			enrichJobs = append(enrichJobs, platformEnrichJob{id: id, url: a.URL})
+		case a.Type == "service" && a.Domain != "":
+			enrichJobs = append(enrichJobs, platformEnrichJob{id: id, domain: a.Domain})
+		}
 	}
+	// W7（方案 v10 §6/§15）：平台侧入库出口的补全 + activity 留痕（best-effort，不影响响应）。
+	s.enrichPlatformAssets(req.TaskID, enrichJobs)
 	writeJSON(w, 200, map[string]any{"results": results, "errors": errs})
+}
+
+// platformEnrichJob 是一条待补全的入库资产：id 是触发补全的资产 id（enrich 入队的
+// 挂靠键），domain/url 二选一或同时为空都合法（空项入队前被 enrich 的 id0/arg 门拦掉）。
+type platformEnrichJob struct {
+	id     int64
+	domain string
+	url    string
+}
+
+// enrichPlatformAssets 平台侧资产入库的补全出口（W7，方案 v10 §6/§15）。
+//
+// enrich 引擎此前只挂在 worker 工具层（ToolSet.SetEnrich），平台侧两个入库口
+// ——手工资产 API 与 ScopeSentry 同步——从不触发补全，登记进来的域名/URL 永远
+// 没有 DNS/HTTP 留痕。这里统一接上：新域名 → ResolveDomain（解析回写 IP/记录）、
+// 新 URL → ProbeSite（探测回写状态码/标题；引擎用自带 client，不进任务出网代理），
+// 并留一条 kind=note / worker=system 的 activity（如实标注「平台侧补全」；activity
+// 的 FK 挂 exploration，无任务上下文 ⇒ 只补全不留痕）。
+//
+// best-effort：单独 goroutine + 5s 超时兜底，enrich 未装配/超时/panic 一律只 log，
+// 不影响入库响应。句柄取 Manager.Enrich()（manager.go 装配的唯一实例）——不再另挂
+// Server 字段，避免同一引擎出现两个可达入口。
+func (s *Server) enrichPlatformAssets(taskID int64, jobs []platformEnrichJob) {
+	eng := s.m.Enrich()
+	if eng == nil || s.m.pg == nil || len(jobs) == 0 {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[enrich] 平台侧补全 panic: %v", r)
+			}
+		}()
+		// 5s 超时兜底：补全是入队即返回的异步作业，慢只可能慢在 activity 留痕的
+		// DB 写——超时只放弃等待并留日志，goroutine 随调用自然结束。
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				log.Printf("[enrich] 平台侧补全留痕超时(>5s)，放弃等待")
+			}
+		}()
+		var domains, urls int
+		for _, j := range jobs {
+			if j.domain != "" {
+				eng.ResolveDomain(j.id, j.domain)
+				domains++
+			}
+			if j.url != "" {
+				eng.ProbeSite(j.id, j.url)
+				urls++
+			}
+		}
+		if taskID <= 0 {
+			return // 无任务上下文：activity FK 挂 exploration，留不了痕
+		}
+		t, err := s.m.pg.GetTask(taskID)
+		if err != nil || t == nil || t.ExplorationID <= 0 {
+			return
+		}
+		if _, err := s.m.pg.Exploration(t.ExplorationID).AppendActivity(db.Activity{
+			Worker: "system", Kind: "note",
+			Summary: fmt.Sprintf("平台侧补全：已触发 DNS 解析 %d 个域名、HTTP 探测 %d 个 URL", domains, urls),
+		}); err != nil {
+			log.Printf("[enrich] 平台侧补全留痕失败（task %d）: %v", taskID, err)
+		}
+	}()
 }

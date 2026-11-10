@@ -221,6 +221,7 @@ func (s *Server) launchSessionWakeTurn(sessionID int64, agentKey, prompt string,
 		s.chatMu.Lock()
 		s.sessionWakeChain[busyKey] = depth + 1
 		s.chatMu.Unlock()
+		turnDone := false
 		defer func() {
 			s.chatMu.Lock()
 			delete(s.sessionWakeChain, busyKey)
@@ -228,6 +229,18 @@ func (s *Server) launchSessionWakeTurn(sessionID int64, agentKey, prompt string,
 			if r := recover(); r != nil {
 				log.Printf("[session-wake] session %d 唤醒 %s panic: %v", sessionID, agentKey, r)
 			}
+			if turnDone {
+				return
+			}
+			// A6（方案 v10 §15）：panic 打断了 turn ⇒ 补跑确定性收尾（presence 回位 +
+			// drain 暂存消息），否则成员卡 working、暂存消息永不投递。text 传空串 ⇒
+			// 不往群里写空泡；收尾自身再 panic 也不能拖死 goroutine——再吞一层。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[session-wake] session %d panic 收尾失败: %v", sessionID, r)
+				}
+			}()
+			s.finishSessionWakeTurn(sessionID, agentKey, c, "", depth+1, chainID)
 		}()
 		// 唤醒提示先落 transcript（人能在「旧对话记录」里看到为什么被叫起来），
 		// 再跑 turn；失败只记日志 —— 唤醒是尽力而为，消息本体已落库，重发即可。
@@ -240,6 +253,7 @@ func (s *Server) launchSessionWakeTurn(sessionID int64, agentKey, prompt string,
 			log.Printf("[session-wake] session %d 唤醒 %s 失败: %v", sessionID, agentKey, err)
 		}
 		s.finishSessionWakeTurn(sessionID, agentKey, c, text, depth+1, chainID)
+		turnDone = true
 	}()
 }
 

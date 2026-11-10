@@ -38,11 +38,17 @@ type ChatAgent struct {
 	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
 	groupMailbox   GroupMailbox // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
+	memoryDB       *db.DB       // 记忆层句柄（方案 v10 W5/W3）；nil = 本 runner 不注入记忆
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
 	return &ChatAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window}
 }
+
+// SetMemoryDB wires the memory-layer handle for this chat runner (nil = off).
+// chat 侧没有 ToolSet，句柄由 server 装配段直接给（与 worker/planner 的
+// ToolSet.SetMemoryDB 同一来源：pg 库句柄）。
+func (c *ChatAgent) SetMemoryDB(pg *db.DB) { c.memoryDB = pg }
 
 // SetNonStreaming wires a resolver deciding whether chat runs use the
 // non-streaming model path (true = non-streaming). nil/unset = streaming.
@@ -166,8 +172,11 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 
 	// 群聊消息：每轮开始时收取本成员的未读群消息并注入提示（协商上下文，不授权）。
 	groupDigest := c.collectGroupMailbox(ctx, agentKey)
+	// W6（方案 v10 §6）：跨会话共享读线最后一跳——与群 digest 同位拼进 system
+	// （函数自带空串兜底：未授权/额度冻结/读不出来 ⇒ 空串，调用方不必特判）。
+	shared := c.collectSessionSharedContext(ctx, agentKey)
 
-	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir)+groupDigest, def)
+	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir)+groupDigest+shared, def)
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,
@@ -206,6 +215,15 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		Settlement:   wrapupSettlement(agentKey, nil),
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	// W3（方案 v10 §6）：chat 是常驻会话（transcript 跨轮复用）⇒ 记忆块不拼进
+	// system（易变内容会损伤前缀缓存），改走 SystemReminderFunc 每轮现取现注；
+	// 无记忆/句柄未接线时返回空串（不塞空段）。全仓库无其他 lane 设置该钩子
+	// （grep 过 SystemReminderFunc），此处为首个使用者，不存在覆盖冲突。
+	if c.memoryDB != nil {
+		opts.SystemReminderFunc = func() string {
+			return MemoryPromptBlock(c.memoryDB, memoryScopeOfChatSession(sessionID))
+		}
 	}
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：会话成员各自的 thinking_effort
 	// 随每次请求生效（""=跟随 profile 默认）。

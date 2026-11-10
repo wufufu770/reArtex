@@ -87,7 +87,7 @@ func newSoDE2E(t *testing.T, opts sodE2EOptions) *sodE2E {
 
 // sodE2EPayload 造本次调用的原始载荷（由 host 决定 ⇒ 父子进程能算出同一份）。
 func sodE2EPayload(host string) []byte {
-	return []byte(`{"command":"curl https://` + host + `/probe"}`)
+	return []byte(`{"command":"curl -X POST -d q=1 https://` + host + `/probe"}`)
 }
 
 // sodE2EChain 造一条受管路径上的链（链 + 凭证表 + 被调工具）。

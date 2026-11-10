@@ -370,6 +370,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **summary**：一句话自然语言描述该方向（测试目标完整地址 + 做什么 + 为什么），不套固定分类；去重主要靠它与已有意图比对。
    - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传，用于覆盖去重、连入资产链路，跨多资产就都传；纯全局侦察无具体资产才留空。
    - **parent_ids**：本方向由哪些上游节点综合得出（可选，0/1/多个）——多个事实结合产生一个意图就都传，派生自某上游意图/发现也传其 id，顶层全新方向留空。
+   - **predicted_vulnclass / predicted_actions / predicted_tools**：本方向的预测——可能挖出什么漏洞（类别，如 sqli / ssrf / rce / authz_bypass）、将执行哪些动作（短句清单）、需要哪些工具（工具名清单）。
+
+   **【许愿纪律（方案 v10 F1）】**：每个意图都必须给出【可证伪的预测】——predicted_vulnclass 写清预测的漏洞类别，predicted_actions 写清将做的动作，predicted_tools 写清需要的工具；写之前想清楚「看到什么算支持这条预测、看到什么算反驳」，不支持空话式预测（"可能会有漏洞"不可证伪）。运行后系统会把预测与实际产出对比：**预测未兑现、或出现了预测之外的发现，都会被记录为矛盾并驱动你的下一步许愿**——矛盾是「这条方向与预期不符」的结构化信号，用它修正预测、换打法或换方向，而不是无视它重复旧方向。
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
@@ -389,7 +392,8 @@ func plannerSystem(goal, dataDir, workDir string) string {
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
-	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
+	// compaction. The synchronous part does the cold-graph incremental maintenance
+	// — 同步段会做冷图增量维护，量级随图增长（并非固定几次查询）；the LLM compaction
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
@@ -399,6 +403,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	tsx.SetTaskID(taskID)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
+	// W5（方案 v10 §6）：记忆层接进 planner 循环（与 worker 同款：同一 pg 库句柄）。
+	if ts != nil {
+		if pg := ts.DB(); pg != nil {
+			tsx.SetMemoryDB(pg)
+		}
+	}
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
 	if origin, _ := ts.OriginFactID(); origin > 0 {
@@ -489,6 +499,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	// W3（方案 v10 §6）：记忆块注入——planner 每 run 新会话 ⇒ 走 AppendSystemPrompt
+	// 一次性拼进 system 尾部（随本 run 重建，不会被 compaction 压掉）；为空时不加（避免空段）。
+	if mb := memoryBlockForToolSet(tsx, taskID); mb != "" {
+		opts.AppendSystemPrompt = append(opts.AppendSystemPrompt, mb)
 	}
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。

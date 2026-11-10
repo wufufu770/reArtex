@@ -197,6 +197,7 @@ func (s *Server) sideProvider(model sidequestion.Model) (llm.Provider, error) {
 		}
 		p, cfg, ok = s.providerForProfile(model.ProfileID)
 	} else {
+		// 该 lane 直连不走 Pool（failover 例外，见 server.go llmDirect 注释）。
 		s.cfgMu.Lock()
 		p, cfg, ok = s.llmDirect, s.llmCfg, s.llmOn
 		s.cfgMu.Unlock()

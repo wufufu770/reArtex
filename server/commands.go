@@ -99,6 +99,32 @@ func (s *Server) pgTokenByModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"models": models})
 }
 
+// pgLLMTokenTotals returns per-exploration token totals for every task in one
+// query（db.TokenTotalsAll）—— 供任务列表等 UI 批量消费（W9，方案 v10 §6）。
+//
+// 口径：total = input + output。缓存两列（cache_read/cache_write）⊆ input——只用于
+// 算「缓存占比」这类比率，**不参与求和**：llmrec 落库的是 SDK 规范化后的 Usage，
+// 缓存已折进 input，四列相加会把缓存前缀算两遍（同 db.TotalTokensForTask 的注释）。
+func (s *Server) pgLLMTokenTotals(w http.ResponseWriter, r *http.Request) {
+	pg := s.m.PG()
+	if pg == nil {
+		writeJSON(w, 200, map[string]any{"totals": map[string]db.TokenUsage{}})
+		return
+	}
+	totals, err := pg.TokenTotalsAll()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// map[int64] 经 JSON 序列化 key 会变字符串；显式转一层让形状稳定
+	// （exploration_id（十进制字符串）→ usage）。
+	out := make(map[string]db.TokenUsage, len(totals))
+	for eid, u := range totals {
+		out[strconv.FormatInt(eid, 10)] = u
+	}
+	writeJSON(w, 200, map[string]any{"totals": out})
+}
+
 // pgUsageStats returns global llm_usage aggregates for the dashboard's "new" token
 // view: per-profile totals (all-time) + per-(profile, day) buckets for the daily
 // chart. Sourced from the always-on metering ledger, so it is accurate across
