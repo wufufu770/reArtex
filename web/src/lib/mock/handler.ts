@@ -1877,7 +1877,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return { nodes: mockBuildAssetTree(list), finding_total: list.length, truncated: false };
   }
   if (path === "/exploration/findings/groups") {
-    const severityOrder = { critical: 4, high: 3, medium: 2, low: 1 } as const;
+    const severityOrder = { critical: 4, high: 3, medium: 2, low: 1, info: 0 } as const;
     const list = mockApplyAssetScope(mockFilterFindings(q), q.get("asset_scope"));
 
     const grouped = new Map<string, typeof list>();
@@ -2119,7 +2119,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
     if (!q.has("page") && !q.has("limit")) return mockFindings.map(withFid);
-    const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
+    const sev = { critical: 4, high: 3, medium: 2, low: 1, info: 0 } as const;
     const list = mockApplyAssetScope(mockFilterFindings(q), q.get("asset_scope"));
     list.sort((a, b) =>
       q.get("sort") === "severity"

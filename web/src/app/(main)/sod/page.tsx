@@ -39,11 +39,31 @@ const ALL_TASKS = "__all__";
 // 账本在任务跑动时一直增长，10 秒一轮足够跟上，又不至于把库读爆。
 const POLL_MS = 10_000;
 
+// 载荷预览的默认截断长度：60 字符足够辨认「这是哪一次调用」，完整内容靠行内
+// 「展开/收起」（方案 v10 §9）——整段铺开会让账本在任务跑动时难以扫读。
+const PREVIEW_LIMIT = 60;
+
+// fmtPreview 把载荷预览截到默认长度；展开后由调用方直接渲染全文。
+function fmtPreview(text: string): string {
+  if (text.length <= PREVIEW_LIMIT) return text;
+  return `${text.slice(0, PREVIEW_LIMIT)}…`;
+}
+
 // DecisionRow 是账本一行的渲染。
 //
 // 分层（tier）是**读时推导**的（下界，不是真值），所以这一列只呈现后端给的
 // 结论，不在这里重新解释「所以其实更严」—— 那是后端 tier_note 的口径。
-function DecisionRow({ row, onReview }: { row: SodDecision; onReview?: (row: SodDecision) => void }) {
+function DecisionRow({
+  row,
+  onReview,
+  previewExpanded,
+  onTogglePreview,
+}: {
+  row: SodDecision;
+  onReview?: (row: SodDecision) => void;
+  previewExpanded: boolean;
+  onTogglePreview: (id: number) => void;
+}) {
   return (
     <TableRow>
       <TableCell>
@@ -90,12 +110,23 @@ function DecisionRow({ row, onReview }: { row: SodDecision; onReview?: (row: Sod
         </div>
       </TableCell>
       <TableCell className="hidden lg:table-cell">
-        <div className="flex max-w-md flex-col gap-1">
+        <div className="flex max-w-md flex-col items-start gap-1">
           <span className="font-mono text-muted-foreground text-xs">{fmtDigest(row.payload_digest)}</span>
           {row.payload_preview && (
-            <pre className="max-h-20 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-2 font-mono text-[10px]">
-              {row.payload_preview}
-            </pre>
+            <>
+              <pre className="whitespace-pre-wrap break-all rounded-md bg-muted/50 p-2 font-mono text-[10px]">
+                {previewExpanded ? row.payload_preview : fmtPreview(row.payload_preview)}
+              </pre>
+              {row.payload_preview.length > PREVIEW_LIMIT && (
+                <button
+                  type="button"
+                  className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  onClick={() => onTogglePreview(row.id)}
+                >
+                  {previewExpanded ? "收起" : "展开"}
+                </button>
+              )}
+            </>
           )}
         </div>
       </TableCell>
@@ -127,10 +158,14 @@ function DecisionList({
   rows,
   loaded,
   onReview,
+  expandedPreviews,
+  onTogglePreview,
 }: {
   rows: SodDecision[];
   loaded: boolean;
   onReview?: (row: SodDecision) => void;
+  expandedPreviews: Set<number>;
+  onTogglePreview: (id: number) => void;
 }) {
   if (!loaded) {
     return <p className="py-6 text-center text-muted-foreground text-sm">加载中…</p>;
@@ -164,7 +199,13 @@ function DecisionList({
         </TableHeader>
         <TableBody>
           {rows.map((row) => (
-            <DecisionRow key={row.id} row={row} onReview={onReview} />
+            <DecisionRow
+              key={row.id}
+              row={row}
+              onReview={onReview}
+              previewExpanded={expandedPreviews.has(row.id)}
+              onTogglePreview={onTogglePreview}
+            />
           ))}
         </TableBody>
       </Table>
@@ -188,6 +229,17 @@ export default function SodLedgerPage() {
   const [loaded, setLoaded] = React.useState(false);
   const [review, setReview] = React.useState<ReviewDraft | null>(null);
   const [reviewing, setReviewing] = React.useState(false);
+  // 载荷预览展开的行 id 集合：默认截 60 字符，点「展开」看全文（账本滚动扫读优先）。
+  const [expandedPreviews, setExpandedPreviews] = React.useState<Set<number>>(() => new Set());
+
+  const togglePreview = React.useCallback((id: number) => {
+    setExpandedPreviews((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // 内容没变就不 setState，避免整页重渲染（与策略库页同一套做法）。
   const lastRef = React.useRef<string>("");
@@ -336,6 +388,8 @@ export default function SodLedgerPage() {
             rows={rows}
             loaded={loaded}
             onReview={(row) => setReview({ decision: row, scope: "once", reason: "", operator: "sir" })}
+            expandedPreviews={expandedPreviews}
+            onTogglePreview={togglePreview}
           />
         </CardContent>
       </Card>

@@ -229,6 +229,17 @@ func sodDecisionTier(d *db.SoDDecision) sodTierVerdict {
 		HostOnly: verdict.HostOnly,
 		Reason:   verdict.Reason,
 	}
+	// E1-4（方案 v10 §9，判定精确化/降虚高）：范围内出网在【账本展示层】降标为
+	// Tier2·egress_in_scope——出网目的地已判在本任务范围内时，「高危出网」的
+	// 标签是虚高；未判定/越界维持 Tier3。只改账本推导，不动运行期闸门语义
+	//（运行期的确定性快路径在 R1/v0.9.13 单独评审）。
+	if verdict.Category == agent.CategoryEgress {
+		if scopeIn, known := sodDecisionScopeIn(d); known && scopeIn {
+			out.Tier = agent.Tier2.String()
+			out.Category = "egress_in_scope"
+			out.Reason = "范围内出网：目的地已判定在本任务范围内（E1-4 降标展示；未判定/越界仍 Tier3）"
+		}
+	}
 	if scopeIn, known := sodDecisionScopeIn(d); known {
 		out.ScopeIn = &scopeIn
 	}
@@ -563,12 +574,10 @@ func (s *Server) sodDecisionReview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "该裁决没有任务上下文，无法发放任务级放行凭据")
 		return
 	}
-	if agent.IsTier3ProtectedTool(dec.ToolName) {
-		writeErr(w, 409, "Tier3 高危工具不可改判放行（只可转 ask 拦截规则）——出网/写宿主/裁决写/状态迁移任何机制都不可豁免")
-		return
-	}
-	// v4.1 §10-F1：锁定基线的拒绝不存在人工改判放行——删除/破坏、平台自身
-	// 配置是安全地板，override 机制对它们同样无权（与 guard 基线预检同源）。
+	// E1-1（方案 v10 §9，以人为本）：Tier3 不再阻断人工改判——人是最终裁决者，
+	// 单次/任务级凭据可签；但两条硬边界保留：
+	// ① 锁定基线（v4.1 §10-F1）：删除/破坏、平台自身配置不可被任何机制豁免；
+	// ② Tier3 仍不可沉淀为【永久】信任规则（trust_rules.go）——永久免审面不扩大。
 	if dec.ReasonCode == sodpolicy.ReasonDestructiveAction || dec.ReasonCode == sodpolicy.ReasonPlatformBaseline {
 		writeErr(w, 409, "锁定基线拒绝不可改判放行——删除/破坏与平台自身配置不可被任何机制豁免")
 		return

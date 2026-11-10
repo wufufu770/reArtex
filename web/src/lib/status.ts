@@ -61,6 +61,9 @@ const severity: Record<string, StatusMeta> = {
   high: { label: "高危", tone: "red" },
   medium: { label: "中危", tone: "amber" },
   low: { label: "低危", tone: "slate" },
+  // info（E1-7）= 信息级：未证实候选面/侦察线索/无直接影响的暴露。neutral 灰
+  // 与 low 的 slate 错开——「信息」连低危的软灰都不占，视觉上明确低于全部等级。
+  info: { label: "信息", tone: "neutral" },
 };
 
 const finding: Record<string, StatusMeta> = {
@@ -202,6 +205,9 @@ const sodTierCategory: Record<string, StatusMeta> = {
   adjudication: { label: "裁决写", tone: "violet" },
   state_change: { label: "状态变更", tone: "amber" },
   egress: { label: "出网", tone: "amber" },
+  // egress_in_scope（E1-4）= 范围内出网：出网目的地已判在本任务范围内，账本展示层
+  // 从 Tier3·出网 降标为 Tier2 级别——用 blue 与 scoped_write 同档，不再吓人。
+  egress_in_scope: { label: "范围内出网", tone: "blue" },
   scope_expansion: { label: "扩权", tone: "rose" },
   proposal: { label: "提议", tone: "blue" },
   unlisted: { label: "未登记工具", tone: "amber" },

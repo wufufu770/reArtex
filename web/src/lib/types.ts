@@ -468,7 +468,8 @@ export interface TaskConstraint {
 }
 
 // ---- Findings ----
-export type Severity = "critical" | "high" | "medium" | "low";
+// info = 信息级（E1-7）：未证实候选面 / 侦察线索 / 无直接影响的暴露。
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 // 漏洞处置状态:待处理 / 处理中 / 已确认 / 已处理 / 已修复 / 误报 / 忽略 / 重复 / 风险接受。
 export type FindingStatus =
@@ -531,6 +532,7 @@ export interface FindingGroup {
   high: number;
   medium: number;
   low: number;
+  info: number;
   last_found_at: string;
 }
 
@@ -557,6 +559,7 @@ export interface FindingStats {
   high: number;
   medium: number;
   low: number;
+  info: number;
   vulnclasses: string[];
   tasks: FindingTaskOption[];
 }
@@ -2037,6 +2040,8 @@ export interface SodFeedRow {
   auditor: string;
   relevance: string;
   note: string;
+  // E1-2：非空 = 这条放行带人工改判标记（checks.manual_override），大屏徽标展示。
+  overridden?: string;
 }
 
 // SodFeedPending 是中列「待人工裁决」的一张卡（intercept_pending status=pending，
@@ -2050,12 +2055,14 @@ export interface SodFeedPending {
   input: string;
 }
 
-// SodFeedStats 是右列统计卡：近 1h 自动放行 / auditor 拒 / 转人工 / 硬拦 + blocked 意图数。
+// SodFeedStats 是右列统计卡：近 1h 自动放行 / auditor 拒 / 转人工 / 硬拦 +
+// 人工改判 + blocked 意图数。
 export interface SodFeedStats {
   auto_pass_1h: number;
   auditor_deny_1h: number;
   human_1h: number;
   hard_deny_1h: number;
+  override_1h: number;
   blocked_intents: number;
 }
 
@@ -2065,6 +2072,93 @@ export interface SodFeed {
   pending: SodFeedPending[];
   stats: SodFeedStats;
   mode: SodMergedGateMode;
+}
+
+// ---- 治理/审计聚合视图（方案 v10 §9 E1-6/E1-8，只读）----
+
+// SodGovernanceDecision 是任务详情「治理」tab 裁决流的一行
+// （GET /api/tasks/{id}/governance 的 decisions）。ts 是 HH24:MI:SS；note 后端截 160 字；
+// overridden 非空 = 这条放行带人工改判标记。
+export interface SodGovernanceDecision {
+  id: number;
+  ts: string;
+  agent: string;
+  tool: string;
+  verdict: string;
+  reason_code: string;
+  note: string;
+  overridden?: string;
+  category: string;
+}
+
+// SodGovernanceOverride 是本任务的人工改判凭据一行。scope ∈ once | task | task_tool
+// （task_tool = ask 批准「同时放行本任务后续同类调用」签发的通配凭据）。
+export interface SodGovernanceOverride {
+  id: number;
+  tool: string;
+  scope: string;
+  reason: string;
+  created_by: string;
+  payload_digest: string;
+}
+
+// SodSystemEvent 是本任务的系统事件一行（B6 升级 / LLM 故障转移等，worker=system 或
+// kind ∈ llm_switch/llm_failover/llm_paused）。
+export interface SodSystemEvent {
+  ts: string;
+  worker: string;
+  kind: string;
+  summary: string;
+}
+
+// TaskGovernance 是任务详情「治理」tab 的聚合响应。
+export interface TaskGovernance {
+  task_id: string;
+  decisions: SodGovernanceDecision[];
+  overrides: SodGovernanceOverride[];
+  system_events: SodSystemEvent[];
+}
+
+// SodHookChainEditable 是生效 hook 链里的可热改面一行：endpoint 指向既有配置页面/工具。
+export interface SodHookChainEditable {
+  name: string;
+  endpoint: string;
+  note: string;
+}
+
+// SodHookChainReadonly 是代码常量层（基线/tier/五检查）一行：只读展示并写明理由。
+export interface SodHookChainReadonly {
+  name: string;
+  reason: string;
+}
+
+// SodHookChain 是 GET /api/sod/hookchain 的响应：可热改面 + 代码常量只读面。
+export interface SodHookChain {
+  editable: SodHookChainEditable[];
+  readonly: SodHookChainReadonly[];
+}
+
+// AuditEvent 是 audit_events 哈希链的一条明细（GET /api/audit/events）。
+// payload 后端截 240 字；digest 依赖 prev_digest，逐条串链。
+export interface AuditEvent {
+  id: number;
+  seq: number;
+  actor: string;
+  tool: string;
+  action: string;
+  reason: string;
+  payload: string;
+  digest: string;
+  prev_digest: string;
+  ts: string; // MM-DD HH24:MI:SS
+}
+
+// AuditEventsPage 是审计事件明细的分页响应。
+export interface AuditEventsPage {
+  items: AuditEvent[];
+  total: number;
+  page: number;
+  size: number;
 }
 
 // SodCategory 是拦截种类表的一行（种类 = 一类命令的名字 + 匹配器 + 动作 + 上限 + 兜底）。

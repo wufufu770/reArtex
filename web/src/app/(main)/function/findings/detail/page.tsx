@@ -27,7 +27,7 @@ import type { Finding, FindingStatus, Severity } from "@/lib/types";
 
 import { FindingLineageView } from "./lineage";
 
-const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
+const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 const FINDING_STATUSES: FindingStatus[] = [
   "pending",
   "in_progress",

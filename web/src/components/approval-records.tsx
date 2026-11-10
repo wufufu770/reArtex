@@ -19,6 +19,7 @@ import { TablePagination } from "@/components/table-pagination";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -278,20 +279,41 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
   );
 }
 
-type Decide = (id: number, decision: "allowed" | "denied") => Promise<void>;
+type Decide = (id: number, decision: "allowed" | "denied", taskTool?: boolean) => Promise<void>;
 
+// DecisionActions 是待审批行的裁决动作。E1-5：允许时可勾选「同时放行本任务后续
+// 同类调用」——签发 task_tool 通配凭据（随任务终态过期；基线类后端照旧拒签）。
 function DecisionActions({ row, busy, decide }: { row: InterceptApprovalRow; busy: boolean; decide: Decide }) {
+  const [taskTool, setTaskTool] = React.useState(false);
   if (row.status !== "pending") return null;
   return (
-    <div className="flex flex-wrap gap-2">
-      <Button size="sm" disabled={busy} onClick={() => void decide(row.id, "allowed")}>
-        <CheckIcon data-icon="inline-start" />
-        允许
-      </Button>
-      <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decide(row.id, "denied")}>
-        <XIcon data-icon="inline-start" />
-        拒绝
-      </Button>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" disabled={busy} onClick={() => void decide(row.id, "allowed", taskTool)}>
+          <CheckIcon data-icon="inline-start" />
+          允许
+        </Button>
+        <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decide(row.id, "denied")}>
+          <XIcon data-icon="inline-start" />
+          拒绝
+        </Button>
+      </div>
+      <label
+        htmlFor={`task-tool-${row.id}`}
+        className="flex max-w-xl cursor-pointer items-start gap-2 text-muted-foreground text-xs"
+      >
+        <Checkbox
+          id={`task-tool-${row.id}`}
+          checked={taskTool}
+          onCheckedChange={(v) => setTaskTool(v === true)}
+          disabled={busy}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span>同时放行本任务后续同类调用</span>
+          <span>签发 task_tool 凭据，随任务终态过期；基线类永不放行</span>
+        </span>
+      </label>
     </div>
   );
 }
@@ -757,12 +779,12 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     setLoading(true);
   };
 
-  const decide: Decide = async (id, decision) => {
+  const decide: Decide = async (id, decision, taskTool = false) => {
     if (decisionLock.current) return;
     decisionLock.current = true;
     setDeciding(true);
     try {
-      await api.interceptDecide(id, decision);
+      const result = await api.interceptDecide(id, decision, taskTool);
       // Invalidate a list request started before this decision.
       request.current++;
       // Optimistically drop the decided item from the independent pending queue
@@ -772,7 +794,13 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       );
       setPendingRows((prev) => prev.filter((row) => row.id !== id));
       setRevision((v) => v + 1);
-      toast.success(decision === "allowed" ? "已允许执行" : "已拒绝执行");
+      if (decision === "denied") {
+        toast.success("已拒绝执行");
+      } else if (result.task_tool_issued) {
+        toast.success("已允许执行，本任务后续同类调用也已放行（随任务终态过期）");
+      } else {
+        toast.success("已允许执行");
+      }
       // Re-fetch counts and rows: a decided item may no longer match the filter.
       await latestLoad.current(true);
     } catch (e) {
