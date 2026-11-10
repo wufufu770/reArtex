@@ -148,7 +148,7 @@ function StrategyDetailInner() {
         <OverviewTab detail={detail} />
       </TabsContent>
       <TabsContent value="body" className="mt-0">
-        <BodyTab strategy={s} />
+        <BodyTab strategy={s} onSaved={() => void load()} />
       </TabsContent>
       <TabsContent value="evidence" className="mt-0">
         <EvidenceTab evidence={detail.evidence} />

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -254,11 +255,45 @@ type UpsertRootDomainReq struct {
 	TaskID int64
 }
 
+// assetFileExtRe 命中常见文件扩展名结尾——「baidu-src.xlsx 之类的文件名被当域名
+// 入库」的根治闸（E2-5，方案 v10 §9）。域名不可能以这些后缀收尾。
+var assetFileExtRe = regexp.MustCompile(`(?i)\.(xlsx|xls|docx?|pptx?|pdf|zip|rar|7z|tar|gz|tgz|csv|json|xml|ya?ml|txt|md|log|sql|exe|dll|bin|iso|img|apk)$`)
+
+// assetDomainLabelRe 是域名标签的合法形状（RFC 1123：字母数字连字符，1-63 字符）。
+var assetDomainLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ValidateAssetDomain 校验一个待入库的域名（E2-5 三口共用：insert_assets /
+// ssIngest / POST /api/assets 都汇入 UpsertRootDomain/UpsertSubdomain，闸在 db 层）。
+// 规则：至少两个标签、每标签 RFC 合法、不得以常见文件扩展名收尾。
+// 错误文案面向 agent——文件名不是域名，请解析文件内容后按真实 host 登记。
+func ValidateAssetDomain(domain string) error {
+	d := DomainKey(domain)
+	if d == "" {
+		return fmt.Errorf("domain is required")
+	}
+	if assetFileExtRe.MatchString(d) {
+		return fmt.Errorf("%q 不是域名（疑似文件名）——请解析文件内容后按真实 host/IP 登记，不要把文件名塞进 domain", d)
+	}
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("%q 不是合法域名（至少需要 两个标签，如 example.com）", d)
+	}
+	for _, l := range labels {
+		if !assetDomainLabelRe.MatchString(l) {
+			return fmt.Errorf("%q 含非法域名标签 %q（只允许字母/数字/连字符）", d, l)
+		}
+	}
+	return nil
+}
+
 // UpsertRootDomain idempotently inserts or merges a root domain asset.
 func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
+	}
+	if err := ValidateAssetDomain(domain); err != nil {
+		return 0, err
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
@@ -457,6 +492,9 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
+	}
+	if err := ValidateAssetDomain(domain); err != nil {
+		return 0, err
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {

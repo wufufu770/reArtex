@@ -3,19 +3,30 @@
 import * as React from "react";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
-import { LibraryBigIcon, PinIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
+import { LibraryBigIcon, PencilIcon, PinIcon, RefreshCwIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { Strategy, StrategyState } from "@/lib/types";
 
@@ -29,7 +40,7 @@ const ALL_STATES = "__all__";
 // 策略库变动很慢（人工裁决 + curator 后台动作），15 秒一轮足够跟上。
 const POLL_MS = 15_000;
 
-function StrategyRow({ strategy }: { strategy: Strategy }) {
+function StrategyRow({ strategy, onEdit }: { strategy: Strategy; onEdit: (strategy: Strategy) => void }) {
   return (
     <TableRow>
       <TableCell>
@@ -70,16 +81,30 @@ function StrategyRow({ strategy }: { strategy: Strategy }) {
         </div>
       </TableCell>
       <TableCell>
-        <div className="flex flex-col items-start gap-0.5">
+        <div className="flex flex-col gap-0.5">
           <span className="font-mono text-muted-foreground text-xs">#{strategy.id}</span>
           <span className="text-muted-foreground text-xs">{fmtDateTime(strategy.updated_at)}</span>
         </div>
+      </TableCell>
+      <TableCell>
+        <Button size="sm" variant="ghost" onClick={() => onEdit(strategy)} title="编辑名称与摘要（版本化保存）">
+          <PencilIcon data-icon="inline-start" />
+          编辑
+        </Button>
       </TableCell>
     </TableRow>
   );
 }
 
-function StrategyTable({ rows, loaded }: { rows: Strategy[]; loaded: boolean }) {
+function StrategyTable({
+  rows,
+  loaded,
+  onEdit,
+}: {
+  rows: Strategy[];
+  loaded: boolean;
+  onEdit: (strategy: Strategy) => void;
+}) {
   if (!loaded) {
     return <p className="py-6 text-center text-muted-foreground text-sm">加载中…</p>;
   }
@@ -106,11 +131,12 @@ function StrategyTable({ rows, loaded }: { rows: Strategy[]; loaded: boolean }) 
           <TableHead>版本</TableHead>
           <TableHead className="hidden md:table-cell">观测</TableHead>
           <TableHead>更新</TableHead>
+          <TableHead>操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {rows.map((s) => (
-          <StrategyRow key={s.id} strategy={s} />
+          <StrategyRow key={s.id} strategy={s} onEdit={onEdit} />
         ))}
       </TableBody>
     </Table>
@@ -118,11 +144,24 @@ function StrategyTable({ rows, loaded }: { rows: Strategy[]; loaded: boolean }) 
 }
 
 export default function StrategiesPage() {
+  const router = useRouter();
   const [state, setState] = React.useState<string>(ALL_STATES);
   const [query, setQuery] = React.useState("");
   const [rows, setRows] = React.useState<Strategy[]>([]);
   const [loaded, setLoaded] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
+
+  // 摄入学习弹窗：url 与粘贴文本二选一（后端优先抓 url）。
+  const [ingestOpen, setIngestOpen] = React.useState(false);
+  const [ingestUrl, setIngestUrl] = React.useState("");
+  const [ingestText, setIngestText] = React.useState("");
+  const [ingesting, setIngesting] = React.useState(false);
+
+  // 行内「编辑」弹窗：改 name/summary（版本化写，后端 version+1）。
+  const [editTarget, setEditTarget] = React.useState<Strategy | null>(null);
+  const [editName, setEditName] = React.useState("");
+  const [editSummary, setEditSummary] = React.useState("");
+  const [savingEdit, setSavingEdit] = React.useState(false);
 
   // 内容没变就不 setState，避免整页重渲染（与任务页同一套做法）。
   const lastRef = React.useRef<string>("");
@@ -168,6 +207,64 @@ export default function StrategiesPage() {
     }
   }
 
+  // 摄入学习：url / 文本二选一交给后端（url 优先）。候选不直接入库，
+  // 全进待裁决提议队列 —— 成功后弹带跳转按钮的 toast。
+  async function submitIngest() {
+    const url = ingestUrl.trim();
+    const text = ingestText.trim();
+    if (!url && !text) return;
+    setIngesting(true);
+    try {
+      const r = await api.strategyIngest({ url: url || undefined, text: text || undefined });
+      if (r.proposals > 0) {
+        toast.success(`学到 ${r.proposals} 条候选策略`, {
+          description: "候选先进待裁决队列，裁决通过后才会进入策略库",
+          action: {
+            label: "去裁决",
+            onClick: () => router.push("/strategies/proposals"),
+          },
+        });
+        setIngestOpen(false);
+        setIngestUrl("");
+        setIngestText("");
+      } else {
+        toast.warning(r.note || "模型没有提炼出候选策略，可换一份更具体的素材再试");
+      }
+    } catch (e) {
+      toast.error(`摄入失败：${(e as Error).message}`);
+    } finally {
+      setIngesting(false);
+    }
+  }
+
+  function openEdit(strategy: Strategy) {
+    setEditTarget(strategy);
+    setEditName(strategy.name);
+    setEditSummary(strategy.summary);
+  }
+
+  // 行内编辑只写 name/summary；正文六元组在详情页的正文 Tab 编辑。
+  async function saveEdit() {
+    if (!editTarget) return;
+    const name = editName.trim();
+    if (!name) {
+      toast.error("策略名不能为空");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      const r = await api.strategyEdit(editTarget.id, { name, summary: editSummary });
+      toast.success(`已保存为 v${r.version}`);
+      setEditTarget(null);
+      lastRef.current = "";
+      await load();
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`);
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   const keyword = query.trim().toLowerCase();
   const visible = keyword
     ? rows.filter(
@@ -191,10 +288,16 @@ export default function StrategiesPage() {
             L4 知识图谱 · 一条策略 = 一份「怎么打这类目标」的参考文本 · 正文不会自动执行
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void refreshUtility()} disabled={refreshing}>
-          {refreshing ? <Spinner data-icon="inline-start" /> : <RefreshCwIcon />}
-          刷新 utility
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setIngestOpen(true)}>
+            <SparklesIcon />
+            摄入学习
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void refreshUtility()} disabled={refreshing}>
+            {refreshing ? <Spinner data-icon="inline-start" /> : <RefreshCwIcon />}
+            刷新 utility
+          </Button>
+        </div>
       </div>
 
       <StrategyNav current="strategies" />
@@ -259,7 +362,7 @@ export default function StrategiesPage() {
               </SelectContent>
             </Select>
           </div>
-          <StrategyTable rows={visible} loaded={loaded} />
+          <StrategyTable rows={visible} loaded={loaded} onEdit={openEdit} />
         </CardContent>
       </Card>
 
@@ -268,6 +371,100 @@ export default function StrategiesPage() {
         效用列读的是 strategies 表上的缓存值，权威 utility 在 strategy_utility 物化视图里；「刷新
         utility」刷的是那张视图。
       </p>
+
+      {/* 摄入学习：报告/网址 → LLM 总结 → 候选策略提议（不直接入库） */}
+      <Dialog open={ingestOpen} onOpenChange={setIngestOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>摄入学习</DialogTitle>
+            <DialogDescription>
+              给一份素材（网址或粘贴的文本，二选一），由 LLM 总结提炼成候选策略 ——
+              先进「待裁决提议」队列，裁决通过才会进入策略库。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="ingest-url">素材网址</Label>
+              <Input
+                id="ingest-url"
+                placeholder="https://example.com/report"
+                value={ingestUrl}
+                onChange={(e) => setIngestUrl(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="ingest-text">或粘贴文本</Label>
+              <Textarea
+                id="ingest-text"
+                className="min-h-40"
+                placeholder="粘贴报告 / 复盘 / 文章正文（太短的素材学不出东西）"
+                value={ingestText}
+                onChange={(e) => setIngestText(e.target.value)}
+              />
+            </div>
+            <p className="text-muted-foreground text-xs">两个都填时优先抓取网址；学习会调用 LLM，可能要等一两分钟。</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIngestOpen(false)} disabled={ingesting}>
+              取消
+            </Button>
+            <Button
+              onClick={() => void submitIngest()}
+              disabled={ingesting || (!ingestUrl.trim() && !ingestText.trim())}
+            >
+              {ingesting && <Spinner data-icon="inline-start" />}
+              {ingesting ? "学习中…" : "开始学习"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 行内编辑：改策略名与摘要（版本化写） */}
+      <Dialog
+        open={editTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>编辑策略 #{editTarget?.id}</DialogTitle>
+            <DialogDescription>
+              保存为一次版本化编辑（version+1）；正文六元组请到详情页的「正文」Tab 改。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="strategy-edit-name">策略名</Label>
+              <Input
+                id="strategy-edit-name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="策略名不能为空"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="strategy-edit-summary">摘要</Label>
+              <Textarea
+                id="strategy-edit-summary"
+                className="min-h-24"
+                value={editSummary}
+                onChange={(e) => setEditSummary(e.target.value)}
+                placeholder="一句话说明这条策略打什么、怎么打"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)} disabled={savingEdit}>
+              取消
+            </Button>
+            <Button onClick={() => void saveEdit()} disabled={savingEdit || !editName.trim()}>
+              {savingEdit && <Spinner data-icon="inline-start" />}
+              {savingEdit ? "保存中…" : "保存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
