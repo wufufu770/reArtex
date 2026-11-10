@@ -222,6 +222,10 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
 	met := e.runFinalPlannerRound(ctx, t)
 	if !e.beginTaskOperation(t.ID) {
+		// A2（方案 v10 §15）：删除屏障拦住了收尾 ⇒ 清掉 settling 标记再退——标记
+		// 只在本函数置位，屏障装上后这里再无别的出口清它；删除若被中止
+		// （AbortDelete），任务会永久卡在「收尾中」，普通唤醒被丢弃。
+		e.settling.Delete(t.ID)
 		return
 	}
 	defer e.decInflight(t.ID)
@@ -242,6 +246,11 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 		if status == "done" && e.LegacyDistiller != nil {
 			e.LegacyDistiller(t)
 		}
+		// W9（方案 v10 §6）：超时收尾的终态同样播报 token 总量（done/timeout 都算收尾）。
+		e.emitTaskTokenTotal(t)
+		// B①（方案 v10 §15）：终态洁癖补挂之一——超时收尾落终态同样清残留意图
+		// （任务 #2 残留 19 意图的根因：5 条终态路径只接了 2 条）。
+		e.settleIntentsOnConclude(t, "超时收尾落终态：残留非终态意图统一 stopped")
 	default:
 		log.Printf("[deadline] task %s 收尾时已是终态,保留原状态", t.ID)
 	}

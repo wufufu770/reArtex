@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -77,6 +78,8 @@ func MemoryPromptBlock(pg *db.DB, scope db.MemoryScope) string {
 // AppendMemoryNote 追加一条记忆（append-only）。
 //
 // 同一主题重复写 ⇒ 调用方用 SupersedeMemoryEntry 关掉旧版本；这里只管追加。
+// W2（方案 v10 §6）：写入口切 Checked 版 —— 上限命中在写前就被拒（类型化错误，
+// 绝不静默截断），错误沿原路返回给调用方。
 func AppendMemoryNote(pg *db.DB, scope db.MemoryScope, topicKey, kind, title, summary, ruleRef string) (int64, error) {
 	if pg == nil {
 		return 0, fmt.Errorf("记忆层未接线")
@@ -87,7 +90,7 @@ func AppendMemoryNote(pg *db.DB, scope db.MemoryScope, topicKey, kind, title, su
 	if strings.TrimSpace(topicKey) == "" {
 		return 0, fmt.Errorf("记忆主题键不能为空")
 	}
-	e, err := pg.AppendMemoryEntry(scope, db.MemoryEntryInput{
+	e, err := pg.AppendMemoryEntryChecked(scope, db.MemoryEntryInput{
 		TopicKey:    strings.TrimSpace(topicKey),
 		Kind:        strings.TrimSpace(kind),
 		Title:       strings.TrimSpace(title),
@@ -115,12 +118,74 @@ func RecallMemory(pg *db.DB, scope db.MemoryScope) (string, error) {
 	return pg.ExportMemoryIndex(scope)
 }
 
+// SearchMemory 对指定 scope 做一次混合检索并渲染成纯文本。
+//
+// W4（方案 v10 §6）：recall 的检索路径 —— 全文（tsvector）与向量（pgvector）两路
+// 各自排序、RRF 融合（db/memory_retrieval.go）。渲染口径与 MemoryPromptBlock 同款
+// （每行「- [topic] title — summary」），块头带上下文分级（complete/partial/
+// insufficient 必须显式给出——不把不完整的上下文当成完整的交出去）。
+// 检索失败或零命中返回错误/空串 ⇒ 调用方回退到 RecallMemory 的纯文本导出路径。
+func SearchMemory(pg *db.DB, scope db.MemoryScope, query string) (string, error) {
+	if pg == nil {
+		return "", fmt.Errorf("记忆层未接线")
+	}
+	if !scope.Valid() {
+		return "", fmt.Errorf("记忆作用域非法")
+	}
+	res, err := pg.RetrieveMemory(db.MemoryRetrievalQuery{Scope: scope, Text: strings.TrimSpace(query)})
+	if err != nil {
+		return "", err
+	}
+	if len(res.Hits) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## 记忆检索结果（混合检索；上下文分级：%s）", res.Grade)
+	b.WriteString("\n")
+	for _, h := range res.Hits {
+		if h == nil {
+			continue
+		}
+		topic := h.TopicKey
+		if topic == "" {
+			topic = "topic"
+		}
+		title := h.Title
+		if title == "" {
+			title = h.SummaryLine
+		}
+		fmt.Fprintf(&b, "- [%s] %s", topic, title)
+		if h.SummaryLine != "" && h.SummaryLine != title {
+			fmt.Fprintf(&b, " — %s", h.SummaryLine)
+		}
+		fmt.Fprintf(&b, "（RRF 分 %.4f）", h.Score)
+		b.WriteString("\n")
+	}
+	return b.String(), nil
+}
+
 // memoryScopeOfTaskID 把任务号翻译成记忆 scope（供工具内部使用）。
 func memoryScopeOfTaskID(taskID int64) db.MemoryScope {
 	if taskID <= 0 {
 		return db.MemoryScope{}
 	}
 	return MemoryScopeForTask(taskID)
+}
+
+// memoryScopeOfChatSession 把 chat 会话键翻译成会话作用域的记忆 scope。
+//
+// chat 侧的 transcript 会话键固定是 server 的 convBusyKey（"conv-<对话id>"，
+// 见 conversations.go）⇒ 取数字部分当 scope_id；不是这个形状（或 <=0）返回
+// 非法 scope ⇒ 调用方拿到空块（不注入）。
+func memoryScopeOfChatSession(sessionID string) db.MemoryScope {
+	if !strings.HasPrefix(sessionID, "conv-") {
+		return db.MemoryScope{}
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(sessionID, "conv-"), 10, 64)
+	if err != nil || id <= 0 {
+		return db.MemoryScope{}
+	}
+	return MemoryScopeForSession(id)
 }
 
 // memoryBlockForToolSet 是给工具集用的记忆块取数（ToolSet 可能有 memory DB）。
@@ -169,19 +234,27 @@ func (t *ToolSet) rememberTool() actool.CoreTool {
 			}
 			id, err := AppendMemoryNote(t.memoryDB, scope, a.TopicKey, a.Kind, a.Title, a.Summary, a.RuleRef)
 			if err != nil {
+				if errors.Is(err, db.ErrMemoryIndexFull) {
+					// W2（方案 v10 §6）：上限命中必须响亮——错误信息里带上「该做什么」
+					// 的固定提示（代码写死，不由模型生成）。
+					return actool.Errorf("记忆追加失败：" + err.Error() + " 记忆索引已达上限，请先 recall 后用 supersede/retire。"), nil
+				}
 				return actool.Text("记忆追加失败：" + err.Error()), nil
 			}
 			return actool.Text("memory recorded: " + strconv.FormatInt(id, 10)), nil
 		})
 }
 
-// recallMemoryTool 返回「导出记忆索引」的工具。
+// recallMemoryTool 返回「检索/导出记忆」的工具。
 func (t *ToolSet) recallMemoryTool() actool.CoreTool {
 	return t.readExpTool("recall_memory",
-		"导出当前任务的记忆索引（纯文本）。",
+		"检索当前任务的记忆。带 query（或 keyword）时走混合检索（全文+向量 RRF 融合，返回最相关的条目，而非整份索引）；不带参数时导出整个记忆索引（纯文本）。写满被拒时先用它看看现状。",
 		map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
+			"type": "object",
+			"properties": map[string]any{
+				"query":   map[string]any{"type": "string", "description": "检索词（自然语言）；给出时走混合检索，只返回相关条目。"},
+				"keyword": map[string]any{"type": "string", "description": "同 query（别名）。"},
+			},
 		},
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.memoryDB == nil {
@@ -190,6 +263,22 @@ func (t *ToolSet) recallMemoryTool() actool.CoreTool {
 			scope := memoryScopeOfTaskID(t.taskID)
 			if !scope.Valid() {
 				return actool.Text("记忆作用域不可用（缺少任务上下文）"), nil
+			}
+			var a struct {
+				Query   string `json:"query"`
+				Keyword string `json:"keyword"`
+			}
+			_ = json.Unmarshal(in, &a)
+			q := strings.TrimSpace(a.Query)
+			if q == "" {
+				q = strings.TrimSpace(a.Keyword)
+			}
+			// W4（方案 v10 §6）：带检索词 ⇒ 混合检索；检索失败/降级/零命中 ⇒ 回退
+			// 原纯文本导出路径（行为不为空，recall 永远给出可用上下文）。
+			if q != "" {
+				if out, err := SearchMemory(t.memoryDB, scope, q); err == nil && strings.TrimSpace(out) != "" {
+					return actool.Text(out), nil
+				}
 			}
 			out, err := RecallMemory(t.memoryDB, scope)
 			if err != nil {

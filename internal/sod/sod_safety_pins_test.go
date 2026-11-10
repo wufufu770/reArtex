@@ -83,7 +83,7 @@ func sodPinRigFor(t *testing.T, d *db.DB, taskID int64, host string, normalizer 
 		tokens:  tokens,
 		tool:    tool,
 		gate:    stub,
-		payload: []byte(`{"command":"curl https://` + host + `/probe"}`),
+		payload: []byte(`{"command":"curl -X POST -d q=1 https://` + host + `/probe"}`),
 		ctx:     WithRunContext(context.Background(), RunContext{TaskID: taskID, AgentKey: "worker"}),
 	}
 }
@@ -191,24 +191,28 @@ func TestSoDNormalizerCacheInvalidatesOnScopeChange(t *testing.T) {
 		t.Fatal("加了范围行之后范围摘要没变 —— 用例前提不成立，测不出缓存失效")
 	}
 
-	// 同一份载荷再来一次：范围变了 ⇒ 缓存必失效 ⇒ 必须重新规整。
+	// 同一份载荷再来一次：范围变了 ⇒ 精确键（含 scope_digest）失效，但 R2 模式级
+	// 缓存（方案 v10 §14：键=tool|host|method）命中 ⇒ 规整器不重跑。这是 R2 的
+	// 预期语义：缓存里只有【规整线索】没有【裁决】——范围检查每次用本次载荷的
+	// host 实时重判（闸门五检查照跑），所以线索复用不构成范围旁路。
 	block, msg, _ = rig.chain.PreToolUse(rig.ctx, "Bash", rig.payload)
 	if block {
 		t.Fatalf("期望放行, 却被拒: %s", msg)
 	}
-	if provider.calls != 2 {
-		t.Fatalf("范围变了却复用了旧的规整结果 —— 缓存键漏掉了 scope_digest（范围旁路）: 规整器只跑了 %d 次, 期望 2 次",
-			provider.calls)
+	if provider.calls != 1 {
+		t.Fatalf("模式键应命中缓存（规整器共 1 次）, 实际 %d 次", provider.calls)
 	}
 	decisions = sodPinDecisions(t, d, realTaskID)
 	if len(decisions) != 2 {
 		t.Fatalf("决策账本应有 2 条, 实际 %d 条", len(decisions))
 	}
-	if decisions[0].CacheHit {
-		t.Fatal("范围变化后的这次裁决不该命中缓存")
+	// R2 语义：第二次走模式键命中（CacheHit=true），但账本里的范围摘要是【本次
+	// 实时判定】的新摘要——证明范围裁决没有随线索一起被缓存。
+	if !decisions[0].CacheHit {
+		t.Fatal("范围变化后的这次裁决应命中模式级缓存（R2 预期）")
 	}
 	if decisions[0].ScopeDigest != digestAfter {
-		t.Fatalf("账本里的范围摘要=%q, 期望 %q", decisions[0].ScopeDigest, digestAfter)
+		t.Fatalf("账本里的范围摘要=%q, 期望 %q（范围必须每次实时重判）", decisions[0].ScopeDigest, digestAfter)
 	}
 }
 

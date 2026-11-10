@@ -135,11 +135,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
 	return id, err
 }
 
-// DecideInterceptPending updates a pending record's status (allowed/denied/timeout).
-func (d *DB) DecideInterceptPending(id int64, status string) error {
-	_, err := d.Exec(`UPDATE intercept_pending SET status=$2, decided_at=NOW() WHERE id=$1`, id, status)
-	return err
-}
 
 // CreateDecidedIntercept inserts an intercept_pending row ALREADY in a final state
 // (status = 'allowed' | 'denied'), decided_at stamped now. Used to log allow/deny

@@ -119,6 +119,12 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	tsx.SetTaskID(taskID)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
+	// W5（方案 v10 §6）：记忆层接进 mainagent 循环（与 worker/planner 同款：同一 pg 库句柄）。
+	if ts != nil {
+		if pg := ts.DB(); pg != nil {
+			tsx.SetMemoryDB(pg)
+		}
+	}
 	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
 	tsx.SetNotifyGoal(notifyGoal) // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发
@@ -166,6 +172,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	// W3（方案 v10 §6）：记忆块注入——mainagent 每 run 新会话（transcript 分段续读，
+	// system 仍每轮重拼）⇒ 走 AppendSystemPrompt 一次性拼进 system 尾部；为空时不加。
+	if mb := memoryBlockForToolSet(tsx, taskID); mb != "" {
+		opts.AppendSystemPrompt = append(opts.AppendSystemPrompt, mb)
 	}
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。

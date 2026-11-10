@@ -331,6 +331,14 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// A1（方案 v10 §15）：失败回滚除了删组，还要删 CreateConversationOf 建出的会话
+	// （大厅 + 成员会话）——孤儿会话占住"一个 task 至多一个大厅"的名额，重试恒 409。
+	createdConvs := []int64{hall.ID}
+	delConvs := func() {
+		for _, id := range createdConvs {
+			_ = pg.DeleteConversation(id)
+		}
+	}
 	gid, err := pg.CreateChatGroup(&db.ChatGroup{
 		ConversationID:   hall.ID,
 		TaskID:           req.TaskID,
@@ -339,6 +347,7 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 		ConcurrencyLimit: limit,
 	})
 	if err != nil {
+		delConvs()
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -346,6 +355,7 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 	// auto 永远是分发者，绑定大厅会话（它不需要第二个会话）。
 	if err := pg.AddChatGroupMember(gid, "auto", &hall.ID, "dispatcher"); err != nil {
 		_ = pg.DeleteChatGroup(gid)
+		delConvs()
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -356,13 +366,16 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 		conv, err := pg.CreateConversationOf(key, name+"/"+key, nil, db.OriginHall)
 		if err != nil {
 			_ = pg.DeleteChatGroup(gid)
+			delConvs()
 			writeErr(w, 500, err.Error())
 			return
 		}
+		createdConvs = append(createdConvs, conv.ID)
 		if err := pg.AddChatGroupMember(gid, key, &conv.ID, "member"); err != nil {
 			// 半个群比没有群更糟：它会占住"一个 task 至多一个大厅"的名额，
 			// 让重试变成 409。
 			_ = pg.DeleteChatGroup(gid)
+			delConvs()
 			writeErr(w, 500, err.Error())
 			return
 		}

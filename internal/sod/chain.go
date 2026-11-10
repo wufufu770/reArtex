@@ -426,19 +426,28 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 
 	// ---- 旧链（off / shadow 的权威路径）：规整 → 闸门 → 裁决 ----
-	// 规整（失败 ⇒ fail-closed）。两类确定性豁免跳过规整：
+	// 规整（失败 ⇒ fail-closed）。三类确定性豁免跳过规整：
 	//   - 任务内结构化写（B2，见 taskInternalWriteTools）；
 	//   - 本地任务目录 Bash（B5）：命令引用的全部绝对路径都在任务工作区内——
-	//     出界路径只要有一个就走完整流程，绝不放宽。
+	//     出界路径只要有一个就走完整流程，绝不放宽；
+	//   - 确定性快路径（方案 v10 §14 R1）：形态上完全确定的安全只读出网
+	//     （curl 纯 GET/HEAD、nmap -sn/-p、dig/nslookup/whois/host、WebFetch）。
+	//     豁免的是 LLM 规整不是闸门裁决 —— 五道检查照跑，scope 用快路径提取的
+	//     TargetHint 判定；审计带 fast_path 独立标记（§4 不变式 4）。
 	localBash := name == "Bash" && BashLocalTaskDir(call.taskID, payload)
 	taskInternal := TaskInternalWrite(call.toolName)
+	fastPath, fastHit := DeterministicFastPath(name, payload)
 	var (
 		normalized NormalizerResult
 		cacheHit   bool
+		patternHit bool
 	)
 	degradeOn := false
-	if !taskInternal && !localBash {
-		normalized, cacheHit, err = c.normalize(ctx, call)
+	if fastHit && !taskInternal && !localBash {
+		normalized, cacheHit = fastPath, false
+	}
+	if !taskInternal && !localBash && !fastHit {
+		normalized, cacheHit, patternHit, err = c.normalize(ctx, call)
 		if err != nil {
 			if errors.Is(err, ErrNormalizerUnavailable) {
 				// B4 降级档：开关开启且连续不可用达阈值 ⇒ Tier1/2 类动作确定性
@@ -482,6 +491,12 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		if localBash {
 			markers["bypass_reason"] = "local_task_dir"
 		}
+	}
+	if fastHit && !taskInternal && !localBash {
+		markers["fast_path"] = "true"
+	}
+	if patternHit {
+		markers["fast_cache"] = "true"
 	}
 	if degradeOn {
 		markers["degraded"] = "true"
@@ -591,18 +606,32 @@ func (c *Chain) scopeDigest(taskID int64) (string, error) {
 //
 // 返回的第二个值是「是否命中缓存」—— 它进审计（cache_hit），让人能看出
 // 这次裁决是省了一次模型调用还是真跑了模型。
+// 返回的第三个值是「是否命中模式缓存」（方案 v10 §14 R2）—— 调用方据此落
+// fast_cache 审计标记，让人能看出这次是精确复用还是模式复用。
+//
+// 查序：精确键 → 模式键（同工具 + 同 host + 同方法 ⇒ 同规整形态）→ 模型。
+// 规整成功后精确键与模式键同落。
 //
 // malformed 重试一次（方案 v3 缺陷 B3③）：temperature=0 的输出仍可能偶发
 // 不合规（截断/漏字段）；同输入重试一次成本可控，能把一次抖动从
 // normalizer_malformed 拒绝里救回来。unavailable 不重试——那是模型侧故障，
 // 立即交给调用方的失败路径（信号量+独立档已在 B3①② 缓解它本身）。
-func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult, bool, error) {
+func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult, bool, bool, error) {
 	if c.deps.Cache == nil || c.deps.Normalizer == nil {
-		return NormalizerResult{}, false, fmt.Errorf("%w: 规整器未装配", ErrNormalizerUnavailable)
+		return NormalizerResult{}, false, false, fmt.Errorf("%w: 规整器未装配", ErrNormalizerUnavailable)
 	}
 	key := c.deps.Cache.Key(call.toolName, call.payloadDigest, call.taskID, call.scopeDigest, call.sourceAgent)
 	if cached, ok := c.deps.Cache.Get(key); ok {
-		return cached, true, nil
+		return cached, true, false, nil
+	}
+	// R2 模式键：精确键未命中 → 查模式键。键里的 host 出自与 scope 判定同一
+	// 套确定性提取 ⇒ 模式命中的意图所指向的目标 == 本次载荷词法指向的目标，
+	// 闸门照常对它判实时范围（缓存只有线索、没有裁决，见 cache.go PatternKey）。
+	patternKey, hasPattern := c.deps.Cache.PatternKey(call.toolName, call.payload)
+	if hasPattern {
+		if cached, ok := c.deps.Cache.Get(patternKey); ok {
+			return cached, true, true, nil
+		}
 	}
 	doNormalize := func() (NormalizerResult, error) {
 		return c.deps.Normalizer.Normalize(ctx, NormalizeInput{
@@ -637,10 +666,15 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 				LatencyMs: time.Since(normalizeStarted).Milliseconds(),
 			})
 		}
-		return NormalizerResult{}, false, err
+		return NormalizerResult{}, false, false, err
 	}
 	c.deps.Cache.Put(key, normalized)
-	return normalized, false, nil
+	// R2：规整成功 ⇒ 精确键与模式键同落（不同载荷、同 host/方法 ⇒ 下次直接
+	// 模式命中，再省一次模型调用）。
+	if hasPattern {
+		c.deps.Cache.Put(patternKey, normalized)
+	}
+	return normalized, false, false, nil
 }
 
 // evaluate 跑确定性闸门。degraded 由调用方传入（B4 降级档放行的调用）。

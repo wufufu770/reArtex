@@ -48,9 +48,6 @@ func SiteKey(scheme, host string, port int) string {
 	return strings.ToLower(scheme) + "|" + strings.ToLower(host) + "|" + strconv.Itoa(port)
 }
 
-func EndpointKey(siteID int64, method, urlTemplate string) string {
-	return itoa(siteID) + "|" + strings.ToUpper(method) + "|" + urlTemplate
-}
 
 func ParameterKey(endpointID int64, location, name string) string {
 	return itoa(endpointID) + "|" + strings.ToLower(location) + "|" + name

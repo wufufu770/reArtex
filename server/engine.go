@@ -314,6 +314,10 @@ func (e *Engine) AbortDelete(taskID string, keepPaused bool) {
 		return
 	}
 	e.deleting.Delete(taskID)
+	// A2（方案 v10 §15）：删除中止 ⇒ 一并清收尾标记。settleTask 撞上删除屏障的
+	// 退出路径只清自己那份，删除被 AbortDelete 中止时若不清这里，任务永远卡在
+	// 「收尾中」，普通唤醒被丢弃、收尾也再进不来。
+	e.settling.Delete(taskID)
 	if !keepPaused {
 		e.paused.Delete(taskID)
 	}
@@ -1095,8 +1099,35 @@ func (e *Engine) emitAuditSummary(t *Task) {
 	if e == nil || e.AuditSummary == nil || t == nil {
 		return
 	}
-	defer func() { _ = recover() }()
+	defer func() {
+		// A7（方案 v10 §15）：吞 panic 但必须留痕——同文件两个观察者
+		// （ActivityMirror / DenialWatcher）recover 时都带日志，这里对齐口径；
+		// 静默吞掉会让审计摘要缺失无从归因。
+		if r := recover(); r != nil {
+			log.Printf("[audit] task %s 审计摘要 panic: %v", t.ID, r)
+		}
+	}()
 	e.AuditSummary(t)
+}
+
+// emitTaskTokenTotal 在任务落终态时播报本任务的 token 总量（方案 v10 §6 W9）。
+//
+// 口径：total = input + output。缓存两列**不再另加** —— llmrec 落库的是 SDK
+// 规范化后的 Usage，cache_read/cache_write 已折进 input（OpenAI 的 cached_tokens
+// 本就在 prompt_tokens 里），四列相加会把缓存前缀算两遍（见 db.TotalTokensForTask）。
+// 挂在收尾的同一批终态点（settleIntentsOnConclude / emitAuditSummary 已挂处），
+// best-effort：读数失败只记日志，不影响收尾主链路。
+func (e *Engine) emitTaskTokenTotal(t *Task) {
+	if e == nil || e.m == nil || e.m.pg == nil || t == nil {
+		return
+	}
+	total, err := e.m.pg.TotalTokensForTask(t.ID)
+	if err != nil {
+		log.Printf("[conclude] task %s token 总量统计失败: %v", t.ID, err)
+		return
+	}
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+		Summary: fmt.Sprintf("本任务 token 总量（input+output，缓存含在 input）：%d", total)})
 }
 
 // freezeReplayCorpus 冻结这个任务的重放语料（一次性、可重入）。
@@ -1493,6 +1524,7 @@ func (e *Engine) noteWrapupRoundResult(t *Task, intentsBefore int) {
 		e.LegacyDistiller(t)
 	}
 	e.emitAuditSummary(t)
+	e.emitTaskTokenTotal(t) // W9（方案 v10 §6）：终态播报 token 总量
 }
 
 // Run starts the planner loop + N worker loops for a task. The loops always run
@@ -1618,6 +1650,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 						e.LegacyDistiller(t)
 					}
 					e.emitAuditSummary(t)
+					e.emitTaskTokenTotal(t) // W9（方案 v10 §6）：终态播报 token 总量
+					// B①（方案 v10 §15）：终态洁癖补挂之一——goalless 落 done 同样清残留意图
+					// （任务 #2 残留 19 意图的根因：5 条终态路径只接了 2 条）。
+					e.settleIntentsOnConclude(t, "goalless 落 done：残留非终态意图统一 stopped")
 				}
 			}
 			return // goalless 分支永不进入 planner.Plan
@@ -1670,6 +1706,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 					e.LegacyDistiller(t)
 				}
 				e.emitAuditSummary(t)
+				e.emitTaskTokenTotal(t) // W9（方案 v10 §6）：终态播报 token 总量
+				// B①（方案 v10 §15）：终态洁癖补挂之一——planner 判定达成落 done 同样清残留
+				// 意图（任务 #2 残留 19 意图的根因：5 条终态路径只接了 2 条）。
+				e.settleIntentsOnConclude(t, "planner 判定目标达成：残留非终态意图统一 stopped")
 			}
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
@@ -2373,6 +2413,14 @@ func (e *Engine) settleIntentsOnConclude(t *Task, reason string) {
 	} else if n > 0 {
 		log.Printf("[conclude] task %s 收尾清理非终态意图 %d 条", t.ID, n)
 	}
+	// W11①（方案 v10 §6）：终态同时过期 task/task_tool 级 SoD 改判（随任务生命周期，
+	// 终态后改判不可用）。本函数是所有终态路径的汇合点（ConcludeTask / 停滞闸 /
+	// 四路终态分支都调它），在这里挂一次即可全覆盖。best-effort：失败只记日志。
+	if id, ok := e.taskNumericID(t); ok && e.m != nil && e.m.pg != nil {
+		if err := e.m.pg.ExpireTaskSodOverrides(id); err != nil {
+			log.Printf("[conclude] task %s SoD 改判过期失败: %v", t.ID, err)
+		}
+	}
 }
 
 // ConcludeTask 收尾任务（v7 双签）：三门满足（无 running/open 意图 + 有产出）
@@ -2401,6 +2449,7 @@ func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 		e.LegacyDistiller(t)
 	}
 	e.emitAuditSummary(t)
+	e.emitTaskTokenTotal(t) // W9（方案 v10 §6）：终态播报 token 总量
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
 		Summary: "【治理收尾】监督者判定目标实质达成（三门满足）：" + trunc(summary, 120)})
 	return true, "任务已收尾"

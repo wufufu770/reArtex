@@ -286,6 +286,18 @@ func NewQuotaProvider(inner llm.Provider, gate *QuotaGate) *QuotaProvider {
 	return &QuotaProvider{inner: inner, gate: gate}
 }
 
+// MarkDispatched 落「请求已发出」标记（W10，方案 v10 §6）。
+//
+// 必须在请求发出**前**调用：崩在 dispatch 与 settle 之间时，预扣仍留在「已计费」
+// 状态，清扫器按输入估算结算而不是整块释放（否则等于白嫖供应商的计费窗口）。
+// best-effort：标记失败不拦请求（结算语义仍兜底）。
+func (g *QuotaGate) MarkDispatched(reservationID int64) {
+	if g == nil || g.pg == nil || reservationID == 0 {
+		return
+	}
+	_ = g.pg.MarkQuotaReservationDispatched(reservationID)
+}
+
 // Stream 实现 llm.Provider：迭代前预扣，迭代结束后结算。
 func (p *QuotaProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
@@ -297,6 +309,11 @@ func (p *QuotaProvider) Stream(ctx context.Context, req llm.CompletionRequest) i
 		var usage llm.Usage
 		dispatched := false
 		defer func() { p.settle(reservationID, estimate, dispatched, usage) }()
+
+		// W10（方案 v10 §6）：派发权威点——请求真正出网前落 dispatched 标记。
+		// 之前的缺口：预留从未标记 ⇒ 崩溃残留的 held 预扣会被清扫器当成「没发出」
+		// 整块释放，多算了预算余量。
+		p.gate.MarkDispatched(reservationID)
 
 		for ev, err := range p.inner.Stream(ctx, req) {
 			// 请求已经发出（哪怕紧接着就报错）：失败时按输入估算结算，不记 0。
@@ -328,6 +345,8 @@ func (p *QuotaProvider) Complete(ctx context.Context, req llm.CompletionRequest)
 	if err != nil {
 		return llm.Message{}, "", llm.Usage{}, err
 	}
+	// W10（方案 v10 §6）：派发权威点——请求出网前落 dispatched 标记（与 Stream 同款）。
+	p.gate.MarkDispatched(reservationID)
 	msg, stopReason, usage, err := p.inner.Complete(ctx, req)
 	p.settle(reservationID, estimate, true, usage)
 	return msg, stopReason, usage, err

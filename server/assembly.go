@@ -453,8 +453,7 @@ func jsonStrMap(raw json.RawMessage) map[string]string {
 
 // lastGoodToolRows 保存最后一次成功读取的工具表。ListTools 失败时沿用它而非
 // 全量放行：放行意味着 DB 一抖动，所有 agent 就拿到完整工具面（含本该被
-// 白名单挡住的），且无任何告警可见性。残留缺口：进程冷启动即遇 DB 故障时
-// 仍无快照可沿用，该路径待按 V2 G-04④ 补「拒绝创建新 run」。
+// 白名单挡住的），且无任何告警可见性。
 var lastGoodToolRows atomic.Value
 
 // degradedToolAllow 是工具表不可读且无快照时仅放行的 SDK 基础件。

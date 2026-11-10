@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -224,6 +223,3 @@ func (s *Server) ensureAuditorAgent() {
 		}
 	}
 }
-
-var _ = context.Background
-var _ = sync.Mutex{}

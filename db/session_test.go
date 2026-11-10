@@ -193,7 +193,7 @@ func TestEnsureSessionSchemaIsIdempotent(t *testing.T) {
 		t.Fatalf("重复 EnsureSessionSchema 失败: %v", err)
 	}
 	// 回填也是幂等的（proposal §4.7：加列 + 加行，可重跑）。
-	if err := d.BackfillSessions(); err != nil {
+	if err := d.backfillSessions(); err != nil {
 		t.Fatalf("重复回填会话失败: %v", err)
 	}
 }

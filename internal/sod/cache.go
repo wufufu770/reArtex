@@ -85,6 +85,42 @@ func (c *Cache) Key(toolName, payloadDigest string, taskID int64, scopeDigest, s
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// PatternKey 算「模式键」（方案 v10 §14 R2 —— 模式级规整缓存）：
+//
+//	模式键 = tool + "|" + hostOf(payload) + "|" + method
+//
+// （键本体仍是 NUL 分量 + SHA-256，与精确键同一套构造；"pattern" 哨兵分量把
+// 两种键的分量序列区分开，防形状巧合对撞。）
+//
+// 与精确键（Key）的差别：不含载荷摘要 / task_id / scope_digest / source_agent
+// —— 同工具、同目标 host、同方法的【不同载荷】共享同一条规整结果。为什么这是
+// 安全的：缓存里只有【规整结果】（结构化意图线索），没有裁决 —— 闸门每次调用
+// 都重跑全部五道检查，scope 用【本次载荷】提取出的 host 判实时范围（键里的
+// host 与意图的 TargetHint 出自同一个确定性提取函数 fastPathTargetHint ⇒ 判
+// 的就是本次连接目标），熔断 / 额度 / tier2 读实时状态。模式命中改变的只是
+// 「要不要再问一次模型」，不是任何一道检查的输入。
+//
+// host 提取不到（Bash 里没有可判定的域名/IP/URL host）⇒ 无模式键（ok=false）。
+// promptDigest 仍在键里：规整提示词一变，模式缓存与精确缓存一起失效。
+func (c *Cache) PatternKey(toolName string, payload []byte) (string, bool) {
+	host := fastPathTargetHint(toolName, payload)
+	if host == "" {
+		return "", false
+	}
+	h := sha256.New()
+	write := func(s string) {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	write(cacheKeyVersion)
+	write("pattern")
+	write(toolName)
+	write(host)
+	write(fastPathMethod(toolName, payload))
+	write(c.promptDigest)
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
 // Get 取一条规整结果（命中则把它移到队尾，维持 LRU 序）。
 func (c *Cache) Get(key string) (NormalizerResult, bool) {
 	c.mu.Lock()

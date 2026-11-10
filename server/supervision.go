@@ -12,6 +12,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,23 @@ var supervisionLast = map[string]time.Time{}
 func (s *Server) RunSupervisionLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	ticks := 0 // W10：30s tick 计数，每 2 个 tick（≈1 分钟）清一次过期预扣
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		// W10 异常路径回收，幂等 best-effort：进程崩在 dispatch 与 settle 之间留下的
+		// held 态预扣按 TTL 收回（dispatched=true 按输入估算结算 / false 整块释放）。
+		// 失败只记日志不阻断监督环；幂等（已结算/已释放的不再被选中）。
+		ticks++
+		if ticks%2 == 0 && s.m != nil && s.m.pg != nil {
+			if n, err := s.m.pg.SweepExpiredQuotaReservations(time.Now(), 100); err != nil {
+				log.Printf("[quota] 过期预扣清扫失败: %v", err)
+			} else if n > 0 {
+				log.Printf("[quota] 过期预扣清扫回收 %d 条", n)
+			}
 		}
 		s.supervisionPass()
 	}

@@ -559,6 +559,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
+	// W3（方案 v10 §6）：记忆块注入——worker 每 run 新会话 ⇒ 走 AppendSystemPrompt
+	// 一次性拼进 system 尾部（随本 run 重建，不会被 compaction 压掉）；为空时不加（避免空段）。
+	if mb := memoryBlockForToolSet(tsx, taskID); mb != "" {
+		opts.AppendSystemPrompt = append(opts.AppendSystemPrompt, mb)
+	}
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
 	applyThinkingOverride(&opts, "worker")

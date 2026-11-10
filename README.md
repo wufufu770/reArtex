@@ -38,7 +38,7 @@ docker compose up -d
 # → http://localhost:8787
 ```
 
-指定版本：`.env` 里设 `ARTEX_TAG=v0.4.7`（不设则用 `latest`）。建议固定版本，不要用可变的 `latest` —— 出问题没法确定跑的是哪一版。
+指定版本：`.env` 里设 `ARTEX_TAG=v0.9.12`（不设则用 `latest`）。建议固定版本，不要用可变的 `latest` —— 出问题没法确定跑的是哪一版。
 
 ### 预编译二进制
 

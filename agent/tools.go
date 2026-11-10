@@ -1187,10 +1187,17 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
-	Summary   string            `json:"summary"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
-	ParentIDs []json.RawMessage `json:"parent_ids"`
-	Priority  int               `json:"priority"`
+	Summary    string            `json:"summary"`
+	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	ParentIDs  []json.RawMessage `json:"parent_ids"`
+	Priority   int               `json:"priority"`
+	StrategyID int64             `json:"strategy_id"` // W12（可选）：本意图所属策略（exploration_nodes.strategy_id）
+	// 方案 v10 F1 —— 愿望结构化：意图自带【可证伪的预测】（许愿纪律）。
+	// 运行后系统把预测与实际产出对比：预测未兑现、或出现预测之外的发现，
+	// 都会被记录为矛盾并驱动下一步许愿。空字段不写 payload（空省略）。
+	PredictedVulnclass string   `json:"predicted_vulnclass"`
+	PredictedActions   []string `json:"predicted_actions"`
+	PredictedTools     []string `json:"predicted_tools"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1238,6 +1245,18 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
+	// 方案 v10 F1 —— 愿望结构化：把预测写进意图 payload（空省略）。这是许愿
+	// 纪律的数据落点：后续「预测 vs 实际」的矛盾对比从这里读三样东西——预测的
+	// 漏洞类别 / 预计动作 / 预计工具；预测未兑现或预测外发现都会被记录为矛盾。
+	if v := strings.TrimSpace(it.PredictedVulnclass); v != "" {
+		payload["predicted_vulnclass"] = v
+	}
+	if len(it.PredictedActions) > 0 {
+		payload["predicted_actions"] = it.PredictedActions
+	}
+	if len(it.PredictedTools) > 0 {
+		payload["predicted_tools"] = it.PredictedTools
+	}
 	// 锚点先判范围（db.ExplorationStore.AddIntentInScope）：意图绑定的资产若落在
 	// 本任务范围之外，整条意图不写 —— 锚点既是血缘也是范围读的授权边，把范围外
 	// 的资产锚上去等于把这个节点在范围读里整体抹掉，也把别人的资产 id 写进共享图。
@@ -1258,6 +1277,17 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			_ = t.ts.Link(origin, db.RelDerivedFrom, id)
 		}
 	}
+	// W12（方案 v10 §6）：可选 strategy_id 落到节点列上（exploration_nodes.strategy_id，
+	// 真外键——非法 id 只会让这条 UPDATE 失败，不影响已建好的意图；历史行不回填）。
+	// db 层写函数（AddIntentInScope）不认识这个参数 ⇒ 落图后补一条 UPDATE 最省事。
+	if it.StrategyID > 0 && t.ts != nil {
+		if pg := t.ts.DB(); pg != nil {
+			if _, err := pg.Exec(`UPDATE exploration_nodes SET strategy_id=$1 WHERE id=$2`,
+				it.StrategyID, id); err != nil {
+				log.Printf("[intent] 意图 %d 挂 strategy_id %d 失败: %v", id, it.StrategyID, err)
+			}
+		}
+	}
 	return id, nil
 }
 
@@ -1265,11 +1295,19 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority/strategy_id/predicted_*）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
+			// W12（方案 v10 §6）：可选 strategy_id —— 意图按策略产出时带上，节点级
+			// 打通「探索图 ↔ 策略图」（exploration_nodes.strategy_id，真外键）。
+			"strategy_id": intp("所属策略 id（可选，number）：本轮探索由哪条生效策略产出时传它（策略面的 strategy id）；不传 = 与策略无归属关系。"),
+			// 方案 v10 F1 —— 愿望结构化（三个可选预测字段）：每个意图给出可证伪的
+			// 预测；运行后系统对比预测与实际，未兑现/预测外发现会被记录为矛盾。
+			"predicted_vulnclass": str("预测本方向可能挖出的【漏洞类别】（可选，一个词，如 sqli / xss / ssrf / rce / authz_bypass / info_disclosure / weak_auth）。要可证伪：写之前想清楚「看到什么算支持这条预测、什么算反驳」。"),
+			"predicted_actions":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "预计执行的【动作清单】（可选，短句按序），如 [\"枚举 /api 端点\", \"对登录口做注入测试\"]——同样要可证伪。"},
+			"predicted_tools":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "预计需要的【工具名清单】（可选），如 [\"Bash\", \"WebFetch\"]。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
