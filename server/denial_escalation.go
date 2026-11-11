@@ -110,29 +110,41 @@ func (s *Server) onToolDenial(taskID, toolName, denialMessage string) {
 	if !ok || t == nil || t.Store == nil {
 		return
 	}
-	summary := fmt.Sprintf("%s 被 %s 连续拒绝 %d 次（reason_code=%s）",
+	summary := fmt.Sprintf("%s 被 %s 连续拒绝 %d 次（reason_code=%s），需人工处理",
 		toolName, "平台", denialEscalationThreshold, reasonCode)
 	hint := denialHintFor(reasonCode)
 	blockedReason := trunc(denialMessage, 300)
+	// v0.10.1 用户拍板「一条一条事件出来，不是合到一起」：升级与每个意图转
+	// blocked 各自独立成一条事件/播报，不再把意图清单拼进同一行摘要。
+	// 事件 1：升级本身。
+	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+		Summary: summary + suffixHint(hint)})
+	// 事件 2..N：每个转 blocked 的意图各一条。
+	var blockedIDs []int64
 	if ids, err := t.Store.RunningIntentIDs(); err == nil {
 		for _, id := range ids {
 			if _, err := t.Store.SetIntentBlockedWithReason(id, blockedReason); err == nil {
-				summary += fmt.Sprintf("；意图 #%d 已转 blocked", id)
+				blockedIDs = append(blockedIDs, id)
+				s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+					Summary: fmt.Sprintf("意图 #%d 已转 blocked：%s 连续拒绝（reason_code=%s）", id, toolName, reasonCode)})
 			}
 		}
 	}
-	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
-		Summary: summary + "，需人工处理" + suffixHint(hint)})
 	// F4 空缺源①（方案 v10 §16）：B6 升级（意图转 blocked）= 一条动作空缺——
 	// worker 反复撞同一堵墙说明「想做的动作做不成」，入账 kind=action 并触发一次
 	// 定向唤醒（让监督者产出绕行意图或收口判断）。
 	s.openGap(numeric, db.GapAction, trunc(denialMessage, 300))
-	// 绑定会话播报（总控/群聊里看得见）。
+	// 绑定会话播报（总控/群聊里看得见）：同样一条事件一条消息。
 	if sess, err := s.m.pg.SessionByTask(numeric); err == nil && sess != nil {
-		body := fmt.Sprintf("【需人工处理】任务 #%s：%s%s", taskID, summary, suffixHint(hint))
-		s.say(sess.ID, numeric, "system", "system", body)
+		s.say(sess.ID, numeric, "system", "system",
+			fmt.Sprintf("【需人工处理】任务 #%s：%s%s", taskID, summary, suffixHint(hint)))
+		for _, id := range blockedIDs {
+			s.say(sess.ID, numeric, "system", "system",
+				fmt.Sprintf("【意图 blocked】任务 #%s：意图 #%d 已转 blocked（%s 连续拒绝，reason_code=%s）",
+					taskID, id, toolName, reasonCode))
+		}
 	}
-	log.Printf("[escalation] task %s %s", taskID, summary)
+	log.Printf("[escalation] task %s %s（blocked 意图 %d 个）", taskID, summary, len(blockedIDs))
 }
 
 func suffixHint(hint string) string {

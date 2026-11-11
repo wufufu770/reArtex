@@ -38,22 +38,35 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
+	// ⚠️ v0.10.1 事故修复：这条 SQL 曾引用不存在的 note 列——Query 报错被
+	// `if err == nil` 静默吞掉，大屏 recent 永远空、200 照回（「0 条」假象）。
+	// 账本读不出来必须报错（与决策账本页同口径）：recent/pending 任一读失败
+	// 直接 500，大屏立刻弹错，而不是安静地演「没有裁决」。
+	// note 语义由账本里真实存在的 anomaly_reason 承担（行级理由）。
 	recent, err := pg.Query(`
 		SELECT id, to_char(created_at,'HH24:MI:SS'), COALESCE(source_agent,''), tool_name, verdict,
 		       COALESCE(reason_code,''), COALESCE(checks->>'category',''), COALESCE(checks->>'auditor',''),
-		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(note,120),''),
+		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(anomaly_reason,120),''),
 		       COALESCE(checks->>'manual_override','')
 		FROM sod_decisions ORDER BY id DESC LIMIT 50`)
-	if err == nil {
-		defer recent.Close()
+	if err != nil {
+		writeErr(w, 500, "读实时裁决流失败: "+err.Error())
+		return
 	}
+	defer recent.Close()
 	rows := []sodFeedRow{}
-	for recent != nil && recent.Next() {
+	for recent.Next() {
 		var r sodFeedRow
 		if err := recent.Scan(&r.ID, &r.ToChar, &r.Agent, &r.Tool, &r.Verdict,
-			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.Note, &r.Overridden); err == nil {
-			rows = append(rows, r)
+			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.Note, &r.Overridden); err != nil {
+			writeErr(w, 500, "读实时裁决流行失败: "+err.Error())
+			return
 		}
+		rows = append(rows, r)
+	}
+	if err := recent.Err(); err != nil {
+		writeErr(w, 500, "读实时裁决流失败: "+err.Error())
+		return
 	}
 
 	pendingRows, err := pg.Query(`
@@ -61,18 +74,26 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 		       to_char(p.created_at,'HH24:MI:SS'),
 		       COALESCE(LEFT(p.tool_input, 400), '')
 		FROM intercept_pending p WHERE p.status='pending' ORDER BY p.id DESC LIMIT 30`)
-	if err == nil {
-		defer pendingRows.Close()
+	if err != nil {
+		writeErr(w, 500, "读待人工裁决失败: "+err.Error())
+		return
 	}
+	defer pendingRows.Close()
 	pend := []map[string]any{}
-	for pendingRows != nil && pendingRows.Next() {
+	for pendingRows.Next() {
 		var id int64
 		var tool, reason, agent, ts, input string
-		if err := pendingRows.Scan(&id, &tool, &reason, &agent, &ts, &input); err == nil {
-			pend = append(pend, map[string]any{
-				"id": id, "tool": tool, "reason": reason, "agent": agent, "ts": ts, "input": input,
-			})
+		if err := pendingRows.Scan(&id, &tool, &reason, &agent, &ts, &input); err != nil {
+			writeErr(w, 500, "读待人工裁决行失败: "+err.Error())
+			return
 		}
+		pend = append(pend, map[string]any{
+			"id": id, "tool": tool, "reason": reason, "agent": agent, "ts": ts, "input": input,
+		})
+	}
+	if err := pendingRows.Err(); err != nil {
+		writeErr(w, 500, "读待人工裁决失败: "+err.Error())
+		return
 	}
 
 	stats := map[string]any{
