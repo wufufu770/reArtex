@@ -2199,13 +2199,74 @@ func (e *Engine) claimNext(t *Task, name string) *db.Node {
 	if !e.groupCapAllowsClaim(t) {
 		return nil
 	}
+	// T5（方案 v10 §6 三期）：种类并发上限——settings 键 dispatch_kind_caps
+	// （JSON map kind→cap，默认空 = 不启用，行为与从前一致）。每次认领批读一次
+	// （认领频率低，不值得缓存）；计数与认领非同一事务 ⇒ 极端并发下可能瞬时超
+	// 一两个，这是快路径口径（与群组上限的快路径同一取舍，权威CAS认领不变）。
+	kindCaps := e.dispatchKindCaps()
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
+		if !e.kindCapAllowsClaim(t, in, kindCaps) {
+			continue
+		}
 		if e.claimIntent(t, in.ID, name) {
 			return in
 		}
 	}
 	return nil
+}
+
+// DispatchKindCapsSettingKey 是种类并发上限的 settings 键（T5）。
+// 值形如 {"recon":2,"verify":1}；空/未配置 = 不启用（零变化）。
+const DispatchKindCapsSettingKey = "dispatch_kind_caps"
+
+// dispatchKindCaps 读种类并发上限（kind → cap）。解析失败按未启用处理并记日志
+// （坏配置不能打死派发，fail-open）。general 不设限——它不是显式种类，是兜底。
+func (e *Engine) dispatchKindCaps() map[string]int {
+	if e == nil || e.m == nil || e.m.pg == nil {
+		return nil
+	}
+	raw, ok, err := e.m.pg.GetSetting(DispatchKindCapsSettingKey)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var m map[string]int
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		log.Printf("[engine] dispatch_kind_caps 解析失败（按未启用处理）: %v", err)
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for kind, capN := range m {
+		if kind == db.IntentKindGeneral || capN <= 0 {
+			continue
+		}
+		out[kind] = capN
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// kindCapAllowsClaim 报告一条候选意图按其种类还能不能认领：同 kind 在跑数
+// < cap 才放行。caps 为 nil（未启用）或意图无显式种类（general）时恒放行；
+// 计数读失败也放行（fail-open——限流是为了治理倾斜，不是为了制造新故障面）。
+func (e *Engine) kindCapAllowsClaim(t *Task, in *db.Node, caps map[string]int) bool {
+	if len(caps) == 0 || in == nil {
+		return true
+	}
+	kind := db.IntentKindFromPayload(in.Payload)
+	capN, ok := caps[kind]
+	if !ok {
+		return true
+	}
+	running, err := t.Store.RunningIntentsCountByKind(kind)
+	if err != nil {
+		log.Printf("[engine] task %s 意图 #%d 的种类 %q 在跑数读取失败（放行）: %v",
+			t.ID, in.ID, kind, err)
+		return true
+	}
+	return running < capN
 }
 
 // dispatcherMayClaim 判定当前 worker 这次能不能参与认领。

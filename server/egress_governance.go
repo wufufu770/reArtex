@@ -11,9 +11,14 @@ package server
 // 拿到 governed=false 与未覆盖通道清单，然后【必须】把清单显示出来。
 
 import (
-	"strings"
 	"encoding/json"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/netguard"
 )
 
 // EgressGovernanceState describes how completely egress is governed.
@@ -138,4 +143,39 @@ func RegisterEgressGovernanceRoutes(mux *http.ServeMux) {
 // 回的是 governed=false 与未覆盖通道清单 —— 平台不提供「已管控」的措辞。
 func getEgressGovernanceState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CurrentEgressGovernanceState())
+}
+
+// ---------- T6（方案 v10 §6 三期）②：egress_allowed_ports 的接线 ----------
+
+// EgressAllowedPortsSettingKey 是 CONNECT 端口白名单的追加端口 settings 键。
+// 值形如 "8443, 8080"（逗号/空白分隔）；空 = 只默认白名单（443）。
+const EgressAllowedPortsSettingKey = "egress_allowed_ports"
+
+// egressPortsTTL 是追加端口表的缓存时长：CONNECT 高频，逐条打库会拖垮代理；
+// 端口白名单是低频变更的运营配置，10s 滞后可接受。
+const egressPortsTTL = 10 * time.Second
+
+// egressAllowedPortsSource 产出录制代理的追加端口读取器（manager 装配时注入
+// traffic.SetEgressPortsSource）。带 TTL 缓存；读失败沿用上次结果（首次失败按
+// 空表 = 只默认白名单——fail-closed：配置读不出来时不放宽，宁可收敛）。
+func egressAllowedPortsSource(pg *db.DB) func() []int {
+	mu := sync.Mutex{}
+	var cached []int
+	var at time.Time
+	return func() []int {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Now().Before(at) {
+			return cached
+		}
+		raw, ok, err := pg.GetSetting(EgressAllowedPortsSettingKey)
+		if err != nil || !ok {
+			// 读失败沿用旧值；旧值不存在则空表（只默认白名单）。
+			at = time.Now().Add(egressPortsTTL)
+			return cached
+		}
+		cached = netguard.ParseEgressAllowedPorts(raw)
+		at = time.Now().Add(egressPortsTTL)
+		return cached
+	}
 }

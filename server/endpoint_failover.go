@@ -1,6 +1,6 @@
 package server
 
-// ---------- 网关候选地址自动切换（方案 v5 G1）----------
+// ---------- 网关候选地址自动切换（方案 v5 G1；T4 方案 v10 §6 接入 X8 触发）----------
 //
 // 一个 LLM profile 可以配 base_urls（有序候选，第一项为主）。装饰器持有每个
 // 候选的独立 provider（各自带完整包装链：llmrec/quota/side——切换后记录与
@@ -8,10 +8,15 @@ package server
 // 自动回切。切换全程留痕（切换历史 ring + llm_records 观测行）。
 //
 // 边界口径：
-//   - 只对【连接类】失败切换——401/403（鉴权）与业务错误与端点无关，照常透传
-//     （401/403 的熔断由 llmpool 的 hard-trip 分类处理，见 G5）；
+//   - 【连接类】失败切换照旧（G1）；T4（X8）追加：额度/认证失败在首个输出事件
+//     前也允许换端点重派——同一模型挂多个网关时，额度与 key 有效性按网关各自
+//     独立。重派上限：额度 2 次、认证 1 次（连续口径，成功即清零；常量与判定
+//     在 role_policy.go，lane 侧共用）。401/403 的链级熔断仍由 llmpool 的
+//     hard-trip 分类处理（G5），与本装饰器正交；
 //   - 每次 Stream/Complete 调用最多把候选列表遍历一圈，不无限重试；
-//   - 探测是 TCP dial（短超时）——「端口通」即候选可用，协议错误留给真实请求。
+//   - 探测是 TCP dial（短超时）——「端口通」即候选可用，协议错误留给真实请求；
+//   - 本装饰器此前是死代码（无装配点），T4 在 providerForProfileModelRaw
+//     （唯一构建源）接入消费——见文件尾 endpointFailoverFor。
 
 import (
 	"context"
@@ -46,6 +51,10 @@ type endpointFailover struct {
 	cur         int              // 当前生效下标
 	switches    []endpointSwitch // 最近切换历史（ring，最多 50）
 	onSwitch    func(from, to, cause string)
+	// T4（X8）：额度/认证失败的连续重派计数（成功一次清零；上限见
+	// laneRedeployClass.capOf——与 role lane 同一份常量）。
+	quotaRedeploys int
+	authRedeploys  int
 }
 
 // buildEndpointProviders 为 profile 的每个候选 URL 构建独立 provider
@@ -138,8 +147,72 @@ func (f *endpointFailover) nextAlive() int {
 	return -1
 }
 
-// streamWithFailover 是 Stream/Complete 共用的执行循环：连接类失败切下一
-// 候选重试整个请求，最多遍历一圈；其它错误原样透传。
+// ---------- T4（方案 v10 §6 / X8）：额度/认证失败的端点重派 ----------
+//
+// 一个 profile 配多个 base_urls 的常见形态是「同一模型挂在多个网关/中转上」，
+// 额度与 key 的有效性按网关各自独立 ⇒ 连接类之外，额度/认证失败也值得换下一
+// 候选试一次。重派上限（代码常量，照 tier 纪律，与 role_policy lane 侧同一
+// 方案条目 X8）：额度 2 次、认证 1 次；任一次成功调用后计数清零（上限约束的
+// 是「连续失败连击」，不是实例生命周期总量）。端点切换不改模型——「返回模型
+// 恒 ≠ 当前模型」的换模型通道在 role lane 的 backup（role_policy.go），这里
+// 的不变量是「返回端点恒 ≠ 当前端点」（switchTo 的 idx != cur 保证）。
+
+// redeployAllowed 报告该错误是否允许换端点重派：连接类恒可（仍受单次调用
+// 遍历一圈约束）；额度/认证按分类上限（连续口径）；其余（业务错误、上下文
+// 过长、确定性 4xx）换端点也没用，透传。
+func (f *endpointFailover) redeployAllowed(err error) bool {
+	if isConnectError(err) {
+		return true
+	}
+	class, ok := classifyLaneFailure(err)
+	if !ok {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	used := f.quotaRedeploys
+	if class == redeployAuth {
+		used = f.authRedeploys
+	}
+	return used < class.capOf()
+}
+
+// noteRedeploy 记一次按分类的端点重派（bump 计数）。
+func (f *endpointFailover) noteRedeploy(err error) {
+	class, ok := classifyLaneFailure(err)
+	if !ok {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if class == redeployAuth {
+		f.authRedeploys++
+	} else {
+		f.quotaRedeploys++
+	}
+}
+
+// noteSuccess 清零连续失败计数（一次成功调用说明当前候选已恢复）。
+func (f *endpointFailover) noteSuccess() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quotaRedeploys, f.authRedeploys = 0, 0
+}
+
+// redeploy 切到「当前之后下一个可用候选」；没有可用候选返回 false。
+func (f *endpointFailover) redeploy(cause string) bool {
+	next := f.nextAlive()
+	if next < 0 {
+		return false
+	}
+	f.switchTo(next, cause)
+	return true
+}
+
+// streamWithFailover 是 Complete 用的执行循环：连接类失败切下一候选重试整个
+// 请求（最多遍历一圈）；额度/认证失败按 X8 上限重派；其它错误原样透传。
+// （Stream 有自己的循环——流式错误从事件序列里冒出来，generic attempt 的
+// 返回值看不到它，见下方 streamOnce。）
 func streamWithFailover[T any](f *endpointFailover, attempt func(prov llm.Provider) (T, bool, error)) (T, error) {
 	var zero T
 	for round := 0; round < len(f.endpoints); round++ {
@@ -149,38 +222,73 @@ func streamWithFailover[T any](f *endpointFailover, attempt func(prov llm.Provid
 		}
 		res, started, err := attempt(prov)
 		if err == nil {
+			f.noteSuccess()
 			return res, nil
 		}
-		if started || !isConnectError(err) {
+		if started || !f.redeployAllowed(err) {
 			return zero, err
 		}
-		next := f.nextAlive()
-		if next < 0 {
+		cause := "连接失败：" + err.Error()
+		if _, ok := classifyLaneFailure(err); ok {
+			f.noteRedeploy(err)
+			cause = "额度/认证失败：" + err.Error()
+		}
+		if !f.redeploy(cause) {
 			return zero, err
 		}
-		f.switchTo(next, "连接失败："+err.Error())
 	}
 	return zero, fmt.Errorf("llm-failover: 所有候选端点均连接失败")
 }
 
-// Stream 实现 llm.Provider（连接类失败自动换端点重放整个请求）。
+// streamOnce 消费一次候选的流：事件原样 yield；首个错误若发生在任何输出
+// 交付之前且允许重派（连接类 / 额度认证类未超上限），返回 retryable=true
+// 与切换原因，让调用方换候选重放整个请求；否则错误原样交付并终止。
+func (f *endpointFailover) streamOnce(prov llm.Provider, ctx context.Context, req llm.CompletionRequest, yield func(llm.StreamEvent, error) bool) (cause string, retryable bool) {
+	delivered := false
+	for ev, err := range prov.Stream(ctx, req) {
+		if err == nil {
+			if !yield(ev, nil) {
+				return "", false
+			}
+			delivered = true
+			continue
+		}
+		if !delivered && f.redeployAllowed(err) {
+			if _, laneClass := classifyLaneFailure(err); laneClass {
+				f.noteRedeploy(err)
+				return "额度/认证失败：" + err.Error(), true
+			}
+			return "连接失败：" + err.Error(), true
+		}
+		yield(llm.StreamEvent{}, err)
+		return "", false
+	}
+	f.noteSuccess()
+	return "", false
+}
+
+// Stream 实现 llm.Provider：连接类失败自动换端点重放整个请求；额度/认证失败
+// 在首个输出事件前按 X8 上限换端点重放；任何输出交付给调用方之后，错误一律
+// 原样透传（重放会重复模型输出/工具副作用）。单次 Stream 调用最多把候选列表
+// 遍历一圈，不无限重试。
 func (f *endpointFailover) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		res, err := streamWithFailover(f, func(prov llm.Provider) (iter.Seq2[llm.StreamEvent, error], bool, error) {
-			// started 恒 false：连接类失败只可能发生在首个事件前（一旦连上，
-			// 中途断连的错误串不命中连接特征，isConnectError 会透传不切换）。
-			return prov.Stream(ctx, req), false, nil
-		})
-		if err != nil {
-			var zero llm.StreamEvent
-			yield(zero, err)
-			return
-		}
-		for ev, err := range res {
-			if !yield(ev, err) {
+		for round := 0; round < len(f.endpoints); round++ {
+			prov, _ := f.current()
+			if prov == nil {
+				yield(llm.StreamEvent{}, fmt.Errorf("llm-failover: 无可用候选端点"))
+				return
+			}
+			cause, retryable := f.streamOnce(prov, ctx, req, yield)
+			if !retryable {
+				return
+			}
+			if !f.redeploy(cause) {
+				yield(llm.StreamEvent{}, fmt.Errorf("llm-failover: 无可用候选端点可切换"))
 				return
 			}
 		}
+		yield(llm.StreamEvent{}, fmt.Errorf("llm-failover: 所有候选端点均失败"))
 	}
 }
 
@@ -292,6 +400,51 @@ func (s *Server) recordEndpointSwitch(profileID int64, name, from, to, cause str
 	}); err != nil {
 		log.Printf("[llm-failover] 切换留痕失败（忽略）: %v", err)
 	}
+}
+
+// endpointFailoverFor 是 T4（方案 v10 §6 / X8）的消费接线：profile 配置了多个
+// base_urls（≥2 个有效候选）时，把裸 provider 装配成 endpointFailover 装饰器
+// 返回；单 base_url（或候选构建不出 ≥2 个可用 provider）时原样返回——行为与
+// 现状逐字节一致（零变化）。切换留痕：log + llm_records 观测行。
+//
+// 装配位置在 providerForProfileModelRaw（唯一构建源）⇒ 所有下游出口（role
+// lane / 任务链 / 任务 pin / auditor / normalizer / chat）都自动获得端点切换。
+// 候选 provider 走 providerForProfileBareURL（改 BaseURL 的 Bare 构建：不写
+// provByProfile 缓存、不触 poolForBinding）⇒ 不与 Pool 构建互递归，共享同一份
+// profile 级限流器。探测回切 goroutine 挂 s.ctx（60s 周期；配置编辑重建实例后
+// 旧探测最迟活到停机，代价仅周期性 TCP 探测）。
+func (s *Server) endpointFailoverFor(id int64, p *db.LLMProfile, prov llm.Provider) llm.Provider {
+	if s == nil || s.m == nil || s.m.pg == nil || p == nil || len(p.BaseURLs) < 2 {
+		return prov
+	}
+	urls := make([]string, 0, len(p.BaseURLs))
+	for _, u := range p.BaseURLs {
+		if u = trimEndpoint(u); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	if len(urls) < 2 {
+		return prov
+	}
+	provs, _ := buildEndpointProviders(urls, func(baseURL string) (llm.Provider, error) {
+		cand, _, ok := s.providerForProfileBareURL(id, baseURL)
+		if !ok {
+			return nil, fmt.Errorf("候选 %s 构建失败", baseURL)
+		}
+		return cand, nil
+	})
+	f := newEndpointFailover(id, p.Name, urls, provs, func(from, to, cause string) {
+		s.recordEndpointSwitch(id, p.Name, from, to, cause)
+	})
+	if f == nil {
+		return prov
+	}
+	log.Printf("[llm-failover] profile %d（%s）装配端点切换（%d 个候选，X8：额度重派≤%d/认证重派≤%d）",
+		id, p.Name, len(urls), LaneQuotaRedeployMax, LaneAuthRedeployMax)
+	// 主地址恢复回切探测：60s 周期，随服务 ctx 终止（配置编辑会重建整个实例，
+	// 旧实例的探测 goroutine 最迟活到停机——60s 一次 TCP 探测，代价可忽略）。
+	f.StartEndpointProbing(s.ctx.Done())
+	return f
 }
 
 // endpointStatus 是 /api/llm 的 endpoints 载荷行（健康卡）。

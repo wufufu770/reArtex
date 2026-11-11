@@ -1891,14 +1891,29 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 }
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
+// T5（方案 v10 §6 三期）：成功认领同时写认领租约观测列——claimed_by=owner（与
+// owner 同值，但语义是「认领事件」而非「归属」）、claimed_at=now()（租约起算点，
+// 租约时长 = 处置时刻 - claimed_at）。无人为清除：列是观测数据，不是调度依据。
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1, attempts=attempts+1
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1, attempts=attempts+1,
+claimed_by=$1, claimed_at=now()
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
 	return n == 1, nil
+}
+
+// RunningIntentsCountByKind 统计同种类在跑（state='running'）的意图数。
+// kind 来自 payload->>'kind'（T5 写入时已归一，见 db/intent_kind.go）——这里只做
+// 等值比较，不重复归一；general 不参与种类容量（容量闸调用方自己排除）。
+func (s *ExplorationStore) RunningIntentsCountByKind(kind string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='running' AND payload->>'kind'=$2`,
+		s.expID, kind).Scan(&n)
+	return n, err
 }
 
 // Stats returns node counts grouped by kind (for dashboard).

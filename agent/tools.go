@@ -1200,6 +1200,10 @@ type intentItem struct {
 	PredictedVulnclass string   `json:"predicted_vulnclass"`
 	PredictedActions   []string `json:"predicted_actions"`
 	PredictedTools     []string `json:"predicted_tools"`
+	// T5（方案 v10 §6 三期）：可选种类标注——自由文本，落 payload 前经
+	// db.NormalizeIntentKind 归一到 recon/exploit/verify（认不出归 general，
+	// 不写 payload）。它是种类并发上限（dispatch_kind_caps）的判定键。
+	Kind string `json:"kind"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1259,6 +1263,12 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(it.PredictedTools) > 0 {
 		payload["predicted_tools"] = it.PredictedTools
 	}
+	// T5（方案 v10 §6 三期）：种类标注落 payload（kind→cap 容量闸的判定键）。
+	// 归一在写入时做（认领侧只做等值比较）；认不出的归 general 且不落字段——
+	// general 是兜底而非显式种类，落了反而让容量闸误限兜底类。
+	if kind := db.NormalizeIntentKind(it.Kind); kind != db.IntentKindGeneral {
+		payload["kind"] = kind
+	}
 	// 锚点先判范围（db.ExplorationStore.AddIntentInScope）：意图绑定的资产若落在
 	// 本任务范围之外，整条意图不写 —— 锚点既是血缘也是范围读的授权边，把范围外
 	// 的资产锚上去等于把这个节点在范围读里整体抹掉，也把别人的资产 id 写进共享图。
@@ -1310,6 +1320,10 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"predicted_vulnclass": str("预测本方向可能挖出的【漏洞类别】（可选，一个词，如 sqli / xss / ssrf / rce / authz_bypass / info_disclosure / weak_auth）。要可证伪：写之前想清楚「看到什么算支持这条预测、什么算反驳」。"),
 			"predicted_actions":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "预计执行的【动作清单】（可选，短句按序），如 [\"枚举 /api 端点\", \"对登录口做注入测试\"]——同样要可证伪。"},
 			"predicted_tools":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "预计需要的【工具名清单】（可选），如 [\"Bash\", \"WebFetch\"]。"},
+			// T5（方案 v10 §6 三期）：可选种类标注——种类并发容量闸（dispatch_kind_caps）
+			// 的判定键。自由文本会被归一到 recon（侦察/收集）/ exploit（利用/攻击）/
+			// verify（验证/复测）之一；认不出按未标注处理（不设种类上限）。
+			"kind": str("本方向的种类（可选，一个词）：recon（侦察/收集类，如子域枚举、端口扫描、指纹）/ exploit（利用/攻击类，如注入、爆破）/ verify（验证/复测类，如证明某漏洞存在）。同种类意图有并发上限时按它限流。"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {

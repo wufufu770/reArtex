@@ -534,6 +534,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		input += "\n\n【收尾评估轮（本轮特殊规则，覆盖上一段的硬底线）】：本轮【允许且预期】产出 0 个新意图。你只应做两件事之一：① prove_goal（目标确已达成、有证据）；② 用 record_fact 写一条 subtype=conclusion 的如实 partial 结论（已确认什么/未竟什么/为什么停），然后直接结束本轮。禁止为了凑产出而派边际/重复意图。"
 	}
 	input += renderPlannerTodos(opts.Todos.List())
+	// T5（方案 v10 §6 三期）：积压水位——settings 键 backlog_watermark（int，
+	// 默认 0 = off）。open 意图数超阈时往本轮 input 注入「只做验证与收口，不产
+	// 新意图」段（照 hint/终局收尾的注入通道：拼进本轮 user 输入，不进 system）。
+	// 与硬底线无冲突：硬底线只在 frontier_open=0 时强制产意图，水位条件意味着
+	// open > 水位 ≥ 1。
+	if blk := backlogWatermarkBlock(ts); blk != "" {
+		input += blk
+	}
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	_, _, err = captureRun(ctx, opts, input,
@@ -544,4 +552,35 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			}
 		})
 	return tsx.GoalMet, tsx.Reason, err
+}
+
+// BacklogWatermarkSettingKey 是积压水位的 settings 键（T5）：open 意图数超过
+// 该值时 planner 本轮只做验证与收口。默认 0 = off（未配置/非法值同样 off）。
+const BacklogWatermarkSettingKey = "backlog_watermark"
+
+// backlogWatermarkBlock 返回积压水位触发段（空串 = 未触发/未启用）。
+// 每轮现读 settings（热改即刻生效；读失败按 off 处理——坏配置不能打死规划），
+// open 数用既有 OpenIntentsCount（与 frontier 同一判定源）。解析失败/非正数
+// 一律按 off，不猜。
+func backlogWatermarkBlock(ts *db.ExplorationStore) string {
+	if ts == nil {
+		return ""
+	}
+	pg := ts.DB()
+	if pg == nil {
+		return ""
+	}
+	raw, ok, err := pg.GetSetting(BacklogWatermarkSettingKey)
+	if err != nil || !ok {
+		return ""
+	}
+	wm := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(raw), "%d", &wm); err != nil || wm <= 0 {
+		return ""
+	}
+	open, err := ts.OpenIntentsCount()
+	if err != nil || open <= wm {
+		return ""
+	}
+	return fmt.Sprintf("\n\n【积压水位触发（本轮特殊规则，覆盖上一段的常规产出节奏）】：当前 open 意图 %d 条，已超过积压水位 %d——frontier 堆积说明派发消化不动了，再产新方向只会加剧积压。本轮【只做验证与收口，不产新意图】：① 复查在跑意图，跑偏的 steer_work 纠偏、死方向 kill_work 止损；② 目标已达成用 prove_goal 证成；③ 对既有方向做合并/去重/降优先级。禁止 add_intent 新增方向。", open, wm)
 }

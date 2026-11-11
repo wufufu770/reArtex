@@ -125,6 +125,8 @@ export default function LLMRecordsPage() {
   const [records, setRecords] = React.useState<LLMRecordItem[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(false);
+  // M3（方案 v10 §6 二期）：缓存命中率与分位延迟聚合。
+  const [stats, setStats] = React.useState<Awaited<ReturnType<typeof api.llmStats>> | null>(null);
 
   // Recording on/off toggle (settings.llm_record; default off). When off the
   // backend records nothing.
@@ -190,6 +192,21 @@ export default function LLMRecordsPage() {
     const t = setTimeout(() => setSessionQ(session.trim()), 300);
     return () => clearTimeout(t);
   }, [session]);
+
+  React.useEffect(() => {
+    let alive = true;
+    api
+      .llmStats()
+      .then((r) => {
+        if (alive) setStats(r);
+      })
+      .catch(() => {
+        /* 统计失败不打扰主列表 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Reset page on filter change.
   // biome-ignore lint/correctness/useExhaustiveDependencies: 故意多列过滤条件以重置页码。
@@ -290,6 +307,25 @@ export default function LLMRecordsPage() {
           <Badge variant="secondary">{total}</Badge>
         </div>
       </div>
+
+      {/* M3（方案 v10 §6 二期）：缓存命中率与分位延迟卡 */}
+      {stats && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {[
+            { label: "调用", value: String(stats.total_calls) },
+            { label: "缓存命中率", value: `${(stats.cache_hit_rate * 100).toFixed(1)}%` },
+            { label: "p50 延迟", value: `${stats.latency_p50_ms}ms` },
+            { label: "p95 延迟", value: `${stats.latency_p95_ms}ms` },
+            { label: "输入 token", value: String(stats.input_tokens) },
+            { label: "错误", value: String(stats.errors) },
+          ].map((c) => (
+            <Card key={c.label} className="gap-1 p-3">
+              <p className="text-muted-foreground text-xs">{c.label}</p>
+              <p className="font-semibold tabular-nums">{c.value}</p>
+            </Card>
+          ))}
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">

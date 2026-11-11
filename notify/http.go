@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Autumn-27/artex/netguard"
 )
 
 // allowLocalTargets 决定是否允许把消息投递到环回 / 链路本地地址。
@@ -44,16 +46,15 @@ func allowLocalTargets() bool {
 // **不拒绝** RFC1918 私网：内网自建 Mattermost / SMTP 中继是很常见的合法用法，
 // 把它们一并挡掉会让功能在真实环境里直接不可用。这条取舍是刻意的——
 // 防护要挡住真正敏感的目标，同时不能把正常部署一起废掉。
+//
+// T6（方案 v10 §6 三期）：恒拒段（黑面）不再自抄清单，引用 netguard.ForbiddenIP
+// 单一事实源（IPv4-mapped IPv6 归一也在那边统一做）；本函数只叠加通知侧自己的
+// 环回取舍（逃生口 ARTEX_NOTIFY_ALLOW_LOCAL）。
 func isBlockedDialIP(ip net.IP) bool {
-	if ip == nil {
+	if _, forbidden := netguard.ForbiddenIP(ip); forbidden {
 		return true
 	}
-	// IPv4-mapped IPv6（::ffff:127.0.0.1）要还原成 IPv4 再判，否则绕过检查。
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	return netguard.NormalizeIP(ip).IsLoopback()
 }
 
 // blockInternalDial 是 http.Transport 拨号器的 Control 钩子，在**连接建立时**

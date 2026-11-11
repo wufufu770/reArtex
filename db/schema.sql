@@ -216,6 +216,12 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
 -- attempts 由 ClaimIntent 成功时 +1；outcomes 由终态转换时追加（JSONB 数组）。
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS outcomes JSONB;
+-- T5（方案 v10 §6 三期）：认领租约观测列——谁在何时认领了这条意图。
+-- claimed_by 与 owner 同值写入（owner 是归属语义，claimed_by 是认领事件语义；
+-- 拆两列让「认领发生在何时」有独立时间戳，租约时长 = 处置时刻 - claimed_at）。
+-- 由 db/exploration.go 的 ClaimIntent 成功时写入，无人为清除。
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 -- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
 DO $$
 BEGIN
@@ -1203,6 +1209,13 @@ CREATE TABLE IF NOT EXISTS finding_retests (
 CREATE INDEX IF NOT EXISTS idx_finding_retests_history ON finding_retests(finding_id, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_retests_active ON finding_retests(finding_id)
     WHERE status IN ('pending','running');
+-- T8（方案 v10 §6 三期）：复测的机械分层标注（幂等 ALTER——老库表已存在，靠这里补列）。
+-- effect_pre_existed：复测执行前的 baseline 探测结论——按 proof 请求去掉攻击载荷
+--   打一次目标，「效果」是否本来就存在（TRUE=存在/FALSE=不存在/NULL=未探测或不可判）。
+-- reproduced：复测结论的独立标注（verdict='reproduced' 时为 TRUE；标注不是否决，
+--   不改判三态结论本身，供下游过滤/统计不必解析 verdict 文本）。
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS effect_pre_existed BOOLEAN;
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS reproduced BOOLEAN;
 
 -- 删除会话保留复测记录，同时解除尚未结束的复测占用。
 CREATE OR REPLACE FUNCTION stop_deleted_conversation_retest() RETURNS trigger LANGUAGE plpgsql AS $$

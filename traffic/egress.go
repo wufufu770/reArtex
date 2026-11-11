@@ -301,6 +301,54 @@ func (t *Traffic) egressScope() EgressScope {
 	return holder.scope
 }
 
+// ---------- T6（方案 v10 §6 三期）：CONNECT 端口白名单 ----------
+
+// egressPortsHolder 装追加端口来源。指针容器为了能原子替换。
+type egressPortsHolder struct{ fn func() []int }
+
+// SetEgressPortsSource 注入 CONNECT 端口白名单的追加端口来源（宿主接线：读
+// settings egress_allowed_ports 的带缓存读取器）。nil/未注入 = 只默认白名单
+// （443）。判定本体在 netguard.CheckConnectPort。
+func (t *Traffic) SetEgressPortsSource(fn func() []int) {
+	t.egressPorts.Store(&egressPortsHolder{fn: fn})
+}
+
+// egressPortsAllowed 取当前追加端口表（来源未注入 → nil）。
+func (t *Traffic) egressPortsAllowed() []int {
+	holder := t.egressPorts.Load()
+	if holder == nil || holder.fn == nil {
+		return nil
+	}
+	return holder.fn()
+}
+
+// connectPortGate 判定一次 CONNECT 隧道的目标端口（T6 ②）。
+//
+// 返回 (reason, allowed)：allowed=false 时 reason 是拒绝原因；环回豁免时
+// allowed=true 且 reason 非空（调用方把它记进登记行）。端口取 CONNECT
+// authority 里的显式端口，缺省按 scheme 补（https=443 / 其余=80）。
+func (t *Traffic) connectPortGate(req *http.Request) (string, bool) {
+	host := egressDestinationHost(req)
+	port := 0
+	if req.URL != nil {
+		port, _ = strconv.Atoi(req.URL.Port())
+	}
+	if port == 0 {
+		if req.URL != nil && req.URL.Scheme == "https" {
+			port = 443
+		} else {
+			port = 80
+		}
+	}
+	allowed, loopback, reason := netguard.CheckConnectPort(host, port, t.egressPortsAllowed())
+	if allowed && loopback {
+		// 环回豁免记登记行：放行，但这条豁免要可观测（排查「谁在打本机端口」）。
+		log.Printf("[traffic] CONNECT 环回豁免登记：%s:%d（端口白名单豁免，放行）", host, port)
+		return reason, true
+	}
+	return reason, allowed
+}
+
 // egressPolicy 返回本实例的出网策略：同一套 netguard 策略类型，允许集钩子接到
 // 本实例的范围判定上。
 func (t *Traffic) egressPolicy() netguard.Policy {
@@ -389,6 +437,28 @@ func (t *Traffic) egressGate(res http.ResponseWriter, req *http.Request) (bool, 
 	// 非代理请求（直接访问代理自身地址）不归这里判，交给代理自己回 400。
 	if req.Method != http.MethodConnect && (req.URL == nil || req.URL.Host == "") {
 		return true, nil
+	}
+	// T6（方案 v10 §6 三期）②：CONNECT 端口白名单——平台级出网卫生规则，先于
+	// 任务范围判定（它不依赖任务身份，对未归属请求同样生效）。非白名单拒绝并
+	// 留痕；环回豁免但登记行照记（见 connectPortGate）。
+	if req.Method == http.MethodConnect {
+		if reason, allowed := t.connectPortGate(req); !allowed {
+			taskID, attributed := egressTaskOf(req)
+			d := EgressDecision{TaskID: taskID, Attributed: attributed,
+				Host: egressDestinationHost(req), Method: req.Method,
+				Allowed: false, Reason: reason}
+			if req.URL != nil {
+				d.URL = req.URL.String()
+			}
+			t.recordEgressDenial(req, d)
+			if scope := t.egressScope(); scope != nil {
+				if err := scope.RecordEgressDecision(req.Context(), d); err != nil {
+					log.Printf("[traffic] CONNECT 端口拒绝入审计链失败: %v", err)
+				}
+			}
+			writeEgressDenied(res, d)
+			return false, errors.New(d.Reason)
+		}
 	}
 	taskID, attributed := egressTaskOf(req)
 	d := t.egressDecide(req.Context(), req, taskID, attributed)

@@ -64,6 +64,111 @@ var rolePolicyLanes = map[string]bool{"planner": true, "worker": true, "mainagen
 // decisionLanes 是决策/验证槽位（结构性禁止 backup）。
 var decisionLanes = map[string]bool{"planner": true, "mainagent": true}
 
+// ---------- lane 失败切换（T4，方案 v10 §6 / X8）----------
+//
+// 触发与上限都是代码常量（照 tier 纪律：安全边界不挂可热改的存储——settings
+// 能被一次 PUT 改掉，代码常量要与判定逻辑一起改、一起审、一起发布）。
+//
+// 触发规则（X8）：额度/认证失败切该 lane 的备用模型或下一 endpoint。连接类失败
+// 的端点切换不占这里的重派预算（endpoint_failover 自己有「遍历一圈」上限）。
+// 「返回模型恒 ≠ 当前模型」是结构保证而非运行时判断：lane 游标只会推进
+// （primary→backup，ParseRolePolicy 已拒绝 backup==primary）；端点切换只换
+// base_url、换不了模型，所以「换模型」的唯一通道是 backup——没有 backup 就
+// 暂停（chainExhausted），绝不原地重派同一个模型。
+const (
+	// LaneQuotaRedeployMax 是额度类失败允许的重派次数上限（切 backup 算一次重派）。
+	LaneQuotaRedeployMax = 2
+	// LaneAuthRedeployMax 是认证类失败允许的重派次数上限（401/403 连击说明是
+	// 配置问题而不是抖动，一次重派就该停）。
+	LaneAuthRedeployMax = 1
+)
+
+// laneRedeployClass 是重派的原因分类（分别计数、分别封顶）。
+type laneRedeployClass int
+
+const (
+	redeployQuota laneRedeployClass = iota
+	redeployAuth
+)
+
+// capOf 返回该分类的重派上限。
+func (c laneRedeployClass) capOf() int {
+	if c == redeployAuth {
+		return LaneAuthRedeployMax
+	}
+	return LaneQuotaRedeployMax
+}
+
+// label 用于留痕文案。
+func (c laneRedeployClass) label() string {
+	if c == redeployAuth {
+		return "认证失败"
+	}
+	return "额度失败"
+}
+
+// classifyLaneFailure 把一次 lane 调用失败归入重派分类；ok=false 表示该失败
+// 不触发重派（业务错误 / 上下文过长 / 其它确定性拒绝——换模型也没用）。
+func classifyLaneFailure(err error) (laneRedeployClass, bool) {
+	if err == nil {
+		return 0, false
+	}
+	if isQuotaExhaustedError(err) {
+		return redeployQuota, true
+	}
+	if isAuthError(err) {
+		return redeployAuth, true
+	}
+	return 0, false
+}
+
+// isAuthError 判定认证类失败（401/403 / api key 无效 / 未授权）。
+// 与 isQuotaExhaustedError 同风格：只认响应里明确表达鉴权失败的形态，
+// 模糊的 4xx 不猜（猜错会把业务错误送进重派循环空转）。
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"status 401", "status 403", "unauthorized", "forbidden",
+		"invalid api key", "invalid_api_key", "incorrect api key",
+		"authentication", "authentication_error", "permission denied",
+		"api key not valid", "invalid x-api-key", "api key expired",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------- 重派计数（内存态；重启归零——与 lane 游标同一简化口径）----------
+
+var (
+	laneRedeployMu     sync.Mutex
+	laneRedeployCounts = map[roleLaneStageKey]map[laneRedeployClass]int{}
+)
+
+// laneRedeploysOf 读该 (task, lane) 在某分类上已用的重派次数。
+func laneRedeploysOf(taskID, lane string, class laneRedeployClass) int {
+	laneRedeployMu.Lock()
+	defer laneRedeployMu.Unlock()
+	return laneRedeployCounts[roleLaneStageKey{taskID, lane}][class]
+}
+
+// bumpLaneRedeploys 记一次重派并返回累计值。
+func bumpLaneRedeploys(taskID, lane string, class laneRedeployClass) int {
+	laneRedeployMu.Lock()
+	defer laneRedeployMu.Unlock()
+	if laneRedeployCounts[roleLaneStageKey{taskID, lane}] == nil {
+		laneRedeployCounts[roleLaneStageKey{taskID, lane}] = map[laneRedeployClass]int{}
+	}
+	m := laneRedeployCounts[roleLaneStageKey{taskID, lane}]
+	m[class]++
+	return m[class]
+}
+
 // ParseRolePolicy 解析并校验 settings 值（JSON 字符串）。返回解析错误（形状/引用）。
 // 引用校验（profile 是否存在）由调用方注入 exists 判定 —— 本包不依赖 pg。
 func ParseRolePolicy(raw string, profileExists func(int64) bool) (RolePolicy, error) {
@@ -174,13 +279,32 @@ func (r *taskLLMRuntime) currentRoleLane(sel *taskLLMSelection) (bool, error) {
 
 // rotateRoleLane 是 role_policy lane 的 exhaust 分流：推进 lane 游标并构造
 // transition（不触碰任务链表）。stage 语义见 roleLaneStageOf。
+//
+// T4（X8）：额度/认证失败都进这里（分类见 classifyLaneFailure）。每次重派按
+// 分类计数、超上限即暂停（stage=2）——重派上限是「同分类累计」口径：额度失败
+// 重派 LaneQuotaRedeployMax 次、认证失败重派 LaneAuthRedeployMax 次后，再触发
+// 不再换目标（换了也一样失败），落 chainExhausted 等人工。返回的模型恒 ≠ 当前
+// 模型：唯一推进通道是 backup profile（ParseRolePolicy 保证 ≠ primary）；
+// 无 backup / 超上限都走暂停，不原地重派。
 func (r *taskLLMRuntime) rotateRoleLane(selection taskLLMSelection, cause error) (db.TaskLLMTransition, error) {
 	pol := *selection.lanePolicy
 	stage := roleLaneStageOf(r.taskID, r.agentKey)
+	class, _ := classifyLaneFailure(cause)
 	next := stage + 1
 	if pol.BackupID != 0 && next > 1 {
 		next = 1 // worker 档在 backup 上重复耗尽：停在 backup（重试语义），事件照发
 	}
+	// 重派上限：该分类已用完预算 ⇒ 不再重派，直接暂停。
+	if used := laneRedeploysOf(r.taskID, r.agentKey, class); used >= class.capOf() {
+		transition := db.TaskLLMTransition{PreviousProfileID: pol.PrimaryID}
+		transition.ChainExhausted = true
+		transition.Advanced = false
+		setRoleLaneStage(r.taskID, r.agentKey, 2)
+		log.Printf("[role-policy] task %s lane %s %s重派已达上限 %d（used=%d），暂停等待人工改档: cause=%v",
+			r.taskID, r.agentKey, class.label(), class.capOf(), used, cause)
+		return transition, nil
+	}
+	bumpLaneRedeploys(r.taskID, r.agentKey, class)
 	setRoleLaneStage(r.taskID, r.agentKey, next)
 	transition := db.TaskLLMTransition{PreviousProfileID: pol.PrimaryID, Advanced: true}
 	if next == 1 && pol.BackupID != 0 {
@@ -193,8 +317,9 @@ func (r *taskLLMRuntime) rotateRoleLane(selection taskLLMSelection, cause error)
 		transition.Advanced = false
 		setRoleLaneStage(r.taskID, r.agentKey, 2)
 	}
-	log.Printf("[role-policy] task %s lane %s 额度耗尽: stage %d→%d cause=%v",
-		r.taskID, r.agentKey, stage, next, cause)
+	log.Printf("[role-policy] task %s lane %s 额度/认证失败重派: stage %d→%d class=%s used=%d/%d cause=%v",
+		r.taskID, r.agentKey, stage, next, class.label(),
+		laneRedeploysOf(r.taskID, r.agentKey, class), class.capOf(), cause)
 	return transition, nil
 }
 
