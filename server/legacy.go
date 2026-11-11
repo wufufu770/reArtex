@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,10 +219,114 @@ func parseLegacyItems(text string) []legacyItemParsed {
 		}
 	}
 	var items []legacyItemParsed
-	if err := json.Unmarshal([]byte(text), &items); err != nil {
+	if err := json.Unmarshal([]byte(text), &items); err == nil {
+		return items
+	}
+	// v0.10.1 容错（task#9 现场）：LLM 产出的 JSON 常带非法字符——字符串值里
+	// 的裸换行/制表符（JSON 禁止字面控制符）、尾逗号。此前解析一失败就把整坨
+	// 数组文本塞进单条经验的 summary（标题=任务目标）——产出既不通用也不可读。
+	// 修常规错误后重试；仍失败就逐对象打捞（每个 {…} 单独修+解析，坏对象跳过）。
+	if repaired := repairLegacyJSON(text); repaired != text {
+		if err := json.Unmarshal([]byte(repaired), &items); err == nil && len(items) > 0 {
+			return items
+		}
+	}
+	return salvageLegacyObjects(text)
+}
+
+// repairLegacyJSON 修 LLM JSON 的两类高频非法点（保守：只在字符串值内部替换
+// 字面控制符；尾逗号按 `,` + 空白 + 收括号 的形态清理）。无法保证可解析时原样
+// 返回（调用方以 `!= text` 判断是否真修过）。
+func repairLegacyJSON(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 64)
+	inStr := false
+	escaped := false
+	for _, r := range s {
+		if inStr {
+			switch {
+			case escaped:
+				escaped = false
+				b.WriteRune(r)
+			case r == '\\':
+				escaped = true
+				b.WriteRune(r)
+			case r == '"':
+				inStr = false
+				b.WriteRune(r)
+			case r == '\n':
+				b.WriteString(`\n`)
+			case r == '\r':
+				b.WriteString(`\r`)
+			case r == '\t':
+				b.WriteString(`\t`)
+			default:
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if r == '"' {
+			inStr = true
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	// 尾逗号：`,}` / `,]`（允许中间空白）→ 收括号。
+	out = trailingCommaRe.ReplaceAllString(out, "$1")
+	return out
+}
+
+var trailingCommaRe = regexp.MustCompile(`,(\s*[}\]])`)
+
+// salvageLegacyObjects 逐对象打捞：在数组文本里按括号配平抠出每个顶层 {…}，
+// 逐个修复+反序列化；坏对象跳过而不是连坐整组。一个都捞不出才返回 nil
+// （调用方回退单条全量经验）。
+func salvageLegacyObjects(text string) []legacyItemParsed {
+	depth := 0
+	start := -1
+	inStr, escaped := false, false
+	out := []legacyItemParsed{}
+	flush := func(seg string) {
+		fixed := repairLegacyJSON(seg)
+		var it legacyItemParsed
+		if err := json.Unmarshal([]byte(fixed), &it); err == nil && strings.TrimSpace(it.Summary) != "" {
+			out = append(out, it)
+		}
+	}
+	for i, r := range text {
+		if inStr {
+			switch {
+			case escaped:
+				escaped = false
+			case r == '\\':
+				escaped = true
+			case r == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inStr = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					flush(text[start : i+1])
+					start = -1
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	return items
+	return out
 }
 
 // legacyEmptyOutput 判定模型输出是否为「明确的空产出」：剥除 ``` 围栏后，被

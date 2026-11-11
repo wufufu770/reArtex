@@ -991,8 +991,49 @@ export const api = {
   // 人工改判历史（职责分离页复核历史过滤）。
   sodOverrides: (taskId?: number) =>
     get<{ overrides: unknown[]; count: number }>(`/sod/overrides${taskId ? `?task_id=${taskId}` : ""}`),
-  reviewLegacyNode: (id: number, state: "accepted" | "retired" | "draft") =>
-    post<{ ok: boolean }>(`/legacy/nodes/${id}/review`, { state, reviewer: "sir" }),
+  // 评审经验：accepted 可带 override+reason 越级（三门未过时后端 409 返回
+  // missing_gates + override_required——手工 fetch 是为了把 409 body 里的
+  // 结构化缺门明细透传给评审弹窗，通用 http 助手只保留 error 字符串）。
+  reviewLegacyNode: async (
+    id: number,
+    state: "accepted" | "retired" | "draft",
+    opts?: { override?: boolean; reason?: string },
+  ) => {
+    const token = getToken();
+    const r = await fetch(`/api/legacy/nodes/${id}/review`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        state,
+        reviewer: "sir",
+        override: opts?.override ?? false,
+        reason: opts?.reason ?? "",
+      }),
+    });
+    const body = (await r.json().catch(() => ({}))) as {
+      ok?: boolean;
+      error?: string;
+      missing_gates?: string[];
+      override_required?: boolean;
+    };
+    if (!r.ok) {
+      const err = new Error(body?.error || `评审失败(${r.status})`) as Error & {
+        missing_gates?: string[];
+        override_required?: boolean;
+      };
+      err.missing_gates = body?.missing_gates;
+      err.override_required = body?.override_required;
+      throw err;
+    }
+    return body;
+  },
+  // v0.10.1 三门自动评估明细（结构完整/历史复盘/实战证据）：评审页在 draft 卡
+  // 上直接画三门徽章——「自动走流程，显示在这里」，不等点了接受才弹含糊的错。
+  legacyGates: (id: number) =>
+    get<{ pass: boolean; missing_gates: string[]; note: string }>(`/legacy/nodes/${id}/gates`),
   // 删除一条经验（draft/retired；accepted 后端 409）。操作者身份走 query（后端审计留人）。
   deleteLegacyNode: (id: number) => del<{ ok: boolean }>(`/legacy/nodes/${id}?operator=${encodeURIComponent("sir")}`),
   runMetrics: (taskId: number) => get<Record<string, unknown>>(`/metrics/run?task_id=${taskId}`),

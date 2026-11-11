@@ -43,6 +43,17 @@ const (
 	PromotionGateEvidence  = "实战证据"
 )
 
+// GateMissing 报告缺口清单里是否含某道门（前缀匹配——清单项是「门名：原因」）。
+// v0.10.1 经验线评审用：结构门硬拦、其余门可越级的判定依据。
+func GateMissing(missing []string, gate string) bool {
+	for _, m := range missing {
+		if strings.HasPrefix(m, gate) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- 三道门（纯函数，可独立测 —— T3 验收第三条） ----------
 
 // promotionGateStructure 门1：结构完整（name/summary 非空 —— 记忆线是
