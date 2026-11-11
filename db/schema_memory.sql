@@ -82,9 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_scope  ON memory_index(scope_type, s
 CREATE INDEX IF NOT EXISTS idx_memory_index_topic  ON memory_index(scope_type, scope_id, topic_key, version DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_index_current ON memory_index(scope_type, scope_id)
     WHERE valid_to IS NULL;
--- 两段式披露（X4/T2）的读面：注入块与混合检索只扫 active 的当前行。
-CREATE INDEX IF NOT EXISTS idx_memory_index_active ON memory_index(scope_type, scope_id)
-    WHERE valid_to IS NULL AND state='active';
+-- idx_memory_index_active（两段式披露 X4/T2 读面，WHERE 里引用 state）不能放
+-- 这里：老库走 ALTER 补列，列要到下方迁移窗口才存在——放前面会让老库启动崩
+-- （production 2026-11-11 实证）。移到 state 迁移窗口之后。
 
 -- ---------- memory_topic：索引指向的正文（按需读，不常驻上下文） ----------
 CREATE TABLE IF NOT EXISTS memory_topic (
@@ -195,6 +195,9 @@ DROP TRIGGER IF EXISTS trg_memory_index_append_only ON memory_index;
 -- 旧数据是人工信任的，回填 'active' 让它们保持可见。
 ALTER TABLE memory_index ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
 UPDATE memory_index SET state='active' WHERE state <> 'active' AND state <> 'quarantined';
+-- 两段式披露（X4/T2）的读面：注入块与混合检索只扫 active 的当前行（列就位后才建）。
+CREATE INDEX IF NOT EXISTS idx_memory_index_active ON memory_index(scope_type, scope_id)
+    WHERE valid_to IS NULL AND state='active';
 -- 老库补 CHECK（与 CREATE 内的定义一致；判据照 schema.sql ck_node_state 的
 -- pg_get_constraintdef 先例，重复启动零开销）。
 DO $$
