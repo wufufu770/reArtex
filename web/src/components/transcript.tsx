@@ -99,6 +99,14 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
       out.push({ type: "user", key: s.seq, step: s, intent: s.kind === "intent" });
       continue;
     }
+    // v0.10.1（用户拍板）：系统事件（worker=system 的文本播报——B6 升级、自动
+    // 暂停、治理收尾等）每条独立渲染成一条完整消息（AnswerBlock：全文气泡 +
+    // 时间戳），不再折进「点击展开」的合并行、也不再合并连续事件。「留一个空」
+    // 的观感正是合并行的展开框——这里从源头根除。
+    if (s.worker === "system" && s.kind === "text") {
+      out.push({ type: "answer", key: s.seq, step: s });
+      continue;
+    }
     // In a chat (main agent) the assistant's text/result IS the answer — render it
     // full (markdown), never collapsed. thinking still folds into a compact block.
     if (s.kind === "result" || (chat && s.kind === "text")) {
