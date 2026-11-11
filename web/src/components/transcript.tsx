@@ -652,10 +652,81 @@ function UserRow({
   );
 }
 
+// SystemEventActions 是系统事件消息下的内联操作条（v0.10.1 用户拍板：需人工
+// 处理的事件直接在消息里给按钮，不用再跑去别处）：
+//   - 「重跑阻塞意图」——B6 升级/LLM 通道故障类事件后，批量重跑本任务全部
+//     blocked 意图（复用 rerun-blocked 端点）；
+//   - 「恢复任务」——额度耗尽自动暂停的事件后，走人工恢复同一条控制链。
+// 匹配不到已知模式（普通播报）就不渲染任何按钮。
+function SystemEventActions({ summary, taskId }: { summary: string; taskId?: string }) {
+  const [busy, setBusy] = React.useState<"" | "rerun" | "resume">("");
+  const [done, setDone] = React.useState("");
+  if (!taskId) return null;
+  const needsRerun = /需人工处理|已转 blocked|LLM 通道故障/.test(summary);
+  const needsResume = /自动暂停/.test(summary);
+  if (!needsRerun && !needsResume) return null;
+
+  async function rerun() {
+    setBusy("rerun");
+    try {
+      const r = await api.rerunBlocked(taskId!);
+      setDone(`已重开 ${r.reopened} 条阻塞意图`);
+      toast.success(`已重开 ${r.reopened} 条阻塞意图`);
+    } catch (e) {
+      toast.error(`重跑失败：${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function resume() {
+    setBusy("resume");
+    try {
+      await api.controlTask(taskId!, "resume");
+      setDone("已恢复运行");
+      toast.success("已恢复运行");
+    } catch (e) {
+      toast.error(`恢复失败：${(e as Error).message}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {needsRerun && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 px-2 text-xs"
+          disabled={busy !== ""}
+          onClick={() => void rerun()}
+        >
+          重跑阻塞意图
+        </Button>
+      )}
+      {needsResume && (
+        <Button size="sm" className="h-7 px-2 text-xs" disabled={busy !== ""} onClick={() => void resume()}>
+          恢复任务
+        </Button>
+      )}
+      {done && <span className="text-[11px] text-muted-foreground">{done}</span>}
+    </div>
+  );
+}
+
 // AnswerBlock renders the agent's FINAL answer (kind="result") in full — never
 // collapsed. The summary is a truncated first line, so the full text is pulled
 // from the detail and shown inline.
-function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
+function AnswerBlock({
+  step,
+  getDetail,
+  taskId,
+}: {
+  step: Activity;
+  getDetail: (seq: number) => Promise<string>;
+  taskId?: string;
+}) {
   const [ref, inView] = useInView();
   const [full, setFull] = React.useState<string | null>(null);
   React.useEffect(() => {
@@ -686,6 +757,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
           <Markdown text={full ?? step.summary} />
         )}
       </div>
+      {step.worker === "system" && <SystemEventActions summary={step.summary} taskId={taskId} />}
       <ActivityTime ts={step.ts} />
     </div>
   );
@@ -727,7 +799,7 @@ function ExecView({
         ) : g.type === "user" ? (
           <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
         ) : g.type === "answer" ? (
-          <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
+          <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} taskId={taskId} />
         ) : g.type === "tool" ? (
           <ToolBlock
             key={"t" + g.key}
