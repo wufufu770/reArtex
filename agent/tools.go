@@ -1732,12 +1732,12 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 
 【绝对不报（0 元）】CORS 跨域配置（除非证明窃取了具体数据）、Sourcemap 泄露、HTTP 安全头缺失（X-Frame-Options/CSP）、版本号/中间件指纹、Self-XSS、SSL/TLS 配置警告（除非严重降级）、单独的开放重定向（无链式利用）、Rate limiting 缺失、任何没有 PoC 的发现。
 
-【评级基准（拿不准降一档）】critical=可验证敏感数据外泄/RCE/数据库完全控制/认证绕过接管/支付金额篡改/大规模数据泄露；high=可验证 SQLi 可读数据/SSRF 可达内网或云元数据/IDOR 可读他人敏感数据/未授权后台/可执行文件上传/反序列化 RCE；medium=有前置条件的利用（存储型 XSS 有场景/敏感操作 CSRF/部分敏感信息泄露/可利用 CORS/目录遍历有限读取）；low=需用户交互（反射 XSS）/仅影响自己/仅版本号技术栈/无敏感数据的未授权/有限 CSRF；info=未证实候选面、侦察线索、无直接影响的暴露（如「疑似注入面未取得 sink」「未验证的开放重定向参数」）——不确定是否成立时一律落 info 并写明缺什么证据。
+【评级基准（拿不准降一档）】critical=可验证敏感数据外泄/RCE/数据库完全控制/认证绕过接管/支付金额篡改/大规模数据泄露；high=可验证 SQLi 可读数据/SSRF 可达内网或云元数据/IDOR 可读他人敏感数据/未授权后台/可执行文件上传/反序列化 RCE；medium=有前置条件的利用（存储型 XSS 有场景/敏感操作 CSRF/可利用 CORS 泄露了具体数据/目录遍历有限读取）；low=需用户交互（反射 XSS）/仅影响自己/有限 CSRF/**带凭据或利用链的**未授权读取（可下载数据库凭据、可读写他人数据）；info=【纯信息泄露与暴露类一律 info，不算低危】：cookie/日志/备份/配置文件可读但不含可用凭据或利用链、版本号/技术栈/中间件指纹、目录列表、报错回显、侦察线索、未证实候选面（如「疑似注入面未取得 sink」「未验证的开放重定向参数」）——漏洞类别是信息泄露（info_disclosure）且没有拿到凭据或可继续利用的链，severity 一律写 info 并说明缺什么才升级。
 
 【组合升权】单独低价值可组合变高价值：信息泄露+CVE=可利用 1day；XSS+CSRF=账户接管；SSRF+云元数据=云接管；JWT 密钥泄露+伪造=认证绕过；文件上传+解析漏洞=webshell；IDOR+批量遍历=大规模泄露。有组合链时在 summary 写明链条并按组合后结果评级。
 
 用 evidence 提供可验证证据；HTTP 漏洞按 traffic_refs 规则绑定真实流量。`, obj(map[string]any{
-		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low|info（拿不准降一档；未证实候选面=info）"), "summary": str("发现摘要"),
+		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low|info（拿不准降一档；未证实候选面=info；纯信息泄露/无凭据暴露=info）"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
@@ -1757,7 +1757,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// E1-7（方案 v10 §9）：severity 归一化校验——乱值不再直落库，当场把合法
 		// 枚举回给模型改写（此前「等级都给错」的直接通道）。
 		if !db.ValidSeverity(a.Severity) {
-			return actool.Errorf("severity 必须是 critical|high|medium|low|info 之一（收到 " + a.Severity + "）。评级基准：可验证 RCE/敏感数据外泄=critical；可验证越权/注入=high；有前置条件利用=medium；需交互或仅配置弱点=low；未证实候选面/侦察线索=info。拿不准降一档。"), nil
+			return actool.Errorf("severity 必须是 critical|high|medium|low|info 之一（收到 " + a.Severity + "）。评级基准：可验证 RCE/敏感数据外泄=critical；可验证越权/注入=high；有前置条件利用=medium；需交互=low；纯信息泄露/无凭据暴露/版本指纹/侦察线索/未证实候选面=info。拿不准降一档。"), nil
 		}
 		if t.ts == nil {
 			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
