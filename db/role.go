@@ -288,4 +288,11 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	llmUsageSchemaReady.Store(pool, struct{}{})
 	metricsSchemaReady.Store(pool, struct{}{})
 	legacySchemaReady.Store(pool, struct{}{})
+	// 奇点循环执行层（db/looptrack.go）与经验权重卡（db/experience_weight.go）：
+	// v0.9.16 事故——这两层漏登记 ⇒ 生产受限角色运行期懒执行 DDL 被
+	// permission denied for schema public 拒掉（治理 tab 列空缺/列矛盾、经验
+	// 权重记账全部失败）。启动期 schemaDB 已用迁移连接把 DDL 应用过 ⇒ 这里
+	// 标记就位，运行期懒执行变空操作。
+	loopTrackSchemaReady.Store(pool, struct{}{})
+	experienceWeightSchemaReady.Store(pool, struct{}{})
 }

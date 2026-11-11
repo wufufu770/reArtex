@@ -1287,6 +1287,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/strategies/edges", s.strategyEdgeList)
 	mux.HandleFunc("GET /api/strategies/utility", s.strategyUtilityList)
 	mux.HandleFunc("GET /api/strategies/curation", s.strategyCuration)
+	// v0.9.17 注入拼装预览（用户要求「直接看拼好的整个库」）：把真正会进 agent
+	// 上下文的两块注入文本（策略摘要块 + 经验块）原样渲染出来。只读：渲染函数
+	// 与生产注入路径同源，经验块走不记账的预览变体。
+	mux.HandleFunc("GET /api/strategies/assembled", s.strategyAssembled)
 
 	// 审计链校验：追加有入口，校验也该有 —— 操作者要能自查链有没有被改过。
 	mux.HandleFunc("GET /api/audit/chain", s.auditChainVerify)

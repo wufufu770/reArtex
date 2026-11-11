@@ -278,8 +278,10 @@ export default function DashboardPage() {
     [tasks],
   );
 
-  const recentFindings = React.useMemo(
-    () => [...findings].sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts)).slice(0, 8),
+  // 发现卡片（v0.9.17）：全部发现按时间倒序进卡片网格（面板内上下滚动，
+  // 不再截 8 条也不再拉长页面）。
+  const sortedFindings = React.useMemo(
+    () => [...findings].sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts)),
     [findings],
   );
 
@@ -907,7 +909,7 @@ export default function DashboardPage() {
           </div>
         </Card>
 
-        {/* 发现 */}
+        {/* 发现（v0.9.17 用户拍板：卡片 + 上下滑动——页面不再被拉长） */}
         <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-1.5 text-xs font-semibold">
@@ -922,31 +924,54 @@ export default function DashboardPage() {
             </Link>
           </div>
 
-          <div className="divide-y">
-            {recentFindings.length === 0 ? (
+          {/* 面板内上下滑动：自适应多列卡片网格，容器限高滚动（页面本身不被拉长） */}
+          <div className="max-h-[36rem] overflow-y-auto pr-1">
+            {sortedFindings.length === 0 ? (
               <div className="py-4 text-center text-xs text-muted-foreground">暂无发现</div>
             ) : (
-              recentFindings.map((f) => (
-                <div key={f.id} className="flex items-start gap-2 py-2">
-                  <StatusBadge
-                    domain="severity"
-                    value={f.severity}
-                    className="mt-0.5 shrink-0 px-1.5 py-0 text-[10px]"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] font-semibold">{f.vulnclass}</span>
-                      {f.task_description && (
-                        <span className="truncate text-[10px] text-muted-foreground">{f.task_description}</span>
-                      )}
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3">
+                {sortedFindings.map((f) => {
+                  const title = f.vulnclass || f.name || "未分类";
+                  const body = (
+                    <>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusBadge
+                          domain="severity"
+                          value={f.severity}
+                          className="shrink-0 px-1.5 py-0 text-[10px]"
+                        />
+                        {f.status && (
+                          <StatusBadge domain="finding" value={f.status} className="shrink-0 px-1.5 py-0 text-[10px]" />
+                        )}
+                        <span className="ml-auto shrink-0 text-[9px] tabular-nums text-muted-foreground">
+                          {fmtRel(f.ts)}
+                        </span>
+                      </div>
+                      <span className="line-clamp-1 font-semibold text-[11px]" title={title}>
+                        {title}
+                      </span>
+                      <span className="line-clamp-2 text-[10px] leading-snug text-muted-foreground">
+                        {f.summary || f.task_description || "—"}
+                      </span>
+                    </>
+                  );
+                  const cls = "grid content-start gap-1.5 rounded-lg border bg-background p-2.5";
+                  return f.finding_id ? (
+                    <Link
+                      key={f.id}
+                      href={`/function/findings/detail?id=${f.finding_id}`}
+                      className={`${cls} hover:border-primary/40`}
+                      title="查看发现详情"
+                    >
+                      {body}
+                    </Link>
+                  ) : (
+                    <div key={f.id} className={cls}>
+                      {body}
                     </div>
-                    <div className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-muted-foreground">
-                      {f.summary}
-                    </div>
-                  </div>
-                  <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">{fmtRel(f.ts)}</span>
-                </div>
-              ))
+                  );
+                })}
+              </div>
             )}
           </div>
         </Card>

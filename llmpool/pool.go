@@ -266,12 +266,32 @@ func shouldFailover(ctx context.Context, err error) bool {
 // isHardFailure reports whether the failure is deterministic (the profile will
 // keep failing until a human fixes it) rather than transient. Hard failures open
 // the breaker on the first occurrence.
+//
+// v0.9.17：配额耗尽型 429（「已达到 Token Plan 用量上限」/ quota / usage limit）
+// 也算硬失败。这类 429 不是瞬时限流——套餐不充值就一直 429，按瞬态处理要凑满
+// softTrip 次才熔断、且每次熔断冷却结束又浪费 softTrip 次请求去探测（task#9
+// 「workers 空跑」的主因之一：05:33-05:51 每个请求都先撞一次 Minimax 429 再
+// 转移）。按硬失败处理 = 首次即熔断，每个冷却窗只浪费一次半开探测。
 func isHardFailure(err error) bool {
 	switch statusOf(err) {
 	case 401, 402, 403, 404:
 		return true
+	case 429:
+		return isQuotaExhausted(err)
 	}
 	return false
+}
+
+// quotaRe 匹配「配额/套餐耗尽」语义的响应体（区别于瞬时限流 rate limit）。
+// 已知形态：MiniMax「已达到 Token Plan 用量上限」、OpenAI「insufficient_quota」、
+// Anthropic「credit balance is too low」等。匹配不了就回落瞬态处理（保守：
+// 误判硬会让恢复慢一个冷却窗，误判瞬态才是空跑放大器）。
+var quotaRe = regexp.MustCompile(`(?i)(用量上限|额度|配额|usage limit|quota (exceeded|exhausted)|insufficient_quota|billing (hard )?limit|credit balance|exceeded your)`)
+
+// isQuotaExhausted reports whether a 429 body reads as quota/plan exhaustion
+// rather than transient rate limiting.
+func isQuotaExhausted(err error) bool {
+	return quotaRe.MatchString(err.Error())
 }
 
 // trimErr shortens an error for logs/UI — provider bodies can be long.

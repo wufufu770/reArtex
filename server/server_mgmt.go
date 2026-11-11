@@ -910,6 +910,9 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	// G1（方案 v10 §15）：MCP 配置变更 → 装配缓存整体翻代，旧连接关闭、下轮重建。
 	agent.InvalidateAssembly()
+	// v0.9.17：配置被人工改动 ⇒ 连接失败冷却一并清掉（改完 URL/命令立即生效，
+	// 不用等冷却窗自然到期）。
+	mcpClearFailCache()
 	// On initial add, auto-discover + cache the tool list so the UI shows it right
 	// away (bounded so a slow/broken server can't hang the request). Skipped on
 	// plain updates (e.g. enable toggles) to avoid re-spawning the server each time.
@@ -965,6 +968,8 @@ func (s *Server) pgRefreshMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
+	// v0.9.17：手动刷新 = 用户明确要求再试 ⇒ 先清该 server 的连接失败冷却。
+	mcpFailUntil.Delete(target.Name)
 	if err := s.discoverAndCacheMCP(ctx, target); err != nil {
 		writeErr(w, 502, "工具发现失败："+err.Error())
 		return

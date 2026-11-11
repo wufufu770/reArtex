@@ -273,19 +273,29 @@ func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Contex
 			if m.Transport == "http" && m.URL == "" && warnMCPMissingURLOnce(m.Name) {
 				continue
 			}
+			// v0.9.17 连接失败负缓存：冷却期内跳过该 server，其余装配照常缓存。
+			// 之前这里失败即 cacheable=false ⇒ 一台上游 504 的 server（burp 实测）
+			// 会让每次认领都重拨全部 MCP、把 worker 启动拖住一分钟——空跑放大器。
+			// TTL 到期自动重试，恢复即回归；配置改动会清冷却（pgSaveMCP）。
+			if mcpDown(m.Name) {
+				continue
+			}
 			cl, err := connectMCP(ctx, m)
 			if err != nil {
-				log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
-				cacheable = false // 拨号失败照旧每 run 重试重报错，不缓存
+				log.Printf("[mcp] %s 连接失败，进入 %s 冷却（期间该 server 工具不可用，到期自动重试）: %v",
+					m.Name, mcpFailTTL, err)
+				mcpMarkFailed(m.Name)
+				continue
+			}
+			mcpMarkHealthy(m.Name)
+			ts, err := cl.Tools(ctx)
+			if err != nil {
+				log.Printf("[mcp] %s tools/list 失败，进入 %s 冷却: %v", m.Name, mcpFailTTL, err)
+				mcpMarkFailed(m.Name)
+				_ = cl.Close() // 工具列表拿不到的连接不进复用集合，直接收掉
 				continue
 			}
 			closers = append(closers, cl)
-			ts, err := cl.Tools(ctx)
-			if err != nil {
-				log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-				cacheable = false
-				continue
-			}
 			for _, t := range ts {
 				art.mcpTools = append(art.mcpTools, t)
 				allNames = append(allNames, t.Name())

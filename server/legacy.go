@@ -293,6 +293,18 @@ func legacyRecencyScore(age time.Duration) float64 {
 // weight.last_win_at（无权重行回落 exp.created_at）分四档。
 // 每条经验带 pattern_key，worker 写回结论引用时的归因提取接线点见变更清单。
 func (s *Server) legacyInjectionBlock(goal string, seedKVs map[string]any, newTaskID int64) string {
+	return s.legacyInjectionRender(goal, seedKVs, newTaskID, true)
+}
+
+// legacyInjectionPreview 是注入拼装预览面（/api/strategies/assembled）用的
+// 只读变体：同一份检索与渲染，**不记账**（usage / hit 都是「真实注入事件」
+// 的留痕，预览页每刷新一次就记一笔等于把计数器刷爆——GET 绝不触发写）。
+func (s *Server) legacyInjectionPreview(goal string) string {
+	return s.legacyInjectionRender(goal, nil, 0, false)
+}
+
+// legacyInjectionRender 是两条路径的共用体：account=true 才写采纳留痕与命中计数。
+func (s *Server) legacyInjectionRender(goal string, seedKVs map[string]any, newTaskID int64, account bool) string {
 	exps, err := s.m.pg.MatchExperiences(goal, seedKVs, 5)
 	if err != nil || len(exps) == 0 {
 		return ""
@@ -338,6 +350,9 @@ func (s *Server) legacyInjectionBlock(goal string, seedKVs map[string]any, newTa
 		}
 		b.WriteString(entry)
 		used += len(entry)
+		if !account {
+			continue // 预览面：只渲染，不记账
+		}
 		// 采纳留痕：经验 × 本次新任务（人工评审参考）+ 权重卡命中记账（X1）。
 		// 注入即命中（hits 只增）；胜要等 worker 写回结论的因果校验 ——
 		// 该写回接线点当前不存在（见变更清单），权重卡的 RecordExperienceOutcome

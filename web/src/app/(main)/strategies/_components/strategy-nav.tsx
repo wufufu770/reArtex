@@ -2,15 +2,17 @@ import Link from "next/link";
 
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-// StrategyNav 是策略库三个面之间的页签导航。
+// StrategyNav 是策略库四个面之间的页签导航。
 //
 // 页签用链接而不是本地状态：策略库是人工复核面，「这条提议待裁」「这个 pin 该
 // 复审了」经常要单独把链接发给别人，所以每一面都得有自己的地址。
-export function StrategyNav({ current }: { current: "strategies" | "proposals" | "pin-queue" }) {
+export function StrategyNav({ current }: { current: "strategies" | "proposals" | "pin-queue" | "assembled" }) {
   const items = [
     { value: "strategies", label: "策略", href: "/strategies" },
     { value: "proposals", label: "待裁决提议", href: "/strategies/proposals" },
     { value: "pin-queue", label: "pin 复审队列", href: "/strategies/pin-queue" },
+    // v0.9.17：注入拼装——agent 实际拿到的整份注入文本。
+    { value: "assembled", label: "注入拼装", href: "/strategies/assembled" },
   ] as const;
 
   return (

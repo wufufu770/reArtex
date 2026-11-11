@@ -256,9 +256,35 @@ func TestHardVsSoftClassification(t *testing.T) {
 			t.Errorf("status %d should be a hard failure", s)
 		}
 	}
-	for _, s := range []int{408, 429, 500, 502, 503} {
+	for _, s := range []int{408, 500, 502, 503} {
 		if isHardFailure(fmt.Errorf("status %d: x", s)) {
 			t.Errorf("status %d should be transient, not hard", s)
+		}
+	}
+}
+
+// v0.9.17：配额耗尽型 429 是硬失败（首次即熔断），瞬时限流 429 仍是软失败。
+// task#9「workers 空跑」主因：MiniMax「已达到 Token Plan 用量上限」按瞬态处理，
+// 每个冷却窗到期后又浪费 softTrip 次请求去撞同一个死配额。
+func TestQuotaExhausted429IsHard(t *testing.T) {
+	hard := []string{
+		`anthropic: status 429: {"error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}`,
+		"openai: status 429: insufficient_quota: You have exceeded your quota",
+		"status 429: Usage limit reached for this plan",
+		"status 429: credit balance is too low",
+	}
+	for _, body := range hard {
+		if !isHardFailure(errors.New(body)) {
+			t.Errorf("quota-exhausted 429 should be hard: %q", trimErr(errors.New(body)))
+		}
+	}
+	soft := []string{
+		`status 429: {"message":"Rate limit reached: too many requests per minute"}`,
+		"status 429: slow down, too many requests",
+	}
+	for _, body := range soft {
+		if isHardFailure(errors.New(body)) {
+			t.Errorf("transient rate-limit 429 should stay soft: %q", body)
 		}
 	}
 }
