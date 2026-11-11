@@ -94,13 +94,13 @@ function FeedRow({ row }: { row: SodFeedRow }) {
   return (
     <div
       className={cn(
-        "rounded-lg border px-2.5 py-1.5",
+        "rounded-lg border px-2 py-1",
         alert ? "border-red-500/30 border-l-2 border-l-red-500 bg-red-500/5" : "border-border/60 bg-background/40",
         muted && "text-[11px] opacity-60",
       )}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="shrink-0 font-mono text-muted-foreground tabular-nums">{row.ts}</span>
+      <div className="flex min-w-0 items-center gap-1.5 text-xs">
+        <span className="shrink-0 font-mono text-muted-foreground text-[11px] tabular-nums">{row.ts}</span>
         <span className="truncate font-medium font-mono">{row.agent || "—"}</span>
         <span className="truncate font-mono text-muted-foreground">{row.tool}</span>
         <span
@@ -115,13 +115,13 @@ function FeedRow({ row }: { row: SodFeedRow }) {
         {row.verdict === "approve" && row.overridden && (
           <Badge
             variant="outline"
-            className="shrink-0 border-violet-500/30 bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-400"
+            className="shrink-0 border-violet-500/30 bg-violet-500/15 px-1 py-0 text-[9px] text-violet-600 dark:text-violet-400"
           >
-            人工改判
+            改判
           </Badge>
         )}
       </div>
-      <div className="mt-1 flex min-w-0 items-center gap-1.5">
+      <div className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px]">
         {row.category && (
           <span className="shrink-0 rounded border border-border/60 bg-muted/40 px-1 py-px text-[10px] text-muted-foreground">
             {row.category}
@@ -234,7 +234,10 @@ function StatCard({ label, value, hint, danger }: { label: string; value: number
   );
 }
 
-// Column 是三列共用的外壳：标题行 + 可滚动内容区。移动端限高，lg 起吃满整列。
+// Column 是三列共用的外壳：标题行 + 可滚动内容区。移动端限高，md 起吃满整列。
+// v0.10.1 用户拍板「太长了，左右缩小」：三列并排从 md 就生效（原 lg 才并排，
+// 窄屏退化单列把页面拉超长）；min-w-0 必须有——grid 子项默认 min-width:auto
+// 会拒绝收缩、把整页撑出横向滚动。
 function Column({
   icon,
   title,
@@ -249,14 +252,14 @@ function Column({
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex max-h-[70svh] min-h-0 flex-col overflow-hidden rounded-xl border bg-card/40 lg:max-h-none">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+    <section className="flex max-h-[70svh] min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border bg-card/40 md:max-h-none">
+      <header className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1.5 sm:gap-2 sm:px-3 sm:py-2">
         {icon}
-        <h2 className="font-semibold text-sm">{title}</h2>
+        <h2 className="truncate font-semibold text-sm">{title}</h2>
         {extra}
-        {right && <span className="ml-auto flex items-center gap-2">{right}</span>}
+        {right && <span className="ml-auto flex shrink-0 items-center gap-1.5">{right}</span>}
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">{children}</div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-1.5 sm:p-2">{children}</div>
     </section>
   );
 }
@@ -441,7 +444,7 @@ export default function SodScreenPage() {
   return (
     <div
       data-content-padding="false"
-      className="dark flex min-w-0 flex-col gap-3 bg-background p-3 sm:p-4 md:gap-4 md:p-6 lg:h-[calc(100svh-3rem)] lg:overflow-hidden"
+      className="dark flex min-w-0 flex-col gap-3 bg-background p-3 sm:p-4 md:gap-4 md:h-[calc(100svh-3rem)] md:overflow-hidden md:p-4"
     >
       {/* 顶栏：标题 + LIVE 指示 + 返回入口 */}
       <header className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
@@ -474,7 +477,7 @@ export default function SodScreenPage() {
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 md:gap-4 lg:grid-cols-3">
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-3 md:grid-cols-3 md:gap-3 lg:gap-4">
         {/* 左列 · 实时裁决流 */}
         <Column
           icon={<ActivityIcon className="size-4 text-emerald-500" />}
