@@ -39,16 +39,6 @@ const ALL_TASKS = "__all__";
 // 账本在任务跑动时一直增长，10 秒一轮足够跟上，又不至于把库读爆。
 const POLL_MS = 10_000;
 
-// 载荷预览的默认截断长度：60 字符足够辨认「这是哪一次调用」，完整内容靠行内
-// 「展开/收起」（方案 v10 §9）——整段铺开会让账本在任务跑动时难以扫读。
-const PREVIEW_LIMIT = 60;
-
-// fmtPreview 把载荷预览截到默认长度；展开后由调用方直接渲染全文。
-function fmtPreview(text: string): string {
-  if (text.length <= PREVIEW_LIMIT) return text;
-  return `${text.slice(0, PREVIEW_LIMIT)}…`;
-}
-
 // ChecksDetail 把闸门 checks（不透明 JSON）渲染成键值卡片。
 // v0.9.17 用户拍板「后面的详细信息看不到」：详情不再藏在横向滚动外的列里，
 // 统一收进行内展开面板。
@@ -111,45 +101,43 @@ function DecisionDetailPanel({ row }: { row: SodDecision }) {
 
 // DecisionRow 是账本一行的渲染。
 //
+// v0.10.1 用户拍板「太宽了，后面的都看不到」：全部徽章内联（横排可折行），
+// 载荷列单行截断（全文在行内详情面板），内边距收紧——整表收进一屏，不再
+// 横向裁切。行高从 ~180px 压到两行以内。
+//
 // 分层（tier）是**读时推导**的（下界，不是真值），所以这一列只呈现后端给的
 // 结论，不在这里重新解释「所以其实更严」—— 那是后端 tier_note 的口径。
 function DecisionRow({
   row,
   onReview,
-  previewExpanded,
-  onTogglePreview,
   detailExpanded,
   onToggleDetail,
 }: {
   row: SodDecision;
   onReview?: (row: SodDecision) => void;
-  previewExpanded: boolean;
-  onTogglePreview: (id: number) => void;
   detailExpanded: boolean;
   onToggleDetail: (id: number) => void;
 }) {
   return (
     <>
       <TableRow>
-        <TableCell>
-          <div className="flex items-start gap-1.5">
+        <TableCell className="whitespace-nowrap">
+          <div className="flex items-center gap-1">
             <button
               type="button"
               aria-label={detailExpanded ? "收起详情" : "展开详情"}
               title={detailExpanded ? "收起详情" : "展开详情（检查结论/完整载荷/分层理由）"}
-              className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+              className="shrink-0 text-muted-foreground hover:text-foreground"
               onClick={() => onToggleDetail(row.id)}
             >
               {detailExpanded ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
             </button>
-            <div className="flex flex-col items-start gap-0.5">
-              <span className="text-xs tabular-nums">{fmtDateTime(row.created_at)}</span>
-              <span className="font-mono text-muted-foreground text-xs">#{row.id}</span>
-            </div>
+            <span className="text-xs tabular-nums">{fmtDateTime(row.created_at)}</span>
+            <span className="font-mono text-muted-foreground text-xs">#{row.id}</span>
           </div>
         </TableCell>
         <TableCell>
-          <div className="flex flex-col items-start gap-0.5">
+          <div className="flex max-w-[10rem] flex-wrap items-center gap-x-1.5 gap-y-0.5">
             <span className="font-mono text-xs">{row.tool_name || "—"}</span>
             <span className="text-muted-foreground text-xs">{row.source_agent || "—"}</span>
             {row.task_id !== undefined && (
@@ -157,63 +145,49 @@ function DecisionRow({
                 href={`/function/tasks/detail?id=${row.task_id}`}
                 className="font-mono text-muted-foreground text-xs hover:text-primary"
               >
-                任务 {row.task_id}
+                任务{row.task_id}
               </Link>
             )}
           </div>
         </TableCell>
         <TableCell>
-          <div className="flex flex-col items-start gap-1">
+          <div className="flex max-w-[14rem] flex-wrap items-center gap-1">
             <StatusBadge domain="sodVerdict" value={row.verdict} dot />
             <StatusBadge domain="sodReason" value={row.reason_code} />
             {row.anomaly_flag && (
-              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-                异常标记{row.anomaly_reason ? ` · ${row.anomaly_reason}` : ""}
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]" title={row.anomaly_reason}>
+                异常
               </Badge>
             )}
           </div>
         </TableCell>
         <TableCell>
-          <div className="flex flex-col items-start gap-1">
+          <div className="flex max-w-[16rem] flex-wrap items-center gap-1">
             <StatusBadge domain="sodTier" value={row.tier} />
             <StatusBadge domain="sodTierCategory" value={row.tier_category} />
             {row.tier_host_only && (
               <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-                仅宿主侧写面
+                仅宿主
               </Badge>
             )}
-            <span className="text-muted-foreground text-xs">{sodScopeLabel(row.tier_scope_in)}</span>
+            <span className="text-muted-foreground text-[10px]">{sodScopeLabel(row.tier_scope_in)}</span>
           </div>
         </TableCell>
-        <TableCell className="hidden lg:table-cell">
-          <div className="flex max-w-md flex-col items-start gap-1">
-            <span className="font-mono text-muted-foreground text-xs">{fmtDigest(row.payload_digest)}</span>
-            {row.payload_preview && (
-              <>
-                <pre className="whitespace-pre-wrap break-all rounded-md bg-muted/50 p-2 font-mono text-[10px]">
-                  {previewExpanded ? row.payload_preview : fmtPreview(row.payload_preview)}
-                </pre>
-                {row.payload_preview.length > PREVIEW_LIMIT && (
-                  <button
-                    type="button"
-                    className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-                    onClick={() => onTogglePreview(row.id)}
-                  >
-                    {previewExpanded ? "收起" : "展开"}
-                  </button>
-                )}
-              </>
-            )}
-          </div>
+        <TableCell className="hidden xl:table-cell">
+          {/* 单行截断：列里只求「认得出是哪次调用」，全文/五检查在详情面板 */}
+          <span
+            className="block max-w-[14rem] truncate font-mono text-[10px] text-muted-foreground"
+            title={row.payload_preview}
+          >
+            {row.payload_preview || "—"}
+          </span>
         </TableCell>
-        <TableCell>
-          <div className="flex flex-col items-start gap-1">
-            {row.cache_hit ? (
+        <TableCell className="whitespace-nowrap">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+            {row.cache_hit && (
               <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-                命中缓存
+                缓存
               </Badge>
-            ) : (
-              <span className="text-muted-foreground text-xs">未命中缓存</span>
             )}
             <span className="text-muted-foreground text-xs tabular-nums">{fmtLatency(row.latency_ms)}</span>
           </div>
@@ -221,7 +195,7 @@ function DecisionRow({
         <TableCell>
           {(row.verdict === "deny" || row.verdict === "needs_review") && onReview && (
             <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onReview(row)}>
-              <GavelIcon /> 人工复核
+              <GavelIcon /> 复核
             </Button>
           )}
         </TableCell>
@@ -243,16 +217,12 @@ function DecisionList({
   rows,
   loaded,
   onReview,
-  expandedPreviews,
-  onTogglePreview,
   expandedDetails,
   onToggleDetail,
 }: {
   rows: SodDecision[];
   loaded: boolean;
   onReview?: (row: SodDecision) => void;
-  expandedPreviews: Set<number>;
-  onTogglePreview: (id: number) => void;
   expandedDetails: Set<number>;
   onToggleDetail: (id: number) => void;
 }) {
@@ -273,15 +243,16 @@ function DecisionList({
     );
   }
   return (
-    <div className="max-h-[65svh] overflow-y-auto rounded-md border">
-      <Table className="**:data-[slot='table-cell']:px-4 **:data-[slot='table-head']:px-4">
+    <div className="max-h-[65svh] overflow-auto rounded-md border">
+      {/* v0.10.1 压缩口径：内边距 px-2、徽章内联——整表收进一屏，不横向裁切 */}
+      <Table className="**:data-[slot='table-cell']:px-2 **:data-[slot='table-head']:px-2 sm:**:data-[slot='table-cell']:px-3 sm:**:data-[slot='table-head']:px-3">
         <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-t">
           <TableRow>
             <TableHead>时间</TableHead>
             <TableHead>工具 / 来源</TableHead>
             <TableHead>裁决</TableHead>
             <TableHead>分层</TableHead>
-            <TableHead className="hidden lg:table-cell">载荷</TableHead>
+            <TableHead className="hidden xl:table-cell">载荷</TableHead>
             <TableHead>缓存 / 延迟</TableHead>
             <TableHead>操作</TableHead>
           </TableRow>
@@ -292,8 +263,6 @@ function DecisionList({
               key={row.id}
               row={row}
               onReview={onReview}
-              previewExpanded={expandedPreviews.has(row.id)}
-              onTogglePreview={onTogglePreview}
               detailExpanded={expandedDetails.has(row.id)}
               onToggleDetail={onToggleDetail}
             />
@@ -320,20 +289,9 @@ export default function SodLedgerPage() {
   const [loaded, setLoaded] = React.useState(false);
   const [review, setReview] = React.useState<ReviewDraft | null>(null);
   const [reviewing, setReviewing] = React.useState(false);
-  // 载荷预览展开的行 id 集合：默认截 60 字符，点「展开」看全文（账本滚动扫读优先）。
-  const [expandedPreviews, setExpandedPreviews] = React.useState<Set<number>>(() => new Set());
-  // v0.9.17 行内详情面板的展开集合：检查结论/完整载荷/分层理由收在面板里，
-  // 不再依赖表格横向滚动（用户拍板「后面的详细信息看不到」）。
+  // v0.10.1 行内详情面板的展开集合：检查结论/完整载荷/分层理由收在面板里，
+  // 列表行保持压缩（载荷列单行截断），不再依赖表格横向滚动。
   const [expandedDetails, setExpandedDetails] = React.useState<Set<number>>(() => new Set());
-
-  const togglePreview = React.useCallback((id: number) => {
-    setExpandedPreviews((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
   const toggleDetail = React.useCallback((id: number) => {
     setExpandedDetails((prev) => {
@@ -491,8 +449,6 @@ export default function SodLedgerPage() {
             rows={rows}
             loaded={loaded}
             onReview={(row) => setReview({ decision: row, scope: "once", reason: "", operator: "sir" })}
-            expandedPreviews={expandedPreviews}
-            onTogglePreview={togglePreview}
             expandedDetails={expandedDetails}
             onToggleDetail={toggleDetail}
           />
