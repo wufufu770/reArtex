@@ -148,6 +148,11 @@ function SystemEventRow({ row }: { row: SodSystemEvent }) {
 
 export function GovernanceTab({ taskId }: { taskId: string }) {
   const [decisions, setDecisions] = React.useState<SodGovernanceDecision[]>([]);
+  // M2/M4（方案 v10 §6 二期）：唤醒计次与 intent 观测计数（governance 载荷扩展字段）。
+  const [wakeStats, setWakeStats] = React.useState<{ total?: number; edge?: number; heartbeat?: number } | null>(null);
+  const [intentCounts, setIntentCounts] = React.useState<{ attempts_total?: number; outcomes?: unknown[] } | null>(
+    null,
+  );
   const [overrides, setOverrides] = React.useState<SodGovernanceOverride[]>([]);
   const [systemEvents, setSystemEvents] = React.useState<SodSystemEvent[]>([]);
   const [loaded, setLoaded] = React.useState(false);
@@ -175,6 +180,16 @@ export function GovernanceTab({ taskId }: { taskId: string }) {
         setDecisions(r.decisions);
         setOverrides(r.overrides);
         setSystemEvents(r.system_events);
+        setWakeStats(
+          ((r as Record<string, unknown>).wake_stats as
+            | { total?: number; edge?: number; heartbeat?: number }
+            | undefined) ?? null,
+        );
+        setIntentCounts(
+          ((r as Record<string, unknown>).intent_counts as
+            | { attempts_total?: number; outcomes?: unknown[] }
+            | undefined) ?? null,
+        );
       })
       .catch((e) => {
         if (alive) toast.error(`读取任务治理视图失败：${(e as Error).message}`);
@@ -211,6 +226,29 @@ export function GovernanceTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* ⓪ 观测计数（M2/M4，方案 v10 §6 二期）：唤醒计次 + 意图观测 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">观测计数</CardTitle>
+          <CardDescription>
+            唤醒按触发来源计次（观测面，先只记不拦）；意图认领次数与终态序列来自 M4 观测列
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          {wakeStats && (
+            <span className="text-muted-foreground">
+              唤醒总计 <span className="text-foreground font-semibold">{wakeStats.total ?? 0}</span>（图变{" "}
+              {wakeStats.edge ?? 0} · 心跳 {wakeStats.heartbeat ?? 0}）
+            </span>
+          )}
+          {intentCounts && (
+            <span className="text-muted-foreground">
+              意图认领 <span className="text-foreground font-semibold">{intentCounts.attempts_total ?? 0}</span> 次
+            </span>
+          )}
+          {!wakeStats && !intentCounts && <span className="text-muted-foreground">暂无观测数据</span>}
+        </CardContent>
+      </Card>
       {/* ① 裁决流：本任务的 sod_decisions（近 100 条，倒序） */}
       <Card>
         <CardHeader>

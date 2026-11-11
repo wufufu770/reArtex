@@ -1734,6 +1734,20 @@ export const api = {
     return get<{ records: LLMRecordItem[]; total: number }>(`/llm/records?${sp}`);
   },
   llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
+  // M3（方案 v10 §6 二期）：缓存命中率 + 分位延迟聚合（llm_records 派生）。
+  llmStats: () =>
+    get<{
+      total_calls: number;
+      errors: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read: number;
+      cache_write: number;
+      cache_hit_rate: number;
+      latency_p50_ms: number;
+      latency_p95_ms: number;
+      by_worker: { worker: string; calls: number; p50_ms: number; p95_ms: number }[];
+    }>(`/llm/records/stats`),
   llmTasks: () => get<{ tasks: LLMTask[] }>(`/llm/records/tasks`),
   llmRecordsDeleteTask: (task: string) => del<{ deleted: number }>(`/llm/records?task=${encodeURIComponent(task)}`),
   // 按模型聚合本任务的 token 用量（来自常开的 llm_usage 计量账本，逐次调用精确，

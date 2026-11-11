@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,24 +58,124 @@ func (p Policy) loopbackEscaped() bool {
 	return p.LoopbackEscapeEnv != "" && envTruthy(p.LoopbackEscapeEnv)
 }
 
+// NormalizeIP 把 IPv4-mapped IPv6 归一回 IPv4（::ffff:1.2.3.4 → 1.2.3.4）。
+// 所有「拿 IP 做比对」的入口先过这里——不归一的话，同一个人用两种写法就能让
+// 环回/私网判定与白名单比对各错一次。
+func NormalizeIP(ip net.IP) net.IP {
+	if ip == nil {
+		return nil
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4
+	}
+	return ip
+}
+
+// ---------- T6（方案 v10 §6 三期）：黑面单一事实源 ----------
+
+// ForbiddenIP 是「黑面」的单一事实源：所有出网策略恒拒的地址段——链路本地
+// （含云元数据端点 169.254.169.254）、未指定、组播、接口本地组播。返回
+// (拒绝原因, 是否恒拒)。环回与 RFC1918 **不在**黑面里：它们的取舍按策略走
+// （环回常是靶场、RFC1918 常是内网测评目标），由各 Policy 自己决定。
+//
+// 之前 notify 包自己抄了一份同样的段表（isBlockedDialIP）——两份清单必然漂移，
+// 现在统一引用这里（traffic/pathguard 与本源的关系见各自包内说明）。
+func ForbiddenIP(ip net.IP) (string, bool) {
+	if ip == nil {
+		return "目标地址无法解析", true
+	}
+	ip = NormalizeIP(ip) // IPv4-mapped IPv6 归一后再比对
+	if ip.IsLinkLocalUnicast() {
+		return "链路本地地址（含云元数据端点 169.254.169.254，可读实例凭据）", true
+	}
+	if ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
+		return "链路/接口本地组播地址", true
+	}
+	if ip.IsUnspecified() {
+		return "未指定地址", true
+	}
+	if ip.IsMulticast() {
+		return "组播地址", true
+	}
+	return "", false
+}
+
+// IsLoopbackHost 报告主机名是否环回：localhost / *.localhost 名字，或解析为
+// 环回段 IP 的字面量（IPv4-mapped 先归一再比对）。CONNECT 端口白名单用它做
+// 环回豁免判定（见 CheckConnectPort）。
+func IsLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(strings.Trim(host, "[]")))
+	if h == "" {
+		return false
+	}
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return NormalizeIP(ip).IsLoopback()
+	}
+	return false
+}
+
+// ---------- T6（方案 v10 §6 三期）：CONNECT 端口白名单 ----------
+
+// EgressDefaultPort 是 CONNECT 端口白名单的默认值：普通 agent 出网实质上只有
+// HTTPS 隧道一种正当形态，443 之外默认不开。追加端口走 settings 的
+// egress_allowed_ports（由宿主解析后传入，本包不读存储——照本包「策略是数据、
+// 判定是代码」的既有分层）。
+const EgressDefaultPort = 443
+
+// ParseEgressAllowedPorts 解析 egress_allowed_ports（逗号/空白分隔的端口号，
+// 1-65535 之外的段丢弃）。空串/全非法 → nil。
+func ParseEgressAllowedPorts(raw string) []int {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == ';'
+	})
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		n, err := strconv.Atoi(strings.TrimSpace(f))
+		if err != nil || n <= 0 || n > 65535 {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// CheckConnectPort 判定一次 CONNECT 隧道的目标端口（T6）。
+//
+// 规则：环回目标豁免（本机靶场是合法形态；loopback=true 由调用方自行登记）；
+// 443 恒放行；白名单 extra（settings egress_allowed_ports 追加）放行；其余拒绝。
+// 返回 (allowed, loopback, reason)。
+func CheckConnectPort(host string, port int, extra []int) (allowed bool, loopback bool, reason string) {
+	if IsLoopbackHost(host) {
+		return true, true, "环回目标豁免端口白名单（已登记）"
+	}
+	if port == EgressDefaultPort {
+		return true, false, ""
+	}
+	for _, p := range extra {
+		if p == port {
+			return true, false, ""
+		}
+	}
+	return false, false, "CONNECT 目标端口不在白名单（默认 443，追加见 egress_allowed_ports）"
+}
+
 // blockedIP 报告该 IP 是否属于本策略拒绝的地址段。
 //
-// 始终拒绝：链路本地（含云元数据）、未指定、组播。环回可由 LoopbackEscapeEnv 单独
-// 放开。RFC1918 是否拒绝取决于 AllowPrivate。
+// 恒拒段（黑面）引用 ForbiddenIP 单一事实源；环回可由 LoopbackEscapeEnv 单独
+// 放开；RFC1918 是否拒绝取决于 AllowPrivate。
 func (p Policy) blockedIP(ip net.IP) bool {
-	if ip == nil {
+	if _, forbidden := ForbiddenIP(ip); forbidden {
 		return true
 	}
-	// IPv4-mapped IPv6（::ffff:127.0.0.1）须还原成 IPv4 再判，否则绕过。
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
+	ip = NormalizeIP(ip)
 	if ip.IsLoopback() {
 		return !p.loopbackEscaped()
-	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-		return true
 	}
 	return !p.AllowPrivate && ip.IsPrivate()
 }
@@ -111,15 +212,56 @@ func (p Policy) dialControl(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// guardedDialer 是带拨号守卫的底层 Dialer（Control 看到的就是最终建连地址，
+// 是终点校验；ResolveOnce 的解析期筛选拦不住的，这里再拦一次）。
+func (p Policy) guardedDialer() *net.Dialer {
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	d.Control = p.dialControl
+	return d
+}
+
+// ResolveOnceDialContext 是「解析一次拿 IP，建连用该 IP」的 DialContext 定制
+// （T6 ①，http.Transport DialContext 定制形态）：
+//   - 域名只走一次解析，然后从解析结果里挑第一个放行的 IP 直接连它——后续
+//     重连不再重新解析（原来 net.Dialer 每次拨号各自解析，DNS 抖动下同一个
+//     URL 的两次请求可能落到不同地址）；
+//   - TLS 的 SNI 与证书校验保持原域名：http.Transport 的 ServerName 取自
+//     请求 URL 的主机名，与拨号地址是 IP 无关；
+//   - 解析结果里没有放行的 IP（黑面/环回/私网按策略）→ fail-closed 拒绝；
+//   - 字面 IP 地址不走解析，按原地址建连（Control 仍生效）。
+func (p Policy) ResolveOnceDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if p.escaped() {
+		return p.guardedDialer().DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return p.guardedDialer().DialContext(ctx, network, addr)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] 解析 %q 失败: %w", p.Name, host, err)
+	}
+	for _, r := range ips {
+		if p.blockedIP(r.IP) {
+			continue
+		}
+		return p.guardedDialer().DialContext(ctx, network, net.JoinHostPort(r.IP.String(), port))
+	}
+	return nil, fmt.Errorf("[%s] %q 解析出的 %d 个地址全部被拒（%s）", p.Name, host, len(ips), p.hint(nil))
+}
+
 // Transport 在 base 上叠加拨号守卫，保留 base 的全部其余行为。
+// T6 ①：DialContext 换成 ResolveOnce——解析一次拿 IP、按 IP 建连（SNI 保持
+// 原域名），拨号 Control 守卫不变。
 func (p Policy) Transport(base *http.Transport) *http.Transport {
 	if base == nil {
 		base = http.DefaultTransport.(*http.Transport)
 	}
 	clone := base.Clone()
-	d := &net.Dialer{Timeout: 10 * time.Second}
-	d.Control = p.dialControl
-	clone.DialContext = d.DialContext
+	clone.DialContext = p.ResolveOnceDialContext
 	return clone
 }
 

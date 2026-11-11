@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/ingestsanitize"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -62,6 +64,82 @@ func assetInputLabel(item assetInputItem) string {
 		return fmt.Sprintf("[%s] %s", typ, target)
 	}
 	return target
+}
+
+// ---------- T7（方案 v10 §6 三期）：外部来源字段消毒 ----------
+
+// sanitizeAssetInput 对一条 insert_assets 输入项的文本字段过消毒链。
+//
+// insert_assets 是 agent 把【外部来源】发现（被动情报源、web 搜索结果、目标页
+// 提取内容）落库的通道——字段值是不可信输入，可藏提示注入/控制字符。处理：
+//   - HIGH 特征（明确注入形态）→ 丢整条（返回 false + 原因，fail-closed）；
+//   - SOFT 特征 → 消毒后放行 + 告警留痕（log + ingestsanitize 计数）；
+//   - 全部文本字段就地替换为消毒后的值（控制/零宽字符剥离，IP/域名的合法
+//     形态不受影响）。结构化数值字段（port/status_code）不经文本消毒。
+func sanitizeAssetInput(item *assetInputItem) (bool, string) {
+	type strField struct {
+		name string
+		get  func() string
+		set  func(string)
+	}
+	fields := []strField{
+		{"domain", func() string { return item.Domain }, func(v string) { item.Domain = v }},
+		{"icp", func() string { return item.ICP }, func(v string) { item.ICP = v }},
+		{"record_type", func() string { return item.RecordType }, func(v string) { item.RecordType = v }},
+		{"ip", func() string { return item.IP }, func(v string) { item.IP = v }},
+		{"app_name", func() string { return item.AppName }, func(v string) { item.AppName = v }},
+		{"bundle_id", func() string { return item.BundleID }, func(v string) { item.BundleID = v }},
+		{"category", func() string { return item.Category }, func(v string) { item.Category = v }},
+		{"description", func() string { return item.Description }, func(v string) { item.Description = v }},
+		{"app_icp", func() string { return item.AppICP }, func(v string) { item.AppICP = v }},
+		{"url", func() string { return item.URL }, func(v string) { item.URL = v }},
+		{"page_title", func() string { return item.PageTitle }, func(v string) { item.PageTitle = v }},
+		{"favicon_mmh3", func() string { return item.FaviconMMH3 }, func(v string) { item.FaviconMMH3 = v }},
+		{"service_name", func() string { return item.ServiceName }, func(v string) { item.ServiceName = v }},
+		{"service_ip", func() string { return item.ServiceIP }, func(v string) { item.ServiceIP = v }},
+		{"method", func() string { return item.Method }, func(v string) { item.Method = v }},
+	}
+	for _, f := range fields {
+		orig := f.get()
+		if strings.TrimSpace(orig) == "" {
+			continue
+		}
+		clean, action, err := ingestsanitize.Sanitize("insert_assets", []byte(orig))
+		switch action {
+		case ingestsanitize.ActionDropped:
+			return false, fmt.Sprintf("字段 %s 消毒失败（%v）", f.name, err)
+		case ingestsanitize.ActionWarned:
+			log.Printf("[insert_assets] %s 字段 %s 命中注入软特征，消毒后放行", ingestsanitize.Marker("insert_assets"), f.name)
+		}
+		f.set(string(clean))
+	}
+	// 数组字段逐条消毒（丢失一条比丢整项轻；域名/DNS 记录/指纹不含逗号，逐条
+	// 处理也不会拆散值）。
+	for i, v := range item.RecordValue {
+		clean, action, err := ingestsanitize.Sanitize("insert_assets", []byte(v))
+		switch action {
+		case ingestsanitize.ActionDropped:
+			return false, fmt.Sprintf("字段 record_value[%d] 消毒失败（%v）", i, err)
+		case ingestsanitize.ActionWarned:
+			log.Printf("[insert_assets] %s 字段 record_value[%d] 命中注入软特征，消毒后放行", ingestsanitize.Marker("insert_assets"), i)
+		}
+		item.RecordValue[i] = string(clean)
+	}
+	for i, v := range item.BoundDomains {
+		if clean, action, err := ingestsanitize.Sanitize("insert_assets", []byte(v)); action != ingestsanitize.ActionDropped {
+			item.BoundDomains[i] = string(clean)
+		} else {
+			return false, fmt.Sprintf("字段 bound_domains[%d] 消毒失败（%v）", i, err)
+		}
+	}
+	for i, v := range item.Technologies {
+		if clean, action, err := ingestsanitize.Sanitize("insert_assets", []byte(v)); action != ingestsanitize.ActionDropped {
+			item.Technologies[i] = string(clean)
+		} else {
+			return false, fmt.Sprintf("字段 technologies[%d] 消毒失败（%v）", i, err)
+		}
+	}
+	return true, ""
 }
 
 // =====================================================================
@@ -245,6 +323,17 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					errs = append(errs, errEntry{
 						Index: i,
 						Error: fmt.Sprintf("资产 %s %s，已禁止插入", assetInputLabel(item), d.Reason),
+					})
+					continue
+				}
+
+				// T7（方案 v10 §6 三期）：外部来源消毒——本工具是 agent 把外部
+				// 发现（被动情报源/web 搜索/目标页提取）落库的通道，文本字段先过
+				// 消毒链：HIGH 注入特征丢该条；SOFT 消毒后放行并告警留痕。
+				if ok, dropReason := sanitizeAssetInput(&item); !ok {
+					errs = append(errs, errEntry{
+						Index: i,
+						Error: fmt.Sprintf("资产 %s %s", assetInputLabel(item), dropReason),
 					})
 					continue
 				}

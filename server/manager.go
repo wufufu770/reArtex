@@ -408,6 +408,11 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			// 接线只放宽不收紧：未接线的语义是「带身份 ⇒ 全拒」，接上后变成
 			// 「带身份 ⇒ 范围内放行、范围外拒绝」，且范围判定不可用时仍拒绝。
 			tr.SetEgressScope(traffic.DBEgressScope{PG: pg})
+			// T6（方案 v10 §6 三期）②：CONNECT 端口白名单的追加端口来源——settings
+			// egress_allowed_ports（逗号分隔端口号；空 = 只默认 443）。带 10s TTL
+			// 缓存：CONNECT 高频，逐条打库会拖垮代理；读失败沿用上次结果（首次
+			// 失败按空表，即只默认白名单——fail-closed 不因配置故障而放宽）。
+			tr.SetEgressPortsSource(egressAllowedPortsSource(pg))
 
 			err = tr.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
 				if taskID <= 0 {

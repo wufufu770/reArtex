@@ -295,8 +295,16 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		if hooks.quotaOutcome != nil {
 			hooks.quotaOutcome(callErr)
 		}
-		// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
-		if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
+		// T4（X8）闸：role_policy lane（lanePolicy 非 nil，profileID 恒 0）的额度/
+		// 认证失败进 exhaust 分流（rotateRoleLane 按分类重派并封顶）——此前
+		// profileID==0 一刀切透传，lane 游标在生产路径上是死代码，本次修正。
+		// 任务链/绑定/全局路径维持原语义：只有额度错误推进，其余透传。
+		if selection.lanePolicy != nil {
+			if _, switchable := classifyLaneFailure(callErr); !switchable {
+				return llm.Message{}, "", llm.Usage{}, callErr
+			}
+		} else if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
+			// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
 			return llm.Message{}, "", llm.Usage{}, callErr
 		}
 		transition, markErr := hooks.exhaust(selection, callErr)
@@ -380,10 +388,23 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 			if hooks.quotaOutcome != nil {
 				hooks.quotaOutcome(streamErr)
 			}
-			// profileID=0 means the explicit chain was cleared while this stable task
-			// bundle was still in use. Agent/global fallback errors follow the legacy
-			// behavior and never mutate task failover state.
-			if selection.profileID == 0 || !isQuotaExhaustedError(streamErr) {
+			// T4（X8）闸：role_policy lane 的额度/认证失败进 exhaust 分流（同
+			// Complete 侧的修正——lane 游标此前被 profileID==0 挡成死代码）。
+			// 任务链/绑定/全局路径维持原语义：只有额度错误推进。
+			if selection.lanePolicy != nil {
+				if _, switchable := classifyLaneFailure(streamErr); !switchable {
+					for _, buffered := range pending {
+						if !yield(buffered, nil) {
+							return
+						}
+					}
+					yield(llm.StreamEvent{}, streamErr)
+					return
+				}
+			} else if selection.profileID == 0 || !isQuotaExhaustedError(streamErr) {
+				// profileID=0 means the explicit chain was cleared while this stable task
+				// bundle was still in use. Agent/global fallback errors follow the legacy
+				// behavior and never mutate task failover state.
 				for _, buffered := range pending {
 					if !yield(buffered, nil) {
 						return

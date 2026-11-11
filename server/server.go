@@ -796,6 +796,10 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 	if p, _ := s.m.pg.ProfileByID(id); p != nil {
 		prov = llmrec.Wrap(installQuotaGate(prov, s.sharedQuotaGate()), s.m.PG(), cfg.Model, p.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
 		prov = bindSideProvider(prov, cfg, id, p.Name)
+		// T4（方案 v10 §6 / X8）：profile 配置了多个 base_urls 时装配端点切换
+		// （endpoint_failover.go）——唯一构建源一处包装，全部下游通道生效。
+		// 单 base_url 时原样返回，行为零变化。
+		prov = s.endpointFailoverFor(id, p, prov)
 	}
 	// G-A（方案 v5.3）：唯一构建源统一挂故障转移链——role lane / 任务链 /
 	// 任务 pin / auditor / normalizer / 旁路提问等全部下游出口都经这里，
@@ -824,11 +828,23 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 // 绝不重入其它 profile 的构建（两 profile 互填备用地址时，经缓存/候选链的
 // 构建会互相触发、无限乒乓——v0.9.3 启动挂死实锤）。
 func (s *Server) providerForProfileBare(id int64) (llm.Provider, agent.Config, bool) {
+	return s.providerForProfileBareURL(id, "")
+}
+
+// providerForProfileBareURL 是 Bare 构建的 BaseURL 覆盖版（T4 端点候选专用）：
+// baseURL 为空时与 providerForProfileBare 逐字节一致；非空时把该候选地址替换
+// 进 config 再走同一套 NewProvider + 记录/配额/旁路包装。同样不写缓存、不挂
+// Pool——候选构建期间绝不重入其它构建路径（endpointFailoverFor 是唯一调用方）。
+func (s *Server) providerForProfileBareURL(id int64, baseURL string) (llm.Provider, agent.Config, bool) {
 	p, err := s.m.pg.ProfileByID(id)
 	if err != nil || p == nil {
 		return nil, agent.Config{}, false
 	}
-	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	probe := p.BaseURL
+	if baseURL != "" {
+		probe = baseURL
+	}
+	cfg := agent.ConfigFrom(p.Format, p.Model, probe, p.APIKey, p.Proxy)
 	cfg.Models = p.Models
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK

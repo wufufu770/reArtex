@@ -219,6 +219,10 @@ type Traffic struct {
 	// egress 是出网目的地判定（写侧）。未注入时，带任务身份的请求一律拒绝 ——
 	// 判不出范围就没有授权边界，那种情况下「放行」就是越权。
 	egress atomic.Pointer[egressScopeHolder]
+	// egressPorts 是 CONNECT 端口白名单的追加端口来源（T6，宿主注入：settings
+	// egress_allowed_ports 的缓存读取器；nil = 只默认白名单）。判定本体在
+	// netguard.CheckConnectPort（netguard/egress.go）。
+	egressPorts atomic.Pointer[egressPortsHolder]
 	// egressCache 是「任务 → 目的地允许集」的短期缓存，避免每个请求打一次库。
 	egressCache egressHostsCache
 }

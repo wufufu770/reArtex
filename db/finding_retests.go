@@ -30,9 +30,17 @@ type FindingRetest struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	StartedAt      *time.Time      `json:"started_at"`
 	FinishedAt     *time.Time      `json:"finished_at"`
+	// T8（方案 v10 §6 三期）：机械分层标注（与三态 verdict 正交，不改判它）。
+	// EffectPreExisted：baseline 探测（proof 请求去掉攻击载荷打一次目标）发现
+	//   「效果」本来就存在 → TRUE / 不存在 → FALSE / 未探测或不可判 → NULL。
+	// Reproduced：本次复测是否复现的独立布尔标注（verdict='reproduced' ⇒ TRUE、
+	//   'fixed' ⇒ FALSE、'inconclusive' ⇒ NULL）——供下游过滤/统计不必解析
+	//   verdict 文本；它由 verdict 确定性推导，反过来永不改写 verdict。
+	EffectPreExisted *bool `json:"effect_pre_existed"`
+	Reproduced       *bool `json:"reproduced"`
 }
 
-const retestCols = `id, finding_id, conversation_id, status, verdict, notes, summary, evidence, error, created_at, started_at, finished_at`
+const retestCols = `id, finding_id, conversation_id, status, verdict, notes, summary, evidence, error, created_at, started_at, finished_at, effect_pre_existed, reproduced`
 
 // ActiveFindingRetest is the small status payload polled by the findings list.
 // Finding IDs use the same string representation as the findings API.
@@ -64,7 +72,8 @@ func (d *DB) ListActiveFindingRetests(ctx context.Context) ([]ActiveFindingRetes
 func scanRetest(row interface{ Scan(...any) error }) (*FindingRetest, error) {
 	r := &FindingRetest{}
 	err := row.Scan(&r.ID, &r.FindingID, &r.ConversationID, &r.Status, &r.Verdict, &r.Notes,
-		&r.Summary, &r.Evidence, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt)
+		&r.Summary, &r.Evidence, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt,
+		&r.EffectPreExisted, &r.Reproduced)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -180,6 +189,9 @@ func (d *DB) StartFindingRetest(ctx context.Context, id int64) (bool, error) {
 
 // RecordFindingRetestResult never accepts a finding ID: ownership comes from the
 // runtime conversation. Identical retries are safe; a second verdict is refused.
+// T8（方案 v10 §6 三期）：落结论时同步产出独立的 reproduced 标注——由 verdict
+// 确定性推导（reproduced⇒true / fixed⇒false / inconclusive⇒NULL），是给下游的
+// 过滤/统计便利位；标注不是否决，永不改写三态 verdict 本身。
 func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64, verdict, summary, evidence string) error {
 	if verdict != "reproduced" && verdict != "fixed" && verdict != "inconclusive" {
 		return errors.New("verdict 必须为 reproduced / fixed / inconclusive")
@@ -191,8 +203,9 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 	if len(summary) > 16000 || len(evidence) > 128000 {
 		return errors.New("复测结论过长（summary ≤ 16KB，evidence ≤ 128KB）")
 	}
-	res, err := d.ExecContext(ctx, `UPDATE finding_retests SET verdict=$2,summary=$3,evidence=$4
-	WHERE conversation_id=$1 AND status='running' AND (verdict='' OR (verdict=$2 AND summary=$3 AND evidence=$4))`, conversationID, verdict, summary, evidence)
+	res, err := d.ExecContext(ctx, `UPDATE finding_retests SET verdict=$2,summary=$3,evidence=$4,reproduced=$5
+WHERE conversation_id=$1 AND status='running' AND (verdict='' OR (verdict=$2 AND summary=$3 AND evidence=$4))`,
+		conversationID, verdict, summary, evidence, reproducedOf(verdict))
 	if err != nil {
 		return err
 	}
@@ -202,6 +215,28 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 		return ErrRetestNotRunning
 	}
 	return nil
+}
+
+// reproducedOf 把三态 verdict 确定性映射成 reproduced 标注（inconclusive ⇒ NULL
+// ——「没法确认」既不是复现也不是修复，标 NULL 而不是 false）。
+func reproducedOf(verdict string) *bool {
+	switch verdict {
+	case "reproduced":
+		t := true
+		return &t
+	case "fixed":
+		f := false
+		return &f
+	}
+	return nil
+}
+
+// SetFindingRetestBaseline 落 baseline 探测结论（T8）。effect 为 nil 表示本次
+// 未探测/不可判（保持列 NULL——NULL 是合法状态，不与 FALSE 混淆）。幂等重写
+// 安全：探测是确定性重放，晚到的结论覆盖早到的空值。
+func (d *DB) SetFindingRetestBaseline(ctx context.Context, id int64, effect *bool) error {
+	_, err := d.ExecContext(ctx, `UPDATE finding_retests SET effect_pre_existed=$2 WHERE id=$1`, id, effect)
+	return err
 }
 
 // FinishFindingRetest seals the result. Cancellation/failure takes precedence

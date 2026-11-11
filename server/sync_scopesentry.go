@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/ingestsanitize"
 	"github.com/Autumn-27/artex/mcphttp"
 )
 
@@ -421,7 +423,20 @@ func (s *Server) ssPageAll(ctx context.Context, cl *mcphttp.Client, ssType strin
 
 // ssIngest maps one ScopeSentry asset JSON to the ARTEX asset store and upserts it.
 // Returns a non-empty error string on failure. synced is incremented per kind.
+//
+// T7（方案 v10 §6 三期）：入口先过消毒链（fail-closed）——ScopeSentry 是外部
+// MCP 数据源，其资产字段是不可信输入（可藏提示注入/控制字符）。丢弃/告警按
+// 条留痕（log + ingestsanitize 拒绝计数）。
 func (s *Server) ssIngest(as *db.AssetStore, assetType string, raw json.RawMessage, synced map[string]int) string {
+	clean, action, err := ingestsanitize.Sanitize("scopesentry", raw)
+	switch action {
+	case ingestsanitize.ActionDropped:
+		log.Printf("[scopesentry-sync] %s", err)
+		return err.Error()
+	case ingestsanitize.ActionWarned:
+		log.Printf("[scopesentry-sync] %s 内容可疑（注入软特征），消毒后放行", ingestsanitize.Marker("scopesentry"))
+	}
+	raw = json.RawMessage(clean)
 	switch assetType {
 	case "subdomain":
 		var it struct {
