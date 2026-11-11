@@ -628,11 +628,15 @@ ON CONFLICT (name) DO NOTHING`,
 	// 要配置上」，此前库里只有名字叫 browser 的同一套 @playwright/mcp，与
 	// playwright-cli skill 对不上号）。与 browser 同一二进制、默认启用；可见性
 	// 给全部内置 agent（ON CONFLICT DO NOTHING：用户改过就尊重用户的）。
+	// ⚠️ command 必须是绝对路径：enabled=true 会在启动自动发现时过 stdio 命令
+	// 守卫——npx 这类包执行器等价于任意第三方代码执行（包名可抢注），会被
+	// 「禁止使用包执行器」拒绝（镜像内 @playwright/mcp 全局安装 ⇒
+	// /usr/bin/playwright-mcp 符号链接总是存在）。
 	if _, err := d.Exec(`
 INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
-VALUES ('playwright-cli', 'stdio', 'npx', $1, '{}', true)
+VALUES ('playwright-cli', 'stdio', '/usr/bin/playwright-mcp', $1, '{}', true)
 ON CONFLICT (name) DO NOTHING`,
-		`["@playwright/mcp","--headless"]`); err != nil {
+		`["--headless"]`); err != nil {
 		return fmt.Errorf("seed playwright-cli mcp: %w", err)
 	}
 	if _, err := d.Exec(`
