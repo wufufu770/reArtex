@@ -312,6 +312,33 @@ func nullStrategyID(id int64) any {
 	return id
 }
 
+// GetStrategyProposal 按 id 取一条提议（F5 人工裁决消账用：strategyProposalDecide
+// 的 approved 分支据 payload 里的 contradiction_id 找回矛盾行）。不存在 ⇒ (nil, nil)。
+func (d *DB) GetStrategyProposal(id int64) (*StrategyProposal, error) {
+	if err := d.ensureStrategyProposalSchema(); err != nil {
+		return nil, err
+	}
+	if id <= 0 {
+		return nil, nil
+	}
+	var p StrategyProposal
+	var payload []byte
+	err := d.QueryRow(`
+SELECT id, COALESCE(strategy_id,0), route, payload, status, reason, decided_reason,
+       created_by, decided_by, decided_at, created_at
+FROM strategy_proposals WHERE id=$1`, id).
+		Scan(&p.ID, &p.StrategyID, &p.Route, &payload, &p.Status, &p.Reason,
+			&p.DecidedReason, &p.CreatedBy, &p.DecidedBy, &p.DecidedAt, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读策略提议失败: %w", err)
+	}
+	p.Payload = json.RawMessage(payload)
+	return &p, nil
+}
+
 // ListStrategyProposals 列出提议。status 为空时列出全部 pending。
 //
 // ⚠️ 空 status **不是**「列出全部」而是「列出 pending」：待裁决的提议是这份

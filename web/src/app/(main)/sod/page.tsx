@@ -394,8 +394,9 @@ export default function SodLedgerPage() {
         </CardContent>
       </Card>
 
-      {/* F3 人工复核改判弹窗：once=用后即焚（默认）/ task=随任务终态过期。
-          Tier3 高危后端 409 拒绝，前端照实展示。 */}
+      {/* E1-1 人工复核改判弹窗：once=用后即焚（默认）/ task=随任务终态过期。
+          以人为本（方案 v10 §9）：Tier3 也可人工放行（后端已放开），弹窗对高危
+          工具给出醒目警示；基线类（删除/破坏/平台凭据）后端仍 409 硬拦。 */}
       <Dialog open={review !== null} onOpenChange={(open) => !open && setReview(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -405,6 +406,12 @@ export default function SodLedgerPage() {
               call-precision 放行凭据：只有载荷完全一致的这次调用会被放行，改一个字节就不命中。
             </DialogDescription>
           </DialogHeader>
+          {review?.decision.tier === "Tier3" && (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+              ⚠ 高危工具人工放行，责任留痕：本次放行将记入审计链（actor/operator
+              全程可溯）；删除/破坏/平台凭据类仍被基线硬拦，无法改判。
+            </p>
+          )}
           {review && (
             <div className="grid gap-3">
               <div className="grid gap-1.5">

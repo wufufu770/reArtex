@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"unicode/utf8"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
@@ -67,7 +67,7 @@ type ToolSet struct {
 	findingValidator FindingValidator
 	// factStateReviewer 是 P4 fact 三态转移的注入点；nil = review_fact 不可用。
 	factStateReviewer FactStateReviewer
-	worker           string
+	worker            string
 	// memberAgentKey 是【调用者的成员身份】（群成员的 agent key，如 pentest/reporter）。
 	//
 	// 为什么不用 worker 字段当成员身份：worker 是执行器名（work#N / planner / human），
@@ -562,8 +562,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 		factNodes = append(factNodes, fn)
 	}
-	out["findings_total"] = len(vulnNodes)                             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                                      // 探索事实/结论数（含否定结论）
+	out["findings_total"] = len(vulnNodes) // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
+	out["facts"] = len(factNodes)          // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -1300,6 +1300,17 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			}
 		}
 	}
+	// F1/F2（方案 v10 §16）：预测三字段镜像一行进 intent_predictions（db/looptrack.go）
+	// —— F2 矛盾检测器做「预测 vs 实际」确定性 diff 时从这里按 intent_id 取预测，
+	// 不必解析意图 payload。无预测字段不写（InsertIntentPrediction 内部同样兜底）；
+	// 写失败只记日志：预测是增值层，缺行 = 检测器自动跳过，不影响已落图的意图。
+	if it.PredictedVulnclass != "" || len(it.PredictedActions) > 0 || len(it.PredictedTools) > 0 {
+		if pg := t.ts.DB(); pg != nil {
+			if _, err := pg.InsertIntentPrediction(id, it.PredictedVulnclass, it.PredictedActions, it.PredictedTools); err != nil {
+				log.Printf("[intent] 意图 %d 预测镜像 intent_predictions 失败: %v", id, err)
+			}
+		}
+	}
 	return id, nil
 }
 
@@ -1817,15 +1828,15 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
-	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	Summary    string `json:"summary"`
+	Detail     string `json:"detail"`
+	Evidence   string `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
+	Confidence string `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
 	// Subtype 仅平台内部使用：handoff（P3 交接事实，结构校验见 recordOneFact）。
 	// 工具 schema 不暴露——由引擎的交接轮注入提示，模型按提示携带。
-	Subtype   string            `json:"subtype,omitempty"`
-	IntentID  json.RawMessage   `json:"intent_id"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
+	Subtype  string            `json:"subtype,omitempty"`
+	IntentID json.RawMessage   `json:"intent_id"`
+	AssetIDs []json.RawMessage `json:"asset_ids"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为

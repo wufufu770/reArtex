@@ -378,6 +378,13 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureMemorySchema(); err != nil {
 			return fmt.Errorf("apply memory schema: %w", err)
 		}
+		// 奇点循环执行层（方案 v10 §12+§16 批次 F2-F5）DDL：intent_predictions /
+		// contradictions / gaps 三表，走独立幂等文件（db/schema_loop.sql）。
+		// 启动时接的理由与其余 Ensure*Schema 相同：库里没表这件事要在启动期暴露，
+		// 而不是等矛盾检测器在 worker 终态路径上运行期报「关系不存在」。
+		if err := schemaDB.EnsureLoopSchema(); err != nil {
+			return fmt.Errorf("apply loop schema: %w", err)
+		}
 		// finding 级验证态与返工边（方案书 §7 的 P0-2）：三态 + rework 边，
 		// 走独立幂等文件（db/schema_finding_validation.sql）。
 		if err := schemaDB.EnsureFindingValidationSchema(); err != nil {
