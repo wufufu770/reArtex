@@ -255,6 +255,18 @@ func (d *DB) DeleteLegacyNode(id int64, operator string) error {
 	return nil
 }
 
+// AppendLegacyAudit 写一条通用审计行（v0.10.1：三门越级接受留痕——缺门清单 +
+// 理由 + 操作人，评审越级全程可溯）。
+func (d *DB) AppendLegacyAudit(action string, nodeID int64, payload map[string]any, operator string) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`INSERT INTO legacy_audit(action, node_id, payload, operator) VALUES ($1,$2,$3,$4)`,
+		strings.TrimSpace(action), nodeID, string(b), strings.TrimSpace(operator))
+	return err
+}
+
 // GetLegacyNode 读单条（不存在返回可区分错误）。
 func (d *DB) GetLegacyNode(id int64) (*LegacyNode, error) {
 	if err := d.EnsureLegacySchema(); err != nil {

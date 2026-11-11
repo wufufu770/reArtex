@@ -232,8 +232,13 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 
 	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
+	// v0.10.1 门4：额度阻塞意图存在时不落 done——额度死态下的「达成」是假象
+	// （worker 全堵死），转自动暂停等人恢复；timeout 语义仍可落（它本就表达「没跑完」）。
 	status := "timeout"
 	if met {
+		if e.refuseDoneIfQuotaBlocked(t, "超时收尾判定达成") {
+			return
+		}
 		status = "done"
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)

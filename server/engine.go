@@ -136,6 +136,14 @@ type Engine struct {
 	// 三处终局点旁 best-effort 异步调用，nil = 未装配。与 freezeReplayCorpus 同点
 	// 同款一次性可重入语义（legacyDistilled 记账在 Server 侧）。
 	LegacyDistiller func(t *Task)
+	// OnLLMQuotaExhausted 是「模型链耗尽 → 任务自动暂停」的宿主落点（v0.10.1，
+	// 用户拍板：额度用完 ⇒ 自动暂停等人手工恢复，不许在额度死态下收尾成
+	// 「已完成」）。engine 侧只判定与播报（noteLLMQuotaExhausted），暂停动作
+	// 走 server 的人工暂停同一条控制链。nil = 未装配（测试）。
+	OnLLMQuotaExhausted func(taskID string)
+	// quotaPausedOnce 记「本任务已因额度耗尽暂停过」——同一轮耗尽风暴里多个
+	// worker 同时撞墙只触发一次暂停；Resume 时清除，下次耗尽再触发。
+	quotaPausedOnce sync.Map
 	// DenialWatcher 是 B6 升级路径的观察者（server/denial_escalation.go）：
 	// 工具调用被拒（「Blocked by hook」）时回调 (taskID, toolName, denialMessage)。
 	// nil = 不观察。宿主（NewServer）装配。
@@ -436,6 +444,8 @@ func (e *Engine) Resume(t *Task) {
 		return
 	}
 	e.paused.Delete(t.ID)
+	// v0.10.1：人工恢复 = 额度止损闸重新武装（下次链耗尽可再次自动暂停）。
+	e.quotaPausedOnce.Delete(t.ID)
 	t.Notify()
 }
 
@@ -1505,6 +1515,10 @@ func (e *Engine) noteWrapupRoundResult(t *Task, intentsBefore int) {
 	if !shouldSettle {
 		return
 	}
+	// v0.10.1 门4：额度死态下的「连续零产出」全是堵死的假象——不收尾，转自动暂停。
+	if e.refuseDoneIfQuotaBlocked(t, "停滞闸收尾") {
+		return
+	}
 
 	// 确定性收尾（C4）：concluded marker fact + 活动播报 + 守卫落 done + 冻结 + 蒸馏。
 	payload := map[string]any{
@@ -1644,6 +1658,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
 			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
+				// v0.10.1 门4：额度阻塞意图存在时不收尾（frontier「抽干」可能是全部
+				// 被额度堵死的假象）——转自动暂停等人恢复。
+				if e.refuseDoneIfQuotaBlocked(t, "goalless 收尾") {
+					return
+				}
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
 				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
@@ -1701,7 +1720,17 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
+			// v0.10.1：规划轮因模型链耗尽失败 ⇒ 任务级止损（自动暂停）。
+			if isTaskLLMChainExhausted(err) {
+				e.noteLLMQuotaExhausted(t)
+			}
 		case met:
+			// v0.10.1 门4（task#9 现场）：额度死态下 planner 判出的「达成」不可信——
+			// worker 全堵死、无新鲜事实，照样可能判 14/14 met。有额度阻塞意图 ⇒
+			// 不落 done，转自动暂停等人手工恢复。
+			if e.refuseDoneIfQuotaBlocked(t, "planner 判定达成") {
+				return
+			}
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
 			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
@@ -2043,6 +2072,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
 			Summary: "【LLM 通道故障】意图 #" + fmt.Sprintf("%d", intent.ID) + " 因模型链耗尽转 blocked——请检查 LLM 配置（key/额度），或通过治理工具/设置页切换备用配置"})
+		// v0.10.1：模型链耗尽 ⇒ 任务级止损（自动暂停等人恢复）。同轮风暴只触发一次。
+		e.noteLLMQuotaExhausted(t)
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
 			// F2 finalize 幂等化：CAS 冲突时读回最终态——已是任一终态 ⇒ 另一写者
@@ -2501,12 +2532,67 @@ func (e *Engine) settleIntentsOnConclude(t *Task, reason string) {
 	}
 }
 
+// quotaBlockedIntents 返回本任务额度阻塞（模型链耗尽）意图数；读失败按 0（防御：
+// 这个数只用于收尾守卫，读失败时不误伤正常收尾——真正的暂停由 worker 路径触发）。
+func (e *Engine) quotaBlockedIntents(t *Task) int {
+	if t == nil || t.Store == nil {
+		return 0
+	}
+	n, err := t.Store.CountIntentsBlockedByReason(db.IntentBlockedLLMQuota)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// refuseDoneIfQuotaBlocked 是所有「落 done」路径的统一守卫（v0.10.1，task#9 现场）：
+// 存在额度阻塞意图 ⇒ 此刻的「达成/可收尾」是额度死态下的假象（worker 全堵死、
+// planner 无新鲜事实可判），落 done 只会把任务伪装成已完成。拦截并转自动暂停，
+// 返回 true = 已拦截（调用方不得再落终态）。
+func (e *Engine) refuseDoneIfQuotaBlocked(t *Task, why string) bool {
+	if n := e.quotaBlockedIntents(t); n > 0 {
+		log.Printf("[conclude-guard] task %s %s 被拦：存在 %d 个额度阻塞意图——转自动暂停待人工恢复", t.ID, why, n)
+		e.noteLLMQuotaExhausted(t)
+		return true
+	}
+	return false
+}
+
+// noteLLMQuotaExhausted 模型链耗尽的任务级止损：播报 + 走宿主的自动暂停回调
+// （人工暂停同一条控制链）。同一轮耗尽风暴只触发一次；Resume 后重新武装。
+func (e *Engine) noteLLMQuotaExhausted(t *Task) {
+	if t == nil {
+		return
+	}
+	if _, loaded := e.quotaPausedOnce.LoadOrStore(t.ID, struct{}{}); loaded {
+		return
+	}
+	if e.IsPaused(t.ID) || e.isTaskTerminal(t) {
+		// 已暂停/已终态：没有可暂停的东西。终态防御在这里兜底（quotaPausedOnce
+		// 也顺带挡住后续重复播报）。
+		return
+	}
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+		Summary: "【自动暂停】模型额度耗尽：任务已暂停等待人工处理——补充额度/切换 LLM 配置后手工恢复，" +
+			"额度阻塞的意图会在更换配置后自动重开"})
+	if e.OnLLMQuotaExhausted != nil {
+		go e.OnLLMQuotaExhausted(t.ID)
+	}
+}
+
 // ConcludeTask 收尾任务（v7 双签）：三门满足（无 running/open 意图 + 有产出）
 // ⇒ 直接 conclude；不满足 ⇒ 返回需人工（调用方转 ask）。
 func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 	t, ok := e.m.Task(taskID)
 	if !ok || t == nil || t.Store == nil {
 		return false, "task 不存在"
+	}
+	// v0.10.1 门4：额度阻塞意图存在 ⇒ 不是「实质达成」而是「跑不动了」——
+	// 原三门只查 running/open，blocked 的额度死态意图不计入 ⇒ 全堵死+有产出
+	// 就能 conclude 出「已完成」（task#9 现场）。拦下并转自动暂停。
+	if n := e.quotaBlockedIntents(t); n > 0 {
+		e.noteLLMQuotaExhausted(t)
+		return false, fmt.Sprintf("第4门不满足：存在 %d 个额度阻塞意图（模型链耗尽）——任务转自动暂停，补充额度后人工恢复", n)
 	}
 	running, _ := t.Store.RunningIntentIDs()
 	openIntents, _ := t.Store.OpenIntentsCount()

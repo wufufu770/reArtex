@@ -98,6 +98,23 @@ func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, er
 	return s.applyTaskControlWithCause(t, action, agent.AbortPausedByUser)
 }
 
+// autoPauseTaskOnLLMQuota 是「模型链耗尽 → 任务自动暂停」的引擎回调（v0.10.1，
+// 用户拍板：额度用完 ⇒ 自动暂停等人手工恢复）。走人工暂停同一条控制链
+// （取消在飞运行 + paused 落库 + 取消主控会话轮次），恢复仍是人工动作；
+// 换配置时额度阻塞意图由 ReplaceTaskLLMProfiles 自动重开。
+func (s *Server) autoPauseTaskOnLLMQuota(taskID string) {
+	t, ok := s.m.Task(taskID)
+	if !ok || t == nil {
+		return
+	}
+	if _, err := s.applyTaskControlWithCause(t, "pause", agent.AbortPausedByUser); err != nil {
+		// 已暂停/终态/删除中——语义上都无需再暂停；记一条日志即可。
+		log.Printf("[task] #%s 额度自动暂停未执行: %v", taskID, err)
+		return
+	}
+	log.Printf("[task] #%s 因模型链耗尽自动暂停（等待人工恢复）", taskID)
+}
+
 func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause error) (taskControlResult, error) {
 	// F1（方案 v9.2 §3.5）：成功与失败都落显式日志。此前失败静默（错误只进
 	// HTTP 409 body）——用户点「重新开始」没生效时服务端一条日志都没有，排障

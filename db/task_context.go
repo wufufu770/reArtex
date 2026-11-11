@@ -576,3 +576,12 @@ WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND blocked_reason
 	n, _ := res.RowsAffected()
 	return n, nil
 }
+
+// CountIntentsBlockedByReason 统计某阻塞原因的意图数（v0.10.1 收尾守卫用：
+// 存在 llm_quota 阻塞 ⇒ 任务处于额度死态，所有「落 done」路径必须拦截）。
+func (s *ExplorationStore) CountIntentsBlockedByReason(reason string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND blocked_reason=$2`, s.expID, reason).Scan(&n)
+	return n, err
+}

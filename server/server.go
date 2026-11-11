@@ -211,6 +211,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// F4：空缺驱动唤醒的宿主落点（server/gapwake.go）——F2 矛盾检测经此开空缺
 	// + 定向唤醒（authorization 类只入账不唤醒）。
 	s.engine.GapOpener = s.openGap
+	// v0.10.1：模型链耗尽 ⇒ 任务自动暂停（用户拍板：额度用完等人手工恢复，
+	// 不许在额度死态下被收尾成「已完成」）。走人工暂停同一条控制链。
+	s.engine.OnLLMQuotaExhausted = s.autoPauseTaskOnLLMQuota
 	go s.RunSupervisionLoop(s.ctx)
 	s.engine.AuditSummary = s.emitAuditSummary
 	s.loadTaskSessionBindings()
