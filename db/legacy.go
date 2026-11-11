@@ -412,6 +412,13 @@ func (d *DB) MatchExperiences(goalText string, seedKVs map[string]any, topN int)
 	if topN <= 0 || topN > 5 {
 		topN = 5
 	}
+	// ⚠️ v0.10.1：池子非空但**全员 0 分**（goal 词表与池零重叠，或 goal 为空）
+	// 时 scored 为空——此前 scored[0] 直接 panic。这条 panic 不只打挂注入拼装
+	// 预览：launchTask 的真实种子路径走同一个函数 ⇒ 新任务目标与 accepted 池
+	// 零词重叠时**建任务请求会直接崩**。空集 = 无命中 = 空串不注入，正常返回。
+	if len(scored) == 0 {
+		return []ScoredExperience{}, nil
+	}
 	// 归一化基准：池内最高原始分（候选们都过同一条匹配函数，相对分可比）。
 	maxScore := scored[0].s
 	out := []ScoredExperience{}
