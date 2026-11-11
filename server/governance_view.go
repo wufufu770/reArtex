@@ -12,8 +12,8 @@ import (
 // taskGovernance 是任务详情「治理」tab 的聚合载荷。
 type taskGovernance struct {
 	TaskID       string           `json:"task_id"`
-	Decisions    []map[string]any `json:"decisions"`    // 本任务 sod_decisions（近 100 条，倒序）
-	Overrides    []map[string]any `json:"overrides"`    // 本任务人工改判凭据
+	Decisions    []map[string]any `json:"decisions"`     // 本任务 sod_decisions（近 100 条，倒序）
+	Overrides    []map[string]any `json:"overrides"`     // 本任务人工改判凭据
 	SystemEvents []map[string]any `json:"system_events"` // B6 升级/LLM 故障转移等系统事件（近 100 条）
 }
 
@@ -87,7 +87,18 @@ ORDER BY id DESC LIMIT 100`, t.ExpID)
 	if out.SystemEvents == nil {
 		out.SystemEvents = []map[string]any{}
 	}
-	writeJSON(w, 200, out)
+	// M2/M4（方案 v10 §6 二期）：唤醒计次 + intent 观测计数随治理视图一并返回。
+	resp := map[string]any{
+		"task_id": out.TaskID, "decisions": out.Decisions, "overrides": out.Overrides,
+		"system_events": out.SystemEvents,
+	}
+	if t, exists := s.m.Task(tid); exists && t != nil {
+		if v, ok := s.engine.wakeStat.Load(t.ID); ok {
+			resp["wake_stats"] = v.(*wakeCounter).snapshot()
+		}
+		resp["intent_counts"] = taskIntentCounts(pg, id)
+	}
+	writeJSON(w, 200, resp)
 }
 
 // auditEvents GET /api/audit/events?page=&size= —— audit_events 明细分页（只读）。

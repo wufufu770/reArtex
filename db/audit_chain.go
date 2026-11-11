@@ -36,7 +36,11 @@ type AuditEvent struct {
 	Payload    json.RawMessage
 	Digest     string
 	PrevDigest string
-	CreatedAt  time.Time
+	// Source 是来源标记（M1，方案 v10 §6：actor/时间/来源三要素）。不参与
+	// digest 计算——链完整性绑定在既有五段上，source 是元数据维度，存量回填
+	// 'legacy' 不破链。
+	Source    string
+	CreatedAt time.Time
 }
 
 // auditDigest 算出一条事件的 digest：前一条的 digest + 本条内容。
@@ -96,9 +100,9 @@ func (d *DB) AppendAuditEvent(ev AuditEvent) (string, error) {
 	seq := lastSeq + 1
 	digest := auditDigest(prevDigest, seq, ev.Actor, ev.ToolName, ev.Action, ev.Reason, payload)
 	_, err := d.Exec(`
-INSERT INTO audit_events(seq, actor, tool_name, action, reason, payload, digest, prev_digest)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		seq, ev.Actor, ev.ToolName, ev.Action, ev.Reason, payload, digest, prevDigest)
+INSERT INTO audit_events(seq, actor, tool_name, action, reason, payload, digest, prev_digest, source)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		seq, ev.Actor, ev.ToolName, ev.Action, ev.Reason, payload, digest, prevDigest, ev.Source)
 	if err != nil {
 		return "", err
 	}

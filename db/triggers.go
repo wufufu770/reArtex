@@ -270,10 +270,36 @@ ORDER BY r.id`, lastID)
 // MetGoals returns all met goals across live tasks (the scheduler filters out the
 // ones it already fired for via the persisted fired-set).
 func (d *DB) MetGoals() ([]TaskEvent, error) {
+	return d.metGoals("")
+}
+
+// MetGoalsActive 是 G3（方案 v10 §15）水位收窄版 MetGoals：只返回【仍可能新达标】
+// 的 met goal —— 活跃任务（status 非终态）的，外加刚进终态不久（completed_at 在
+// 1 小时内）的任务的。调度器每 5s tick 用它替代全表扫描；首次 init 播种仍用全表
+// MetGoals()（重启不重复触发的语义不变）。
+//
+// 为什么不能只扫活跃任务：goal 置 met 的唯一写入点是 prove_goal（agent/tools.go，
+// SetNodeState(goal,"met")），它与引擎把任务落 done 之间通常只隔亚秒~几秒 ——
+// 5s tick 很可能整个跳过「任务还活跃」的窗口，只扫活跃任务会系统性漏掉这类
+// 目标达成触发。所以把刚终态的任务留在扫描窗里：任务的引擎停止后不可能再有新的
+// prove_goal，终态超 1h 的任务其 met goal 早已被之前的 tick 扫到、id 已进已触发
+// 集合（集合只增不减，见 scheduler.fireGoals）。1h ≈ 720 个 tick 的裕量。
+//
+// 集合去重语义不变：本查询收窄的只是「候选流」，已触发 id 的持久化与去重逻辑照旧。
+// 没有走「satisfied_at 时间窗」方案的原因：goal 判定只依赖实时 state 列
+// （exploration_nodes 没有 satisfied_at；nodes.updated_at 会随任意更新抖动），
+// 任务状态/完成时间才是可靠的分窗锚点。
+func (d *DB) MetGoalsActive() ([]TaskEvent, error) {
+	return d.metGoals(` AND (t.status NOT IN ('done','failed','timeout')
+	   OR t.completed_at > now() - interval '1 hour')`)
+}
+
+// metGoals 是 MetGoals/MetGoalsActive 的共用查询体，extraWhere 追加在任务过滤之后。
+func (d *DB) metGoals(extraWhere string) ([]TaskEvent, error) {
 	rows, err := d.Query(`
 SELECT n.id, t.id, t.description, t.goal, n.payload
 FROM exploration_nodes n JOIN tasks t ON t.exploration_id = n.exploration_id
-WHERE n.kind='goal' AND n.state='met' AND t.deleted_at IS NULL
+WHERE n.kind='goal' AND n.state='met' AND t.deleted_at IS NULL` + extraWhere + `
 ORDER BY n.id`)
 	if err != nil {
 		return nil, err

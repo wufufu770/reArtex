@@ -81,20 +81,20 @@ func ValidateFingerprint(fp map[string]any) error {
 
 // LegacyNode 是一条经验。
 type LegacyNode struct {
-	ID           int64          `json:"id"`
-	CompanyID    *int64         `json:"company_id,omitempty"`
-	Kind         string         `json:"kind"`
-	Title        string         `json:"title"`
-	Summary      string         `json:"summary"`
-	Detail       string         `json:"detail,omitempty"`
-	Fingerprint  map[string]any `json:"fingerprint"`
-	State        string         `json:"state"`
-	SourceTaskID *int64         `json:"source_task_id,omitempty"`
-	SourceTask   string         `json:"source_task,omitempty"`
-	SourceSession string        `json:"source_session,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	ReviewedAt   *time.Time     `json:"reviewed_at,omitempty"`
-	ReviewedBy   string         `json:"reviewed_by,omitempty"`
+	ID            int64          `json:"id"`
+	CompanyID     *int64         `json:"company_id,omitempty"`
+	Kind          string         `json:"kind"`
+	Title         string         `json:"title"`
+	Summary       string         `json:"summary"`
+	Detail        string         `json:"detail,omitempty"`
+	Fingerprint   map[string]any `json:"fingerprint"`
+	State         string         `json:"state"`
+	SourceTaskID  *int64         `json:"source_task_id,omitempty"`
+	SourceTask    string         `json:"source_task,omitempty"`
+	SourceSession string         `json:"source_session,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	ReviewedAt    *time.Time     `json:"reviewed_at,omitempty"`
+	ReviewedBy    string         `json:"reviewed_by,omitempty"`
 }
 
 const legacyCols = `id, company_id, kind, title, summary, detail, fingerprint, state,
@@ -313,10 +313,22 @@ func (d *DB) ListLegacyNodes(state string, limit int) ([]*LegacyNode, error) {
 
 // acceptedExperiences 是注入候选池的行（注入只取列出的字段，预算内截断）。
 type acceptedExperience struct {
-	ID       int64
-	Title    string
-	Summary  string
-	Fingerp  map[string]any
+	ID      int64
+	Title   string
+	Summary string
+	Fingerp map[string]any
+	// CreatedAt 是经验的归档时间：注入面按它算时效分（权重行没有 last_win_at
+	// 时的回落基准，见 MatchExperiences）。
+	CreatedAt time.Time
+}
+
+// ScoredExperience 是带归一化重叠分的注入候选（X1：注入排序
+// 0.6×重叠 + 0.2×prior + 0.2×时效，重叠分从这里来）。
+type ScoredExperience struct {
+	acceptedExperience
+	// Overlap 是文本重叠分（0..1）＝ 原始匹配分 / 候选池最高原始分。
+	// 相对归一口径：池内可比、跨池稳定（同池排序确定性不变）。
+	Overlap float64
 }
 
 // AcceptedExperiences 读注入候选池（state=accepted）。
@@ -327,7 +339,7 @@ func (d *DB) AcceptedExperiences(limit int) ([]acceptedExperience, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := d.Query(`SELECT id, title, summary, fingerprint FROM legacy_nodes
+	rows, err := d.Query(`SELECT id, title, summary, fingerprint, created_at FROM legacy_nodes
 WHERE state='accepted' ORDER BY id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -337,7 +349,7 @@ WHERE state='accepted' ORDER BY id DESC LIMIT $1`, limit)
 	for rows.Next() {
 		var e acceptedExperience
 		var fp []byte
-		if err := rows.Scan(&e.ID, &e.Title, &e.Summary, &fp); err != nil {
+		if err := rows.Scan(&e.ID, &e.Title, &e.Summary, &fp, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(fp, &e.Fingerp)
@@ -350,15 +362,19 @@ WHERE state='accepted' ORDER BY id DESC LIMIT $1`, limit)
 // 查询侧没有历史指纹（指纹属蒸馏产物）⇒ 匹配退化为文本/资产重叠——如实口径
 // （方案 v3.1 §3.3③）。token 化照抄 sapper recall 思路：小写化 + 连续字母数字切分
 // + CJK 单字切分；打分 = 标题×2 + 摘要 + 指纹值命中。
-func (d *DB) MatchExperiences(goalText string, seedKVs map[string]any, topN int) ([]acceptedExperience, error) {
+//
+// X1（方案 v10 §6 T1）：返回带归一化重叠分的候选 —— 注入面按
+// 0.6×重叠 + 0.2×prior + 0.2×时效 加权重排，重叠分在这里归一化
+// （原始分 / 池内最高分，0..1），排序面不再各自算一份。
+func (d *DB) MatchExperiences(goalText string, seedKVs map[string]any, topN int) ([]ScoredExperience, error) {
 	pool, err := d.AcceptedExperiences(100)
 	if err != nil {
 		return nil, err
 	}
 	if len(pool) == 0 {
-		return pool, nil
+		return []ScoredExperience{}, nil
 	}
-	qt := tokenizeForMatch(goalText)
+	qt := TokenizeForMatch(goalText)
 	scored := make([]struct {
 		e acceptedExperience
 		s float64
@@ -396,18 +412,26 @@ func (d *DB) MatchExperiences(goalText string, seedKVs map[string]any, topN int)
 	if topN <= 0 || topN > 5 {
 		topN = 5
 	}
-	out := []acceptedExperience{}
+	// 归一化基准：池内最高原始分（候选们都过同一条匹配函数，相对分可比）。
+	maxScore := scored[0].s
+	out := []ScoredExperience{}
 	for i, sc := range scored {
 		if i >= topN {
 			break
 		}
-		out = append(out, sc.e)
+		overlap := 0.0
+		if maxScore > 0 {
+			overlap = sc.s / maxScore
+		}
+		out = append(out, ScoredExperience{acceptedExperience: sc.e, Overlap: overlap})
 	}
 	return out, nil
 }
 
-// tokenizeForMatch 小写化 + 连续字母数字段 + CJK 单字（sapper.py:1013-1027 思路）。
-func tokenizeForMatch(text string) map[string]bool {
+// TokenizeForMatch 小写化 + 连续字母数字段 + CJK 单字（sapper.py:1013-1027 思路）。
+// 词集口径的唯一定义处：匹配打分（MatchExperiences）、归因因果校验
+// （experience_weight.go）、晋级复盘门（server/promotion.go）共用它。
+func TokenizeForMatch(text string) map[string]bool {
 	text = strings.ToLower(text)
 	out := map[string]bool{}
 	var cur strings.Builder

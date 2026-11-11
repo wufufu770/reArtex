@@ -18,7 +18,9 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// govRecord 治理动作双留痕：llm_records 观测行 + 绑定会话播报。
+// govRecord 治理动作三留痕：llm_records 观测行 + 绑定会话播报 + **哈希链审计**
+// （M1，方案 v10 §6：治理动作是哈希链本该覆盖的内容——此前只落一张会随任务
+// 删除/归档连带删除的观测表，审计链里没有治理动作的任何痕迹）。
 func (s *Server) govRecord(taskID, action, summary string) {
 	if s.m == nil || s.m.pg == nil {
 		return
@@ -29,6 +31,17 @@ func (s *Server) govRecord(taskID, action, summary string) {
 		RawResponse: string(body),
 	}); err != nil {
 		log.Printf("[governance] 留痕失败（忽略）: %v", err)
+	}
+	// M1 双写：进 audit_events 哈希链（source=governance-tool；观测表可删，链不可删）。
+	if _, err := s.m.pg.AppendAuditEvent(db.AuditEvent{
+		Actor:    "auto-supervisor",
+		ToolName: "governance",
+		Action:   "governance." + action,
+		Reason:   summary,
+		Payload:  body,
+		Source:   "governance-tool",
+	}); err != nil {
+		log.Printf("[governance] 审计链写入失败（忽略）: %v", err)
 	}
 	numeric, err := parseTaskID(taskID)
 	if err != nil {

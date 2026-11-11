@@ -1,7 +1,6 @@
 package server
 
 import (
-	"reflect"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -195,11 +195,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s := &Server{m: m, engine: engine, ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, sessionWakePending: map[string][]pendingWake{},
 		sessionWakeChain: map[string]int{}, mirror: newTaskSessionMirror(), denials: newDenialEscalation(),
-		triggerQ: map[string][]triggeredRun{},
+		triggerQ:      map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[profChatKey]*agent.ChatAgent{},
-		provByProfile: map[provKey]*provEntry{}, profileRateLimits: map[int64]*llm.RateLimit{},
-		llmHealth: newLLMHealthRegistry(m.pg),
+		provByProfile:  map[provKey]*provEntry{}, profileRateLimits: map[int64]*llm.RateLimit{},
+		llmHealth:  newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
@@ -307,7 +307,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// agent 只认「读队列 / 结案」这两个动作，不认表名与列名。
 		// 不注入时那两个工具会返回中文错误而不是崩，但 redteam 也就永远查不到队列。
 		agent.SodReviewStore = sodReviewStore{pg: m.pg}
-		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		seedPrompts(m.pg) // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		// SoD 链：先绑定运行上下文读法，再装链。
 		//
 		// 为什么必须绑定读法：链铸的凭证与执行器查的凭证都靠四元组里的 agent_key
@@ -322,20 +322,20 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// = 所有工具调用都不受管 ⇒ 那是**比没有这个特性更危险**的状态（制造虚假
 		// 安全感）。宁可启动失败，让部署方看到明确原因。
 		sod.SetContextReader(agent.SodContextReader)
-			if err := s.installSoDChain(); err != nil {
+		if err := s.installSoDChain(); err != nil {
 			log.Fatalf("[sod] 安装 SoD 链失败: %v", err)
 		}
-			s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
-			if err := s.seedFindingRetester(); err != nil {
+		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
-			go s.evidenceStore().RunGC(s.ctx)
+		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-			go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
-			// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
+		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
 		go newNotifier(s).Run(s.ctx)
-			// Fill the tool cache for any enabled MCP that has none yet (notably the
+		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
@@ -349,11 +349,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	}
 	// precedence: persisted DB config > env.
 	if cfg, ok := s.loadLLMConfig(); ok {
-			if err := s.applyLLM(cfg); err != nil {
+		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] saved LLM config init failed — engine idle: %v", err)
 		} else {
 			log.Printf("[engine] LLM configured from DB: %s / %s", cfg.Provider(), cfg.Model)
-			}
+		}
 	} else if cfg, ok := agent.FromEnv(); ok {
 		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] env provider init failed — engine idle: %v", err)
@@ -561,7 +561,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && reflect.DeepEqual(activeCfg, cfg) {
 			log.Printf("[boot] applyLLM: resolving provider for profile %d", active.ID)
 			prov, _, _ = s.providerForProfile(active.ID)
-				}
+		}
 	}
 	if prov == nil {
 		var err error
@@ -818,7 +818,6 @@ func (s *Server) providerForProfileModelRaw(id int64, model string) (llm.Provide
 	return prov, cfg, true
 }
 
-
 // providerForProfileBare 是 Pool 成员的专用裸构建（v5.3 G-A 防互递归）：
 // loadProfileConfig + NewProvider + 记录/配额包装，**不含** endpoint 候选链、
 // **不含** poolForBinding、**不写** provByProfile 缓存——Pool 成员构建期间
@@ -946,6 +945,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	s.registerMetricsRoutes(mux) // 运行度量（P0 评估基线）
 	s.registerLegacyRoutes(mux)  // 传承图（P5 第三张图）
+	// 记忆晋级门（X4+X2，方案 v10 §6 T2/T3）：host-only 的 promote/retire +
+	// 治理分页列表；promote 先过三门评估（server/promotion.go）。
+	s.registerMemoryCurationRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -1102,7 +1104,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
-	mux.HandleFunc("GET /api/llm/totals", s.pgLLMTokenTotals)        // W9（方案 v10 §6）：全任务 token 总量（exploration_id → total）
+	mux.HandleFunc("GET /api/llm/totals", s.pgLLMTokenTotals)         // W9（方案 v10 §6）：全任务 token 总量（exploration_id → total）
+	// 二期度量（方案 v10 §6 M3 + loop 可计算指标）。
+	mux.HandleFunc("GET /api/llm/records/stats", s.llmStats)
+	mux.HandleFunc("GET /api/metrics/loop", s.loopMetrics)
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)

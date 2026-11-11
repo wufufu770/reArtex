@@ -29,7 +29,9 @@ type DeferredInfo struct {
 // built-in base set — the agent's visible skills (packed into one Skill meta-tool)
 // and visible MCP servers (expanded to mcp__server__tool). It also returns the
 // DeferredInfo describing how those MCP tools are deferred/gated. The server wires
-// it to the PG agent_visibility table. cleanup releases any spawned MCP clients.
+// it to the PG agent_visibility table. cleanup releases any spawned MCP clients —
+// G1（方案 v10 §15）后：装配缓存命中的 run 它是 no-op（连接跨 run 复用、进程退出统一
+// 收），仅降级路径按 run 关闭本 run 新建的连接（见 assemblycache.go）。
 //
 // When nil, agents run with only their built-in tools — behavior is unchanged
 // until a user assigns a skill/MCP to the agent in the UI.

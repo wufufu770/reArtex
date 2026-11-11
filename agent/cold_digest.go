@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
+	"golang.org/x/sync/singleflight"
 )
 
 // Compactor performs background cold-node compaction for many explorations.
@@ -121,7 +123,9 @@ func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed
 	if err != nil {
 		return
 	}
-	g, _, err := loadColdGraph(ts)
+	// G2（方案 v10 §15）：读图走 TTL 缓存（写回照旧 —— 下面的 stamp ops 决策在
+	// 快照上算完照常落库，缓存只消除重复的全量读图）。
+	g, _, err := loadColdGraphCached(ts)
 	if err != nil {
 		return
 	}
@@ -340,6 +344,83 @@ func (c *Compactor) finish(expID int64) {
 }
 
 // --- helpers: db ↔ coldgraph ---
+
+// G2（方案 v10 §15）冷图读路径的进程内 TTL 缓存。
+//
+// 为什么需要它：全量读图（LIMIT 1<<30 的 Nodes+Edges + 建邻接表）在一个 planner
+// 轮内最多发生两次（OnPlannerRound→maintain 一次 + graphOverviewData 一次），worker
+// 每领一条意图又经 graphOverviewData 再来一次 —— 图越大这笔重复越贵。给「读出来的
+// 图数据」加 TTL 缓存（键=explorationID，TTL 10s），三条读路径共享同一份 ≤10s 旧的
+// 快照；singleflight 合并同一时刻的并发重建。
+//
+// 边界（刻意的）：
+//   - maintain 的【写回】不经过缓存 —— BumpRound / ApplyStampOps 照跑，缓存只省
+//     读图本身（决策照旧在快照上算，≤10s 的陈旧由 R=6 的去抖窗吸收）；
+//   - 后台压缩（minor/major/foldBlock 的活性复查）仍走 loadColdGraph 直读 ——
+//     那些位置的新鲜度是正确性要求（§并发 liveness recheck），不进缓存。
+//
+// 并发：coldGraph 建完后只读（所有方法都是纯计算、返回新 map），跨 goroutine 共享
+// 安全；条目读写由 coldGraphMu 保护，singleflight 保证同 key 并发重建只跑一次。
+const coldGraphCacheTTL = 10 * time.Second
+
+type coldGraphCacheEntry struct {
+	g    *coldGraph
+	byID map[int64]*db.Node
+	at   time.Time
+}
+
+var (
+	coldGraphMu    sync.Mutex
+	coldGraphCache = map[int64]*coldGraphCacheEntry{}
+	coldGraphSF    singleflight.Group
+)
+
+// loadColdGraphCached 是 loadColdGraph 的 TTL 缓存版，供读路径使用。
+func loadColdGraphCached(ts *db.ExplorationStore) (*coldGraph, map[int64]*db.Node, error) {
+	key := ts.ID()
+	if e := lookupColdGraph(key); e != nil {
+		return e.g, e.byID, nil
+	}
+	v, err, _ := coldGraphSF.Do(strconv.FormatInt(key, 10), func() (any, error) {
+		if e := lookupColdGraph(key); e != nil {
+			// 排队期间已有并发调用方重建完：直接复用（double-check），不再读库。
+			return e, nil
+		}
+		g, byID, err := loadColdGraph(ts)
+		if err != nil {
+			return nil, err // 读失败不缓存，照旧把错误交给调用方
+		}
+		e := &coldGraphCacheEntry{g: g, byID: byID, at: time.Now()}
+		storeColdGraph(key, e)
+		return e, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	e := v.(*coldGraphCacheEntry)
+	return e.g, e.byID, nil
+}
+
+func lookupColdGraph(key int64) *coldGraphCacheEntry {
+	coldGraphMu.Lock()
+	defer coldGraphMu.Unlock()
+	if e, ok := coldGraphCache[key]; ok && time.Since(e.at) < coldGraphCacheTTL {
+		return e
+	}
+	return nil
+}
+
+func storeColdGraph(key int64, e *coldGraphCacheEntry) {
+	coldGraphMu.Lock()
+	defer coldGraphMu.Unlock()
+	// 活跃探索数有限；存入时顺手清掉过期条目，避免长进程里 map 无界增长。
+	for k, old := range coldGraphCache {
+		if time.Since(old.at) >= coldGraphCacheTTL {
+			delete(coldGraphCache, k)
+		}
+	}
+	coldGraphCache[key] = e
+}
 
 // loadColdGraph reads the exploration's nodes + edges and builds the cold-graph
 // view plus an id→node index (for summaries/payload during compression).

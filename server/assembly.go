@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -64,168 +67,331 @@ func wireToolDenialRecorder(ic *intercept.Interceptor) {
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
+//
+// G1（方案 v10 §15）装配缓存：昂贵的部分（重读解析全部 SKILL.md、spawn 每个 stdio
+// MCP 进程 + tools/list）不再每 run 重跑 —— 按 agentKey 缓存「连接与解析产物」，
+// 每 run 只用缓存产物重建轻包装（新 UnlockSet / OnInvoke / Skill 工具 / host 工具，
+// 这些是 per-run 状态，不能跨 run 复用）。失效走两条通道：配置写入 handler 调
+// agent.InvalidateAssembly() 直接翻代；命中时 fresh() 用几条廉价查询复核装配输入
+// —— 给绕过 handler 的直写 DB（测试、种子代码）兜底。MCP 连接跨 run 复用不关闭，
+// 由失效/重建替换时与进程退出统一收。
 func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
-		a, err := pg.GetAgentByKey(agentKey)
-		if err != nil || a == nil {
+		value, release, err := agent.GetOrBuildAssembly(agentKey,
+			func(v any) bool {
+				asm, ok := v.(*agentAssembly)
+				return ok && asm.fresh(pg)
+			},
+			func() (agent.AssemblyBuild, error) {
+				return buildAgentAssembly(pg, skillDir, agentKey, ctx)
+			})
+		if err != nil || value == nil {
 			return nil, agent.DeferredInfo{}, nil
 		}
-		var extra []actool.CoreTool
-
-		// --- skills: load visible skills into reg (used for the Skill meta-tool
-		// and to know which MCP servers are skill-gated). ---
-		var reg *skill.Registry
-		if names, _ := pg.AgentSkillNames(a.ID); len(names) > 0 {
-			nameSet := make(map[string]bool, len(names))
-			for _, n := range names {
-				nameSet[n] = true
-			}
-			if allReg, err := skill.LoadDir(skillDir); err == nil && allReg != nil {
-				reg = skill.NewRegistry()
-				for _, s := range allReg.List() {
-					// match by directory name (Base of Dir), not by skill display Name
-					if s.Dir != "" && nameSet[filepath.Base(s.Dir)] {
-						reg.Add(s)
-					}
-				}
-				if len(reg.List()) == 0 {
-					reg = nil
-				}
-			}
-		}
-		// A server named by any visible skill's `mcps:` is skill-gated: its tools
-		// are deferred + locked (not in the global block) until that skill loads.
-		gated := map[string]bool{}
-		if reg != nil {
-			for _, s := range reg.List() {
-				for _, srv := range s.MCPs {
-					gated[srv] = true
-				}
-			}
-		}
-
-		// --- mcp: connect enabled servers that are directly visible to this agent
-		// OR skill-gated (named in a visible skill's mcps field). Directly-visible
-		// and NOT gated → global (unlocked from session start). Skill-gated →
-		// deferred until that skill is invoked (regardless of direct visibility).
-		var closers []io.Closer
-		serverTools := map[string][]string{} // server name → its tool names
-		var allNames, globalNames []string
-		globalSet := map[string]bool{}
-		{
-			mcpIDs, _ := pg.AgentVisible(a.ID, "mcp")
-			want := idSet(mcpIDs)
-			all, _ := pg.ListMCP()
-			for _, m := range all {
-				if !m.Enabled {
-					continue
-				}
-				directVisible := want[m.ID]
-				skillGated := gated[m.Name]
-				if !directVisible && !skillGated {
-					continue // neither directly visible nor referenced by a visible skill
-				}
-				// F5（方案 v9.2 §3.5）：http 传输但 URL 没配（如 schema 播种的
-				// ScopeSentry 占位行）⇒ 连接必然失败，跳过发现并只告警一次——
-				// 否则每个 agent 会话装配都刷一条「连接失败」（周期性噪音）。
-				// 补上 URL 后此处不再命中，发现自动恢复。
-				if m.Transport == "http" && m.URL == "" && warnMCPMissingURLOnce(m.Name) {
-					continue
-				}
-				cl, err := connectMCP(ctx, m)
-				if err != nil {
-					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
-					continue
-				}
-				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
-				if err != nil {
-					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-					continue
-				}
-				for _, t := range ts {
-					extra = append(extra, t)
-					allNames = append(allNames, t.Name())
-					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
-					if directVisible && !skillGated {
-						// directly visible and not gated → available from session start
-						globalNames = append(globalNames, t.Name())
-						globalSet[t.Name()] = true
-					}
-					// skill-gated tools stay out of globalNames; unlocked via unlockSkill()
-				}
-			}
-		}
-
-		// Shared call-gate: global MCP tools are unlocked from the start; skill-gated
-		// ones are unlocked when their skill loads (or replayed from history — C2).
-		unlock := actool.NewUnlockSet(globalNames...)
-		unlockSkill := func(skillName string) {
-			if reg == nil {
-				return
-			}
-			if s, ok := reg.Get(skillName); ok {
-				for _, srv := range s.MCPs {
-					unlock.Add(serverTools[srv]...)
-				}
-			}
-		}
-
-		// Skill meta-tool: on load, unlock the skill's MCPs and reveal their names
-		// (the ones not already in the global block).
-		if reg != nil {
-			reg.OnInvoke = func(s skill.Skill) string {
-				unlockSkill(s.Name)
-				var reveal []string
-				for _, srv := range s.MCPs {
-					for _, n := range serverTools[srv] {
-						if !globalSet[n] {
-							reveal = append(reveal, n)
-						}
-					}
-				}
-				return actool.RenderDeferredToolsBlock(reveal)
-			}
-			// Attribution for the usage ledger: ToolAugment only gets (ctx, agentKey),
-			// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
-			// once here — this closure is rebuilt per run, so the captured value always
-			// belongs to this run.
-			extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, skillDir, a.Key, agent.RunInfoFrom(ctx)))
-		}
-
-		// host tools (traffic / orchestration / custom) — added to every agent's base;
-		// ToolResolve then keeps them only for agents the tool is bound to. Custom
-		// tools flagged deferred contribute their names to the deferred wiring so
-		// their schema is withheld (SearchExtraTools/ExecuteExtraTool), same as MCP.
-		if hostTools != nil {
-			ht, deferredBinds := hostTools()
-			extra = append(extra, ht...)
-			for name, boundAgents := range deferredBinds {
-				if !contains(boundAgents, a.Key) {
-					continue // only defer names this agent is actually bound to
-				}
-				allNames = append(allNames, name)       // schema withheld from the prompt
-				globalNames = append(globalNames, name) // advertised in the deferred block
-				globalSet[name] = true
-				if unlock != nil {
-					unlock.Add(name) // global deferred → callable from the start
-				}
-			}
-		}
-
-		cleanup := func() {
-			for _, c := range closers {
-				_ = c.Close()
-			}
-		}
-		def := agent.DeferredInfo{
-			Deferred:    allNames,
-			GlobalNames: globalNames,
-			Unlock:      unlock,
-			UnlockSkill: unlockSkill,
-		}
-		return extra, def, cleanup
+		return value.(*agentAssembly).rebuild(ctx, pg, skillDir, hostTools, release)
 	}
+}
+
+// agentAssembly 是一个 agent 的【可缓存装配产物】：连接与解析产物（skill 文档、活的
+// MCP 客户端连接、工具 schema 名单）。字段在建完后只读、跨 run 共享：
+//   - mcpTools：CoreTool 实例只捕获连接与工具元数据，Call 是 per-call ctx + 并发安全
+//     （norma mcp conn.call / mcphttp.Client 都有锁、无 per-run 状态）⇒ 多 run 并发复用；
+//   - serverTools：OnInvoke/unlockSkill 闭包只读它；
+//   - skills：skill.Skill 是值结构，每 run Add 进新 Registry（OnInvoke 是 per-run 的）。
+//
+// per-run 可变状态（Unlock、globalSet 的 host 追加、name 名单的 host 追加）不在这里，
+// rebuild 里每次拷贝重建。
+type agentAssembly struct {
+	agentID  int64
+	agentKey string
+	skills   []skill.Skill     // 该 agent 可见的 skills（按目录名过滤后的解析产物）；空 = 无 Skill 工具
+	mcpTools []actool.CoreTool // 活连接上的 MCP 工具（服务端遍历序，与全量装配一致）
+	// server 名 → 工具名；unlockSkill / OnInvoke 按它解锁与揭示
+	serverTools map[string][]string
+	allNames    []string        // deferred 名单的 MCP 部分（host 部分每 run 追加）
+	globalNames []string        // 全局块名单的 MCP 部分（host 部分每 run 追加）
+	globalSet   map[string]bool // globalNames 的集合形态（OnInvoke 的 reveal 判定用）
+
+	// --- 装配输入快照：fresh() 探针比对这些，任一变化 ⇒ 产物过期 ---
+	skillNames []string       // AgentSkillNames（该查询带 ORDER BY，直接 DeepEqual）
+	mcpVis     []int64        // AgentVisible("mcp")（无序，按集合比对）
+	mcpSig     []mcpServerSig // ListMCP 里影响装配的字段投影（ORDER BY id，直接 DeepEqual）
+}
+
+// mcpServerSig 是装配真正消费的 MCPServer 字段（连接参数 + enabled）。Tools 缓存列
+// 不进装配决策，不参与比对。Args/Env 归一成 string，nil 与空切片等价。
+type mcpServerSig struct {
+	ID        int64
+	Name      string
+	Transport string
+	Command   string
+	Args      string
+	Env       string
+	URL       string
+	Enabled   bool
+	Insecure  bool
+}
+
+func mcpSignature(all []*db.MCPServer) []mcpServerSig {
+	out := make([]mcpServerSig, 0, len(all))
+	for _, m := range all {
+		out = append(out, mcpServerSig{
+			ID: m.ID, Name: m.Name, Transport: m.Transport, Command: m.Command,
+			Args: string(m.Args), Env: string(m.Env), URL: m.URL,
+			Enabled: m.Enabled, Insecure: m.Insecure,
+		})
+	}
+	return out
+}
+
+// fresh 是缓存命中时的装配输入探针（G1）：agent 行、skill 可见性、MCP 可见性、MCP
+// 配置四条廉价索引查询（毫秒级）。任何一条读失败或与快照不符 ⇒ 过期，走重建 ——
+// 语义与「每 run 全量装配」对齐，包括绕过 handler 的直写 DB。
+func (asm *agentAssembly) fresh(pg *db.DB) bool {
+	a, err := pg.GetAgentByKey(asm.agentKey)
+	if err != nil || a == nil || a.ID != asm.agentID {
+		return false
+	}
+	names, err := pg.AgentSkillNames(a.ID)
+	if err != nil || !reflect.DeepEqual(names, asm.skillNames) {
+		return false
+	}
+	vis, err := pg.AgentVisible(a.ID, "mcp")
+	if err != nil || !equalInt64Set(vis, asm.mcpVis) {
+		return false
+	}
+	all, err := pg.ListMCP()
+	if err != nil || !reflect.DeepEqual(mcpSignature(all), asm.mcpSig) {
+		return false
+	}
+	return true
+}
+
+func equalInt64Set(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[int64]bool, len(b))
+	for _, v := range b {
+		set[v] = true
+	}
+	for _, v := range a {
+		if !set[v] {
+			return false
+		}
+	}
+	return true
+}
+
+// buildAgentAssembly 是全量装配路径（缓存未命中/过期时跑）：读 agent 行、解析可见
+// skills、连接可见 MCP 并 tools/list、拼 deferred/global 名单。任何一处【非确定性】
+// 失败（DB 读错、LoadDir 失败、MCP 拨号/tools-list 失败）都把 Cacheable 置 false：
+// 本 run 照旧返回部分装配（与缓存前逐字等价），下轮重试 —— 失败状态不进缓存。
+// 成功且输入干净的产物才允许缓存（Cacheable=true，连接随之跨 run 存活）。
+func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Context) (agent.AssemblyBuild, error) {
+	cacheable := true // G1：装配输入全程读干净才缓存；任何降级都退回每 run 重试
+	a, err := pg.GetAgentByKey(agentKey)
+	if err != nil {
+		return agent.AssemblyBuild{}, err
+	}
+	if a == nil {
+		return agent.AssemblyBuild{}, fmt.Errorf("agent %q 不存在", agentKey)
+	}
+	art := &agentAssembly{agentID: a.ID, agentKey: a.Key}
+
+	// --- skills: 解析可见 skills（原每 run 路径的 LoadDir + 过滤），建产物时存
+	// 列表；reg 与 OnInvoke 每 run 重建。 ---
+	names, err := pg.AgentSkillNames(a.ID)
+	if err != nil {
+		cacheable = false // 读失败按空处理（同旧行为），但不缓存这份结果
+		names = nil
+	}
+	art.skillNames = append([]string(nil), names...)
+	if len(names) > 0 {
+		nameSet := make(map[string]bool, len(names))
+		for _, n := range names {
+			nameSet[n] = true
+		}
+		if allReg, err := skill.LoadDir(skillDir); err == nil && allReg != nil {
+			for _, s := range allReg.List() {
+				// match by directory name (Base of Dir), not by skill display Name
+				if s.Dir != "" && nameSet[filepath.Base(s.Dir)] {
+					art.skills = append(art.skills, s)
+				}
+			}
+		} else if err != nil {
+			cacheable = false // LoadDir 失败：本轮无 Skill 工具（同旧），下轮重试
+		}
+	}
+	// A server named by any visible skill's `mcps:` is skill-gated: its tools
+	// are deferred + locked (not in the global block) until that skill loads.
+	gated := map[string]bool{}
+	for _, s := range art.skills {
+		for _, srv := range s.MCPs {
+			gated[srv] = true
+		}
+	}
+
+	// --- mcp: connect enabled servers that are directly visible to this agent
+	// OR skill-gated (named in a visible skill's mcps field). Directly-visible
+	// and NOT gated → global (unlocked from session start). Skill-gated →
+	// deferred until that skill is invoked (regardless of direct visibility).
+	// G1：连接建立后跨 run 复用（进 build.Closers，由缓存统一收），不再每 run 关。
+	mcpIDs, err := pg.AgentVisible(a.ID, "mcp")
+	if err != nil {
+		cacheable = false
+		mcpIDs = nil
+	}
+	art.mcpVis = append([]int64(nil), mcpIDs...)
+	sort.Slice(art.mcpVis, func(i, j int) bool { return art.mcpVis[i] < art.mcpVis[j] }) // 无序查询 → 探针按集合比对
+	all, err := pg.ListMCP()
+	if err != nil {
+		cacheable = false
+		all = nil
+	}
+	art.mcpSig = mcpSignature(all)
+
+	var closers []io.Closer
+	serverTools := map[string][]string{} // server name → its tool names
+	var allNames, globalNames []string
+	globalSet := map[string]bool{}
+	{
+		want := idSet(mcpIDs)
+		for _, m := range all {
+			if !m.Enabled {
+				continue
+			}
+			directVisible := want[m.ID]
+			skillGated := gated[m.Name]
+			if !directVisible && !skillGated {
+				continue // neither directly visible nor referenced by a visible skill
+			}
+			// F5（方案 v9.2 §3.5）：http 传输但 URL 没配（如 schema 播种的
+			// ScopeSentry 占位行）⇒ 连接必然失败，跳过发现并只告警一次——
+			// 否则每个 agent 会话装配都刷一条「连接失败」（周期性噪音）。
+			// 补上 URL 后此处不再命中，发现自动恢复。
+			if m.Transport == "http" && m.URL == "" && warnMCPMissingURLOnce(m.Name) {
+				continue
+			}
+			cl, err := connectMCP(ctx, m)
+			if err != nil {
+				log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+				cacheable = false // 拨号失败照旧每 run 重试重报错，不缓存
+				continue
+			}
+			closers = append(closers, cl)
+			ts, err := cl.Tools(ctx)
+			if err != nil {
+				log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
+				cacheable = false
+				continue
+			}
+			for _, t := range ts {
+				art.mcpTools = append(art.mcpTools, t)
+				allNames = append(allNames, t.Name())
+				serverTools[m.Name] = append(serverTools[m.Name], t.Name())
+				if directVisible && !skillGated {
+					// directly visible and not gated → available from session start
+					globalNames = append(globalNames, t.Name())
+					globalSet[t.Name()] = true
+				}
+				// skill-gated tools stay out of globalNames; unlocked via unlockSkill()
+			}
+		}
+	}
+	art.serverTools = serverTools
+	art.allNames = allNames
+	art.globalNames = globalNames
+	art.globalSet = globalSet
+	return agent.AssemblyBuild{Value: art, Closers: closers, Cacheable: cacheable}, nil
+}
+
+// rebuild 用缓存产物重建本 run 的轻包装（G1）：新 UnlockSet / OnInvoke / Skill 工具 /
+// host 工具 + per-run 名单拷贝。工具追加顺序与全量装配逐字一致：
+// [mcp 工具..., Skill 元工具, host 工具...]。
+// cleanup：缓存命中的 run 是 no-op（连接跨 run 复用）；降级产物（不可缓存的 build）
+// 的 release 会关掉本 run 新建的连接 —— 与缓存前的 cleanup 语义一致。
+func (asm *agentAssembly) rebuild(ctx context.Context, pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), cleanup func()) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+	var extra []actool.CoreTool
+	extra = append(extra, asm.mcpTools...)
+	// 名单/集合按 run 拷贝：host deferred 工具会往里追加，缓存产物本体保持只读。
+	allNames := append([]string(nil), asm.allNames...)
+	globalNames := append([]string(nil), asm.globalNames...)
+	globalSet := make(map[string]bool, len(asm.globalSet))
+	for k, v := range asm.globalSet {
+		globalSet[k] = v
+	}
+
+	// Skill 元工具用的 reg 每 run 重建 —— OnInvoke 捕获本 run 的 unlock，绝不能共享。
+	var reg *skill.Registry
+	if len(asm.skills) > 0 {
+		reg = skill.NewRegistry()
+		for _, s := range asm.skills {
+			reg.Add(s)
+		}
+	}
+
+	// Shared call-gate: global MCP tools are unlocked from the start; skill-gated
+	// ones are unlocked when their skill loads (or replayed from history — C2).
+	unlock := actool.NewUnlockSet(globalNames...)
+	unlockSkill := func(skillName string) {
+		if reg == nil {
+			return
+		}
+		if s, ok := reg.Get(skillName); ok {
+			for _, srv := range s.MCPs {
+				unlock.Add(asm.serverTools[srv]...)
+			}
+		}
+	}
+
+	if reg != nil {
+		reg.OnInvoke = func(s skill.Skill) string {
+			unlockSkill(s.Name)
+			var reveal []string
+			for _, srv := range s.MCPs {
+				for _, n := range asm.serverTools[srv] {
+					if !globalSet[n] {
+						reveal = append(reveal, n)
+					}
+				}
+			}
+			return actool.RenderDeferredToolsBlock(reveal)
+		}
+		// Attribution for the usage ledger: ToolAugment only gets (ctx, agentKey),
+		// so the run's task/session ids ride in on the ctx (agent.RunInfo). Read it
+		// once here — this closure is rebuilt per run, so the captured value always
+		// belongs to this run.
+		extra = append(extra, meterSkillTool(reg.Tool(), pg, reg, skillDir, asm.agentKey, agent.RunInfoFrom(ctx)))
+	}
+
+	// host tools (traffic / orchestration / custom) — 每跑现取：capture 开关、自定义
+	// 工具增删都实时生效（不进缓存）。Custom tools flagged deferred contribute their
+	// names to the deferred wiring so their schema is withheld
+	// (SearchExtraTools/ExecuteExtraTool), same as MCP.
+	if hostTools != nil {
+		ht, deferredBinds := hostTools()
+		extra = append(extra, ht...)
+		for name, boundAgents := range deferredBinds {
+			if !contains(boundAgents, asm.agentKey) {
+				continue // only defer names this agent is actually bound to
+			}
+			allNames = append(allNames, name)       // schema withheld from the prompt
+			globalNames = append(globalNames, name) // advertised in the deferred block
+			globalSet[name] = true
+			if unlock != nil {
+				unlock.Add(name) // global deferred → callable from the start
+			}
+		}
+	}
+
+	def := agent.DeferredInfo{
+		Deferred:    allNames,
+		GlobalNames: globalNames,
+		Unlock:      unlock,
+		UnlockSkill: unlockSkill,
+	}
+	return extra, def, cleanup
 }
 
 func idSet(ids []int64) map[int64]bool {
