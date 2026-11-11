@@ -124,6 +124,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		if pg := ts.DB(); pg != nil {
 			tsx.SetMemoryDB(pg)
 		}
+		// v0.10.1 接线补缺：validate_finding 在 MainAgentTools 里（主控做产出级
+		// 复核/去重裁决），但 SetFindingValidator 只在 worker 循环接过——主控一调
+		// 就报「复核层未接线」。与 worker 同款走 store 级入口（裁决限定本探索内，
+		// 确定性层仍挡「提出人自验/已结案翻案/缺理由」）。
+		tsx.SetFindingValidator(ts.ValidateFinding)
 	}
 	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
