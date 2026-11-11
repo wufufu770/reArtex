@@ -504,8 +504,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// §6 revival check: a covered member that revived (now hot) must NOT stay folded
 	// — hidden() only folds a member out when it is covered AND still cold. Computed
 	// every round (cheap for real graph sizes); nil map degrades safely.
+	// G2（方案 v10 §15）：读图走 TTL 缓存（maintain/graphOverviewData/worker 每意图
+	// 三条读路径共享同一份 ≤10s 快照，省掉重复的全量读图；写回路径不受影响）。
 	var hotAtRender map[int64]bool
-	if cg, _, err := loadColdGraph(t.ts); err == nil {
+	if cg, _, err := loadColdGraphCached(t.ts); err == nil {
 		hotAtRender = cg.hotSet()
 	}
 	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
@@ -1817,6 +1819,15 @@ type factItem struct {
 func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
+	}
+	// T1 经验权重记账（方案 v10 §5.2 X1 接线点，T-A 注明）：worker 写回的结论里
+	// 若引用了注入经验的归因串（used_experience:<pattern_key>），按因果校验记
+	// hit/win——wins 由此积累，三门晋级的实战证据门由此解锁。best-effort。
+	if t.ts != nil && t.ts.DB() != nil {
+		conclusion := it.Summary + "\n" + it.Detail
+		for _, key := range db.ExtractExperienceAttributions(conclusion) {
+			_, _, _ = t.ts.DB().RecordExperienceOutcome(key, "used_experience:"+key, conclusion)
+		}
 	}
 	payload := map[string]any{"summary": it.Summary}
 	if it.Detail != "" {

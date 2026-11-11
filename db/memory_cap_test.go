@@ -44,10 +44,13 @@ func TestMemoryIndexCapRejectsWriteAndKeepsEverything(t *testing.T) {
 	scope := memoryTestScope(t)
 
 	// 一路写到被拒为止。
+	// X4（方案 v10 §6 T2）：Checked 是 agent 写路径（默认隔离态）——上限口径
+	// 量的是**全部当前行**（含隔离态），但本用例断言导出可见性，所以用 host
+	// 语义的基础写入（active），上限检查本身不变。
 	var lastErr error
 	written := 0
 	for i := 0; i < MemoryIndexMaxEntries+20; i++ {
-		_, err := d.AppendMemoryEntryChecked(scope, MemoryEntryInput{
+		_, err := d.AppendMemoryEntry(scope, MemoryEntryInput{
 			TopicKey:    "cap-" + strconvItoa(i),
 			Title:       "上限压力条目 " + strconvItoa(i),
 			SummaryLine: "用于验证索引上限写时拒绝",
@@ -145,9 +148,10 @@ func TestMemoryCapCheckRejectsFullScope(t *testing.T) {
 		t.Fatalf("未满的 scope 不该被拒：%v", err)
 	}
 
-	// 写满到被拒之后 ⇒ 预判给出类型化错误。
+	// 写满到被拒之后 ⇒ 预判给出类型化错误（同前：host 语义基础写入，
+	// 保证导出/预判口径与条目可见性一致）。
 	for i := 0; i < MemoryIndexMaxEntries+20; i++ {
-		if _, err := d.AppendMemoryEntryChecked(scope, MemoryEntryInput{
+		if _, err := d.AppendMemoryEntry(scope, MemoryEntryInput{
 			TopicKey: "pre-" + strconvItoa(i),
 			Title:    "预判条目",
 		}); err != nil {

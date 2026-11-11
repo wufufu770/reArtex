@@ -212,6 +212,10 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS delete_reason TEXT;
 -- a node most recently went from "has a live downstream branch" to none (NULL = hot).
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
+-- M4（方案 v10 §6 二期）：intent 观测计数——认领次数与终态追加序列。
+-- attempts 由 ClaimIntent 成功时 +1；outcomes 由终态转换时追加（JSONB 数组）。
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS outcomes JSONB;
 -- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
 DO $$
 BEGIN
@@ -1472,9 +1476,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
     payload     TEXT NOT NULL DEFAULT '{}',
     digest      TEXT NOT NULL,
     prev_digest TEXT NOT NULL DEFAULT '',
+    -- M1（方案 v10 §6 二期）：来源标记——行动者/时间/来源三要素。存量行回填 'legacy'。
+    source      TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_seq ON audit_events(seq);
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
 
 -- ---------- P4 fact 三态（candidate / verified / refuted）----------
 -- 幂等约束迁移：老库的 ck_node_state 已含旧 fact 状态集，重建一次补新态。

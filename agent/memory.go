@@ -26,6 +26,24 @@ import (
 // 记忆在提示词里的抬头。
 const memoryPromptHeading = "## 记忆索引（append-only；这里只有索引，规则本体在提示词里）"
 
+// 两段式披露的注入预算（X3，方案 v10 §6 T2）：
+//
+//	索引 ≤30 条、整块 ≤12KB；超限按固定块序丢弃并在块尾加
+//	「【memory-trimmed】已裁剪 N 条」留痕 —— 绝不静默截断。
+//	阈值是代码常量（§8 红线第 3 条），不进可热改的 DB/settings。
+const (
+	// memoryPromptMaxEntries 是注入块的条目上限（X3：≤30 条）。
+	memoryPromptMaxEntries = 30
+	// memoryPromptMaxBytes 是注入块的字节上限（X3：≤12KB，与 legacy 注入块
+	// 同一档预算 —— 两个常驻块不能各自吃满上下文）。
+	memoryPromptMaxBytes = 12 * 1024
+	// memoryTrimMarkerReserve 是给裁剪标记预留的字节（标记最长
+	// 「【memory-trimmed】已裁剪 30 条\n」≈ 40 字节 ⇒ 64 字节足够）。
+	memoryTrimMarkerReserve = 64
+	// memoryTrimMarkerTemplate 是超限留痕的固定形状（写死，不由模型生成）。
+	memoryTrimMarkerTemplate = "【memory-trimmed】已裁剪 %d 条\n"
+)
+
 // MemoryScopeForTask 返回「任务大厅」作用域的记忆 scope。
 func MemoryScopeForTask(taskID int64) db.MemoryScope {
 	return db.MemoryScope{Type: db.MemoryScopeTaskHall, ID: taskID}
@@ -36,41 +54,73 @@ func MemoryScopeForSession(sessionID int64) db.MemoryScope {
 	return db.MemoryScope{Type: db.MemoryScopeChat, ID: sessionID}
 }
 
+// memoryPromptEntryLine 渲染一条索引行（两段式披露的第一段：只有索引摘要，
+// 正文走 recall 按需下钻）。
+func memoryPromptEntryLine(e *db.MemoryEntry) string {
+	topic := e.TopicKey
+	if topic == "" {
+		topic = "topic"
+	}
+	title := e.Title
+	if title == "" {
+		title = e.SummaryLine
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "- [%s] %s", topic, title)
+	if e.SummaryLine != "" && e.SummaryLine != title {
+		fmt.Fprintf(&b, " — %s", e.SummaryLine)
+	}
+	if e.RuleRef != "" {
+		fmt.Fprintf(&b, "（规则：%s）", e.RuleRef)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // MemoryPromptBlock 渲染指定 scope 的记忆块，供拼进 agent 上下文。
 //
 // 返回空串表示没有记忆 ⇒ 调用方不要塞一个空标题进提示词。
 // 读失败**不报错**：记忆是辅助，取不到就当没有（不能因为记忆层故障让整个 agent 挂掉）。
+//
+// X4+X3（方案 v10 §6 T2）：两段式披露 ——
+//  1. **只含 state='active' 条目**（隔离态条目经 host-only 晋级后才可见，
+//     模型写入即隔离 ⇒ 「写进去取不到」不可能发生在注入面）；
+//  2. **索引 ≤30 条、整块 ≤12KB**，超限按固定块序丢弃（ListMemoryEntries 的
+//     ORDER BY topic_key, version DESC 就是块序：同主题取最新版本，主题序稳定）
+//     并在块尾加「【memory-trimmed】已裁剪 N 条」留痕 —— 超限必须可观测。
 func MemoryPromptBlock(pg *db.DB, scope db.MemoryScope) string {
 	if pg == nil || !scope.Valid() {
 		return ""
 	}
-	entries, err := pg.ListMemoryEntries(scope, db.MemoryListOptions{Limit: 50})
+	entries, err := pg.ListMemoryEntries(scope, db.MemoryListOptions{
+		Limit:      memoryPromptMaxEntries,
+		OnlyActive: true,
+	})
 	if err != nil || len(entries) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(memoryPromptHeading)
 	b.WriteString("\n")
+	size := b.Len()
+	trimmed := 0
 	for _, e := range entries {
 		if e == nil {
 			continue
 		}
-		topic := e.TopicKey
-		if topic == "" {
-			topic = "topic"
+		line := memoryPromptEntryLine(e)
+		// 预算内逐条装块；装不下 ⇒ 固定块序丢弃 + 计数。预留裁剪标记的行宽，
+		// 保证「整块 ≤12KB」的承诺不被标记自己突破。
+		if size+len(line)+memoryTrimMarkerReserve > memoryPromptMaxBytes {
+			trimmed++
+			continue
 		}
-		title := e.Title
-		if title == "" {
-			title = e.SummaryLine
-		}
-		fmt.Fprintf(&b, "- [%s] %s", topic, title)
-		if e.SummaryLine != "" && e.SummaryLine != title {
-			fmt.Fprintf(&b, " — %s", e.SummaryLine)
-		}
-		if e.RuleRef != "" {
-			fmt.Fprintf(&b, "（规则：%s）", e.RuleRef)
-		}
-		b.WriteString("\n")
+		b.WriteString(line)
+		size += len(line)
+	}
+	if trimmed > 0 {
+		marker := fmt.Sprintf(memoryTrimMarkerTemplate, trimmed)
+		b.WriteString(marker)
 	}
 	return b.String()
 }

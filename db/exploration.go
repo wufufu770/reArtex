@@ -611,7 +611,8 @@ func (s *ExplorationStore) SetIntentState(id int64, state string) error {
 	// terminal states stamp completed_at; reopening (back to open/running) clears it.
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	_, err := s.db.Exec(`UPDATE exploration_nodes
-SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END
+SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $4 THEN now() ELSE NULL END,
+    outcomes = CASE WHEN $4 THEN COALESCE(outcomes,'[]'::jsonb) || jsonb_build_array($1::text) ELSE outcomes END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, terminal)
 	return err
 }
@@ -622,7 +623,8 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, termin
 func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state string) (bool, error) {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
 	res, err := s.db.Exec(`UPDATE exploration_nodes
-SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
+SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END,
+    outcomes = CASE WHEN $5 THEN COALESCE(outcomes,'[]'::jsonb) || jsonb_build_array($1::text) ELSE outcomes END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
 	if err != nil {
 		return false, err
@@ -1890,7 +1892,7 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1, attempts=attempts+1
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id, s.expID)
 	if err != nil {
 		return false, err
@@ -2910,6 +2912,34 @@ WHERE id=$1 AND kind=$3 AND state='candidate'`, factID, state, KindFact)
 	}
 	_ = reviewer
 	return nil
+}
+
+// RefutedFactSummaries 读全库 fact 三态里 refuted 态的结论摘要（近 limit 条，
+// 新在前）。X2（方案 v10 §6 T3）晋级复盘门用它做「不撞证伪池」判定 ——
+// 复用 fact 三态的 refuted 态定义（kind='fact' AND state='refuted'，与
+// SetFactState 的转移目标同源，不另立一套「证伪」词汇）。
+func (d *DB) RefutedFactSummaries(limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := d.Query(`SELECT COALESCE(payload->>'summary','')
+FROM exploration_nodes WHERE kind=$1 AND state='refuted'
+ORDER BY id DESC LIMIT $2`, KindFact, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读 fact 证伪池失败: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("读 fact 证伪池失败: %w", err)
+		}
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out, rows.Err()
 }
 
 // BlockedIntentIDs 列出 blocked 状态的意图 id（v4.1 收尾审计报告用：

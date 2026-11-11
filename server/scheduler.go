@@ -245,6 +245,15 @@ func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
 }
 
 // fireGoals fires on_goal_met triggers for met goals not yet in the fired set.
+//
+// G3（方案 v10 §15）水位收窄：候选流改走 MetGoalsActive()（活跃任务 + 刚终态 1h 内
+// 的任务），不再每 5s 全表 join。终态已久的任务其 met goal 早已进已触发集合、
+// 也不可能再新达标（引擎停了就没有 prove_goal），收窄不影响触发语义；重启播种仍用
+// 全表 MetGoals()（见 init）。
+//
+// 集合写入确认（方案 ②）：saveFiredGoalSet 仅在本次确实【新增】了未触发 id 时调用
+// （changed 标记），纯命中的 tick 既不重写 JSON 也不发 UPDATE —— 本来就是增量的，
+// 此处只注明不改动。
 func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
@@ -252,7 +261,7 @@ func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 			want = append(want, tr)
 		}
 	}
-	events, err := sc.pg.MetGoals()
+	events, err := sc.pg.MetGoalsActive()
 	if err != nil || len(events) == 0 {
 		return
 	}

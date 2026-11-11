@@ -456,6 +456,9 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// G1（方案 v10 §15）：agent 配置变更 → 装配缓存翻代（装配输入含 agent 行；
+	// interactive_shell 等字段虽然走 per-run 的 ToolResolve，翻代成本低、语义最稳）。
+	agent.InvalidateAssembly()
 	// an agent's LLM binding change also invalidates pinned-task / per-profile caches
 	// so their next round re-resolves each agent's bound model.
 	if profileChanged {
@@ -762,6 +765,8 @@ func (s *Server) pgSetAgentVisibility(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：可见性变更（MCP/skill 都可能变了）→ 装配缓存翻代。
+	agent.InvalidateAssembly()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -903,6 +908,8 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：MCP 配置变更 → 装配缓存整体翻代，旧连接关闭、下轮重建。
+	agent.InvalidateAssembly()
 	// On initial add, auto-discover + cache the tool list so the UI shows it right
 	// away (bounded so a slow/broken server can't hang the request). Skipped on
 	// plain updates (e.g. enable toggles) to avoid re-spawning the server each time.
@@ -927,6 +934,8 @@ func (s *Server) pgDeleteMCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：MCP 删除 → 装配缓存整体翻代（同 pgSaveMCP）。
+	agent.InvalidateAssembly()
 	writeJSON(w, 200, map[string]any{"deleted": id})
 }
 
@@ -1161,6 +1170,9 @@ func (s *Server) fsCreateSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：skill 文件变更（新建含 mcps: 门控变化）→ 装配缓存翻代。
+	// 全量装配时代 SKILL.md 每 run 重读、改动即时生效；缓存后必须在此翻代才不丢语义。
+	agent.InvalidateAssembly()
 	writeJSON(w, 201, map[string]any{"name": body.Name})
 }
 
@@ -1200,6 +1212,8 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：SKILL.md 前言变更（mcps/description 等）→ 装配缓存翻代。
+	agent.InvalidateAssembly()
 	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -1467,6 +1481,8 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
+	// G1（方案 v10 §15）：skill 安装/覆盖 → 装配缓存翻代（同 fsCreateSkill）。
+	agent.InvalidateAssembly()
 	writeJSON(w, 201, map[string]any{"name": name, "files": entries})
 }
 
@@ -1499,6 +1515,8 @@ func (s *Server) fsDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// G1（方案 v10 §15）：skill 删除 → 装配缓存翻代（同 fsCreateSkill）。
+	agent.InvalidateAssembly()
 	clearSkillTrust(s.db(), name)
 	writeJSON(w, 200, map[string]any{"deleted": name})
 }

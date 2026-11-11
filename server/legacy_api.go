@@ -56,7 +56,24 @@ func (s *Server) legacyReview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "参数解析失败")
 		return
 	}
-	if err := pg.ReviewLegacyNode(id, strings.TrimSpace(req.State), strings.TrimSpace(req.Reviewer)); err != nil {
+	state := strings.TrimSpace(req.State)
+	// 三门晋级（X2，方案 v10 §6 T3）：经验线的「晋级」= draft → accepted 转移，
+	// 同样过三门评估（结构完整 / 不撞证伪池 / 实战证据 wins）。不过门返回
+	// 409 + 缺哪门；无 --force（退役/恢复 draft 不评估 —— 那两个方向只收缩
+	// 可见性，不产生新信任）。
+	if state == "accepted" {
+		pass, missing := EvaluateExperiencePromotion(pg, id)
+		if !pass {
+			writeJSON(w, 409, map[string]any{
+				"ok":            false,
+				"error":         "经验晋级未过三门评估",
+				"missing_gates": missing,
+				"node_id":       id,
+			})
+			return
+		}
+	}
+	if err := pg.ReviewLegacyNode(id, state, strings.TrimSpace(req.Reviewer)); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

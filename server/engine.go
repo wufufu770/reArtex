@@ -163,6 +163,7 @@ type Engine struct {
 
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
+	wakeStat sync.Map // taskID -> *wakeCounter, M2 唤醒计次（观测面，进程内；重启归零）
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
 	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
 	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
@@ -1592,6 +1593,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
+		// M2（方案 v10 §6 二期）：唤醒计次观测——按触发来源计数，先只记不拦。
+		// 硬闸阈值等本观测的真实分布数据（防 E5 口径病：单一计数器单一来源键）。
+		e.recordPlannerWake(t.ID, src)
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
 	drain:

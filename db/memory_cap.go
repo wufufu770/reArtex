@@ -118,7 +118,7 @@ func (d *DB) MemoryIndexHeadroom(scope MemoryScope) (*MemoryIndexHeadroom, error
  WHERE scope_type=$1 AND scope_id=$2 AND valid_to IS NULL`, scope.Type, scope.ID).Scan(&entries); err != nil {
 		return nil, fmt.Errorf("统计记忆索引条目失败: %w", err)
 	}
-	text, err := exportMemoryIndex(d, scope)
+	text, err := exportMemoryIndexFiltered(d, scope, false)
 	if err != nil {
 		return nil, err
 	}
@@ -182,20 +182,25 @@ func (d *DB) CheckMemoryIndexCap(scope MemoryScope) error {
 	return nil
 }
 
-// AppendMemoryEntryChecked 是「带上限语义」的写入入口。
+// AppendMemoryEntryChecked 是「带上限语义」的写入入口 —— 也是 **agent（模型）
+// 写路径**（X4，方案 v10 §6 T2）：写入默认落 state='quarantined'（模型写入即
+// 隔离）。治理/晋级要写 active 走 host 通道 AppendMemoryEntryActive。
 //
 // 语义：
 //   - 写前预判（CheckMemoryIndexCap）：已经满了 ⇒ 直接返回类型化错误，**不动库**。
-//   - 写（复用 db/memory.go 的 AppendMemoryEntry ⇒ 写路径只有一份，
-//     append-only / scope 强制 / 事务内上限检查全部照旧）。
+//   - 写（复用 db/memory.go 的唯一写入体 appendMemoryEntryWithDefault ⇒
+//     append-only / scope 强制 / 事务内上限检查全部照旧；默认隔离态）。
 //   - 写后若撞上上限（ErrMemoryIndexFull）⇒ 翻译成类型化错误：重读余量，按
 //     「条目数是否已到上限」精确判定是哪条上限（写事务已回滚 ⇒ 重读到的就是
 //     写之前的真实状态）。
+//
+// 隔离态条目不进注入块/检索面（两段式披露），要让它可见必须走 host-only 的
+// PromoteMemoryEntry（Supersede 通道追加 active 新版本）—— 模型自己做不到。
 func (d *DB) AppendMemoryEntryChecked(scope MemoryScope, in MemoryEntryInput) (*MemoryEntry, error) {
 	if err := d.CheckMemoryIndexCap(scope); err != nil {
 		return nil, err
 	}
-	entry, err := d.AppendMemoryEntry(scope, in)
+	entry, err := d.appendMemoryEntryWithDefault(scope, in, MemoryStateQuarantined)
 	if err != nil {
 		return nil, d.MemoryCapErrorFor(scope, in, err)
 	}

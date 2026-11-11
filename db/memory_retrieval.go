@@ -146,6 +146,7 @@ WITH scoped AS (
              COALESCE(array_to_string(m.tags, ' '), '') AS src
       FROM memory_index m
      WHERE m.scope_type = $1 AND m.scope_id = $2 AND m.valid_to IS NULL
+       AND m.state = 'active'
 ),
 docs AS (
     SELECT scoped.id,
@@ -187,16 +188,21 @@ SELECT e.entry_id,
  ORDER BY e.embedding <=> $3::vector
  LIMIT $4`
 
-// memoryScopeTotalSQL 数 scope 里的**当前**条目数（分级的分母）。
+// memoryScopeTotalSQL 数 scope 里的**当前且 active** 条目数（分级的分母）。
+// X4（方案 v10 §6 T2）：两段式披露下可检索宇宙 = active 条目 —— 隔离态条目
+// 不进分母，否则「全部 active 都命中了」会被隔离行拖成 PARTIAL（分级骗人）。
 const memoryScopeTotalSQL = `
 SELECT count(*) FROM memory_index
- WHERE scope_type = $1 AND scope_id = $2 AND valid_to IS NULL`
+ WHERE scope_type = $1 AND scope_id = $2 AND valid_to IS NULL AND state = 'active'`
 
 // memoryEntriesByIDsSQL 按 id 取索引行（融合之后拿元数据）。
+// X4：只取 active —— 向量通道（memory_embedding 无 state 列）可能把隔离态
+// 条目捞进名次，这里统一过滤（与「行在融合与取元数据之间被退役」同一处理：
+// 拿不到元数据 = 跳过，不把不可见内容交给调用方）。
 const memoryEntriesByIDsSQL = `
 SELECT id, topic_key, version, kind, title, summary_line, written_by, valid_from
   FROM memory_index
- WHERE id = ANY($1::bigint[]) AND valid_to IS NULL`
+ WHERE id = ANY($1::bigint[]) AND valid_to IS NULL AND state = 'active'`
 
 // memoryVectorCountSQL 数 scope 里的向量条数。
 const memoryVectorCountSQL = `

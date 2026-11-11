@@ -94,6 +94,18 @@ const (
 	MemoryKindNote = "note"
 	MemoryKindLink = "link"
 
+	// MemoryStateActive / MemoryStateQuarantined 是晋级门（X4，方案 v10 §6 T2）
+	// 的两段式披露状态。
+	//
+	//   active      —— 进入注入块与检索面（披露第一段）；
+	//   quarantined —— 隔离态：agent（模型）写入即隔离，host-only 晋级后才可见。
+	//
+	// 转态**没有就地更新**入口：append-only 触发器把 state 也钉在内容列守卫里，
+	// 晋级走 Supersede（追加 active 新版本并闭合旧区间）、退役走 Retire
+	//（闭合区间）这两条双时态通道。
+	MemoryStateActive      = "active"
+	MemoryStateQuarantined = "quarantined"
+
 	// MemoryIndexMaxEntries 是单个 scope 的**当前**索引条目数上限。
 	// 超出 ⇒ 写入被拒（响亮拒绝，不是静默截断）。
 	MemoryIndexMaxEntries = 150
@@ -171,6 +183,9 @@ type MemoryEntryInput struct {
 	SourceSessionIDs []int64
 	// WrittenBy 记「谁写的」（审计用，不是归属，见 §9 第 6 条）。
 	WrittenBy string
+	// State 是两段式披露状态（X4）：active / quarantined。空 ⇒ 由写入入口的
+	// 默认值决定（agent 的 Checked 路径默认隔离，host 通道默认 active）。
+	State string
 	// Body 是正文（markdown），落在 memory_topic，按需读。
 	Body string
 	// BodyDigest 可选：给出时必须等于 sha256(Body)，否则说明调用方算的是另一份
@@ -196,11 +211,14 @@ type MemoryEntry struct {
 	SourceSessionIDs []int64
 	WrittenBy        string
 	ContentDigest    string
-	SupersedesID     *int64
-	ValidFrom        time.Time
-	ValidTo          *time.Time
-	SupersededBy     *int64
-	CreatedAt        time.Time
+	// State 是两段式披露状态（X4）：active / quarantined。晋级走 Supersede
+	// 通道（同主题追加 active 新版本），退役走 Retire（闭合区间）。
+	State        string
+	SupersedesID *int64
+	ValidFrom    time.Time
+	ValidTo      *time.Time
+	SupersededBy *int64
+	CreatedAt    time.Time
 }
 
 // MemoryWriteLogEntry 是写入账的一行（只追加的账本）。
@@ -234,6 +252,9 @@ const (
 type MemoryListOptions struct {
 	// IncludeSuperseded 为真时把已闭合有效区间的历史版本也列出来。
 	IncludeSuperseded bool
+	// OnlyActive 为真时只列 state='active' 的行（两段式披露的读面口径：
+	// 注入块/导出只给 active；治理面要隔离态条目用 ListMemoryEntriesByState）。
+	OnlyActive bool
 	// Limit <= 0 时用默认 200。
 	Limit int
 }
@@ -248,6 +269,7 @@ type memoryPayload struct {
 	RuleRef          string
 	SourceSessionIDs []int64
 	WrittenBy        string
+	State            string
 	Body             string
 	ContentDigest    string
 }
@@ -264,7 +286,7 @@ type memoryScanner interface {
 
 const memoryEntryCols = `id, scope_type, scope_id, topic_key, version, kind, title, summary_line,
 	array_to_json(tags)::text, rule_ref, array_to_json(source_session_ids)::text,
-	written_by, content_digest, supersedes_id, valid_from, valid_to, superseded_by, created_at`
+	written_by, content_digest, state, supersedes_id, valid_from, valid_to, superseded_by, created_at`
 
 // scanMemoryEntry 把一行索引读成结构体。
 func scanMemoryEntry(row memoryScanner) (*MemoryEntry, error) {
@@ -275,7 +297,7 @@ func scanMemoryEntry(row memoryScanner) (*MemoryEntry, error) {
 	)
 	if err := row.Scan(&e.ID, &e.ScopeType, &e.ScopeID, &e.TopicKey, &e.Version, &e.Kind,
 		&e.Title, &e.SummaryLine, &tagsJSON, &e.RuleRef, &sourcesJSON, &e.WrittenBy,
-		&e.ContentDigest, &e.SupersedesID, &e.ValidFrom, &e.ValidTo, &e.SupersededBy,
+		&e.ContentDigest, &e.State, &e.SupersedesID, &e.ValidFrom, &e.ValidTo, &e.SupersededBy,
 		&e.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -307,7 +329,33 @@ func scanMemoryEntry(row memoryScanner) (*MemoryEntry, error) {
 //   - rule_ref 不是 agent_prompts:<id> 指针 ⇒ ErrMemoryRuleRefInvalid。
 //   - 索引达到硬上限 ⇒ ErrMemoryIndexFull（响亮拒绝，绝不静默丢弃）。
 //   - 并发写同一主题 ⇒ ErrMemoryVersionConflict。
+//
+// X4（方案 v10 §6 T2）：本入口是**基础写入**，state 默认 active（host 语义）。
+// agent（模型）写路径走 AppendMemoryEntryChecked —— 默认落 quarantined；
+// 治理/晋级用 host 通道 AppendMemoryEntryActive。
 func (d *DB) AppendMemoryEntry(scope MemoryScope, in MemoryEntryInput) (*MemoryEntry, error) {
+	entry, err := d.appendMemoryEntryWithDefault(scope, in, MemoryStateActive)
+	if err != nil {
+		// 基础写入没有前置余量检查（那是 Checked 的闸），上限错误在事务内以
+		// 裸哨兵浮出——这里统一翻译成类型化 *MemoryCapError（「截断必须响亮」
+		// + 「可区分」两条纪律对 host 通道同样成立）。
+		return nil, d.MemoryCapErrorFor(scope, in, err)
+	}
+	return entry, nil
+}
+
+// AppendMemoryEntryActive 是 host 通道（治理/晋级/人工信任写入）：强制落
+// state='active'，无视 in.State。agent 写路径**不许**用它 —— 模型写入即隔离
+// 是 AppendMemoryEntryChecked 的职责。
+func (d *DB) AppendMemoryEntryActive(scope MemoryScope, in MemoryEntryInput) (*MemoryEntry, error) {
+	in.State = MemoryStateActive
+	return d.appendMemoryEntryWithDefault(scope, in, MemoryStateActive)
+}
+
+// appendMemoryEntryWithDefault 是追加语义的唯一写入体：defaultState 决定
+// in.State 为空时落什么态（agent Checked 路径隔离、host 路径 active ——
+// 两条通道共用同一份 append-only / scope 强制 / 上限检查纪律）。
+func (d *DB) appendMemoryEntryWithDefault(scope MemoryScope, in MemoryEntryInput, defaultState string) (*MemoryEntry, error) {
 	if err := d.ensureMemorySchema(); err != nil {
 		return nil, err
 	}
@@ -327,7 +375,7 @@ func (d *DB) AppendMemoryEntry(scope MemoryScope, in MemoryEntryInput) (*MemoryE
 	if err := lockMemoryScope(tx, scope); err != nil {
 		return nil, err
 	}
-	entry, err := appendMemoryVersion(tx, scope, payload, 0)
+	entry, err := appendMemoryVersion(tx, scope, payload, 0, defaultState)
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +386,7 @@ func (d *DB) AppendMemoryEntry(scope MemoryScope, in MemoryEntryInput) (*MemoryE
 		"topic_key": payload.TopicKey,
 		"version":   entry.Version,
 		"kind":      payload.Kind,
+		"state":     entry.State,
 	}); err != nil {
 		return nil, err
 	}
@@ -354,6 +403,11 @@ func (d *DB) AppendMemoryEntry(scope MemoryScope, in MemoryEntryInput) (*MemoryE
 // （valid_to 为空）。否则报 ErrMemoryScopeMismatch / ErrMemoryEntryNotFound。
 //
 // 取代同样不删任何东西：旧行只是被闭合有效区间（内容不变，仍可读）。
+//
+// X4（方案 v10 §6 T2）：取代也是**晋级/披露转态**的双时态通道 —— 晋级 =
+// 追加 state='active' 的新版本并闭合隔离态旧行（host-only，见
+// PromoteMemoryEntry）。取代的新版本 state 默认 active（host 语义；显式传入
+// in.State 可覆盖）。
 func (d *DB) SupersedeMemoryEntry(scope MemoryScope, oldID int64, in MemoryEntryInput) (*MemoryEntry, error) {
 	if err := d.ensureMemorySchema(); err != nil {
 		return nil, err
@@ -377,7 +431,7 @@ func (d *DB) SupersedeMemoryEntry(scope MemoryScope, oldID int64, in MemoryEntry
 	if err := lockMemoryScope(tx, scope); err != nil {
 		return nil, err
 	}
-	entry, err := appendMemoryVersion(tx, scope, payload, oldID)
+	entry, err := appendMemoryVersion(tx, scope, payload, oldID, MemoryStateActive)
 	if err != nil {
 		return nil, err
 	}
@@ -388,6 +442,7 @@ func (d *DB) SupersedeMemoryEntry(scope MemoryScope, oldID int64, in MemoryEntry
 		"topic_key":  payload.TopicKey,
 		"version":    entry.Version,
 		"kind":       payload.Kind,
+		"state":      entry.State,
 		"supersedes": oldID,
 	}); err != nil {
 		return nil, err
@@ -438,10 +493,128 @@ func (d *DB) RetireMemoryEntry(scope MemoryScope, id int64, actor string) error 
 	return nil
 }
 
+// PromoteMemoryEntry 晋级一条隔离态记忆（X4，方案 v10 §6 T2：host-only 转态）。
+//
+// 走 Supersede 双时态通道：同一主题追加 state='active' 的新版本（内容逐字段
+// 继承），旧行被闭合有效区间（quarantined 的历史仍可查）。**没有就地翻转** ——
+// append-only 触发器把 state 钉在内容列守卫里，这是结构性的，不是纪律性。
+//
+// 幂等：目标已是 active ⇒ 原样返回（重复点击不产生新版本）。
+// 已被取代/退役的行不能晋级（它已不在当前索引里）。
+func (d *DB) PromoteMemoryEntry(id int64, actor string) (*MemoryEntry, error) {
+	if err := d.ensureMemorySchema(); err != nil {
+		return nil, err
+	}
+	if id <= 0 {
+		return nil, ErrMemoryEntryNotFound
+	}
+	e, err := d.GetMemoryEntry(id)
+	if err != nil {
+		return nil, err
+	}
+	if e.ValidTo != nil {
+		return nil, fmt.Errorf("记忆条目 %d 已被取代或退役，不在当前索引里，不能晋级", id)
+	}
+	if e.State == MemoryStateActive {
+		return e, nil // 幂等成功：已是生效态
+	}
+	body, err := d.ReadMemoryTopic(id)
+	if err != nil {
+		return nil, err
+	}
+	in := MemoryEntryInput{
+		TopicKey:         e.TopicKey,
+		Kind:             e.Kind,
+		Title:            e.Title,
+		SummaryLine:      e.SummaryLine,
+		Tags:             e.Tags,
+		RuleRef:          e.RuleRef,
+		SourceSessionIDs: e.SourceSessionIDs,
+		WrittenBy:        "host:" + strings.TrimSpace(actor),
+		Body:             body,
+		State:            MemoryStateActive,
+	}
+	return d.SupersedeMemoryEntry(MemoryScope{Type: e.ScopeType, ID: e.ScopeID}, id, in)
+}
+
+// RetireMemoryEntryHost 是 host-only 的按 id 退役入口：治理面只拿得到 id，
+// scope 由条目自己带出来，再走既有 RetireMemoryEntry 的双时态通道
+// （闭合有效区间，不删内容）。已被取代/退役的行报可区分错误（不是 NotFound，
+// 调用方能分清「条目在但已不在当前索引」）。
+func (d *DB) RetireMemoryEntryHost(id int64, actor string) error {
+	if err := d.ensureMemorySchema(); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return ErrMemoryEntryNotFound
+	}
+	e, err := d.GetMemoryEntry(id)
+	if err != nil {
+		return err
+	}
+	if e.ValidTo != nil {
+		return fmt.Errorf("记忆条目 %d 已被取代或退役（当前索引外），无需再退役", id)
+	}
+	return d.RetireMemoryEntry(MemoryScope{Type: e.ScopeType, ID: e.ScopeID}, id, actor)
+}
+
+// ListMemoryEntriesByState 是治理面的跨 scope 分页列表（X4：GET
+// /api/memory/entries?state= 的取数）。state 为空 = 全部当前行（active +
+// quarantined）；只认 active/quarantined 两个值，其他值报错（fail-closed，
+// 不把拼错的过滤词当「全部」）。返回值带总数供分页。
+func (d *DB) ListMemoryEntriesByState(state string, limit, offset int) ([]*MemoryEntry, int, error) {
+	if err := d.ensureMemorySchema(); err != nil {
+		return nil, 0, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where := ` WHERE valid_to IS NULL`
+	args := []any{}
+	if state != "" {
+		if state != MemoryStateActive && state != MemoryStateQuarantined {
+			return nil, 0, fmt.Errorf("state 只接受 active|quarantined 或留空，收到 %q", state)
+		}
+		where += ` AND state=$1`
+		args = append(args, state)
+	}
+	var total int
+	if err := d.QueryRow(`SELECT count(*) FROM memory_index`+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("统计记忆条目失败: %w", err)
+	}
+	query := `SELECT ` + memoryEntryCols + ` FROM memory_index` + where +
+		fmt.Sprintf(` ORDER BY id DESC LIMIT %d OFFSET %d`, limit, offset)
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("列记忆条目失败: %w", err)
+	}
+	defer rows.Close()
+	out := make([]*MemoryEntry, 0, 16)
+	for rows.Next() {
+		e, err := scanMemoryEntry(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("列记忆条目失败: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("列记忆条目失败: %w", err)
+	}
+	return out, total, nil
+}
+
 // ListMemoryEntries 列 scope 下的索引行。
 //
 // 默认只列**当前**行（valid_to 为空）：被取代与退役的行从当前索引里消失，但仍可
 // 用 IncludeSuperseded 查出来。scope 过滤是强制的（§10.4：scope 过滤强制）。
+// OnlyActive（X4 两段式披露的读面口径）再滤掉隔离态 —— 注入块与纯文本导出走
+// 这条；治理面要看隔离态条目用 ListMemoryEntriesByState。
 func (d *DB) ListMemoryEntries(scope MemoryScope, opts MemoryListOptions) ([]*MemoryEntry, error) {
 	if err := d.ensureMemorySchema(); err != nil {
 		return nil, err
@@ -457,6 +630,9 @@ func (d *DB) ListMemoryEntries(scope MemoryScope, opts MemoryListOptions) ([]*Me
  WHERE scope_type=$1 AND scope_id=$2`
 	if !opts.IncludeSuperseded {
 		query += ` AND valid_to IS NULL`
+	}
+	if opts.OnlyActive {
+		query += ` AND state='active'`
 	}
 	query += ` ORDER BY topic_key, version DESC LIMIT $3`
 	rows, err := d.Query(query, scope.Type, scope.ID, limit)
@@ -530,8 +706,9 @@ func (d *DB) ReadMemoryTopic(entryID int64) (string, error) {
 // 读、直接改，也能直接塞进 agent 的提示上下文（同一份东西两处用，不做二次格式
 // 转换 ⇒ 看到的与注入的是同一份）。
 //
-// 导出的是当前索引（valid_to 为空的行）：被取代的条目以新版本出现在同一个主题
-// 下，历史版本不在导出里（要查历史用 ListMemoryEntries + IncludeSuperseded）。
+// 导出的是当前索引里 **state='active'** 的行（X4 两段式披露）：被取代的条目以
+// 新版本出现在同一个主题下，隔离态条目不进导出（要查全量用
+// ListMemoryEntriesByState）。
 func (d *DB) ExportMemoryIndex(scope MemoryScope) (string, error) {
 	if err := d.ensureMemorySchema(); err != nil {
 		return "", err
@@ -539,7 +716,7 @@ func (d *DB) ExportMemoryIndex(scope MemoryScope) (string, error) {
 	if !scope.Valid() {
 		return "", ErrMemoryScopeRequired
 	}
-	return exportMemoryIndex(d, scope)
+	return exportMemoryIndexFiltered(d, scope, true)
 }
 
 // ListMemoryWriteLog 列该 scope 的写入账（只追加）。
@@ -622,10 +799,20 @@ func (d *DB) RecordMemoryDreamDiff(scope MemoryScope, actor string, diff json.Ra
 //
 // explicitPrevID > 0 ⇒ 显式取代那一行（它必须属于同一 scope、是该主题的当前
 // 版本）；= 0 ⇒ 自动取该主题的当前版本（没有就当新主题，version 从 1 起）。
+// defaultState 是 in.State 为空时落的两段式披露态（agent Checked 路径隔离、
+// host 路径 active —— 由各写入入口决定，见 appendMemoryEntryWithDefault）。
 //
 // 事务里做三件事：追加新行、闭合旧行、写正文。任何一步失败 ⇒ 整体回滚 ⇒
 // 「旧行被改了」这种半截状态不会出现。
-func appendMemoryVersion(tx *sql.Tx, scope MemoryScope, p memoryPayload, explicitPrevID int64) (*MemoryEntry, error) {
+func appendMemoryVersion(tx *sql.Tx, scope MemoryScope, p memoryPayload, explicitPrevID int64, defaultState string) (*MemoryEntry, error) {
+	// state 的取值只有一个定义处：显式传入的 p.State 优先，否则落入口默认。
+	state := p.State
+	if state == "" {
+		state = defaultState
+	}
+	if state != MemoryStateActive && state != MemoryStateQuarantined {
+		return nil, fmt.Errorf("记忆披露态只接受 active|quarantined，收到 %q", state)
+	}
 	var (
 		prevID      int64
 		prevVersion int
@@ -690,16 +877,16 @@ func appendMemoryVersion(tx *sql.Tx, scope MemoryScope, p memoryPayload, explici
 	}
 	entry, err := scanMemoryEntry(tx.QueryRow(`INSERT INTO memory_index(
  scope_type, scope_id, topic_key, version, kind, title, summary_line, tags, rule_ref,
- source_session_ids, written_by, content_digest, supersedes_id)
+ source_session_ids, written_by, content_digest, state, supersedes_id)
 VALUES($1,$2,$3,$4,$5,$6,$7,
  ARRAY(SELECT jsonb_array_elements_text(($8::text)::jsonb)),
  $9,
  ARRAY(SELECT jsonb_array_elements_text(($10::text)::jsonb))::bigint[],
- $11,$12,$13)
+ $11,$12,$13,$14)
 RETURNING `+memoryEntryCols,
 		scope.Type, scope.ID, topicKey, version, p.Kind, p.Title, p.SummaryLine,
 		string(tagsJSON), p.RuleRef, string(sourcesJSON), p.WrittenBy, p.ContentDigest,
-		supersedes))
+		state, supersedes))
 	if err != nil {
 		if memoryUniqueViolation(err) {
 			return nil, ErrMemoryVersionConflict
@@ -739,7 +926,7 @@ func enforceMemoryIndexCaps(tx *sql.Tx, scope MemoryScope) error {
 	if count > MemoryIndexMaxEntries {
 		return ErrMemoryIndexFull
 	}
-	text, err := exportMemoryIndex(tx, scope)
+	text, err := exportMemoryIndexFiltered(tx, scope, false)
 	if err != nil {
 		return err
 	}
@@ -749,11 +936,20 @@ func enforceMemoryIndexCaps(tx *sql.Tx, scope MemoryScope) error {
 	return nil
 }
 
-// exportMemoryIndex 渲染该 scope 当前索引的纯文本。
-func exportMemoryIndex(q memoryQueryer, scope MemoryScope) (string, error) {
-	rows, err := q.Query(`SELECT `+memoryEntryCols+` FROM memory_index
- WHERE scope_type=$1 AND scope_id=$2 AND valid_to IS NULL
- ORDER BY topic_key, version`, scope.Type, scope.ID)
+// exportMemoryIndexFiltered 渲染该 scope 当前索引的纯文本。
+//
+// onlyActive 为真 ⇒ 只渲染 state='active' 的行（agent 读面：两段式披露只给
+// active）；为假 ⇒ 全部当前行（上限检查的口径：隔离态条目也占 scope 预算，
+// 否则一个写满隔离态的 scope 永远撞不到字节上限）。
+func exportMemoryIndexFiltered(q memoryQueryer, scope MemoryScope, onlyActive bool) (string, error) {
+	query := `SELECT ` + memoryEntryCols + ` FROM memory_index
+ WHERE scope_type=$1 AND scope_id=$2 AND valid_to IS NULL`
+	if onlyActive {
+		query += ` AND state='active'`
+	}
+	query += `
+ ORDER BY topic_key, version`
+	rows, err := q.Query(query, scope.Type, scope.ID)
 	if err != nil {
 		return "", fmt.Errorf("导出记忆索引失败: %w", err)
 	}
@@ -762,6 +958,9 @@ func exportMemoryIndex(q memoryQueryer, scope MemoryScope) (string, error) {
 	b.WriteString("# 记忆索引 · scope=" + scope.String() + "\n")
 	b.WriteString("# 规则不住在索引里：rule_ref 只是 agent_prompts 的指针。\n")
 	b.WriteString("# 本索引是 append-only 的版本化索引：被取代的条目以新版本追加，旧版本只闭合有效区间。\n")
+	if onlyActive {
+		b.WriteString("# 本导出只含 state=active 的条目（两段式披露）：隔离态条目经 host 晋级后才可见。\n")
+	}
 	for rows.Next() {
 		e, err := scanMemoryEntry(rows)
 		if err != nil {
@@ -816,9 +1015,13 @@ func normalizeMemoryInput(in MemoryEntryInput) (memoryPayload, error) {
 		SummaryLine:      strings.TrimSpace(in.SummaryLine),
 		RuleRef:          strings.TrimSpace(in.RuleRef),
 		WrittenBy:        strings.TrimSpace(in.WrittenBy),
+		State:            strings.TrimSpace(in.State),
 		Body:             in.Body,
 		Tags:             []string{},
 		SourceSessionIDs: []int64{},
+	}
+	if p.State != "" && p.State != MemoryStateActive && p.State != MemoryStateQuarantined {
+		return p, fmt.Errorf("记忆披露态只接受 active|quarantined，收到 %q", p.State)
 	}
 	if p.Kind == "" {
 		p.Kind = MemoryKindNote

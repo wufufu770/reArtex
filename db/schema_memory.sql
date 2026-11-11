@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS memory_index (
     source_session_ids BIGINT[] NOT NULL DEFAULT '{}',
     -- 写者（审计用，不是归属，见 §9 第 6 条）。
     written_by        TEXT NOT NULL DEFAULT '',
+    -- 晋级门（X4，方案 v10 §6 T2）：两段式披露的**状态列**。
+    --   active      —— 当前生效，进入注入/检索面（两段式披露的第一段）；
+    --   quarantined —— 隔离态：模型写入即隔离（agent 写路径默认落这里），
+    --                  host-only 晋级（走 Supersede 通道追加 active 新版本）才可见。
+    -- 存量回填 'active' —— **如实口径**：老数据全是人工信任过的（或至少是
+    -- 人工评审体系里已经存在的），不因加列而被隐藏。
+    -- state 是内容列：append-only 触发器不许就地改它 —— 转态只能走
+    -- Supersede（追加新版本）或 Retire（闭合区间）这两条双时态通道。
+    state             TEXT NOT NULL DEFAULT 'active'
+                        CHECK (state IN ('active','quarantined')),
     -- 内容摘要（sha256 十六进制）：内容一旦写下就不会变 ⇒ 摘要用来验「没被改过」。
     content_digest    TEXT NOT NULL DEFAULT '',
     -- 取代关系：新行指向它取代的那一行（§10.5-4）。
@@ -72,6 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_scope  ON memory_index(scope_type, s
 CREATE INDEX IF NOT EXISTS idx_memory_index_topic  ON memory_index(scope_type, scope_id, topic_key, version DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_index_current ON memory_index(scope_type, scope_id)
     WHERE valid_to IS NULL;
+-- 两段式披露（X4/T2）的读面：注入块与混合检索只扫 active 的当前行。
+CREATE INDEX IF NOT EXISTS idx_memory_index_active ON memory_index(scope_type, scope_id)
+    WHERE valid_to IS NULL AND state='active';
 
 -- ---------- memory_topic：索引指向的正文（按需读，不常驻上下文） ----------
 CREATE TABLE IF NOT EXISTS memory_topic (
@@ -147,6 +160,9 @@ BEGIN
         OR NEW.written_by IS DISTINCT FROM OLD.written_by
         OR NEW.content_digest IS DISTINCT FROM OLD.content_digest
         OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id
+        -- state 也在守卫里：晋级/退役是**状态迁移**，走 Supersede（追加 active
+        -- 新版本）或 Retire（闭合区间）双时态通道，不许就地翻转（X4 host-only）。
+        OR NEW.state IS DISTINCT FROM OLD.state
         OR NEW.valid_from IS DISTINCT FROM OLD.valid_from
         OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
         RAISE EXCEPTION 'memory_index 是 append-only：内容列不可就地改写（条目 %）', OLD.id
@@ -168,6 +184,32 @@ END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_memory_index_append_only ON memory_index;
+
+-- ---------- state 列的幂等迁移（X4：CREATE 内 + 幂等 ALTER + 存量回填） ----------
+-- 为什么放在 DROP TRIGGER 之后、CREATE TRIGGER 之前：老库已经装着 append-only
+-- 触发器，它只放行「闭合有效区间」的 UPDATE —— 存量回填是普通 UPDATE，必须
+-- 在触发器缺席的窗口里跑。本文件每次应用都走这个窗口，重复执行零副作用。
+--
+-- 老库走 ALTER 补列；NOT NULL DEFAULT 让存量行**就地**变 active —— 这不是
+-- 改写内容（state 是新列，历史行从来没有过这个属性），是加列时的如实初始化：
+-- 旧数据是人工信任的，回填 'active' 让它们保持可见。
+ALTER TABLE memory_index ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
+UPDATE memory_index SET state='active' WHERE state <> 'active' AND state <> 'quarantined';
+-- 老库补 CHECK（与 CREATE 内的定义一致；判据照 schema.sql ck_node_state 的
+-- pg_get_constraintdef 先例，重复启动零开销）。
+DO $$
+DECLARE
+    v_def text;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO v_def
+      FROM pg_constraint WHERE conname='ck_memory_index_state' AND conrelid='memory_index'::regclass;
+    IF v_def IS NULL THEN
+        ALTER TABLE memory_index ADD CONSTRAINT ck_memory_index_state
+            CHECK (state IN ('active','quarantined'));
+    END IF;
+END
+$$;
+
 CREATE TRIGGER trg_memory_index_append_only BEFORE UPDATE OR DELETE ON memory_index
     FOR EACH ROW EXECUTE FUNCTION memory_index_append_only();
 
