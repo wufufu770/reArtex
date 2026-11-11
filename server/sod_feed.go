@@ -72,7 +72,7 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	pendingRows, err := pg.Query(`
 		SELECT p.id, COALESCE(p.tool_name,''), COALESCE(p.reason,''), COALESCE(p.agent_name,''),
 		       to_char(p.created_at,'HH24:MI:SS'),
-		       COALESCE(LEFT(p.tool_input, 400), '')
+		       COALESCE(LEFT(p.tool_input::text, 400), '')
 		FROM intercept_pending p WHERE p.status='pending' ORDER BY p.id DESC LIMIT 30`)
 	if err != nil {
 		writeErr(w, 500, "读待人工裁决失败: "+err.Error())
