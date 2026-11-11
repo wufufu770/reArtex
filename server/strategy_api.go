@@ -242,6 +242,13 @@ func (s *Server) strategyProposalDecide(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// F5（方案 v10 §12+§16）人工裁决侧消账：奇点循环矛盾沉淀的 proposal
+	// （created_by="contradiction"，server/contradiction.go F3 建）被批准 ⇒
+	// MarkContradictionResolved + CloseGap。best-effort：裁决已落库并进审计链，
+	// 消账失败只记日志不影响本次返回。
+	if req.Status == db.StrategyProposalApproved {
+		s.settleContradictionProposal(pid, req.Reason)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "id": pid, "status": req.Status})
 }
 

@@ -5,8 +5,11 @@ package server
 // 不新开写面。
 
 import (
+	"log"
 	"net/http"
 	"strconv"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 // taskGovernance 是任务详情「治理」tab 的聚合载荷。
@@ -97,6 +100,21 @@ ORDER BY id DESC LIMIT 100`, t.ExpID)
 			resp["wake_stats"] = v.(*wakeCounter).snapshot()
 		}
 		resp["intent_counts"] = taskIntentCounts(pg, id)
+	}
+	// F 线（方案 v10 §12+§16 批次 F4/F5）：空缺账本与矛盾台账随治理视图暴露
+	// （只读聚合，不新开写面；gap 的专属 UI 页随后批）。查询失败置空数组，
+	// 不让增值面拖垮整个治理载荷。
+	if gaps, gerr := pg.ListOpenGaps(id); gerr == nil {
+		resp["gaps"] = gaps
+	} else {
+		log.Printf("[governance] task %s 列空缺失败: %v", tid, gerr)
+		resp["gaps"] = []db.Gap{}
+	}
+	if ctrs, cerr := pg.ListRecentContradictions(id, 20); cerr == nil {
+		resp["contradictions"] = ctrs
+	} else {
+		log.Printf("[governance] task %s 列矛盾失败: %v", tid, cerr)
+		resp["contradictions"] = []db.Contradiction{}
 	}
 	writeJSON(w, 200, resp)
 }

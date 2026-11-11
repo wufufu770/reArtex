@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
 )
 
 // denialEscalationThreshold 是触发升级的连续同类拒绝次数。
@@ -88,6 +89,15 @@ func (s *Server) onToolDenial(taskID, toolName, denialMessage string) {
 	if environmentalDenialCodes[reasonCode] {
 		return // D3 环境类失败：不计数（实质拒绝才升 blocked）
 	}
+	// F4 空缺源③（方案 v10 §16）：授权类硬停（锁定基线/删除破坏）的拒绝逐次入账
+	// kind=authorization。authorization 类只入账不唤醒（授权空缺必须停——只能由人
+	// 补范围/给额度，自动唤醒产意图等于让 agent 自己给自己扩权，见 server/gapwake.go
+	// 的硬停止注释）。同 (task, detail) 的 open 行由 gap 层去重，重复撞墙不刷账。
+	if reasonCode == sodpolicy.ReasonPlatformBaseline || reasonCode == sodpolicy.ReasonDestructiveAction {
+		if numeric, perr := strconv.ParseInt(taskID, 10, 64); perr == nil && numeric > 0 {
+			s.openGap(numeric, db.GapAuthorization, trunc(denialMessage, 300))
+		}
+	}
 	if !s.denials.recordDenial(taskID, toolName, reasonCode) {
 		return
 	}
@@ -113,6 +123,10 @@ func (s *Server) onToolDenial(taskID, toolName, denialMessage string) {
 	}
 	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
 		Summary: summary + "，需人工处理" + suffixHint(hint)})
+	// F4 空缺源①（方案 v10 §16）：B6 升级（意图转 blocked）= 一条动作空缺——
+	// worker 反复撞同一堵墙说明「想做的动作做不成」，入账 kind=action 并触发一次
+	// 定向唤醒（让监督者产出绕行意图或收口判断）。
+	s.openGap(numeric, db.GapAction, trunc(denialMessage, 300))
 	// 绑定会话播报（总控/群聊里看得见）。
 	if sess, err := s.m.pg.SessionByTask(numeric); err == nil && sess != nil {
 		body := fmt.Sprintf("【需人工处理】任务 #%s：%s%s", taskID, summary, suffixHint(hint))

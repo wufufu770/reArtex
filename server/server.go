@@ -208,6 +208,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.engine.LegacyDistiller = s.DistillLegacyExperience
 	// B6：工具连续拒绝的升级观察者（意图转 blocked + 会话播报）。
 	s.engine.DenialWatcher = s.onToolDenial
+	// F4：空缺驱动唤醒的宿主落点（server/gapwake.go）——F2 矛盾检测经此开空缺
+	// + 定向唤醒（authorization 类只入账不唤醒）。
+	s.engine.GapOpener = s.openGap
 	go s.RunSupervisionLoop(s.ctx)
 	s.engine.AuditSummary = s.emitAuditSummary
 	s.loadTaskSessionBindings()

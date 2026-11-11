@@ -4,7 +4,7 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ChevronLeftIcon, ChevronRightIcon, FlaskConicalIcon, RotateCcwIcon } from "lucide-react";
+import { FlaskConicalIcon, RotateCcwIcon } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -22,55 +22,22 @@ interface FindingsCardsProps {
   onDeepen: (finding: Finding) => void;
 }
 
-// FindingsCards 是发现列表的卡片形态：横向滑动卡片流。与 FindingsTable 消费
-// 同一页数据、同一批回调，只是把行渲染换成卡片；分页与筛选仍在外层页面。
-// 滚动不用 embla 之类的轮播依赖：原生 snap + 自绘左右滚动按钮（scrollTo 平滑滚）。
+// FindingsCards 是发现列表的卡片形态：自适应多列网格、页面自然【上下滚动】
+//（用户拍板：要上下滑，不要左右滑）。与 FindingsTable 消费同一页数据、同一批
+// 回调；分页与筛选仍在外层页面。
 export function FindingsCards({ items, activeRetests, onRetest, onDeepen }: FindingsCardsProps) {
-  const scrollerRef = React.useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = React.useState(false);
-  const [canScrollRight, setCanScrollRight] = React.useState(false);
-
-  const updateArrows = React.useCallback(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 0);
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-  }, []);
-
-  // 数据换页后 DOM 已重渲染,重新量一次两端可滚性(与 onScroll 各自触发);
-  // 空列表直接把按钮收起来。
-  React.useEffect(() => {
-    if (items.length === 0) {
-      setCanScrollLeft(false);
-      setCanScrollRight(false);
-      return;
-    }
-    const el = scrollerRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 0);
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-  }, [items]);
-
-  function scrollCards(direction: -1 | 1) {
-    const el = scrollerRef.current;
-    if (!el) return;
-    el.scrollTo({ left: el.scrollLeft + direction * el.clientWidth * 0.8, behavior: "smooth" });
-  }
-
   if (items.length === 0) {
     return <p className="py-12 text-center text-muted-foreground text-sm">没有匹配的发现。</p>;
   }
 
   return (
-    <div className="relative">
-      <div ref={scrollerRef} className="flex snap-x gap-3 overflow-x-auto px-4 py-3" onScroll={updateArrows}>
+    <div className="relative px-4 py-3">
+      {/* 用户拍板：上下滑动（非左右）——自适应多列网格，页面自然纵向滚动 */}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {items.map((f) => {
           const retest = f.finding_id ? activeRetests[f.finding_id] : undefined;
           return (
-            <article
-              key={findingRowKey(f)}
-              className="flex w-[320px] min-w-[320px] shrink-0 snap-start flex-col gap-2 rounded-lg border bg-background p-3"
-            >
+            <article key={findingRowKey(f)} className="flex flex-col gap-2 rounded-lg border bg-background p-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 <StatusBadge domain="severity" value={f.severity} dot />
                 <StatusBadge domain="finding" value={f.status} dot />
@@ -134,28 +101,6 @@ export function FindingsCards({ items, activeRetests, onRetest, onDeepen }: Find
           );
         })}
       </div>
-      {canScrollLeft && (
-        <Button
-          variant="outline"
-          size="icon"
-          className="absolute top-1/2 left-2 z-10 size-7 -translate-y-1/2 rounded-full"
-          onClick={() => scrollCards(-1)}
-          aria-label="向左滚动"
-        >
-          <ChevronLeftIcon />
-        </Button>
-      )}
-      {canScrollRight && (
-        <Button
-          variant="outline"
-          size="icon"
-          className="absolute top-1/2 right-2 z-10 size-7 -translate-y-1/2 rounded-full"
-          onClick={() => scrollCards(1)}
-          aria-label="向右滚动"
-        >
-          <ChevronRightIcon />
-        </Button>
-      )}
     </div>
   );
 }

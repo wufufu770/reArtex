@@ -140,6 +140,10 @@ type Engine struct {
 	// 工具调用被拒（「Blocked by hook」）时回调 (taskID, toolName, denialMessage)。
 	// nil = 不观察。宿主（NewServer）装配。
 	DenialWatcher func(taskID, toolName, denialMessage string)
+	// GapOpener 是 F4 空缺驱动唤醒的宿主落点（server/gapwake.go）：F2 矛盾检测
+	// 记 evidence/path 类空缺时回调宿主（宿主做去重入库 + authorization 以外的
+	// 定向唤醒）。nil = 只播报不开空缺（测试形态）。宿主（NewServer）装配。
+	GapOpener func(taskID int64, kind, detail string)
 	// AuditSummary 是 v4.1 收尾审计报告的回调（server/auditor_report.go）：
 	// 任务落终态（done/failed/timeout/cancelled）时 best-effort 调用，
 	// 产出《本任务操作审计摘要》播报到绑定会话 + 落审计页。nil = 不产出。
@@ -2050,6 +2054,15 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			} else {
 				log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
 			}
+		} else {
+			// F2/F5（方案 v10 §12+§16）：worker 终态（done/blocked/exhausted 三态）
+			// 落库成功后的奇点循环钩子。两者都 fail-closed（内部一切失败只记日志，
+			// 不改写终态、不阻塞认领循环）：
+			//   detectContradiction —— F2 确定性 diff（预测 vs 实际）+ F3 路由；
+			//   settleGapOnIntentDone —— F5 空缺消账（仅 done 兑现 evidence 类）。
+			// exhausted/无预测在钩子内部自行短路。
+			e.detectContradiction(t, intent.ID, state)
+			e.settleGapOnIntentDone(t, intent.ID, state)
 		}
 	}
 	// C4 停滞闸记账：按写回量更新停滞状态（0 写回递增 / 有效写回清零）。

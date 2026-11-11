@@ -103,6 +103,19 @@ func (s *Server) distillLegacySync(t *Task, taskID int64) error {
 			b.WriteString(fmt.Sprintf("- #%d %s\n", fd.ID, truncateStrRunes(fp.Summary, 160)))
 		}
 	}
+	// F3（方案 v10 §12+§16）：矛盾记录追加进 legacy 蒸馏原料——奇点循环的
+	// 「矛盾→经验」转化点：哪些预测没兑现、出现了什么预测外的发现、卡在哪个
+	// 授权面，都是值得跨任务传承的 pitfall/experience 素材。查本任务未消解的
+	// 矛盾（≤10 条）；查询失败只跳过这段（蒸馏不因增值面中断）。
+	if s.m != nil && s.m.pg != nil {
+		if ctrs, cerr := s.m.pg.ListUnresolvedContradictions(taskID, 10); cerr == nil && len(ctrs) > 0 {
+			b.WriteString("\n【矛盾记录（预测 vs 实际，未消解，≤10）】\n")
+			for _, c := range ctrs {
+				b.WriteString(fmt.Sprintf("- [%s] 矛盾 #%d（意图 #%d）：%s\n",
+					c.Kind, c.ID, c.IntentID, truncateStrRunes(c.Detail, 200)))
+			}
+		}
+	}
 	if b.Len() < 200 {
 		// 原料太薄（图上几乎什么都没有）——蒸馏没有素材，如实跳过。
 		return fmt.Errorf("原料不足（图上事实/交接过少），跳过蒸馏")
