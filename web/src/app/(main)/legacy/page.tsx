@@ -5,7 +5,9 @@
 
 import * as React from "react";
 
-import { CheckIcon, HistoryIcon, XIcon } from "lucide-react";
+import Link from "next/link";
+
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon, HistoryIcon, LibraryBigIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +49,9 @@ export default function LegacyPage() {
   const [state, setState] = React.useState("");
   const [loaded, setLoaded] = React.useState(false);
   const [busyId, setBusyId] = React.useState<number | null>(null);
+  // 展开的 detail 正文（节点 id 集合）：蒸馏正文（detail）默认收起为 6 行摘要，
+  // 点「展开」看全文——用户拍板「策略的要能展开」。
+  const [expanded, setExpanded] = React.useState<Set<number>>(() => new Set());
 
   const load = React.useCallback(async () => {
     try {
@@ -131,6 +136,8 @@ export default function LegacyPage() {
               ([k, v]) => k.trim() !== "" && String(v).trim() !== "",
             );
             const summary = (node.summary ?? "").trim();
+            const detail = (node.detail ?? "").trim();
+            const open = expanded.has(node.id);
             return (
               <div key={node.id} className="grid gap-2 rounded-lg border p-3">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -151,6 +158,28 @@ export default function LegacyPage() {
                 </div>
                 {summary !== "" && summary !== "[]" && (
                   <p className="whitespace-pre-wrap text-muted-foreground text-xs">{summary}</p>
+                )}
+                {/* 蒸馏正文（detail）：默认收起 6 行，展开看全文（v0.9.17 用户拍板） */}
+                {detail !== "" && detail !== summary && (
+                  <div className="grid gap-1">
+                    <p className={`whitespace-pre-wrap text-xs ${open ? "" : "line-clamp-6"}`}>{detail}</p>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 w-fit px-2 text-[11px]"
+                      onClick={() =>
+                        setExpanded((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(node.id)) next.delete(node.id);
+                          else next.add(node.id);
+                          return next;
+                        })
+                      }
+                    >
+                      {open ? <ChevronUpIcon /> : <ChevronDownIcon />}
+                      {open ? "收起正文" : "展开正文"}
+                    </Button>
+                  </div>
                 )}
                 {fingerprintEntries.length > 0 && (
                   <div className="flex flex-wrap gap-1">
@@ -212,9 +241,16 @@ export default function LegacyPage() {
             );
           })}
           {loaded && nodes.length > 0 && (
-            <p className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <p className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
               <HistoryIcon className="size-3" />
               只有 accepted 会注入新任务的规划上下文（预算 ≤12K 字符，top-5）。
+              <Link
+                href="/strategies/assembled"
+                className="inline-flex items-center gap-0.5 text-primary hover:underline"
+              >
+                <LibraryBigIcon className="size-3" />
+                看注入拼装全文
+              </Link>
             </p>
           )}
         </CardContent>

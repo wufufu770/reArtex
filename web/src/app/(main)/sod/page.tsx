@@ -4,7 +4,7 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { GavelIcon, MonitorPlayIcon, ScrollTextIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, GavelIcon, MonitorPlayIcon, ScrollTextIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { SodShadowCard } from "@/components/sod-shadow-card";
@@ -49,6 +49,66 @@ function fmtPreview(text: string): string {
   return `${text.slice(0, PREVIEW_LIMIT)}…`;
 }
 
+// ChecksDetail 把闸门 checks（不透明 JSON）渲染成键值卡片。
+// v0.9.17 用户拍板「后面的详细信息看不到」：详情不再藏在横向滚动外的列里，
+// 统一收进行内展开面板。
+function ChecksDetail({ checks }: { checks: unknown }) {
+  if (checks === null || checks === undefined) {
+    return <span className="text-muted-foreground text-xs">（本条没有检查记录）</span>;
+  }
+  const entries =
+    typeof checks === "object" && !Array.isArray(checks) ? Object.entries(checks as Record<string, unknown>) : [];
+  if (entries.length === 0) {
+    return <pre className="break-all rounded-md bg-muted/50 p-2 font-mono text-[10px]">{String(checks)}</pre>;
+  }
+  return (
+    <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+      {entries.map(([k, v]) => (
+        <div key={k} className="rounded border bg-muted/40 px-2 py-1">
+          <div className="text-[10px] font-semibold text-muted-foreground">{k}</div>
+          <div className="break-all font-mono text-[10px]">{typeof v === "string" ? v : JSON.stringify(v)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// DecisionDetailPanel 是行内展开的详情面板：一行裁决的**全部**信息——
+// 完整载荷、五检查结论、分层理由、异常理由、各摘要。横向滚不出列时看这里。
+function DecisionDetailPanel({ row }: { row: SodDecision }) {
+  return (
+    <div className="grid gap-3 border-b bg-muted/20 px-4 py-3">
+      <div className="grid gap-1">
+        <p className="font-semibold text-[11px] text-muted-foreground">检查结论（checks）</p>
+        <ChecksDetail checks={row.checks} />
+      </div>
+      <div className="grid gap-1">
+        <p className="font-semibold text-[11px] text-muted-foreground">载荷预览（原文不入库，此处即全部留痕）</p>
+        <pre className="max-h-60 overflow-y-auto rounded-md border bg-background p-2 font-mono text-[10px] whitespace-pre-wrap break-all">
+          {row.payload_preview || "（空）"}
+        </pre>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        <div className="grid content-start gap-1">
+          <p className="font-semibold text-[11px] text-muted-foreground">分层推导</p>
+          <p className="text-xs">{row.tier_reason || "（无分层理由）"}</p>
+          <p className="text-muted-foreground text-[10px]">范围结论：{sodScopeLabel(row.tier_scope_in)}</p>
+        </div>
+        <div className="grid content-start gap-1">
+          <p className="font-semibold text-[11px] text-muted-foreground">摘要与异常</p>
+          <p className="break-all font-mono text-[10px] text-muted-foreground">
+            payload {fmtDigest(row.payload_digest)}
+          </p>
+          <p className="break-all font-mono text-[10px] text-muted-foreground">intent {fmtDigest(row.intent_digest)}</p>
+          <p className="break-all font-mono text-[10px] text-muted-foreground">token {fmtDigest(row.token_digest)}</p>
+          <p className="break-all font-mono text-[10px] text-muted-foreground">scope {fmtDigest(row.scope_digest)}</p>
+          {row.anomaly_flag && <p className="text-[10px]">异常标记：{row.anomaly_reason || "（无理由）"}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // DecisionRow 是账本一行的渲染。
 //
 // 分层（tier）是**读时推导**的（下界，不是真值），所以这一列只呈现后端给的
@@ -58,98 +118,123 @@ function DecisionRow({
   onReview,
   previewExpanded,
   onTogglePreview,
+  detailExpanded,
+  onToggleDetail,
 }: {
   row: SodDecision;
   onReview?: (row: SodDecision) => void;
   previewExpanded: boolean;
   onTogglePreview: (id: number) => void;
+  detailExpanded: boolean;
+  onToggleDetail: (id: number) => void;
 }) {
   return (
-    <TableRow>
-      <TableCell>
-        <div className="flex flex-col items-start gap-0.5">
-          <span className="text-xs tabular-nums">{fmtDateTime(row.created_at)}</span>
-          <span className="font-mono text-muted-foreground text-xs">#{row.id}</span>
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-col items-start gap-0.5">
-          <span className="font-mono text-xs">{row.tool_name || "—"}</span>
-          <span className="text-muted-foreground text-xs">{row.source_agent || "—"}</span>
-          {row.task_id !== undefined && (
-            <Link
-              href={`/function/tasks/detail?id=${row.task_id}`}
-              className="font-mono text-muted-foreground text-xs hover:text-primary"
+    <>
+      <TableRow>
+        <TableCell>
+          <div className="flex items-start gap-1.5">
+            <button
+              type="button"
+              aria-label={detailExpanded ? "收起详情" : "展开详情"}
+              title={detailExpanded ? "收起详情" : "展开详情（检查结论/完整载荷/分层理由）"}
+              className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => onToggleDetail(row.id)}
             >
-              任务 {row.task_id}
-            </Link>
+              {detailExpanded ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+            </button>
+            <div className="flex flex-col items-start gap-0.5">
+              <span className="text-xs tabular-nums">{fmtDateTime(row.created_at)}</span>
+              <span className="font-mono text-muted-foreground text-xs">#{row.id}</span>
+            </div>
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-col items-start gap-0.5">
+            <span className="font-mono text-xs">{row.tool_name || "—"}</span>
+            <span className="text-muted-foreground text-xs">{row.source_agent || "—"}</span>
+            {row.task_id !== undefined && (
+              <Link
+                href={`/function/tasks/detail?id=${row.task_id}`}
+                className="font-mono text-muted-foreground text-xs hover:text-primary"
+              >
+                任务 {row.task_id}
+              </Link>
+            )}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-col items-start gap-1">
+            <StatusBadge domain="sodVerdict" value={row.verdict} dot />
+            <StatusBadge domain="sodReason" value={row.reason_code} />
+            {row.anomaly_flag && (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                异常标记{row.anomaly_reason ? ` · ${row.anomaly_reason}` : ""}
+              </Badge>
+            )}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-col items-start gap-1">
+            <StatusBadge domain="sodTier" value={row.tier} />
+            <StatusBadge domain="sodTierCategory" value={row.tier_category} />
+            {row.tier_host_only && (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                仅宿主侧写面
+              </Badge>
+            )}
+            <span className="text-muted-foreground text-xs">{sodScopeLabel(row.tier_scope_in)}</span>
+          </div>
+        </TableCell>
+        <TableCell className="hidden lg:table-cell">
+          <div className="flex max-w-md flex-col items-start gap-1">
+            <span className="font-mono text-muted-foreground text-xs">{fmtDigest(row.payload_digest)}</span>
+            {row.payload_preview && (
+              <>
+                <pre className="whitespace-pre-wrap break-all rounded-md bg-muted/50 p-2 font-mono text-[10px]">
+                  {previewExpanded ? row.payload_preview : fmtPreview(row.payload_preview)}
+                </pre>
+                {row.payload_preview.length > PREVIEW_LIMIT && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                    onClick={() => onTogglePreview(row.id)}
+                  >
+                    {previewExpanded ? "收起" : "展开"}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-col items-start gap-1">
+            {row.cache_hit ? (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                命中缓存
+              </Badge>
+            ) : (
+              <span className="text-muted-foreground text-xs">未命中缓存</span>
+            )}
+            <span className="text-muted-foreground text-xs tabular-nums">{fmtLatency(row.latency_ms)}</span>
+          </div>
+        </TableCell>
+        <TableCell>
+          {(row.verdict === "deny" || row.verdict === "needs_review") && onReview && (
+            <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onReview(row)}>
+              <GavelIcon /> 人工复核
+            </Button>
           )}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-col items-start gap-1">
-          <StatusBadge domain="sodVerdict" value={row.verdict} dot />
-          <StatusBadge domain="sodReason" value={row.reason_code} />
-          {row.anomaly_flag && (
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-              异常标记{row.anomaly_reason ? ` · ${row.anomaly_reason}` : ""}
-            </Badge>
-          )}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-col items-start gap-1">
-          <StatusBadge domain="sodTier" value={row.tier} />
-          <StatusBadge domain="sodTierCategory" value={row.tier_category} />
-          {row.tier_host_only && (
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-              仅宿主侧写面
-            </Badge>
-          )}
-          <span className="text-muted-foreground text-xs">{sodScopeLabel(row.tier_scope_in)}</span>
-        </div>
-      </TableCell>
-      <TableCell className="hidden lg:table-cell">
-        <div className="flex max-w-md flex-col items-start gap-1">
-          <span className="font-mono text-muted-foreground text-xs">{fmtDigest(row.payload_digest)}</span>
-          {row.payload_preview && (
-            <>
-              <pre className="whitespace-pre-wrap break-all rounded-md bg-muted/50 p-2 font-mono text-[10px]">
-                {previewExpanded ? row.payload_preview : fmtPreview(row.payload_preview)}
-              </pre>
-              {row.payload_preview.length > PREVIEW_LIMIT && (
-                <button
-                  type="button"
-                  className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-                  onClick={() => onTogglePreview(row.id)}
-                >
-                  {previewExpanded ? "收起" : "展开"}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className="flex flex-col items-start gap-1">
-          {row.cache_hit ? (
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-              命中缓存
-            </Badge>
-          ) : (
-            <span className="text-muted-foreground text-xs">未命中缓存</span>
-          )}
-          <span className="text-muted-foreground text-xs tabular-nums">{fmtLatency(row.latency_ms)}</span>
-        </div>
-      </TableCell>
-      <TableCell>
-        {(row.verdict === "deny" || row.verdict === "needs_review") && onReview && (
-          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onReview(row)}>
-            <GavelIcon /> 人工复核
-          </Button>
-        )}
-      </TableCell>
-    </TableRow>
+        </TableCell>
+      </TableRow>
+      {/* v0.9.17：行内详情面板——「后面的详细信息」不再依赖横向滚动 */}
+      {detailExpanded && (
+        <TableRow className="hover:bg-transparent">
+          <TableCell colSpan={7} className="p-0">
+            <DecisionDetailPanel row={row} />
+          </TableCell>
+        </TableRow>
+      )}
+    </>
   );
 }
 
@@ -160,12 +245,16 @@ function DecisionList({
   onReview,
   expandedPreviews,
   onTogglePreview,
+  expandedDetails,
+  onToggleDetail,
 }: {
   rows: SodDecision[];
   loaded: boolean;
   onReview?: (row: SodDecision) => void;
   expandedPreviews: Set<number>;
   onTogglePreview: (id: number) => void;
+  expandedDetails: Set<number>;
+  onToggleDetail: (id: number) => void;
 }) {
   if (!loaded) {
     return <p className="py-6 text-center text-muted-foreground text-sm">加载中…</p>;
@@ -205,6 +294,8 @@ function DecisionList({
               onReview={onReview}
               previewExpanded={expandedPreviews.has(row.id)}
               onTogglePreview={onTogglePreview}
+              detailExpanded={expandedDetails.has(row.id)}
+              onToggleDetail={onToggleDetail}
             />
           ))}
         </TableBody>
@@ -231,9 +322,21 @@ export default function SodLedgerPage() {
   const [reviewing, setReviewing] = React.useState(false);
   // 载荷预览展开的行 id 集合：默认截 60 字符，点「展开」看全文（账本滚动扫读优先）。
   const [expandedPreviews, setExpandedPreviews] = React.useState<Set<number>>(() => new Set());
+  // v0.9.17 行内详情面板的展开集合：检查结论/完整载荷/分层理由收在面板里，
+  // 不再依赖表格横向滚动（用户拍板「后面的详细信息看不到」）。
+  const [expandedDetails, setExpandedDetails] = React.useState<Set<number>>(() => new Set());
 
   const togglePreview = React.useCallback((id: number) => {
     setExpandedPreviews((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleDetail = React.useCallback((id: number) => {
+    setExpandedDetails((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -390,6 +493,8 @@ export default function SodLedgerPage() {
             onReview={(row) => setReview({ decision: row, scope: "once", reason: "", operator: "sir" })}
             expandedPreviews={expandedPreviews}
             onTogglePreview={togglePreview}
+            expandedDetails={expandedDetails}
+            onToggleDetail={toggleDetail}
           />
         </CardContent>
       </Card>

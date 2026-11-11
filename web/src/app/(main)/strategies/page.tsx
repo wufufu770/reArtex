@@ -5,7 +5,16 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { LibraryBigIcon, PencilIcon, PinIcon, RefreshCwIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  LibraryBigIcon,
+  PencilIcon,
+  PinIcon,
+  RefreshCwIcon,
+  SearchIcon,
+  SparklesIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
@@ -41,16 +50,38 @@ const ALL_STATES = "__all__";
 const POLL_MS = 15_000;
 
 function StrategyRow({ strategy, onEdit }: { strategy: Strategy; onEdit: (strategy: Strategy) => void }) {
+  // 行内展开（v0.9.17 用户拍板「策略的要能展开」）：默认摘要在单元格里截断，
+  // 点箭头展开看全文（正文六元组仍在详情页）。
+  const [open, setOpen] = React.useState(false);
   return (
-    <TableRow>
+    <TableRow className="align-top">
       <TableCell>
-        <Link
-          href={`/strategies/detail?id=${strategy.id}`}
-          className="flex flex-col gap-0.5 font-medium hover:text-primary"
-        >
-          <span className="truncate">{strategy.name}</span>
-          <span className="truncate font-normal text-muted-foreground text-xs">{strategy.summary || "（无摘要）"}</span>
-        </Link>
+        <div className="flex items-start gap-1">
+          <button
+            type="button"
+            aria-label={open ? "收起摘要" : "展开摘要"}
+            className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? <ChevronDownIcon className="size-3.5" /> : <ChevronRightIcon className="size-3.5" />}
+          </button>
+          <Link
+            href={`/strategies/detail?id=${strategy.id}`}
+            className="flex min-w-0 flex-col gap-0.5 font-medium hover:text-primary"
+            title="进入详情看正文与证据链"
+          >
+            <span className="truncate">{strategy.name}</span>
+            <span
+              className={
+                open
+                  ? "whitespace-pre-wrap font-normal text-muted-foreground text-xs"
+                  : "truncate font-normal text-muted-foreground text-xs"
+              }
+            >
+              {strategy.summary || "（无摘要）"}
+            </span>
+          </Link>
+        </div>
       </TableCell>
       <TableCell>
         <div className="flex flex-col items-start gap-1">

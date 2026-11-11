@@ -1098,6 +1098,24 @@ export const api = {
   // version = version+1。空 patch 后端回 400「没有可更新字段」。
   strategyEdit: (id: string | number, body: Record<string, unknown>) =>
     patch<{ ok: boolean; version: number }>(`/strategies/${id}`, body),
+  // v0.9.17 注入拼装预览：把真正会进 agent 上下文的两块注入文本（策略摘要块 +
+  // 经验块）原样取回。task_id 可选——给了 = 该任务的真实快照；不给 = active 池全量。
+  strategyAssembled: (opts?: { taskId?: number; goal?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.taskId !== undefined && Number.isFinite(opts.taskId)) q.set("task_id", String(opts.taskId));
+    if (opts?.goal) q.set("goal", opts.goal);
+    const suffix = q.toString();
+    return get<{
+      strategies_block: string;
+      legacy_block: string;
+      entries: { strategy_id: number; name: string; summary: string; version: number; utility: number }[] | null;
+      note: string;
+      advisory_only: boolean;
+    }>(`/strategies/assembled${suffix ? `?${suffix}` : ""}`).then((r) => ({
+      ...r,
+      entries: arr(r.entries),
+    }));
+  },
 
   // ---- SoD 链（职责分离）----
   // 决策账本。task_id 是任务的**数字 id**（= Task.id 转数字，后端就是数字主键）。

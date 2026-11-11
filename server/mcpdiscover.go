@@ -75,6 +75,50 @@ func warnMCPMissingURLOnce(name string) bool {
 	return true
 }
 
+// ---------- 连接失败负缓存（v0.9.17，task#9「workers 空跑」根治之一） ----------
+//
+// G1 装配缓存下，任何一台 server 连接失败都会把整份装配标记为不可缓存
+// （cacheable=false）⇒ 此后**每个** worker 认领都重新拨号**全部** server。
+// burp 上游 504 挂死（nginx ~60s 才回超时）时，每次认领都被拖住一分多钟，
+// worker 一轮都跑不满——这正是「worker 会话在转、0 执行步」的空跑签名。
+//
+// 负缓存：失败后 TTL 内跳过该 server（本轮没有它的工具，其余 server 正常），
+// 装配保持可缓存；TTL 到期自动重试拨号，恢复即自动回归。配置改动/手动刷新
+// 会清掉冷却（pgSaveMCP / pgRefreshMCP），改完配置立即生效。
+var mcpFailUntil sync.Map // server name → time.Time（冷却到期时刻）
+
+// mcpFailTTL 是连接失败后的重试冷却。短到「恢复后一两轮就能用」，长到能扛住
+// 上游几十秒的超时窗口。
+const mcpFailTTL = 2 * time.Minute
+
+// mcpDown 报告该 server 是否处于连接失败冷却期。
+func mcpDown(name string) bool {
+	v, ok := mcpFailUntil.Load(name)
+	if !ok {
+		return false
+	}
+	until, _ := v.(time.Time)
+	return time.Now().Before(until)
+}
+
+// mcpMarkFailed 把该 server 打入失败冷却（到期自动重试）。
+func mcpMarkFailed(name string) {
+	mcpFailUntil.Store(name, time.Now().Add(mcpFailTTL))
+}
+
+// mcpMarkHealthy 清除该 server 的失败冷却（拨号成功即调，恢复立即生效）。
+func mcpMarkHealthy(name string) {
+	mcpFailUntil.Delete(name)
+}
+
+// mcpClearFailCache 清空全部冷却（MCP 配置被人工改动/手动刷新时调用）。
+func mcpClearFailCache() {
+	mcpFailUntil.Range(func(k, _ any) bool {
+		mcpFailUntil.Delete(k)
+		return true
+	})
+}
+
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 	switch m.Transport {

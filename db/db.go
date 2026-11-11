@@ -385,6 +385,15 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureLoopSchema(); err != nil {
 			return fmt.Errorf("apply loop schema: %w", err)
 		}
+		// 经验权重卡（方案 v10 §6 T1/X1）DDL：experience_weights 记账表。
+		// ⚠️ v0.9.16 事故：这层漏接启动流程 ⇒ 生产库（受限运行角色）首次记账时
+		// 运行期懒执行 DDL 被 permission denied for schema public 拒掉（日志
+		// 「[legacy] 经验 #N 权重命中记账失败」），经验权重在生产永远记不上。
+		// 与上面 EnsureLoopSchema 同理：必须在启动期用有 DDL 权限的连接建好，
+		// 运行期只标记就位（markRuntimeSchemasReady）。
+		if err := schemaDB.EnsureExperienceWeightSchema(); err != nil {
+			return fmt.Errorf("apply experience weight schema: %w", err)
+		}
 		// finding 级验证态与返工边（方案书 §7 的 P0-2）：三态 + rework 边，
 		// 走独立幂等文件（db/schema_finding_validation.sql）。
 		if err := schemaDB.EnsureFindingValidationSchema(); err != nil {
@@ -614,6 +623,24 @@ VALUES ('browser', 'stdio', 'npx', $1, '{}', false)
 ON CONFLICT (name) DO NOTHING`,
 		`["@playwright/mcp","--headless"]`); err != nil {
 		return fmt.Errorf("seed browser mcp: %w", err)
+	}
+	// v0.9.17：playwright-cli 的 MCP 入口（用户明确要求「playwright-cli 的 mcp
+	// 要配置上」，此前库里只有名字叫 browser 的同一套 @playwright/mcp，与
+	// playwright-cli skill 对不上号）。与 browser 同一二进制、默认启用；可见性
+	// 给全部内置 agent（ON CONFLICT DO NOTHING：用户改过就尊重用户的）。
+	if _, err := d.Exec(`
+INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
+VALUES ('playwright-cli', 'stdio', 'npx', $1, '{}', true)
+ON CONFLICT (name) DO NOTHING`,
+		`["@playwright/mcp","--headless"]`); err != nil {
+		return fmt.Errorf("seed playwright-cli mcp: %w", err)
+	}
+	if _, err := d.Exec(`
+INSERT INTO agent_visibility(agent_id, resource_kind, resource_id, enabled)
+SELECT a.id, 'mcp', m.id, true FROM agents a
+JOIN mcp_servers m ON m.name='playwright-cli'
+ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("seed playwright-cli mcp visibility: %w", err)
 	}
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
 	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init
