@@ -335,17 +335,19 @@ func (d *DB) InsertGap(taskID int64, kind, detail string) (id int64, inserted bo
 		kind = GapAction
 	}
 	detail = truncateRunesLoop(detail, gapDetailMaxRune)
-	res, ierr := d.Exec(`
+	var newID int64
+	ierr := d.QueryRow(`
 INSERT INTO gaps(task_id, kind, detail) VALUES($1,$2,$3)
-ON CONFLICT (task_id, kind, detail) WHERE status='open' DO NOTHING`,
-		taskID, kind, detail)
-	if ierr != nil {
+ON CONFLICT (task_id, kind, detail) WHERE status='open' DO NOTHING
+RETURNING id`, taskID, kind, detail).Scan(&newID)
+	if ierr == nil {
+		return newID, true, nil // 新 open 行：调用方据此触发唤醒
+	}
+	if !errors.Is(ierr, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("记空缺失败: %w", ierr)
 	}
-	if n, _ := res.RowsAffected(); n == 1 {
-		return 0, true, nil // id 由调用方按需再取；插入成功即足够驱动唤醒
-	}
-	// 撞了 open 去重行：把既有行 id 带回（便于观测；唤醒不触发）。
+	// 撞了 open 去重行（DO NOTHING ⇒ RETURNING 无行）：把既有行 id 带回
+	// （便于观测；唤醒不触发）。
 	var existing int64
 	qerr := d.QueryRow(`SELECT id FROM gaps
 WHERE task_id=$1 AND kind=$2 AND detail=$3 AND status='open' ORDER BY id DESC LIMIT 1`,
