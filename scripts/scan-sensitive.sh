@@ -155,7 +155,19 @@ scan_messages() {
 # 只扫 tip 的树看不见它。一次性导出全部对象，再逐模式 grep 导出文件。
 # ---------------------------------------------------------------------
 scan_history_blobs() {
-	git rev-list --objects --all 2>/dev/null | awk '{print $1}' > "$OBJFILE"
+	# 带参数 = 只扫这些 rev 可达的对象（push 模式用：待推内容及其祖先）；
+	# 不带参数 = 扫全部 ref 可达对象（all 模式用）。
+	#
+	# 为什么 push 模式必须扫到祖先 blob：只扫待推 commit 的**树**看不见祖先里的
+	# 泄漏（内容后来从 tree 删了，历史还在）。2026-11-11 实测：本地 main 这条线
+	# 的 tip 树是干净的，但祖先历史里有 13 处本机拓扑字面量（内网网关地址 + 家目录
+	# 绝对路径）—— 旧版 push 模式放行 ⇒ 泄漏可被推出去。这是**漏检**，比误报危险得多。
+	# （注释里刻意不写具体字面量：扫描器不能成为它要拦的那类泄漏。）
+	if [ "$#" -gt 0 ]; then
+		git rev-list --objects "$@" 2>/dev/null | awk '{print $1}' > "$OBJFILE"
+	else
+		git rev-list --objects --all 2>/dev/null | awk '{print $1}' > "$OBJFILE"
+	fi
 	git cat-file --batch < "$OBJFILE" 2>/dev/null > "$BLOBFILE"
 	while IFS= read -r p; do
 		[ -n "$p" ] || continue
@@ -165,7 +177,13 @@ scan_history_blobs() {
 
 # 历史命中时补一次定位（唯一 tree 逐个 git grep -f，拿到 file:line）。
 attribute_history_hits() {
-	git rev-list --all --format=%T 2>/dev/null | grep -v '^commit' | sort -u | while IFS= read -r t; do
+	if [ "$#" -gt 0 ]; then
+		trees=$(git rev-list "$@" --format=%T 2>/dev/null)
+	else
+		trees=$(git rev-list --all --format=%T 2>/dev/null)
+	fi
+	printf '%s\n' "$trees" | grep -v '^commit' | sort -u | while IFS= read -r t; do
+		[ -n "$t" ] || continue
 		out=$(git grep -I -n -P -f "$PATFILE" "$t" -- 2>/dev/null | sort -u)
 		[ -n "$out" ] || continue
 		printf '%s\n' "$out" | mask | sed "s|^|历史内容定位 [$t]: |" >>"$HITS"
@@ -211,6 +229,10 @@ push)
 		scan_tree_content "$sha"
 	done
 	scan_messages "$@"
+	scan_history_blobs "$@"
+	if [ -s "$HITS" ]; then
+		attribute_history_hits "$@"
+	fi
 	;;
 *)
 	echo "用法: $0 all | tree <rev> | push <sha>..." >&2
