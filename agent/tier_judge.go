@@ -92,6 +92,11 @@ const (
 	CategoryStateChange TierCategory = "state_change"
 	// CategoryEgress 是 Tier 3：出网（数据外带）。
 	CategoryEgress TierCategory = "egress"
+	// CategoryEgressInScope 是 Tier 2 的一种（E1-4，⑩ 已认可口径）：范围内出网——
+	// 出网目的地已判定在本任务范围内时「高危出网」标签虚高，降档标注；未判定/
+	// 越界维持 CategoryEgress（Tier 3）。降的是档位标注不是放行：后续动作仍按
+	// 种类表（出网新主机 auditor 等）走，不经本判定直接放行。
+	CategoryEgressInScope TierCategory = "egress_in_scope"
 	// CategoryScopeExpansion 是 Tier 3：扩权请求本身。
 	CategoryScopeExpansion TierCategory = "scope_expansion"
 	// CategoryProposal 是 Tier 2 的一种：提议级写入（隔离态记录，不影响他人行为）。
@@ -314,6 +319,13 @@ func tierOfActionDecide(a TierAction) TierVerdict {
 		return tier3StateVerdict(st)
 	}
 	if a.Write.Egress {
+		// E1-4（方案 v10 §9，判定精确化/降虚高）：出网分支吃范围状态（TierAction.Scope
+		// 是调用方判过的结论——账本侧取自宿主闸门的 scope_check，不是 agent 可写数据）。
+		// 三态：判定过且在范围内 ⇒ Tier2·范围内出网；未判定 / 越界 ⇒ Tier 3 维持。
+		if a.Scope.Assessed && a.Scope.AssetInScope {
+			return TierVerdict{Tier: Tier2, Category: CategoryEgressInScope,
+				Reason: "范围内出网：目的地已判定在本任务范围内（E1-4 精确化；未判定/越界仍 Tier 3）"}
+		}
 		return tier3Verdict(CategoryEgress, "出网（数据外带）⇒ Tier 3（设计 §4.1：出网治理不完整，必须显式标注）")
 	}
 	if a.Write.ScopeExpansion {
