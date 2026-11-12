@@ -1896,7 +1896,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		emit(a)
 	}
 	label := fmt.Sprintf("%s · #%d", name, iid)
-	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
+	// 第 4 参是 SoD 口径键（E1-5）：审批 pending 行与「同类放行」凭据按它落库，
+	// 与执行器查表端（agent.SodContextReader）逐字节同源；label 仍只管展示。
+	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, agent.SodScopeAgentKey(iid), taskEmit)
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{

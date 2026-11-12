@@ -84,7 +84,7 @@ func TestWorkerReviewContextAcrossToolCalls(t *testing.T) {
 		},
 	})
 	workDir := t.TempDir()
-	ctx := intercept.WithTaskContext(t.Context(), taskID, "test-agent", nil)
+	ctx := intercept.WithTaskContext(t.Context(), taskID, "test-agent", "", nil)
 	ctx = intercept.WithReviewContext(ctx, "/parent", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: "PARENT_BACKGROUND_SENTINEL"})
 	intentPayload := map[string]any{"summary": "创建并清理", "extra": "FULL_INTENT_SENTINEL"}
 	intentID, err := ts.AddNode("intent", intentPayload, 0, "running", "planner", nil)

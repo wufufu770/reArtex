@@ -37,7 +37,7 @@ func seedShortCircuitAsk(t *testing.T, d *db.DB, taskID, agentName, toolName str
 func TestAskBurstExceeded(t *testing.T) {
 	d := openTestDB(t)
 	ic := New(d)
-	ctx := WithTaskContext(context.Background(), "task-1", "worker-1", nil)
+	ctx := WithTaskContext(context.Background(), "task-1", "worker-1", "", nil)
 
 	for i := 0; i < defaultAskBurstThreshold; i++ {
 		seedShortCircuitAsk(t, d, "task-1", "worker-1", "update_custom_tool")
@@ -58,7 +58,7 @@ func TestAskBurstExceeded(t *testing.T) {
 func TestAskBurstIgnoresOldRequests(t *testing.T) {
 	d := openTestDB(t)
 	ic := New(d)
-	ctx := WithTaskContext(context.Background(), "task-2", "worker-2", nil)
+	ctx := WithTaskContext(context.Background(), "task-2", "worker-2", "", nil)
 
 	for i := 0; i < defaultAskBurstThreshold; i++ {
 		seedShortCircuitAsk(t, d, "task-2", "worker-2", "update_custom_tool")
@@ -77,7 +77,7 @@ func TestAskBurstIgnoresOldRequests(t *testing.T) {
 func TestAskBurstIgnoresRuleSourcedAsks(t *testing.T) {
 	d := openTestDB(t)
 	ic := New(d)
-	ctx := WithTaskContext(context.Background(), "task-3", "worker-3", nil)
+	ctx := WithTaskContext(context.Background(), "task-3", "worker-3", "", nil)
 
 	for i := 0; i < defaultAskBurstThreshold+2; i++ {
 		if _, err := d.CreateInterceptPending(0, 0, "task-3", "worker-3", "update_custom_tool", []byte(`{}`), "[模型] 需要判断"); err != nil {
@@ -93,7 +93,7 @@ func TestAskBurstIgnoresRuleSourcedAsks(t *testing.T) {
 func TestAskBurstThresholdIsConfigurable(t *testing.T) {
 	d := openTestDB(t)
 	ic := New(d)
-	ctx := WithTaskContext(context.Background(), "task-4", "worker-4", nil)
+	ctx := WithTaskContext(context.Background(), "task-4", "worker-4", "", nil)
 
 	seedShortCircuitAsk(t, d, "task-4", "worker-4", "update_custom_tool")
 	if ic.AskBurstExceeded(ctx, "update_custom_tool") {

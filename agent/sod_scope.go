@@ -57,16 +57,24 @@ func SodContextReader(ctx context.Context) sod.RunContext {
 	}
 }
 
-// sodScopeAgentKey 算出 SoD 四元组里的 agent_key 分量。
+// sodScopeAgentKey 算出 SoD 四元组里的 agent_key 分量（口径见 SodScopeAgentKey）。
+func sodScopeAgentKey(ri RunInfo) string { return SodScopeAgentKey(ri.IntentID) }
+
+// SodScopeAgentKey 是 SoD agent_key 分量的**唯一构造口径**，形如 "worker#<意图id>"。
 //
-// 形态 "worker#<意图id>"：同任务里两个并发 worker 会同时跑同一个工具、载荷也可能
+// 为什么必须全仓共用这一个函数：E1-5 事故——写端（人工改判凭据落库）曾用展示
+// 标签 "worker · #42"，查端（执行器查表）用本口径 "worker#42"，两边逐字节不同
+// ⇒ 「同类放行」的凭据永远查不到，第 2 次同类调用照旧弹审批。chain.go 的约定
+// 是 agent 分量两端**逐字节相同**，唯一保证法就是两边调同一个函数。
+//
+// 形态为什么带意图 id：同任务两个并发 worker 会同时跑同一个工具、载荷也可能
 // 相同（同样一条 ls）⇒ 若 agent_key 都是 "worker"，四元组撞车 ⇒ 后铸的凭证作废
 // 先铸的 ⇒ 先到的执行被误拒。带意图 id 即可区分。
 //
 // 为什么审计账本里也要能看出是谁：sod_decisions.source_agent 记的就是这个值。
-func sodScopeAgentKey(ri RunInfo) string {
-	if ri.IntentID <= 0 {
+func SodScopeAgentKey(intentID int64) string {
+	if intentID <= 0 {
 		return ""
 	}
-	return "worker#" + strconv.FormatInt(ri.IntentID, 10)
+	return "worker#" + strconv.FormatInt(intentID, 10)
 }
