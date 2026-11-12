@@ -59,6 +59,9 @@ type sodDecisionDTO struct {
 	AnomalyFlag    bool            `json:"anomaly_flag"`
 	AnomalyReason  string          `json:"anomaly_reason"`
 	Checks         json.RawMessage `json:"checks"`
+	// E1-2：改判标记从 checks 提升为便捷字段（非空 = 这条放行带人工改判），
+	// 决策账本页据此打徽标——此前只有治理 tab 与大屏渲染它。
+	Overridden string `json:"overridden"`
 	TokenDigest    string          `json:"token_digest"`
 	ScopeDigest    string          `json:"scope_digest"`
 	CacheHit       bool            `json:"cache_hit"`
@@ -184,6 +187,13 @@ func sodDecisionDTOOf(d *db.SoDDecision) sodDecisionDTO {
 	}
 	if len(out.Checks) == 0 {
 		out.Checks = json.RawMessage(`{}`)
+	}
+	// E1-2：checks.manual_override 非空 ⇒ 这条放行来自人工改判。
+	if len(d.Checks) > 0 {
+		var checks map[string]string
+		if json.Unmarshal(d.Checks, &checks) == nil {
+			out.Overridden = checks["manual_override"]
+		}
 	}
 	return out
 }

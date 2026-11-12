@@ -132,7 +132,7 @@ function FeedRow({ row }: { row: SodFeedRow }) {
             利用价值 {row.relevance}
           </span>
         )}
-        {row.note && <span className="truncate text-muted-foreground">{row.note}</span>}
+        {row.anomaly_reason && <span className="truncate text-muted-foreground">{row.anomaly_reason}</span>}
       </div>
     </div>
   );
