@@ -1,3 +1,5 @@
+**reArtex v0.11.1** —— P0 幻觉收口缺口根治。planner 不再能登记漏洞（实测 LLM 零执行即编造漏洞并 20 秒假完成）；goalless 收尾加零产出守卫（无 fact/finding 不落 done，转暂停等人确认）。对升级用户无破坏性。
+
 **reArtex v0.11.0** —— 治理面收口 + 现场事故根治 + 报告中心。对运行用户升级无破坏性：schema 幂等自动应用；唯一行为变化是 `llm_pool_enabled` 默认翻开（多 profile 故障/额度耗尽自动落链；单 profile 与直连等价）。
 
 ## 新功能

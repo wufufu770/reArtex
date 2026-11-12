@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.11.1] - 2026-11-13
+
+### 修复（P0：幻觉收口缺口）
+- **planner 不再能登记漏洞**：planner 工具面移除 report_finding——LLM 可在未执行任何工具的情况下凭空登记编造的漏洞并宣布完成（复测实证：20 秒假完成）。规划者的发现一律走 add_intent / 交 worker 验证登记。
+- **planner 补 findingValidator 接线**（防御双保险）。
+- **goalless 零产出守卫**：直投任务抽干但探索图无任何 fact/finding 时不落 done，转自动暂停等人确认。
+- 附带：绑定快照同步；db 新增 CountKindsUnscoped（不经 scope 过滤的客观产出计数，排除 origin 根）。
+
 ## [0.11.0] - 2026-11-12
 
 跨过 v0.9.16 → v0.10.x 的一个大版本：治理面收口 + 现场事故根治 + 两个新功能面（报告中心/消息化）。**升级无破坏性**：schema 全部幂等、启动期自动应用；`llm_pool_enabled` 默认翻开（行为变化见下）。
