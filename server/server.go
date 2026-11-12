@@ -352,6 +352,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if m.pg != nil {
 		WireGroupMailbox(m.pg)
 		WireSessionContext(m.pg)
+		// T7（方案 v10 §6 三期）：web_search 出网目的地判定装进 vendored SDK 的
+		// 请求前钩子——此前 InstallWebSearchScope 仅测试调用 ⇒ web_search 出网
+		// 既无范围判定也无留痕。*db.DB 满足 EgressAuditWriter（AppendAuditEvent）。
+		traffic.InstallWebSearchScope(traffic.NewWebSearchScope(m.pg))
 	}
 	// precedence: persisted DB config > env.
 	if cfg, ok := s.loadLLMConfig(); ok {
@@ -608,6 +612,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
+	s.chatAgent.SetGroupMailbox(s.m.pg) // W1：显式持信箱句柄（nil 时 chat 侧回退 DefaultGroupMailbox，同源同值）
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
 	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
@@ -905,6 +910,7 @@ func (s *Server) chatAgentForProfileModel(id int64, model string) *agent.ChatAge
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
+	ca.SetGroupMailbox(s.m.pg) // W1：与全局 chat runner 同款显式信箱接线
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	ca.SetMaxTokens(maxTokensResolver(cfg))
 	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)

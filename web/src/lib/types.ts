@@ -1710,12 +1710,26 @@ export interface TaskHallMember {
   joined_at: string;
 }
 
+// TaskHallStatus 是后端纯函数算出的大厅整体状态（db.ComputeTaskHallStatus）：
+// level 是档位、summary 是一句话人话，blocked_members 列出卡住的成员。
+export interface TaskHallStatus {
+  group_id: number;
+  task_id: number;
+  group_status: string;
+  level: string;
+  summary: string;
+  blocked_members: string[];
+  computed_at: string;
+}
+
 // TaskHallGroupDetail 是群详情：群本体 + 成员 + 群内禁列表 + 消息箱计数。
 export interface TaskHallGroupDetail extends TaskHallGroup {
   members: TaskHallMember[];
   // disabled_tools 是**禁列表**：出现的 key 就是被禁用的（表里没有 enabled 列 ⇒ 只能收紧）。
   disabled_tools: Record<string, boolean>;
   message_count: number;
+  // status 是语义化整体状态；后端算不出时缺省（详情不被状态计算拖垮）。
+  status?: TaskHallStatus | null;
 }
 
 // TaskHallRow 是 /task-hall/tasks 的一行：一个已发布的大厅（带成员与额度上限）。
