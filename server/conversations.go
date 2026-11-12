@@ -556,6 +556,10 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 // (empty on early bail-outs) plus the run error, if any. The session waker mirrors
 // the text back into the group stream; the chat path discards it.
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) (string, error) {
+	log.Printf("[chat] conv %d turn 开始 agent=%s busy=%s", c.ID, c.AgentKey, busyKey)
+	defer func() {
+		log.Printf("[chat] conv %d turn 结束", c.ID)
+	}()
 	// v0.11.2（「群聊发命令没人认领」根因之二）：把会话的任务身份放进 ctx——群成员
 	// 会话经 chat_group_members 绑定到群/任务，但此前 server 侧从不注入 RunInfo ⇒
 	// chat turn 的 TaskID 恒零 ⇒ 成员被唤醒也反查不到群（collectGroupMailbox 收空）、
