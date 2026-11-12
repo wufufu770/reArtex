@@ -378,7 +378,10 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	// E1-7：评级基准进 planner 系统提示词——规划者做态势研判、可经 report_finding
+	// 直接登记发现（与 worker 同工具），判级标准同样要在它的视野里（唯一语义源见
+	// rating_baseline.go）。
+	return body + artifactSpec(workDir) + RatingBaselineDoc
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution
