@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Autumn-27/artex/internal/ingestsanitize"
 )
 
 const (
@@ -265,6 +267,13 @@ func (s *AssetStore) AttachAssetsToTask(taskID int64, assetIDs []int64, sourceSu
 	}
 	if sourceSummary == "" {
 		return mutation, fmt.Errorf("%w: source_summary is required", ErrTaskAssetInvalid)
+	}
+	// T7（方案 v10 §6 三期）：来源摘要是自由文本，会随资产视图进入其他任务/成员
+	// 的视野——出口过消毒链（fail-closed：HIGH 拒挂；SOFT 消毒放行）。
+	if clean, action, err := ingestsanitize.Sanitize("attach_assets", []byte(sourceSummary)); action == ingestsanitize.ActionDropped {
+		return mutation, fmt.Errorf("source_summary 命中注入特征被拦截: %w", err)
+	} else {
+		sourceSummary = string(clean)
 	}
 	mutation.Requested = len(assetIDs)
 	tx, err := s.db.Begin()
