@@ -1779,6 +1779,35 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// ⚠️ profile 回填必须在 ConfigFrom **之前**（v0.11.0 缺陷）：只传 profile_id 时
+	// provider/model/base_url 全空 ⇒ ConfigFrom 落到官方端点 ⇒ Minimax 等自定义
+	// 端点的 key 被官方拒 401——「测试失败」实为「测错了地方」。
+	if req.ProfileID != nil {
+		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+			if req.Provider == "" {
+				req.Provider = p.Format
+			}
+			if req.Model == "" {
+				req.Model = p.Model
+			}
+			if req.BaseURL == "" {
+				req.BaseURL = p.BaseURL
+			}
+			if req.Streaming == nil {
+				st := p.Streaming
+				req.Streaming = &st
+			}
+			if req.ThinkingType == "" {
+				req.ThinkingType = p.ThinkingType
+			}
+			if req.ReasoningEffort == "" {
+				req.ReasoningEffort = p.ReasoningEffort
+			}
+			if req.SessionHeaderKey == "" {
+				req.SessionHeaderKey = p.SessionHeaderKey
+			}
+		}
+	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
