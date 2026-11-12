@@ -98,6 +98,9 @@ import type {
   SodDecision,
   SodFeed,
   SodHookChain,
+  ReportCandidate,
+  ReportFull,
+  ReportMeta,
   SodMergedGateMode,
   SodManualOverrideRow,
   SodReviewItem,
@@ -527,6 +530,34 @@ export const api = {
     const a = document.createElement("a");
     a.href = objUrl;
     a.download = path.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objUrl);
+  },
+
+  // ---- 报告中心（/system/reports）----
+  reports: () => get<{ reports: ReportMeta[]; count: number }>("/reports").then((r) => r.reports ?? []),
+  reportGet: (id: number) => get<ReportFull>(`/reports/${id}`),
+  createReport: (title: string, content = "") =>
+    post<{ id: number }>("/reports", { title, content }),
+  updateReport: (id: number, patch: { title?: string; content?: string }) =>
+    put<{ ok: boolean }>(`/reports/${id}`, patch),
+  deleteReport: (id: number) => del<{ ok: boolean }>(`/reports/${id}`),
+  reportsDiscover: () =>
+    get<{ items: ReportCandidate[]; count: number }>("/reports/discover").then((r) => r.items ?? []),
+  importReport: (path: string) => post<{ id: number; title: string }>("/reports/import", { path }),
+  reportDownload: async (id: number, title: string) => {
+    const token = getToken();
+    const r = await fetch(`/api/reports/${id}/download`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    });
+    if (!r.ok) throw new Error(`下载失败: ${r.status}`);
+    const blob = await r.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = `${title || "report"}.md`;
     document.body.appendChild(a);
     a.click();
     a.remove();

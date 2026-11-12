@@ -2295,3 +2295,37 @@ export interface LegacyNode {
   reviewed_at?: string | null;
   reviewed_by?: string;
 }
+
+// ---- 报告中心（/system/reports）----
+
+// ReportMeta 是报告列表行（不带正文）。
+export interface ReportMeta {
+  id: number;
+  title: string;
+  task_id?: number;
+  source_path?: string;
+  size: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ReportFull 是整篇（编辑器/查看用）。
+export interface ReportFull {
+  id: number;
+  title: string;
+  task_id?: number;
+  source_path?: string;
+  content: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ReportCandidate 是「从工作空间导入」的候选文件/目录一行。
+export interface ReportCandidate {
+  path: string;
+  name: string;
+  size?: number;
+  is_dir?: boolean;
+}
