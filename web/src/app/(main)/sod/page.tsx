@@ -27,7 +27,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
-import type { SodDecision, SodDecisionLedger, Task } from "@/lib/types";
+import type { SodDecision, SodDecisionLedger, SodManualOverrideRow, Task } from "@/lib/types";
 
 import { ChainStatusCard } from "./_components/chain-status-card";
 import { fmtDateTime, fmtDigest, fmtLatency, SOD_LIMIT_OPTIONS, sodScopeLabel } from "./_components/sod-format";
@@ -154,6 +154,16 @@ function DecisionRow({
           <div className="flex max-w-[14rem] flex-wrap items-center gap-1">
             <StatusBadge domain="sodVerdict" value={row.verdict} dot />
             <StatusBadge domain="sodReason" value={row.reason_code} />
+            {/* E1-2：改判放行行在账本页同样可见（此前只有治理 tab 与大屏有徽标）。 */}
+            {row.overridden && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/30 bg-amber-500/10 px-1.5 py-0 text-[10px] text-amber-600 dark:text-amber-400"
+                title={"人工改判标记：" + row.overridden}
+              >
+                人工改判
+              </Badge>
+            )}
             {row.anomaly_flag && (
               <Badge variant="outline" className="px-1.5 py-0 text-[10px]" title={row.anomaly_reason}>
                 异常
@@ -370,6 +380,9 @@ export default function SodLedgerPage() {
       <SodSuggestionCard />
       <SodShadowCard />
 
+      {/* E1-2 收尾：改判凭据与账本同屏（api.sodOverrides 此前零消费者）。 */}
+      <RecentOverridesCard taskId={taskID === ALL_TASKS ? undefined : Number(taskID)} />
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card size="sm" className="gap-1">
           <CardContent>
@@ -558,5 +571,81 @@ export default function SodLedgerPage() {
         看，但那张队列是给 redteam 证伪用的，不是人点头的地方。
       </p>
     </div>
+  );
+}
+
+// RecentOverridesCard 是「最近人工改判」卡（E1-2 收尾）：api.sodOverrides 此前
+// 零消费——改判凭据只藏在治理 tab 和大屏统计里，账本页看不见「谁放行了什么」。
+// 本卡消费它，与账本表同屏：改判凭据（同类通配/单次）与它放出来的决策行对照看。
+function RecentOverridesCard({ taskId }: { taskId?: number }) {
+  const [rows, setRows] = React.useState<SodManualOverrideRow[]>([]);
+  const [loaded, setLoaded] = React.useState(false);
+
+  React.useEffect(() => {
+    let alive = true;
+    const loadOnce = () =>
+      api
+        .sodOverrides(taskId)
+        .then((r) => {
+          if (alive) setRows(r.overrides ?? []);
+        })
+        .catch(() => {
+          if (alive) setRows([]);
+        })
+        .finally(() => {
+          if (alive) setLoaded(true);
+        });
+    void loadOnce();
+    const t = setInterval(loadOnce, POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [taskId]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">最近人工改判</CardTitle>
+        <CardDescription>
+          ask 批准签发的放行凭据 · task_tool=本任务同类通配（随任务终态过期）· once=单次用后即焚
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {!loaded ? (
+          <p className="py-4 text-center text-muted-foreground text-sm">加载中…</p>
+        ) : rows.length === 0 ? (
+          <p className="text-muted-foreground text-sm">
+            没有生效中的人工改判凭据——ask 拦截都在等人点头，没有「同类放行」在免问。
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {rows.map((o) => (
+              <div key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md border px-2.5 py-1.5 text-sm">
+                <Badge
+                  variant="outline"
+                  className={
+                    o.scope === "task_tool"
+                      ? "border-amber-500/30 bg-amber-500/10 px-1.5 py-0 text-[10px] text-amber-600 dark:text-amber-400"
+                      : "px-1.5 py-0 text-[10px]"
+                  }
+                >
+                  {o.scope === "task_tool" ? "同类通配" : o.scope === "once" ? "单次" : o.scope}
+                </Badge>
+                <span className="font-mono text-xs">{o.tool_key}</span>
+                <span className="text-muted-foreground text-xs">{o.agent_key || "—"}</span>
+                <span className="text-muted-foreground max-w-[24rem] truncate text-xs" title={o.reason}>
+                  {o.reason || "（无理由）"}
+                </span>
+                <span className="text-muted-foreground text-xs tabular-nums">已用 {o.use_count} 次</span>
+                <span className="text-muted-foreground ml-auto text-xs tabular-nums">
+                  {o.created_by} · {fmtDateTime(o.created_at)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

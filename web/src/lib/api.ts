@@ -99,6 +99,7 @@ import type {
   SodFeed,
   SodHookChain,
   SodMergedGateMode,
+  SodManualOverrideRow,
   SodReviewItem,
   SSProject,
   SSTask,
@@ -988,9 +989,9 @@ export const api = {
       override_count_same_tool: number;
       suggest_trust_rule: boolean;
     }>(`/sod/decisions/${id}/review`, body),
-  // 人工改判历史（职责分离页复核历史过滤）。
+  // 人工改判历史（职责分离页复核历史过滤 + 决策账本页「最近改判」卡）。
   sodOverrides: (taskId?: number) =>
-    get<{ overrides: unknown[]; count: number }>(`/sod/overrides${taskId ? `?task_id=${taskId}` : ""}`),
+    get<{ overrides: SodManualOverrideRow[]; count: number }>(`/sod/overrides${taskId ? `?task_id=${taskId}` : ""}`),
   // 评审经验：accepted 可带 override+reason 越级（三门未过时后端 409 返回
   // missing_gates + override_required——手工 fetch 是为了把 409 body 里的
   // 结构化缺门明细透传给评审弹窗，通用 http 助手只保留 error 字符串）。

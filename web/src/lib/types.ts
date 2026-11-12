@@ -1944,6 +1944,8 @@ export interface SodDecision {
   anomaly_reason: string;
   // checks 是闸门记下的各道检查结论（不透明 JSON，按原样展示）。
   checks: unknown;
+  // E1-2：非空 = 这条放行带人工改判标记（checks.manual_override），账本页徽标展示。
+  overridden?: string;
   cache_hit: boolean;
   latency_ms: number;
   created_at: string;
@@ -2056,7 +2058,8 @@ export interface SodFeedRow {
   category: string;
   auditor: string;
   relevance: string;
-  note: string;
+  // E1-3：字段名与账本真实列对齐——后端原来借「note」装 anomaly_reason 的内容。
+  anomaly_reason: string;
   // E1-2：非空 = 这条放行带人工改判标记（checks.manual_override），大屏徽标展示。
   overridden?: string;
 }
@@ -2117,6 +2120,24 @@ export interface SodGovernanceOverride {
   reason: string;
   created_by: string;
   payload_digest: string;
+}
+
+// SodManualOverrideRow 是 GET /api/sod/overrides 的一行（db.SodManualOverride 原样投影，
+// 字段名带 _key 后缀，与治理 tab 的聚合投影 SodGovernanceOverride 不同）。
+export interface SodManualOverrideRow {
+  id: number;
+  decision_id: number;
+  payload_digest: string;
+  tool_key: string;
+  task_id: number;
+  agent_key: string;
+  scope: string;
+  reason: string;
+  created_by: string;
+  created_at: string;
+  expires_at?: string | null;
+  use_count: number;
+  last_used_at?: string | null;
 }
 
 // SodSystemEvent 是本任务的系统事件一行（B6 升级 / LLM 故障转移等，worker=system 或

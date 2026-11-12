@@ -27,7 +27,9 @@ type sodFeedRow struct {
 	Category   string            `json:"category"`
 	Auditor    string            `json:"auditor"`
 	Relevance  string            `json:"relevance"`
-	Note       string            `json:"note"`
+	// E1-3：字段名与账本真实列对齐（anomaly_reason=行级异常理由）。此前借
+	// 「note」这个名字装 anomaly_reason 的内容，看 API 的人会去找不存在的 note 列。
+	AnomalyReason string            `json:"anomaly_reason"`
 	// E1-2（方案 v10 §9）：改判放行行在大屏可见——checks 里带 manual_override 标记。
 	Overridden string            `json:"overridden"`
 	Checks     map[string]string `json:"-"`
@@ -46,7 +48,7 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	recent, err := pg.Query(`
 		SELECT id, to_char(created_at,'HH24:MI:SS'), COALESCE(source_agent,''), tool_name, verdict,
 		       COALESCE(reason_code,''), COALESCE(checks->>'category',''), COALESCE(checks->>'auditor',''),
-		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(anomaly_reason,120),''),
+		       COALESCE(checks->>'exploit_relevance',''), COALESCE(left(anomaly_reason,400),''),
 		       COALESCE(checks->>'manual_override','')
 		FROM sod_decisions ORDER BY id DESC LIMIT 50`)
 	if err != nil {
@@ -58,7 +60,7 @@ func (s *Server) sodFeed(w http.ResponseWriter, r *http.Request) {
 	for recent.Next() {
 		var r sodFeedRow
 		if err := recent.Scan(&r.ID, &r.ToChar, &r.Agent, &r.Tool, &r.Verdict,
-			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.Note, &r.Overridden); err != nil {
+			&r.ReasonCode, &r.Category, &r.Auditor, &r.Relevance, &r.AnomalyReason, &r.Overridden); err != nil {
 			writeErr(w, 500, "读实时裁决流行失败: "+err.Error())
 			return
 		}
