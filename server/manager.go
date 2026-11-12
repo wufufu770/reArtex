@@ -540,14 +540,17 @@ func (m *Manager) SetNoaCompaction(on bool) error {
 	return m.pg.SetBool(settingNoaCompaction, on)
 }
 
-// LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认关；
-// settings.llm_pool_enabled). Read when the provider chain is built (applyLLM),
+// LLMPoolEnabled reports whether LLM failover ("轮询") is on (默认开：
+// 单 profile 时链长 1 与直连等价；多 profile 时故障/额度耗尽自动落到链上下一档，
+// 这正是额度耗尽任务停摆事故的解药，不该等人在设置里翻开关。绑定回退
+// （llm_pool_bind_fallback）仍默认关——绑定即独占的语义不变。
+// settings.llm_pool_enabled。Read when the provider chain is built (applyLLM),
 // so a change requires a rebuild — putSettings does that.
 func (m *Manager) LLMPoolEnabled() bool {
 	if m.pg == nil {
 		return false
 	}
-	return m.pg.GetBool(settingLLMPoolOn, false)
+	return m.pg.GetBool(settingLLMPoolOn, true)
 }
 
 // SetLLMPoolEnabled persists the failover toggle. Callers rebuild agents
