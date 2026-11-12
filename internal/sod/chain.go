@@ -187,6 +187,39 @@ func (t *degradeTracker) recordAvailable(enabled func() bool, onChange func(bool
 type Chain struct {
 	inner harness.HookRunner
 	deps  ChainDeps
+	// recentDenied 记录「刚被本链拒绝的 (tool|digest)」→ 过期时刻。
+	//
+	// 为什么要有：治理拒绝不是工具故障。PostToolUse 只看 isErr，链 deny 后 SDK
+	// 回传的错误也会 isErr=true ⇒ 拒绝被喂进熔断计数 ⇒ normalizer 故障 ⇒ 全 deny
+	// ⇒ deny 又加速熔断 ⇒ 正常工具被整只拉黑（v0.11.0 E2E 实证的恶性循环）。
+	// 治理拒绝只审计、不计熔断；真正执行了且执行层出错才计数。
+	recentDenied sync.Map // map[string]time.Time
+}
+
+// noteDeniedByName 标记「这次调用被链拒绝了」（2 分钟窗口，足够覆盖 SDK 回调）。
+func (c *Chain) noteDeniedByName(tool, payloadDigest string) {
+	if payloadDigest == "" {
+		return
+	}
+	c.recentDenied.Store(tool+"|"+payloadDigest, time.Now().Add(2*time.Minute))
+}
+
+// deniedRecently 报告这次调用是否刚被链拒绝（是 ⇒ 不喂熔断）。
+func (c *Chain) deniedRecently(tool string, input []byte) bool {
+	digest := CanonicalDigest(input)
+	if digest == "" {
+		return false
+	}
+	key := tool + "|" + digest
+	v, ok := c.recentDenied.Load(key)
+	if !ok {
+		return false
+	}
+	if ts, ok := v.(time.Time); ok && time.Now().Before(ts) {
+		return true
+	}
+	c.recentDenied.Delete(key)
+	return false
 }
 
 // ChainDeps 是链的依赖装配。
@@ -567,9 +600,11 @@ func (c *Chain) finalize(ctx context.Context, call chainCall, out GateOutput, no
 		// （审计器在 Record 里入队），并即时通知 redteam。
 		c.record(ctx, rec)
 		c.notifyReview(ctx, rec, intentJSON)
+		c.noteDeniedByName(call.toolName, call.payloadDigest)
 		return true, blockMessage(rec), nil
 	default: // deny
 		c.record(ctx, rec)
+		c.noteDeniedByName(call.toolName, call.payloadDigest)
 		return true, blockMessage(rec), nil
 	}
 }
@@ -577,7 +612,10 @@ func (c *Chain) finalize(ctx context.Context, call chainCall, out GateOutput, no
 // PostToolUse 记工具成败（喂熔断计数），并转发给 inner。
 func (c *Chain) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
 	if c.deps.DB != nil && GatedTool(name) {
-		if err := c.deps.DB.RecordToolCallOutcome(name, isErr); err != nil {
+		// 治理拒绝（本次调用根本没执行）不喂熔断：只有真执行了的失败才计数。
+		if c.deniedRecently(name, input) {
+			c.recentDenied.Delete(name + "|" + CanonicalDigest(input))
+		} else if err := c.deps.DB.RecordToolCallOutcome(name, isErr); err != nil {
 			log.Printf("[sod] 记录工具调用结果失败: tool=%s err=%v", name, err)
 		}
 	}
@@ -718,6 +756,8 @@ func (c *Chain) deny(ctx context.Context, call chainCall, reasonCode, note strin
 		LatencyMs:      int(time.Since(call.started) / time.Millisecond),
 	}
 	c.record(ctx, rec)
+	// 治理拒绝不计熔断（见 Chain.recentDenied）。
+	c.noteDeniedByName(call.toolName, call.payloadDigest)
 	return true, blockMessage(rec), nil
 }
 
