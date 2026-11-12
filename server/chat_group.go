@@ -531,6 +531,7 @@ func (s *Server) wakeHallAgent(group *db.ChatGroup, convID int64, agentKey, trig
 		}
 		text = strings.TrimSpace(text)
 		if text == "" {
+			log.Printf("[task-hall] 群 %d 唤醒 %s 的轮已结束但回复为空（查看 conv %d 的 transcript/活动定位 turn 内部行为）", group.ID, agentKey, convID)
 			return
 		}
 		if _, err := s.m.pg.AddChatGroupMessage(&db.ChatGroupMessage{
