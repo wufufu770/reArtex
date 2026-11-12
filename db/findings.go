@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -840,4 +841,76 @@ WHERE f.task_id=$1 AND f.node_id IS NOT NULL`, taskID)
 		out[nid] = m
 	}
 	return out, rows.Err()
+}
+
+// ---------- E1-7 存量重评（评级基准显式化后的收尾） ----------
+//
+// 背景：severity 枚举校验与 info 档是 v0.10.1 才上的——此前的存量行里有
+// ① 乱值 severity（当时的透传通道）②「纯信息泄露却给了 low/medium」的虚高行。
+// 这里只出**候选**不改库：应用走 SetFindingSeverity，apply=true 由人拍板。
+
+// RerateCandidate 是一条重评候选：Current→Proposed 的改法与触发规则。
+type RerateCandidate struct {
+	ID        int64  `json:"id"`
+	TaskID    int64  `json:"task_id"`
+	VulnClass string `json:"vulnclass"`
+	Name      string `json:"name"`
+	Current   string `json:"current"`
+	Proposed  string `json:"proposed"`
+	Rule      string `json:"rule"`
+}
+
+// rerateCredentialRe 是「凭据/利用链特征」标记：命中其一 ⇒ 这条 info_disclosure
+// 可能真有升级链，**不**进候选（留给人工/复核判——确定性层只收无争议的）。
+var rerateCredentialRe = regexp.MustCompile(
+	`(?i)(password|passwd|pwd=|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|cookie|sessionid|jwt|authorization|注入成功|接管|rce|shell|凭据|口令|密码|利用链)`)
+
+// rerateMaxRows 单次重评扫描的上限（无界扫描没有意义：候选是给人看的）。
+const rerateMaxRows = 500
+
+// RerateFindingCandidates 列出评级基准（E1-7）下需要重评的存量 finding 候选：
+// ① severity 乱值（不在枚举内）→ info（无判级依据，只能落信息级）；
+// ② 纯信息泄露（vulnclass=info_disclosure）且现级 > info，且证据/摘要均无
+//    凭据链特征 → info（基准：纯信息泄露与暴露类一律 info）。
+// taskID>0 时只扫该任务。只读，不改任何行。
+func (d *DB) RerateFindingCandidates(taskID int64) ([]RerateCandidate, error) {
+	q := `SELECT id, COALESCE(task_id,0), COALESCE(vulnclass,''), COALESCE(name,''), severity,
+		     COALESCE(summary,''), COALESCE(evidence,'')
+		FROM findings`
+	args := []any{}
+	if taskID > 0 {
+		q += ` WHERE task_id=$1`
+		args = append(args, taskID)
+	}
+	q += fmt.Sprintf(` ORDER BY id LIMIT %d`, rerateMaxRows)
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RerateCandidate{}
+	for rows.Next() {
+		var c RerateCandidate
+		var summary, evidence string
+		if err := rows.Scan(&c.ID, &c.TaskID, &c.VulnClass, &c.Name, &c.Current, &summary, &evidence); err != nil {
+			return nil, err
+		}
+		if proposed, rule := reratePropose(c.VulnClass, c.Current, summary, evidence); rule != "" {
+			c.Proposed, c.Rule = proposed, rule
+			out = append(out, c)
+		}
+	}
+	return out, rows.Err()
+}
+
+// reratePropose 按确定性规则给改评建议；rule 为空 = 不需要重评。
+func reratePropose(vulnclass, severity, summary, evidence string) (proposed, rule string) {
+	if !ValidSeverity(severity) {
+		return SeverityInfo, "severity 乱值（历史行早于枚举校验），无判级依据 → info"
+	}
+	if vulnclass == "info_disclosure" && severity != SeverityInfo &&
+		!rerateCredentialRe.MatchString(summary) && !rerateCredentialRe.MatchString(evidence) {
+		return SeverityInfo, "纯信息泄露且证据/摘要未见凭据或利用链特征 → info（E1-7：一律 info）"
+	}
+	return "", ""
 }
