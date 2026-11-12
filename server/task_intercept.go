@@ -75,7 +75,17 @@ func (s *Server) taskInterceptListRules(w http.ResponseWriter, r *http.Request) 
 	if rules == nil {
 		rules = []db.AssetInterceptRule{}
 	}
-	writeJSON(w, 200, map[string]any{"rules": rules})
+	// W11②：命令级规则（证据保全策略装的 command_regex）单列一份——前端据此打
+	// 「证据保全·不可改」徽标（这类规则是安全控制本身，CRUD 侧 guard 拒改）。
+	// 无规则不报错：空数组照常返回。
+	commandRules, err := pg.Assets().ListTaskCommandRules(taskID)
+	if err != nil {
+		commandRules = []db.AssetInterceptRule{}
+	}
+	if commandRules == nil {
+		commandRules = []db.AssetInterceptRule{}
+	}
+	writeJSON(w, 200, map[string]any{"rules": rules, "command_rules": commandRules})
 }
 
 func (s *Server) taskInterceptCreateRule(w http.ResponseWriter, r *http.Request) {

@@ -1283,30 +1283,42 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                   >
                     {r.action === "allow" ? "允许" : "拦截"}
                   </span>
-                  <span className="text-muted-foreground shrink-0 text-xs">{TASK_RULE_KIND_LABEL[r.kind]}</span>
+                  <span className="text-muted-foreground shrink-0 text-xs">
+                    {TASK_RULE_KIND_LABEL[r.kind] ?? (r.kind === "command_regex" ? "命令级" : r.kind)}
+                  </span>
                   <code className="bg-muted min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-xs">{r.pattern}</code>
                   {r.note && (
                     <span className="text-muted-foreground max-w-[120px] shrink-0 truncate text-xs">{r.note}</span>
                   )}
-                  <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy}
-                    onClick={() => startEdit(r)}
-                  >
-                    <PencilIcon className="size-3.5" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 shrink-0 px-1.5"
-                    disabled={busy}
-                    onClick={() => void remove(r)}
-                  >
-                    <Trash2Icon className="size-3.5 text-red-500" />
-                  </Button>
+                  {r.kind === "command_regex" ? (
+                    // W11②：命令级规则是任务的安全控制本身（证据保全策略装的）——
+                    // 只读展示 + 锁标，不提供启停/编辑/删除（API 侧同样拒改）。
+                    <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-xs">
+                      <ShieldCheckIcon className="size-3.5 text-sky-500" /> 证据保全 · 不可改
+                    </span>
+                  ) : (
+                    <>
+                      <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 shrink-0 px-1.5"
+                        disabled={busy}
+                        onClick={() => startEdit(r)}
+                      >
+                        <PencilIcon className="size-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 shrink-0 px-1.5"
+                        disabled={busy}
+                        onClick={() => void remove(r)}
+                      >
+                        <Trash2Icon className="size-3.5 text-red-500" />
+                      </Button>
+                    </>
+                  )}
                 </div>
               ),
             )}

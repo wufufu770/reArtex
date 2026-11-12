@@ -1343,7 +1343,10 @@ export type AssetInterceptKind =
   | "fuzzy_domain"
   | "fuzzy_ip"
   | "fuzzy_url"
-  | "cidr";
+  | "cidr"
+  // command_regex 是证据保全策略装的命令级规则（W11②）：安全控制本身，API/UI
+  // 均不提供新建与改写入口，列表里只读展示。
+  | "command_regex";
 
 // action 仅用于任务级规则：block=拦截(禁止测试) allow=允许(白名单)。
 export type AssetInterceptAction = "block" | "allow";
@@ -2150,6 +2153,19 @@ export interface SodHookChainReadonly {
 export interface SodHookChain {
   editable: SodHookChainEditable[];
   readonly: SodHookChainReadonly[];
+  // categories 是 sod_categories 表的实读快照（E1-8 实况化）：种类→动作/cap/启停。
+  categories?: SodHookCategory[] | null;
+}
+
+// SodHookCategory 是生效种类表的一行（后端 best-effort 实读；读不出时缺省）。
+export interface SodHookCategory {
+  name: string;
+  action: string;
+  cap_per_task: number;
+  enabled: boolean;
+  locked: boolean;
+  priority: number;
+  reason: string;
 }
 
 // AuditEvent 是 audit_events 哈希链的一条明细（GET /api/audit/events）。

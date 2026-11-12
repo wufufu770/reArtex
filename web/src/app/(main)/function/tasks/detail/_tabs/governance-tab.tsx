@@ -28,10 +28,18 @@ const OVERRIDE_SCOPE_META: Record<string, string> = {
   task_tool: "本任务同类通配 · 随终态过期",
 };
 
+// CATEGORY_ACTION_META 把种类动作翻成人话 + 徽标色（后端 sodpolicy 的四档动作）。
+const CATEGORY_ACTION_META: Record<string, { label: string; className: string }> = {
+  pass: { label: "放行", className: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+  auditor: { label: "审计", className: "bg-sky-500/15 text-sky-600 dark:text-sky-400" },
+  ask: { label: "转人工", className: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  hard_deny: { label: "硬拦", className: "bg-red-500/15 text-red-600 dark:text-red-400" },
+};
+
 // HOOK_ROUTE_BY_ENDPOINT 把 hook 链里可热改面的配置端点映射到对应的配置页面。
 // 没有页面的（治理工具 sod_adjust_cap）不在表里，渲染为纯文本不可点。
+// E1-8 勘误：种类表编辑器实际在 /system/intercept（拦截页同层），后端已改发该端点。
 const HOOK_ROUTE_BY_ENDPOINT: Record<string, string> = {
-  "/sod/categories": "/sod",
   "/system/intercept": "/system/intercept",
   "/system/agents": "/system/agents",
 };
@@ -412,6 +420,58 @@ export function GovernanceTab({ taskId }: { taskId: string }) {
           )}
         </CardContent>
       </Card>
+
+      {/* ⑤ 生效种类表（E1-8 实况化）：sod_categories 实读，动作/cap/启停一目了然 */}
+      {hook.categories && hook.categories.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <GavelIcon className="size-4 text-emerald-500" /> 生效种类表（实读）
+            </CardTitle>
+            <CardDescription>
+              共 {hook.categories.length} 类 · 按优先级降序 · 动作与 cap 改后即时生效（前往上方「拦截种类」配置入口）
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="max-h-72 overflow-y-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-36">种类</TableHead>
+                    <TableHead className="w-20">动作</TableHead>
+                    <TableHead className="w-16">cap/任务</TableHead>
+                    <TableHead className="w-14">启停</TableHead>
+                    <TableHead>理由</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {hook.categories.map((c) => {
+                    const meta = CATEGORY_ACTION_META[c.action];
+                    return (
+                      <TableRow key={c.name}>
+                        <TableCell className="font-medium">
+                          {c.name}
+                          {c.locked && <LockIcon className="ml-1 inline size-3 text-muted-foreground" />}
+                        </TableCell>
+                        <TableCell>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-xs ${meta?.className ?? "bg-muted text-muted-foreground"}`}
+                          >
+                            {meta?.label ?? c.action}
+                          </span>
+                        </TableCell>
+                        <TableCell className="tabular-nums">{c.cap_per_task}</TableCell>
+                        <TableCell>{c.enabled ? "启用" : "停用"}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs">{c.reason}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
