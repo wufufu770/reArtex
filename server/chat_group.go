@@ -391,6 +391,14 @@ func (s *Server) createTaskHallGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// v0.11.2（「群聊发命令没人认领」根因之三）：建群即开通默认群预算——群上所有
+	// LLM 调用走 group-quota 闸，未配置预算 ⇒ 全部拒绝（planner/成员唤醒/worker
+	// 一概 [[group-quota]] 拒），建出来的群是个哑巴。默认 500k tokens/日，配额页
+	// 可调；SetGroupQuotaBudget 建行默认 active。
+	const defaultGroupBudgetTokens = int64(500_000)
+	if qerr := pg.SetGroupQuotaBudget(gid, defaultGroupBudgetTokens); qerr != nil {
+		log.Printf("[task-hall] 群 %d 默认预算开通失败（群仍创建成功，配额页手工配置）: %v", gid, qerr)
+	}
 	writeJSON(w, 201, detail)
 }
 
@@ -502,6 +510,7 @@ func (s *Server) postTaskHallGroupMessage(w http.ResponseWriter, r *http.Request
 // wakeHallAgent 对大厅相关的某个会话跑一轮 agent（异步），并把最终回复镜像回群
 // 信箱（from_agent=该 agent，大厅消息流可见）。busy 冲突静默放弃。
 func (s *Server) wakeHallAgent(group *db.ChatGroup, convID int64, agentKey, trigger string) {
+	log.Printf("[task-hall] 群 %d 触发唤醒 %s conv=%d", group.ID, agentKey, convID)
 	conv, err := s.m.pg.GetConversation(convID)
 	if err != nil || conv == nil {
 		return

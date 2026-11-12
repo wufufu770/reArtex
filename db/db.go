@@ -464,6 +464,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureReportsSchema(); err != nil {
 			return fmt.Errorf("apply reports schema: %w", err)
 		}
+		// 后台命令（bg_task，db/bg_task.go）：memo 名单里有但启动序列漏接的第三例
+		//（reports 之后）——主控 bg 命令登记/查询在受限角色下 42P01。同款修法。
+		if err := schemaDB.EnsureBgTaskSchema(); err != nil {
+			return fmt.Errorf("apply bg_task schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
