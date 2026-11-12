@@ -121,7 +121,7 @@ func TestExistingAgentToolBindingsUnchanged(t *testing.T) {
 		"insert_assets":            {"mainagent", "worker", "auto", "pentest", "recon"},
 		"add_company_scope":        {"mainagent", "planner", "auto"},
 		"list_assets":              {"mainagent", "planner", "worker", "auto", "pentest", "recon", "creative"},
-		"report_finding":           {"mainagent", "planner", "worker", "auto", "pentest"},
+		"report_finding":           {"mainagent", "worker", "auto", "pentest"}, // v0.11.1：planner 移除（幻觉登记缺口，P0）,
 		"record_fact":              {"mainagent", "worker", "recon"},
 		"add_task_scope":           {"mainagent", "planner", "worker"}, // E1-5：恢复 worker 横向扩权执行端（仍走 ask+预算）
 		"list_untested_assets":     {"mainagent", "planner"},

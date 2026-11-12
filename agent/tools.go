@@ -2631,8 +2631,11 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// 放在这里是为了让它进目录（tools 表据此登记，绑定到群成员 agent key）。
 		toolProposeIntent(t),
 		t.killWorkTool(), t.steerWorkTool(),
-		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
-		t.addFinding(),
+		// report_finding【不给 planner】（v0.11.1 P0 修复）：planner 没挂 SoD 链、
+		// 也没接 findingValidator ⇒ 登记路径零校验；实测 LLM 可在未执行任何工具的
+		// 情况下「幻觉登记」编造的漏洞并随即宣布目标达成（20 秒假完成）。规划者的
+		// 态势研判发现一律走 add_hint 交 worker 验证登记——登记是执行侧的产出，
+		// 必须有真实执行支撑。
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
 		// list_assets：规划时按 DSL 检索全资产库（配合 list_untested_assets 的"范围内未测"视角，

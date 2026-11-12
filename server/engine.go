@@ -1663,6 +1663,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				if e.refuseDoneIfQuotaBlocked(t, "goalless 收尾") {
 					return
 				}
+				// v0.11.1 门5：零产出守卫——抽干但没有任何 fact/finding 写回不落 done
+				//（防 LLM 幻觉收口：不执行工具直接宣布完成）。转暂停等人确认。
+				if e.refuseDoneIfNoOutput(t, "goalless 收尾") {
+					return
+				}
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
 				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
@@ -2555,6 +2560,38 @@ func (e *Engine) refuseDoneIfQuotaBlocked(t *Task, why string) bool {
 	if n := e.quotaBlockedIntents(t); n > 0 {
 		log.Printf("[conclude-guard] task %s %s 被拦：存在 %d 个额度阻塞意图——转自动暂停待人工恢复", t.ID, why, n)
 		e.noteLLMQuotaExhausted(t)
+		return true
+	}
+	return false
+}
+
+// refuseDoneIfNoOutput 零产出守卫（v0.11.1 P0）：直投任务抽干但探索图上没有任何
+// fact/finding 产出时，不落 done。
+//
+// 为什么要有：v0.11.0 E2E 实证——LLM 可以在不执行任何工具的情况下「幻觉收口」：
+// 零工具调用、零写回、零裁决，直接 report 一条编造的漏洞并 20 秒落 done。收尾只
+// 看意图抽干，不看有没有真实产出，幻觉路径畅通。守卫口径：图上存在 fact 或
+// finding 节点即算有产出（worker 写回与漏洞登记都落这两类节点）；判定不了
+// （基础设施错误）不拦——收尾路径不因查询失败卡死。
+// 动作：转 paused 等人工确认（与额度守卫同一条控制链语义），而不是继续 running
+// 空转——零产出抽干大概率意味着执行链路有异常，等人看一眼。
+func (e *Engine) refuseDoneIfNoOutput(t *Task, why string) bool {
+	if t == nil || t.Store == nil || e.isTaskTerminal(t) {
+		return false
+	}
+	total, err := t.Store.CountKindsUnscoped(db.KindFact, db.KindFinding)
+	if err != nil {
+		return false // 判定不了不拦（收尾路径不因基础设施错误卡死）
+	}
+	if total > 0 {
+		return false
+	}
+	log.Printf("[conclude-guard] task %s %s 被拦：探索图零产出（无 fact/finding）——转自动暂停待人工确认", t.ID, why)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+		Summary: "【自动暂停】直投意图已执行完毕但没有任何写回产出（无 fact/finding）——为防「假完成」已暂停：人工确认后可恢复任务或手工收尾。"})
+	if won, err := e.m.SetTaskStatusGuarded(t.ID, "paused"); err != nil {
+		log.Printf("[conclude-guard] task %s 转暂停失败: %v", t.ID, err)
+	} else if won {
 		return true
 	}
 	return false
