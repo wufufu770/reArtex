@@ -479,7 +479,61 @@ func (s *Server) postTaskHallGroupMessage(w http.ResponseWriter, r *http.Request
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// v0.11.2（用户报障「群聊发命令没人认领」）：此前消息入库后【零唤醒】——命令
+	// 只躺在信箱里等成员"下一轮"，而没有人给成员起轮 ⇒ 永远无人认领。现在入库即
+	// 驱动：定向 → 唤醒该成员的会话跑一轮（经 collectGroupMailbox 收到命令，带任务
+	// 上下文执行/回答）；广播/未定向 → 唤醒 auto 分发者（hall 会话）派活。
+	// 双方回复镜像回群信箱，大厅消息流可见。busy 冲突则放弃本轮触发：消息已在
+	// 信箱，上一轮结束后任何新消息都会再触发，不丢。
+	if pg != nil && group != nil {
+		trigger := "【群信箱】有新的人类命令，请收取群信箱（collectGroupMailbox 通道已注入内容）并处理：确认要做什么，动手执行或在群里回答。"
+		if to := strings.TrimSpace(req.ToAgent); to != "" {
+			convs, _ := pg.ChatGroupMemberConversations(id)
+			if convID, ok := convs[to]; ok && convID > 0 {
+				s.wakeHallAgent(group, convID, to, trigger)
+			}
+		} else if group.ConversationID > 0 {
+			s.wakeHallAgent(group, group.ConversationID, "auto", trigger)
+		}
+	}
 	writeJSON(w, 201, msg)
+}
+
+// wakeHallAgent 对大厅相关的某个会话跑一轮 agent（异步），并把最终回复镜像回群
+// 信箱（from_agent=该 agent，大厅消息流可见）。busy 冲突静默放弃。
+func (s *Server) wakeHallAgent(group *db.ChatGroup, convID int64, agentKey, trigger string) {
+	conv, err := s.m.pg.GetConversation(convID)
+	if err != nil || conv == nil {
+		return
+	}
+	busyKey := s.convBusyKey(convID)
+	s.chatMu.Lock()
+	if s.chatBusy[busyKey] {
+		s.chatMu.Unlock() // 上一轮未完：消息已在信箱，不丢
+		return
+	}
+	s.chatBusy[busyKey] = true
+	s.chatMu.Unlock()
+	go func() {
+		text, rerr := s.runConversationSync(conv, trigger, busyKey)
+		if rerr != nil {
+			log.Printf("[task-hall] 群 %d 唤醒 %s 失败: %v", group.ID, agentKey, rerr)
+			return
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		if _, err := s.m.pg.AddChatGroupMessage(&db.ChatGroupMessage{
+			GroupID:   group.ID,
+			FromAgent: agentKey,
+			Kind:      "note",
+			Body:      text,
+			TaskID:    &group.TaskID,
+		}); err != nil {
+			log.Printf("[task-hall] 群 %d 镜像 %s 回复失败: %v", group.ID, agentKey, err)
+		}
+	}()
 }
 
 // getTaskHallGroupMessages 读群消息箱（管理视角：含已读与被拦截的）。
@@ -608,4 +662,21 @@ func (s *Server) taskHallGroupDetail(pg *db.DB, groupID int64) (*taskHallGroupDe
 		MessageCount:  count,
 		HallStatus:    status,
 	}, nil
+}
+
+// hallTaskForConversation 反查一个会话作为群成员所绑定的任务（v0.11.2）：
+// conv → chat_group_members → chat_groups → tasks。查不到（独立聊天/无绑定）⇒ ok=false。
+// agent_key='auto' 的 hall 会话同样命中（它是 dispatcher 成员）。
+func (s *Server) hallTaskForConversation(convID int64) (taskID, expID int64, ok bool) {
+	if s.m == nil || s.m.pg == nil {
+		return 0, 0, false
+	}
+	err := s.m.pg.QueryRow(`
+SELECT g.task_id, t.exploration_id
+FROM chat_group_members m
+JOIN chat_groups g ON g.id = m.group_id
+JOIN tasks t ON t.id = g.task_id AND t.deleted_at IS NULL
+WHERE m.conversation_id = $1
+ORDER BY m.group_id DESC LIMIT 1`, convID).Scan(&taskID, &expID)
+	return taskID, expID, err == nil && taskID > 0
 }
