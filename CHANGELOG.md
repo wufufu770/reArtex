@@ -5,6 +5,12 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.11.3] - 2026-11-13
+
+### 修复（v0.11.2 遗留两项收尾）
+- **会话轮硬顶 15min**（AbortChatTurnTimeout）：LLM 流式连接挂死（无数据也不断开）会让 turn 永久占用 busyKey——群唤醒/人工对话全部静默失效（复测实证 conv 卡 running 240s+ 无输出无失败日志）。人工 stop 仍可提前收束。
+- **规整输入按 schema 矫正标量类型**：只动 schema 声明的 boolean/number 位置的字符串值（实测 MiniMax "has_background":"false" ⇒ normalizer_malformed ⇒ 意图 blocked）；string 字段与数组内容绝不被启发式误伤（单测钉死）。矫正后仍失败才拒绝。
+
 ## [0.11.2] - 2026-11-13
 
 ### 修复（群聊发命令无人认领——用户报障根治）
