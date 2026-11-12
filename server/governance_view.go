@@ -161,10 +161,13 @@ FROM audit_events ORDER BY seq DESC LIMIT $1 OFFSET $2`, size, (page-1)*size)
 // hookChain GET /api/sod/hookchain —— 生效 hook 链的只读描述（E1-8：看得见才能改）。
 // 可热改面（种类/拦截规则/信任规则/提示词）指向既有配置端点；代码常量（基线/tier）
 // 只读展示并写明理由——安全纪律不进热改面（v4.1 已批）。
+//
+// E1-8 实况化：种类表不再靠描述文字——categories 从 sod_categories 表实读（每行的
+// 动作/cap/启停/锁定一目了然）；跳转端点指到编辑器真实所在页（/system/intercept）。
 func (s *Server) hookChain(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{
+	out := map[string]any{
 		"editable": []map[string]string{
-			{"name": "拦截种类（动作/每任务 cap）", "endpoint": "/sod/categories", "note": "sod_categories：hard_deny/ask/auditor/pass 与 cap，改后即时生效"},
+			{"name": "拦截种类（动作/每任务 cap）", "endpoint": "/system/intercept", "note": "sod_categories：hard_deny/ask/auditor/pass 与 cap，改后即时生效（种类表在拦截页同层）"},
 			{"name": "拦截规则（allow/ask/deny）", "endpoint": "/system/intercept", "note": "intercept_rules：工具级规则与超时动作"},
 			{"name": "信任规则（allow 沉淀）", "endpoint": "/system/intercept", "note": "[信任] 前缀 allow 规则；Tier3 与基线特征不可沉淀"},
 			{"name": "agent 提示词（含收尾词）", "endpoint": "/system/agents", "note": "agent_prompts：DB 化热改，改后下轮生效"},
@@ -172,8 +175,23 @@ func (s *Server) hookChain(w http.ResponseWriter, r *http.Request) {
 		},
 		"readonly": []map[string]string{
 			{"name": "锁定基线", "reason": "删除/破坏/平台凭据/平台自身配置——安全地板，任何机制不可豁免（v4.1 §10-F1 代码常量）"},
-			{"name": "Tier 分级清单", "reason": "Tier1 只读白名单 / Tier2 结构化写 / Tier3 出网·扩权·状态迁移·宿主文件——fail-closed 纪律，热改=污染底层；范围内出网的展示降标见 E1-4"},
+			{"name": "Tier 分级清单", "reason": "Tier1 只读白名单 / Tier2 结构化写 / Tier3 出网·扩权·状态迁移·宿主文件——fail-closed 纪律，热改=污染底层；范围内出网降标 Tier2·egress_in_scope 见 E1-4"},
 			{"name": "SoD 链五检查", "reason": "规整→基线→范围→种类→auditor，每次调用全跑；缓存只存规整结果不存裁决"},
 		},
-	})
+	}
+	// E1-8：种类表实读（best-effort——读不出时面板仍有热改面与只读面，不整体 500）。
+	if pg := s.pg(w); pg != nil {
+		if cats, err := pg.ListSodCategories(); err == nil {
+			rows := make([]map[string]any, 0, len(cats))
+			for _, c := range cats {
+				rows = append(rows, map[string]any{
+					"name": c.Name, "action": c.Action, "cap_per_task": c.CapPerTask,
+					"enabled": c.Enabled, "locked": c.Locked, "priority": c.Priority,
+					"reason": c.Reason,
+				})
+			}
+			out["categories"] = rows
+		}
+	}
+	writeJSON(w, 200, out)
 }
