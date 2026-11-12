@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/ingestsanitize"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -1844,6 +1845,29 @@ type factItem struct {
 func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error) {
 	if strings.TrimSpace(it.Summary) == "" {
 		return 0, fmt.Errorf("summary 不能为空")
+	}
+	// T7（方案 v10 §6 三期）：事实落图前过消毒链——事实经 graph_overview /
+	// node_detail / handoff 进入【其他执行体】的上下文，是跨上下文通道。此前消毒
+	// 链只有 scopesentry / insert_assets 两个出口，自由文本出口这里是第三个
+	//（fail-closed：HIGH 丢弃该条；SOFT 消毒放行并留痕）。
+	for _, f := range []struct{ name, val string }{
+		{"summary", it.Summary}, {"detail", it.Detail}, {"evidence", it.Evidence},
+	} {
+		if strings.TrimSpace(f.val) == "" {
+			continue
+		}
+		clean, action, serr := ingestsanitize.Sanitize("record_fact", []byte(f.val))
+		if action == ingestsanitize.ActionDropped {
+			return 0, fmt.Errorf("字段 %s 命中注入特征被拦截（%v）", f.name, serr)
+		}
+		switch f.name {
+		case "summary":
+			it.Summary = string(clean)
+		case "detail":
+			it.Detail = string(clean)
+		case "evidence":
+			it.Evidence = string(clean)
+		}
 	}
 	// T1 经验权重记账（方案 v10 §5.2 X1 接线点，T-A 注明）：worker 写回的结论里
 	// 若引用了注入经验的归因串（used_experience:<pattern_key>），按因果校验记
