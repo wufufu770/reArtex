@@ -64,7 +64,9 @@ export default function Layout({ children }: Readonly<{ children: ReactNode }>) 
       defaultOpen={defaultOpen}
       style={
         {
-          "--sidebar-width": "calc(var(--spacing) * 68)",
+          // 用户拍板「侧边栏太长，用之前的数值」：68(272px)→60(240px)，行距同步收紧
+          //（ui/sidebar.tsx 的 group/行高/内距）。
+          "--sidebar-width": "calc(var(--spacing) * 60)",
         } as React.CSSProperties
       }
     >

@@ -363,11 +363,11 @@ export default function MCPPage() {
         <p className="text-muted-foreground text-sm">外部 MCP 工具服务器 · 按 Agent 授权可见</p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <button
           type="button"
           onClick={openAdd}
-          className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[116px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition"
+          className="text-foreground/70 border-foreground/70 hover:bg-muted/60 hover:shadow-sm flex min-h-[88px] flex-col items-center justify-center gap-2 rounded-lg border border-dashed transition"
         >
           <PlusIcon className="size-6" />
           <span className="text-sm">添加 MCP</span>
@@ -377,7 +377,7 @@ export default function MCPPage() {
           <Card
             key={s.id}
             onClick={() => openEdit(s)}
-            className="hover:border-primary/60 cursor-pointer gap-3 transition hover:shadow-sm"
+            className="hover:border-primary/60 cursor-pointer gap-2 rounded-lg transition hover:shadow-sm [--card-spacing:--spacing(3)]"
           >
             <CardHeader>
               <div className="flex items-center gap-2">
