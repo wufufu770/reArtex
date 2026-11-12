@@ -527,15 +527,29 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) (s
 }
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
+// chatTurnTimeout 是会话轮的硬顶时长（v0.11.3）：LLM 流式连接挂死（无数据也不断
+// 开）会让 turn 永久占用 busyKey——群唤醒/人工对话全部静默失效（v0.11.0 E2E 实证
+// conv 卡 running 240s+ 无输出无失败日志）。正常轮几十秒到几分钟；15 分钟硬顶只
+// 兜真挂死，不干预正常长轮。
+const chatTurnTimeout = 15 * time.Minute
+
 // miss a background goroutine which has not started yet.
 func (s *Server) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
 	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
+	// v0.11.3：轮级硬顶。超时走 WithCancelCause 的外层 cause —— run 内部的
+	// ctx.Err() 判定与中断消息会拿到 AbortChatTurnTimeout，人工 stop 仍可提前。
+	hardDeadline, hardCancel := context.WithTimeoutCause(ctx, chatTurnTimeout, agent.AbortChatTurnTimeout)
+	prevCancel := cancel
+	cancel = func(cause error) {
+		hardCancel()
+		prevCancel(cause)
+	}
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
 	s.chatMu.Unlock()
-	return ctx, cancel
+	return hardDeadline, cancel
 }
 
 // runConversationTurn runs ONE agent turn and returns its final assistant text

@@ -59,6 +59,8 @@ var (
 		"用户暂停任务时，正在运行的主 Agent 对话也被同步取消。已经产生的活动记录会保留；恢复任务后不会自动重放本轮消息")
 	AbortChatTurnFinished = cause("chat_turn_finished", "本轮对话已正常结束并释放 context",
 		"本轮对话已正常结束，服务端正在释放该轮 context 资源。这不是运行中断；若它出现在中断消息中，说明取消与收场事件发生了竞态")
+	AbortChatTurnTimeout = cause("chat_turn_timeout", "本轮对话超过硬顶时长被强制收束",
+		"会话轮超过硬顶时长仍无返回（多为模型流式连接挂死）——服务端强制收束该轮，防止 turn 永久占用。已产生的活动记录保留，可直接重发")
 
 	// Process-level and per-run hard backstop.
 	AbortShutdown = cause("shutdown", "后端进程正在关闭",

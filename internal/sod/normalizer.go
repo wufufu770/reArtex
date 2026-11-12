@@ -1,6 +1,9 @@
 package sod
 
 import (
+	"bytes"
+	"strconv"
+
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -277,8 +280,21 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 	}
 
 	var raw normalizerToolOutput
-	if err := json.Unmarshal(uses[0].Input, &raw); err != nil {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
+	input := uses[0].Input
+	if err := json.Unmarshal(input, &raw); err != nil {
+		// v0.11.3 容错（与蒸馏容错同思路）：模型最常见的 malformed 错法是把
+		// bool/数字写成字符串（实测 MiniMax："has_background":"false" ⇒ 严格
+		// unmarshal 直接炸 ⇒ normalizer_malformed ⇒ 意图 blocked）。先做一次
+		// 确定性标量矫正（"true"/"false"→bool、纯数字→number）再试一次；
+		// 矫正后仍失败才拒绝。
+		loosened, changed := loosenAgainstSchema(input, n.schema.InputSchema)
+		if !changed {
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
+		}
+		if err2 := json.Unmarshal(loosened, &raw); err2 != nil {
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err2)
+		}
+		log.Printf("[sod] 规整输入标量矫正生效：模型把 bool/数字写成了字符串，已自动转型")
 	}
 	out := NormalizerResult{
 		StructuredIntent: raw.StructuredIntent,
@@ -402,3 +418,130 @@ func requiresTarget(actionType string, rawPayload []byte) bool {
 
 // targetMarkerRe 匹配「明确的目标标记」：URL 方案前缀或 IPv4 字面量。
 var targetMarkerRe = regexp.MustCompile(`(?i)(?:https?|ftp)://|\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+// loosenAgainstSchema 按【JSON Schema 树】矫正模型输出里的标量类型（v0.11.3）：
+// 只有 schema 声明为 boolean/number 的位置，叶子字符串 "true"/"false"/纯数字 才
+// 会被转型；schema 声明为 string 的字段与无 schema 约束的位置绝不触碰。
+//
+// 为什么不能全树启发式：string 数组元素（arguments 里的 "-c","true"）与字符串
+// 字段（summary:"42 个端口"）会被误伤 —— 单测钉死了这一条。实测 MiniMax 把
+// shell_features.has_background 写成 "false" 是头号 malformed 错法。
+func loosenAgainstSchema(raw json.RawMessage, inputSchema map[string]any) (json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw, false
+	}
+	changed := false
+	var walk func(x any, node map[string]any) any
+	walk = func(x any, node map[string]any) any {
+		typ, _ := node["type"].(string)
+		switch typ {
+		case "boolean":
+			if str, isStr := x.(string); isStr {
+				switch strings.ToLower(strings.TrimSpace(str)) {
+				case "true":
+					changed = true
+					return true
+				case "false":
+					changed = true
+					return false
+				}
+			}
+			return x
+		case "number", "integer":
+			if str, isStr := x.(string); isStr {
+				if n, err := strconv.ParseInt(str, 10, 64); err == nil {
+					changed = true
+					return json.Number(strconv.FormatInt(n, 10))
+				}
+				if f, err := strconv.ParseFloat(str, 64); err == nil {
+					changed = true
+					return json.Number(strconv.FormatFloat(f, 'f', -1, 64))
+				}
+			}
+			return x
+		case "object":
+			m, isMap := x.(map[string]any)
+			if !isMap {
+				return x
+			}
+			props, _ := node["properties"].(map[string]any)
+			for k, vv := range m {
+				sub, _ := props[k].(map[string]any)
+				m[k] = walk(vv, sub) // 无子 schema ⇒ sub=nil ⇒ 不动
+			}
+			return m
+		case "array":
+			arr, isArr := x.([]any)
+			if !isArr {
+				return x
+			}
+			items, _ := node["items"].(map[string]any)
+			for i, vv := range arr {
+				arr[i] = walk(vv, items)
+			}
+			return arr
+		default:
+			// type 为 string/缺失/未知 ⇒ 不动（含 string：绝不启发式转型）
+			return x
+		}
+	}
+	fixed := walk(v, inputSchema)
+	out, err := json.Marshal(fixed)
+	if err != nil {
+		return raw, false
+	}
+	return out, changed
+}
+func loosenScalarStrings(raw json.RawMessage) (json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw, false
+	}
+	changed := false
+	var walk func(x any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, vv := range t {
+				t[k] = walk(vv)
+			}
+			return t
+		case []any:
+			for i, vv := range t {
+				t[i] = walk(vv)
+			}
+			return t
+		case string:
+			switch strings.ToLower(strings.TrimSpace(t)) {
+			case "true":
+				changed = true
+				return true
+			case "false":
+				changed = true
+				return false
+			}
+			if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+				changed = true
+				return json.Number(strconv.FormatInt(n, 10))
+			}
+			if f, err := strconv.ParseFloat(t, 64); err == nil {
+				changed = true
+				return json.Number(strconv.FormatFloat(f, 'f', -1, 64))
+			}
+			return t
+		default:
+			return x
+		}
+	}
+	fixed := walk(v)
+	out, err := json.Marshal(fixed)
+	if err != nil {
+		return raw, false
+	}
+	return out, changed
+}
