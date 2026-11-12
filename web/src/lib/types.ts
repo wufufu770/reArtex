@@ -1731,8 +1731,9 @@ export interface TaskHallGroupDetail extends TaskHallGroup {
   // disabled_tools 是**禁列表**：出现的 key 就是被禁用的（表里没有 enabled 列 ⇒ 只能收紧）。
   disabled_tools: Record<string, boolean>;
   message_count: number;
-  // status 是语义化整体状态；后端算不出时缺省（详情不被状态计算拖垮）。
-  status?: TaskHallStatus | null;
+  // hall_status 是语义化整体状态（键避开嵌入 ChatGroup 的 status=群原始状态字符串）；
+  // 后端算不出时缺省（详情不被状态计算拖垮）。
+  hall_status?: TaskHallStatus | null;
 }
 
 // TaskHallRow 是 /task-hall/tasks 的一行：一个已发布的大厅（带成员与额度上限）。
