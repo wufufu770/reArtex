@@ -1354,6 +1354,39 @@ func (s *ExplorationStore) CountByKindVisible(taskID int64, kind string) (int, e
 	return s.countByKindFilteredVisible(taskID, kind, "")
 }
 
+// CountKindsUnscoped 统计本探索图上给定 kind 的节点总数——【不做】scope 可见性
+// 过滤。
+//
+// 为什么不过滤：调用方（engine 的 goalless 零产出守卫）要的是「图上有没有产出」
+// 这一客观事实，不是「某个视角能看见多少」——scope 过滤在未配置范围的任务上会把
+// 资产锚定节点滤成 0，让守卫在「真有产出」时误判，或因资产库不可用而整体失效。
+func (s *ExplorationStore) CountKindsUnscoped(kinds ...string) (int, error) {
+	if len(kinds) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(kinds))
+	args := make([]any, 0, len(kinds)+1)
+	args = append(args, s.expID)
+	for i, k := range kinds {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, k)
+	}
+	// 排除 origin 根节点（CreateTask 建图时自带的那个 fact）——它是图的地基不是
+	// 「产出」；不算排除的话守卫在零产出任务上恒不触发。
+	exclude := " AND id <> $%d"
+	if origin, oerr := s.OriginFactID(); oerr == nil && origin > 0 {
+		args = append(args, origin)
+		exclude = fmt.Sprintf(exclude, len(args))
+	} else {
+		exclude = ""
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1 AND kind IN (`+strings.Join(placeholders, ",")+`)`+exclude,
+		args...).Scan(&n)
+	return n, err
+}
+
 // nodeVisibleInScope 判断一个节点对 taskID 的调用者是否可见。
 //
 // 图里有两种节点，两种可见性 —— 这是范围隔离里最容易搞混的一处：

@@ -411,6 +411,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		if pg := ts.DB(); pg != nil {
 			tsx.SetMemoryDB(pg)
 		}
+		// v0.11.1 P0 双保险：planner 工具面已移除 report_finding（登记必须有真实
+		// 执行支撑）；这里把确定性复核接上——万一未来有人把登记工具加回 planner，
+		// 校验层兜底，不再出现零校验登记。
+		tsx.SetFindingValidator(ts.ValidateFinding)
 	}
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
