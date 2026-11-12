@@ -10,7 +10,10 @@
 ### 修复（群聊发命令无人认领——用户报障根治）
 - **大厅群消息入库即驱动行动**：此前消息只躺信箱、零唤醒（无人认领的根因之一）。现在定向命令唤醒对应成员会话、广播唤醒 auto 分发者，各跑一轮；回复镜像回群信箱（大厅消息流可见）。busy 冲突静默放弃（消息在信箱不丢）。
 - **群成员会话的任务身份注入**（根因之二）：server 侧此前从不注入 RunInfo ⇒ 成员被唤醒也反查不到群（收信为空、探索图工具不可用）。现按 conv→群成员→群→任务自动注入；独立聊天不受影响。
-- 附带：db 无此列变更，纯接线；唤醒用现有 runConversationSync 通道（stop/状态页的 busyKey 口径一致）。
+- **建群自动开通默认群预算 500k/日**（根因之三）：group-quota 闸在未配置预算时拒群上一切 LLM 调用（planner/成员唤醒全被 [[group-quota]] 拒）——建群即哑巴。已有群在配额页手工配置。
+- **bg_task 启动期 DDL 接线补缺**（memo 名单有而启动序列漏接的第三例）：主控后台命令在受限角色下 42P01。
+- 附带：唤醒用现有 runConversationSync 通道（busyKey 与 stop/状态页口径一致）；wakeHallAgent 入口日志。
+- 已知开放项（v0.11.3 候选）：① auto 的 chat 轮在群会话上偶发挂起无响应（conv15 实测 240s+ 无输出无失败日志——chat lane 的 LLM 挂起无超时）；② 规整器对 MiniMax 输出容错不足（structured_intent.shell_features.has_background 类型错 → normalizer_malformed → 意图 blocked）。
 
 ## [0.11.1] - 2026-11-13
 
