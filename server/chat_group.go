@@ -35,6 +35,10 @@ type taskHallGroupDetail struct {
 	Members       []db.ChatGroupMember `json:"members"`
 	DisabledTools map[string]bool      `json:"disabled_tools"`
 	MessageCount  int                  `json:"message_count"`
+	// Status 是语义化整体状态（db.TaskHallStatusByGroup 纯函数算出）。此前该函数
+	// 0 生产调用 ⇒ 大厅只有原始 group_status 没有人话档位。best-effort：算不出
+	// 不给（详情不被状态计算拖垮）。
+	Status *db.TaskHallStatus `json:"status,omitempty"`
 }
 
 // RegisterTaskHallGroupRoutes 挂上群聊路由。
@@ -590,10 +594,17 @@ func (s *Server) taskHallGroupDetail(pg *db.DB, groupID int64) (*taskHallGroupDe
 	if err != nil {
 		return nil, err
 	}
+	var status *db.TaskHallStatus
+	if st, serr := pg.TaskHallStatusByGroup(groupID, time.Now()); serr == nil {
+		status = st
+	} else {
+		log.Printf("[task-hall] 群 %d 状态计算失败（详情照常返回）: %v", groupID, serr)
+	}
 	return &taskHallGroupDetail{
 		ChatGroup:     g,
 		Members:       members,
 		DisabledTools: disabled,
 		MessageCount:  count,
+		Status:        status,
 	}, nil
 }

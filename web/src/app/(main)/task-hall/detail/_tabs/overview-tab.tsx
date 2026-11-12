@@ -10,6 +10,14 @@ import type { Settings, Task, TaskHallGroupDetail, TaskHallQuota, TaskNode } fro
 import { QuotaMeter } from "../../_components/quota-meter";
 import { fmtDateTime, fmtTokens, workerMembers } from "../../_components/task-hall-format";
 
+// hallStatusTone 把状态档位映射成徽标色（未知档位给中性色）。
+function hallStatusTone(level: string): string {
+  if (/ok|normal|healthy|idle/i.test(level)) return "text-emerald-600 dark:text-emerald-400";
+  if (/warn|degrad|slow|backlog/i.test(level)) return "text-amber-600 dark:text-amber-400";
+  if (/block|error|crit|fail|stall/i.test(level)) return "text-red-600 dark:text-red-400";
+  return "text-muted-foreground";
+}
+
 // OverviewTab 是大厅的仲裁面总览：成员席位、并发占用、额度进度、消息箱。
 export function OverviewTab({
   detail,
@@ -35,6 +43,18 @@ export function OverviewTab({
 
   return (
     <div className="flex flex-col gap-4">
+      {detail.status ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="font-medium">大厅状态</span>
+          <span className={`font-semibold ${hallStatusTone(detail.status.level)}`}>{detail.status.level}</span>
+          <span className="text-muted-foreground">{detail.status.summary}</span>
+          {detail.status.blocked_members?.length > 0 && (
+            <span className="text-red-600 dark:text-red-400">
+              卡住：{detail.status.blocked_members.join("、")}
+            </span>
+          )}
+        </div>
+      ) : null}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card size="sm" className="gap-1">
           <CardContent>
