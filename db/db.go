@@ -458,6 +458,12 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureLegacySchema(); err != nil {
 			return fmt.Errorf("apply legacy schema: %w", err)
 		}
+		// 报告中心（/system/reports）：reports 表，独立幂等文件
+		// （db/schema_reports.sql）。正文整篇存库——必须在启动期用有 DDL 权限的
+		// 连接建好（与上方各 Ensure*Schema 同理，受限运行角色建不了表）。
+		if err := schemaDB.EnsureReportsSchema(); err != nil {
+			return fmt.Errorf("apply reports schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
