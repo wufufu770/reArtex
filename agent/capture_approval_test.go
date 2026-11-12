@@ -60,7 +60,7 @@ func TestCaptureApprovalLifecycle(t *testing.T) {
 			g := guard.NewWithInterceptor(ic)
 			taskID := "approval-lifecycle-" + tc.name
 			t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM intercept_pending WHERE task_id=$1`, taskID) })
-			ctx := intercept.WithTaskContext(t.Context(), taskID, "test-agent", func(a db.Activity) {
+			ctx := intercept.WithTaskContext(t.Context(), taskID, "test-agent", "", func(a db.Activity) {
 				if a.Kind != "intercept_request" || !tc.manual {
 					return
 				}

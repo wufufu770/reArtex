@@ -24,7 +24,7 @@ func (i *Interceptor) AppendDecisionEvent(ctx context.Context, dec Decision, too
 //
 // best-effort：链写失败不能改变工具调用的结果，所以只记日志。
 func (i *Interceptor) appendAuditEvent(ctx context.Context, dec Decision, toolName string, input []byte, action string) {
-	taskID, agentName := taskInfoFromCtx(ctx)
+	taskID, agentName, _ := taskInfoFromCtx(ctx)
 	payload, err := json.Marshal(map[string]any{
 		"task_id":      taskID,
 		"rule_id":      dec.RuleID,

@@ -51,24 +51,37 @@ const (
 	taskEmitCtxKey taskCtxKey = 2
 )
 
-type taskCtxInfo struct{ taskID, agentName string }
+// sodAgentKey 是 SoD agent_key 分量（agent.SodScopeAgentKey 的产物）。与展示用
+// agentName 分开携带：审批 pending 行落库时优先用 sodAgentKey——执行器查「同类
+// 放行」凭据按它逐字节匹配（E1-5）；展示/审计仍用 agentName。
+type taskCtxInfo struct{ taskID, agentName, sodAgentKey string }
 
 // WithTaskContext injects task metadata and an emit function into ctx so that
 // HandleAsk can tag pending records and write intercept_request activities to
 // the task's exploration stream (making them appear inline in session transcripts).
-func WithTaskContext(ctx context.Context, taskID, agentName string, emit func(db.Activity)) context.Context {
-	ctx = context.WithValue(ctx, taskInfoCtxKey, taskCtxInfo{taskID, agentName})
+func WithTaskContext(ctx context.Context, taskID, agentName, sodAgentKey string, emit func(db.Activity)) context.Context {
+	ctx = context.WithValue(ctx, taskInfoCtxKey, taskCtxInfo{taskID, agentName, sodAgentKey})
 	if emit != nil {
 		ctx = context.WithValue(ctx, taskEmitCtxKey, emit)
 	}
 	return ctx
 }
 
-func taskInfoFromCtx(ctx context.Context) (taskID, agentName string) {
+func taskInfoFromCtx(ctx context.Context) (taskID, agentName, sodAgentKey string) {
 	if v, ok := ctx.Value(taskInfoCtxKey).(taskCtxInfo); ok {
-		return v.taskID, v.agentName
+		return v.taskID, v.agentName, v.sodAgentKey
 	}
-	return "", ""
+	return "", "", ""
+}
+
+// pendingAgentName 选审批 pending 行落库的 agent 分量：有 SoD 口径键（worker 执行
+// 体）用键——它与执行器查「同类放行」凭据的 agent_key 同源同值（E1-5）；没有键
+// （会话侧等）退回展示名。
+func pendingAgentName(agentName, sodAgentKey string) string {
+	if sodAgentKey != "" {
+		return sodAgentKey
+	}
+	return agentName
 }
 
 func taskEmitFromCtx(ctx context.Context) func(db.Activity) {
@@ -540,7 +553,7 @@ const (
 // 计数失败时返回 false（不升级）：这个计数是防疲劳措施、不是安全边界，
 // 误拒的代价（正常任务被卡死）高于漏拒的代价（人多点一次 allow）。
 func (i *Interceptor) AskBurstExceeded(ctx context.Context, toolName string) bool {
-	_, agentName := taskInfoFromCtx(ctx)
+	_, agentName, _ := taskInfoFromCtx(ctx)
 	if agentName == "" {
 		return false
 	}
@@ -694,7 +707,7 @@ func defaultMessage(action, name string) string {
 // error is swallowed so logging never changes the tool call's outcome. The pending list
 // (status='pending') is unaffected, so it still shows only asks awaiting a decision.
 func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolName string, input []byte, status string) {
-	taskID, agentName := taskInfoFromCtx(ctx)
+	taskID, agentName, _ := taskInfoFromCtx(ctx) // 观测记录用展示名；SoD 键只进 pending 行
 	audit := auditFor(ctx, dec, input, status)
 	id, err := i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status, dec.Message, audit)
 	if err == nil {
@@ -737,11 +750,11 @@ func (i *Interceptor) emitAskResultActivity(convID int64, taskEmit func(db.Activ
 // like in a chat session — the user must visit the approvals page to unblock it.
 func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
 	ruleID := dec.RuleID
-	taskID, agentName := taskInfoFromCtx(ctx)
+	taskID, agentName, sodKey := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)
 
 	audit := auditFor(ctx, dec, input, "pending")
-	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, agentName, toolName, input, dec.Message, audit)
+	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, pendingAgentName(agentName, sodKey), toolName, input, dec.Message, audit)
 	if err != nil {
 		return false
 	}
