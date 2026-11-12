@@ -812,6 +812,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.recordProgress(), t.listProgressReceipts(),
 		// 记忆层（方案 B）：追加一条 / 导出索引。
 		t.rememberTool(), t.recallMemoryTool(),
+		// message_group（设计 §1 Tier 2 ④）：向本任务绑定的任务大厅群信箱投递消息
+		// （进展汇报/请求决策，可定向）。Tier2 结构化写；出口过消毒链；准入在存储层。
+		t.messageGroupTool(),
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
