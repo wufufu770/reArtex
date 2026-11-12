@@ -294,5 +294,7 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	// 权重记账全部失败）。启动期 schemaDB 已用迁移连接把 DDL 应用过 ⇒ 这里
 	// 标记就位，运行期懒执行变空操作。
 	loopTrackSchemaReady.Store(pool, struct{}{})
+	// 报告中心（db/reports.go）：同上，启动期由迁移连接应用，运行期免建表。
+	reportsSchemaReady.Store(pool, struct{}{})
 	experienceWeightSchemaReady.Store(pool, struct{}{})
 }
