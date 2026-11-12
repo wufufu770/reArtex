@@ -43,14 +43,14 @@ export function OverviewTab({
 
   return (
     <div className="flex flex-col gap-4">
-      {detail.status ? (
+      {detail.hall_status ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="font-medium">大厅状态</span>
-          <span className={`font-semibold ${hallStatusTone(detail.status.level)}`}>{detail.status.level}</span>
-          <span className="text-muted-foreground">{detail.status.summary}</span>
-          {detail.status.blocked_members?.length > 0 && (
+          <span className={`font-semibold ${hallStatusTone(detail.hall_status.level)}`}>{detail.hall_status.level}</span>
+          <span className="text-muted-foreground">{detail.hall_status.summary}</span>
+          {detail.hall_status.blocked_members?.length > 0 && (
             <span className="text-red-600 dark:text-red-400">
-              卡住：{detail.status.blocked_members.join("、")}
+              卡住：{detail.hall_status.blocked_members.join("、")}
             </span>
           )}
         </div>
