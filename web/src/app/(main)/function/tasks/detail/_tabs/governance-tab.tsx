@@ -422,7 +422,7 @@ export function GovernanceTab({ taskId }: { taskId: string }) {
       </Card>
 
       {/* ⑤ 生效种类表（E1-8 实况化）：sod_categories 实读，动作/cap/启停一目了然 */}
-      {hook.categories && hook.categories.length > 0 && (
+      {hook && hook.categories && hook.categories.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm">
