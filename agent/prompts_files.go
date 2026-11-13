@@ -37,6 +37,7 @@ var advisoryPromptFiles = map[string]string{
 	//（promptKeyAliases 惯例）。
 	"edge":      "prompts/edge.md",
 	"edge_exec": "prompts/edge-exec.md",
+	"miniprogram": "prompts/miniprogram.md",
 }
 
 // 下面这些文件【刻意不登记】为 agent：

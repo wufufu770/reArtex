@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.13.0] - 2026-11-14
+
+### 新增（小程序渗透增强批次——专用 agent + 内嵌浏览器 + chrome-devtools 注册；按用户需求）
+- **专用小程序渗透 agent**（builtin，`miniprogram`，单次 run 不限时）：六阶段专用提示词（阶段→kind 映射、两层身份矩阵、包获取人工口子、证据纪律）注册进 prompts_files；wechat-miniprogram skill 与 mp_token 工具绑定补上 miniprogram agent；桌面控制经 desktop-ops 的全量绑定天然可用（驱动微信 PC 客户端）。
+- **chrome-devtools MCP 种子**：LookPath 解析绝对路径（未安装跳过不落旗标）；可见性=全部 agent——接口发现阶段的浏览器操控入口。
+- **内嵌浏览器（小程序运行时反代）**：`/mp-runtime/` 反代到 wxa-runner dev server（settings `miniprogram_runtime_url`，操作者经 REST `PUT /api/miniprogram/runtime` 设置，**agent 不可改**）——小程序渗透页新增「内嵌浏览器」面板（同源 iframe，直接点击调试页面）；SSRF 面关闭：scheme 仅 http/https、单固定目标（路径转发 host 恒等配置值）、目标为部署配置非 agent 可控输入。iframe 公共路由说明：代理的是被测应用自身 dev server（与直接访问运行时等价），artex JWT 不适用于 iframe 请求头。
+- 前端：小程序页「内嵌浏览器」面板（地址配置 + iframe + 未配置引导）；api/types 接线。
+- 验证：build/vet/tsc/biome 全绿；实跑 0.13.0。
+- 对齐检查：miniprogram agent（对话选择器）、chrome-devtools（MCP 页）、内嵌浏览器面板（小程序页）、mp 工具（工具页）——后端功能点全部有前端入口。
+
 ## [0.12.3] - 2026-11-14
 
 ### 修复（偏锋探索入口在用户设备反复"无法载入"——移除查询参数变量）

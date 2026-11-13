@@ -1342,6 +1342,10 @@ func (s *Server) Handler() http.Handler {
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
+	// 小程序运行时反代（0.13.0 内嵌浏览器面板）：同源 iframe 数据面。公共路由——
+	// 它代理的是被测应用自身的 dev server（与直接访问运行时等价），artex 的
+	// JWT 不适用于 iframe 请求头；单固定目标（settings），SSRF 面已关闭。
+	root.Handle("/mp-runtime/", mpRuntime.handler())
 	root.Handle("/", s.webuiHandler())
 	return root
 }

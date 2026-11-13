@@ -34,7 +34,7 @@ func (s *Server) mpTools() []actool.CoreTool {
 // 执行在任务路径（worker）与会话驱动（pentest/auto/mainagent）两条线都要用）。
 func (s *Server) seedMpTools() {
 	const refreshFlag = "mp_tools_seed_v1"
-	bindings, _ := json.Marshal([]string{"pentest", "worker", "auto", "mainagent"})
+	bindings, _ := json.Marshal([]string{"pentest", "worker", "auto", "mainagent", "miniprogram"})
 	for _, t := range s.mpTools() {
 		schema, _ := json.Marshal(t.InputSchema())
 		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, bindings)

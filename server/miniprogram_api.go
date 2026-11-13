@@ -135,11 +135,46 @@ func (s *Server) mpArtifactsHandler(w http.ResponseWriter, r *http.Request) {
 
 // mpRoutes 注册小程序渗透的路由（在 requireAuth 之内）。
 func (s *Server) mpRoutes(mux *http.ServeMux) {
+	// 运行时反代目标从 settings 加载（部署配置；agent 不可改，仅操作者经 REST）。
+	if raw, ok, _ := s.m.pg.GetSetting("miniprogram_runtime_url"); ok && strings.TrimSpace(raw) != "" {
+		if err := mpRuntimeSetURL(raw); err != nil {
+			log.Printf("[mp] 运行时地址配置非法（忽略）: %v", err)
+		}
+	}
 	mux.HandleFunc("GET /api/miniprogram/tokens", s.mpTokensHandler)
 	mux.HandleFunc("POST /api/miniprogram/tokens", s.mpTokensHandler)
 	mux.HandleFunc("DELETE /api/miniprogram/tokens/{id}", s.mpTokenDeleteHandler)
 	mux.HandleFunc("GET /api/miniprogram/artifacts", s.mpArtifactsHandler)
 	mux.HandleFunc("PUT /api/tasks/{id}/host-targets", s.taskHostTargetsHandler)
+	mux.HandleFunc("GET /api/miniprogram/runtime", s.mpRuntimeGetHandler)
+	mux.HandleFunc("PUT /api/miniprogram/runtime", s.mpRuntimeSetHandler)
+}
+
+// mpRuntimeGetHandler 处理 GET /api/miniprogram/runtime：当前运行时地址（空=未配置）。
+func (s *Server) mpRuntimeGetHandler(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"url": mpRuntimeGetURL()})
+}
+
+// mpRuntimeSetHandler 处理 PUT /api/miniprogram/runtime：设置运行时地址
+//（http/https；单固定目标——SSRF 面关闭：agent 不可改，路径转发 host 恒等配置值）。
+func (s *Server) mpRuntimeSetHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "请求体非法")
+		return
+	}
+	if err := mpRuntimeSetURL(req.URL); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := s.m.pg.SetSetting("miniprogram_runtime_url", strings.TrimSpace(req.URL)); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "url": strings.TrimSpace(req.URL)})
 }
 
 // taskHostTargetsHandler 处理 PUT /api/tasks/{id}/host-targets：任务级宿主授权

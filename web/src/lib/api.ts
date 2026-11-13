@@ -485,6 +485,9 @@ export const api = {
   mpTokenDelete: (id: number) => del<{ ok: boolean }>(`/miniprogram/tokens/${id}`),
   // 解包产物目录（artifacts/miniprogram/）。
   mpArtifacts: () => get<{ apps: MiniprogramArtifact[] }>("/miniprogram/artifacts"),
+  // 运行时地址（内嵌浏览器面板的数据面；部署配置，agent 不可改）。
+  mpRuntime: () => get<{ url: string }>("/miniprogram/runtime"),
+  mpRuntimeSet: (url: string) => put<{ ok: boolean }>("/miniprogram/runtime", { url }),
   // 任务级宿主授权集合（桌面控制闸门第五分支的判定依据）。
   taskHostTargets: (id: string) => get<{ targets: string[] }>(`/tasks/${id}/host-targets`),
   taskSetHostTargets: (id: string, targets: string[]) =>

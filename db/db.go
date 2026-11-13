@@ -587,6 +587,12 @@ var builtinAgents = []builtinAgent{
 	// ⚠️ chat_visible=false：执行体藏出会话选择器（seedBuiltins 落库后统一置 false，
 	// 见下方 edge_exec_chat_visible_v1 块）——选择器里只出现方法论那个 agent。
 	{"edge_exec", "偏锋探索·执行", "assistant", "偏锋探索的执行体：在指定任务上做总控——查判据进度、下发偏锋假设、判完成、封格、换方法论；判据成立即确定性收尾。", nil, false, intp(0)},
+	// 小程序渗透（0.13.0）：小程序全链渗透的代表 agent——包获取（人工口子）→解包
+	// 还原→配置矫正→运行时→接口发现→越权矩阵→结论回写。工具面：wechat-miniprogram
+	// skill（阶段脚本+指南）+ mp_token_* 池 + chrome-devtools MCP（浏览器操控）+
+	// desktop-ops（微信 PC 客户端原生交互，全 agent 共有能力的调用方）。单次 run
+	// 不限时（intp(0)，与 pentest/recon 同款长跑形态）。
+	{"miniprogram", "小程序渗透", "assistant", "小程序渗透 agent：从 wxapkg 解包还原源码工程、起运行时、接口发现、Burp 重放越权矩阵到结论回写的完整小程序渗透链；token 池与证据纪律内置。", nil, false, intp(0)},
 	//
 	// 以下三者是【确定性基础设施】，刻意不作为 agent 落库：
 	//   - policy-gate：它的裁决（scope、tier2 一致性、工具熔断、群组额度状态、anomaly 标记）
@@ -727,6 +733,31 @@ ON CONFLICT DO NOTHING`); err != nil {
 			log.Printf("[seed] agent-desktop 桌面控制 MCP 已注册（%s），可见性=全部 agent", abs)
 		}
 	}
+	// chrome-devtools MCP（0.13.0 小程序渗透增强）：stdio 注册，绝对路径 LookPath
+	// 解析（未安装跳过且不落旗标）。浏览器操控入口——小程序接口发现阶段由它驱动
+	// Chrome；不需要环回放行（CDP 走管道/本机端口，出网守卫的 HTTP 闸不管它）。
+	if v, _, _ := d.GetSetting("chrome_devtools_mcp_seed_v1"); v != "true" {
+		abs, err := exec.LookPath("chrome-devtools-mcp")
+		if err != nil {
+			log.Printf("[seed] chrome-devtools-mcp 未安装（npm i -g chrome-devtools-mcp），跳过 MCP 种子")
+		} else {
+			if _, err := d.Exec(`
+INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
+VALUES ('chrome-devtools', 'stdio', $1, '[]', '{}', true)
+ON CONFLICT (name) DO NOTHING`, abs); err != nil {
+				return fmt.Errorf("seed chrome-devtools mcp: %w", err)
+			}
+			if _, err := d.Exec(`
+INSERT INTO agent_visibility(agent_id, resource_kind, resource_id, enabled)
+SELECT a.id, 'mcp', m.id, true FROM agents a
+JOIN mcp_servers m ON m.name='chrome-devtools'
+ON CONFLICT DO NOTHING`); err != nil {
+				return fmt.Errorf("seed chrome-devtools visibility: %w", err)
+			}
+			_ = d.SetSetting("chrome_devtools_mcp_seed_v1", "true")
+			log.Printf("[seed] chrome-devtools MCP 已注册（%s），可见性=全部 agent", abs)
+		}
+	}
 	// 桌面工具进拦截系统（治理三段之一，施工方案 §四-D1）：启用名单按【内层名】
 	// 逐项合并（延迟调用经 guard 解包后按内层名求值，见 intercept.UnwrapDeferredName）；
 	// 四族规则（观测 allow / 动作 ask / 敏感读取 ask / 高危 deny）。旗标一次性：
@@ -813,7 +844,7 @@ var builtinSkillVisibility = map[string][]string{
 	"desktop-ops": {"*"},
 	// 小程序渗透（0.12.0）：阶段执行在任务路径（worker）与会话驱动（pentest/auto/
 	// mainagent）两条线；token 池工具同绑定。
-	"wechat-miniprogram": {"auto", "pentest", "worker", "mainagent"},
+	"wechat-miniprogram": {"auto", "pentest", "worker", "mainagent", "miniprogram"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default

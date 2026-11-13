@@ -20,6 +20,9 @@ export default function MiniprogramPage() {
   const [loading, setLoading] = React.useState(false);
   const [showAdd, setShowAdd] = React.useState(false);
   const [form, setForm] = React.useState({ app_id: "", label: "", value: "" });
+  const [runtimeUrl, setRuntimeUrl] = React.useState("");
+  const [runtimeInput, setRuntimeInput] = React.useState("");
+  const [runtimeDirty, setRuntimeDirty] = React.useState(false);
 
   const load = React.useCallback(() => {
     const id = taskId.trim();
@@ -28,10 +31,17 @@ export default function MiniprogramPage() {
       return;
     }
     setLoading(true);
-    Promise.all([api.mpTokens(Number(id)).catch(() => ({ tokens: [] })), api.mpArtifacts().catch(() => ({ apps: [] }))])
-      .then(([ts, arts]) => {
+    Promise.all([
+      api.mpTokens(Number(id)).catch(() => ({ tokens: [] })),
+      api.mpArtifacts().catch(() => ({ apps: [] })),
+      api.mpRuntime().catch(() => ({ url: "" })),
+    ])
+      .then(([ts, arts, rt]) => {
         setTokens(ts.tokens ?? []);
         setArtifacts(arts.apps ?? []);
+        setRuntimeUrl(rt.url ?? "");
+        setRuntimeInput(rt.url ?? "");
+        setRuntimeDirty(false);
       })
       .finally(() => setLoading(false))
       .catch(() => setLoading(false)); // 各请求自带 catch；这里兜 finally 链本身
@@ -53,6 +63,17 @@ export default function MiniprogramPage() {
       load();
     } catch (err) {
       toast.error(`保存失败：${String(err)}`);
+    }
+  };
+
+  const saveRuntime = async () => {
+    try {
+      await api.mpRuntimeSet(runtimeInput);
+      toast.success(runtimeInput ? "运行时地址已设置，内嵌浏览器可用" : "运行时地址已清除");
+      setRuntimeUrl(runtimeInput);
+      setRuntimeDirty(false);
+    } catch (err) {
+      toast.error(`设置失败：${String(err)}`);
     }
   };
 
@@ -165,6 +186,48 @@ export default function MiniprogramPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* 内嵌浏览器：运行时反代（同源 iframe）+ 地址配置 */}
+      <div className="rounded-lg border">
+        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+          <span className="text-sm font-medium">内嵌浏览器（小程序运行时）</span>
+          {runtimeUrl && (
+            <Badge variant="secondary" className="text-[10px]">
+              {runtimeUrl}
+            </Badge>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            <input
+              className="h-8 w-56 rounded-md border bg-background px-2 text-xs"
+              placeholder="运行时地址（如 http://127.0.0.1:3000）"
+              value={runtimeInput}
+              onChange={(e) => {
+                setRuntimeInput(e.target.value);
+                setRuntimeDirty(true);
+              }}
+            />
+            <Button size="sm" className="h-8 text-xs" disabled={!runtimeDirty} onClick={saveRuntime}>
+              保存
+            </Button>
+          </div>
+        </div>
+        <div className="bg-muted px-3 py-2 text-xs text-muted-foreground">
+          wxa-runner 起 dev server 后把地址填到这里——小程序页面内嵌在下方（同源反代），可直接点击调试；agent 经
+          chrome-devtools 操控同一页面做接口发现。运行时地址为部署配置（agent 不可改）。
+        </div>
+        {runtimeUrl ? (
+          <iframe
+            src="/mp-runtime/"
+            title="小程序运行时"
+            className="h-[60vh] w-full border-0"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          />
+        ) : (
+          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+            未配置运行时地址。用 wxa-runner 起 dev server（地址如 http://127.0.0.1:端口），填入上方并保存。
+          </div>
+        )}
       </div>
 
       {/* 解包产物 */}
