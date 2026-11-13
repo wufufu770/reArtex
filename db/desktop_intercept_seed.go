@@ -61,12 +61,13 @@ var desktopHighRiskTools = []string{
 	"sandbox_start", "sandbox_stop",
 }
 
-// desktopServerName 是注册的 MCP server 名（mcp_servers.name），
-// 平台全名 = mcp__<server>__<tool>。
+// desktopServerName 是注册的 MCP server 名（mcp_servers.name）。
+// DesktopMCPToolPrefix（桌面工具平台全名前缀）声明在 db/desktop_host.go——闸门
+// 桌面识别的唯一语义源，本文件的名单生成经 desktopToolFull 引用它。
 const desktopServerName = "agent-desktop"
 
 func desktopToolFull(cmd string) string {
-	return "mcp__" + desktopServerName + "__desktop_" + cmd
+	return DesktopMCPToolPrefix + cmd
 }
 
 // desktopGovernedNames 返回全部可治理桌面工具的平台全名（四类并集，去重排序）。

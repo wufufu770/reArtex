@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.12.1] - 2026-11-14
+
+### 新增（桌面控制 A4——闸门第五分支 HostLocalAction，任务路径桌面动作解锁）
+- **闸门第五分支**：`GateInput.HostLocalAction`——桌面控制面动作（`db.IsDesktopToolName`，解包后的内层名）且任务宿主授权集合（tasks.host_targets）非空时，scope 按构造通过（`pass(host_local_action)`），其余四道检查照跑。集合未配置的桌面动作在规整之前以**独立理由**拒绝（与「无可判定目标」区分）。
+- **跳过意图规整**（照 fastpath 纪律：豁免规整不豁免裁决）：桌面载荷只有 ref，规整器产不出目标线索——编造目标反而制造不稳定放行；审计带 bypassed_normalizer + bypass_reason=host_local_action。
+- **tasks.host_targets 列**（D9）+ db SetTaskHostTargets/TaskHostTargets + REST `PUT /api/tasks/{id}/host-targets`（写审计链）+ 任务详情「业务建模」tab 授权清单编辑器。
+- **解包一致性钉**：sod 的 deferredInnerName 与 guard 侧 intercept.UnwrapDeferredName 同载荷同产出（双包各持实现，行为漂移在此被钉死）；desktop_gate_test 三钉（分支通过/未授权区分/前缀唯一语义源）+ db 往返集成测试。
+- 语义边界（如实）：授权粒度是任务级粗粒度 + guard 层逐动作人工审批的组合——ref→窗口映射在 agent-desktop 会话态里，闸门解析不到；窗口级精控排后续。
+- 验证：build/vet 全绿；sod 包测试全过（含 0.11.9 既有链测试回归）；三钉 + db 往返真库通过；实跑 0.12.1。
+- 对齐检查：无新前端路由；授权清单编辑落在既有任务详情 tab。
+
 ## [0.12.0] - 2026-11-14
 
 ### 新增（小程序渗透功能点，施工方案 B0-B4；包获取人工口子按 D7）

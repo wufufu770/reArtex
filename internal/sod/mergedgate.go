@@ -379,6 +379,9 @@ func (c *Chain) gateInput(call chainCall, normalized NormalizerResult, scopePass
 		PayloadDigest: call.payloadDigest, ScopeDigest: call.scopeDigest,
 		Normalized: normalized, FindingID: findingIDFromInput(call.payload),
 		ScopePassReason: scopePassReason,
+		// 宿主本地桌面动作（0.12.1 A4）：enforce 模式的 scope 判定同样按第五类
+		// 通过（判定口径与旧链一致：桌面控制面 + 任务授权集合非空）。
+		HostLocalAction: c.hostLocalAction(call.taskID, call.toolName, call.payload),
 	}
 	return in
 }

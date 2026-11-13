@@ -139,6 +139,46 @@ func (s *Server) mpRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/miniprogram/tokens", s.mpTokensHandler)
 	mux.HandleFunc("DELETE /api/miniprogram/tokens/{id}", s.mpTokenDeleteHandler)
 	mux.HandleFunc("GET /api/miniprogram/artifacts", s.mpArtifactsHandler)
+	mux.HandleFunc("PUT /api/tasks/{id}/host-targets", s.taskHostTargetsHandler)
+}
+
+// taskHostTargetsHandler 处理 PUT /api/tasks/{id}/host-targets：任务级宿主授权
+// 集合（桌面控制闸门第五分支的判定依据，D9）。空数组=关闭授权。动作写审计链。
+func (s *Server) taskHostTargetsHandler(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID <= 0 {
+		writeErr(w, 400, "task id 非法")
+		return
+	}
+	var req struct {
+		Targets []string `json:"targets"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "请求体非法")
+		return
+	}
+	if err := pg.SetTaskHostTargets(taskID, req.Targets); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// 审计链：授权边界变更必须可回放（与 biz 差异裁决同规格）。
+	auditBody, _ := json.Marshal(map[string]any{"task_id": taskID, "targets": req.Targets})
+	if _, err := pg.AppendAuditEvent(db.AuditEvent{
+		Actor:    "operator",
+		ToolName: "desktop",
+		Action:   "host-targets-set",
+		Reason:   fmt.Sprintf("task=%d targets=%v", taskID, req.Targets),
+		Payload:  auditBody,
+		Source:   "desktop-host-auth",
+	}); err != nil {
+		log.Printf("[desktop] 授权清单审计链写入失败（忽略）: %v", err)
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "targets": req.Targets})
 }
 
 // mpArtifactRootRel 是小程序产物的固定相对目录（工作目录纪律：data_dir 固化，

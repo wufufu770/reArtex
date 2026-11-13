@@ -485,6 +485,10 @@ export const api = {
   mpTokenDelete: (id: number) => del<{ ok: boolean }>(`/miniprogram/tokens/${id}`),
   // 解包产物目录（artifacts/miniprogram/）。
   mpArtifacts: () => get<{ apps: MiniprogramArtifact[] }>("/miniprogram/artifacts"),
+  // 任务级宿主授权集合（桌面控制闸门第五分支的判定依据）。
+  taskHostTargets: (id: string) => get<{ targets: string[] }>(`/tasks/${id}/host-targets`),
+  taskSetHostTargets: (id: string, targets: string[]) =>
+    put<{ ok: boolean }>(`/tasks/${id}/host-targets`, { targets }),
   // 方法论注册表（偏锋总览页）。
   edgeMethodologies: () => get<{ methodologies: EdgeMethodology[] }>("/edge/methodologies"),
   // 偏锋任务总览（判据进度 + stop 统计）。

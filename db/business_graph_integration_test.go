@@ -316,3 +316,44 @@ func TestEdgeTasksOverview(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskHostTargetsRoundtrip 验证任务级宿主授权集合（0.12.1 A4 闸门分支的
+// 判定依据）：写入/读取/清空往返。
+func TestTaskHostTargetsRoundtrip(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	suffix := nowSuffix()
+	companyID, _, _, _, _, err := d.Companies().CreateCompanyWithScope(
+		"宿主授权公司"+suffix, "", []ScopeInput{{Kind: "domain", Value: "hostauth-" + suffix + ".example.com"}}, "集成测试造数")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	t.Cleanup(func() { _, _ = d.Companies().DeleteCompanyWithAssets(companyID, true) })
+	task, err := d.CreateTaskWithOptions("宿主授权验证 "+suffix, "验证",
+		TaskCreateOptions{CompanyIDs: []int64{companyID}})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	tid := task.ID
+	t.Cleanup(func() { _, _ = d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, tid) })
+
+	targets, ok, err := d.TaskHostTargets(tid)
+	if err != nil || !ok || len(targets) != 0 {
+		t.Fatalf("新任务应为空授权集合: targets=%v ok=%v err=%v", targets, ok, err)
+	}
+	if err := d.SetTaskHostTargets(tid, []string{"app:微信", "win:订单系统"}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	targets, ok, err = d.TaskHostTargets(tid)
+	if err != nil || !ok || len(targets) != 2 {
+		t.Fatalf("写入后应 2 项: %v", targets)
+	}
+	if err := d.SetTaskHostTargets(tid, nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if targets, _, _ = d.TaskHostTargets(tid); len(targets) != 0 {
+		t.Fatalf("清空后应 0 项: %v", targets)
+	}
+}

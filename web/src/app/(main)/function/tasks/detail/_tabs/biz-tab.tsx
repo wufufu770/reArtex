@@ -6,6 +6,8 @@
 
 import * as React from "react";
 
+import { toast } from "sonner";
+
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,6 +48,9 @@ export function BizTab({ taskId }: { taskId: string }) {
     criterion_progress: number;
     stop_stats: Record<string, number>;
   } | null>(null);
+  const [hostTargets, setHostTargets] = React.useState<string[]>([]);
+  const [hostInput, setHostInput] = React.useState("");
+  const [hostDirty, setHostDirty] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
 
   const load = React.useCallback(() => {
@@ -54,8 +59,9 @@ export function BizTab({ taskId }: { taskId: string }) {
       api.taskBizGraph(taskId).catch(() => null),
       api.bizDiffs({ task_id: Number(taskId), limit: 100 }).catch(() => null),
       api.taskEdgeCoverage(taskId).catch(() => null),
+      api.taskHostTargets(taskId).catch(() => ({ targets: [] })),
     ])
-      .then(([g, ds, ec]) => {
+      .then(([g, ds, ec, ht]) => {
         if (g) {
           setSummary(g.summary);
           setNodes(
@@ -174,6 +180,57 @@ export function BizTab({ taskId }: { taskId: string }) {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* 宿主授权集合（桌面控制闸门第五分支的判定依据，D9） */}
+      <div className="rounded-lg border p-3">
+        <div className="mb-1 text-sm font-medium">宿主授权集合（桌面控制）</div>
+        <div className="text-xs text-muted-foreground">
+          任务路径上桌面动作的授权窗口/应用清单（如 <code>app:微信</code>、<code>win:订单系统</code>；空 =
+          桌面动作在任务内拒绝）。变更走审计链。
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            className="h-8 flex-1 rounded-md border bg-background px-2 text-xs"
+            value={hostInput}
+            onChange={(e) => {
+              setHostInput(e.target.value);
+              setHostDirty(true);
+            }}
+            placeholder="逗号分隔，如：app:微信, win:订单系统"
+          />
+          <Button
+            size="sm"
+            className="h-8 text-xs"
+            disabled={!hostDirty}
+            onClick={async () => {
+              try {
+                await api.taskSetHostTargets(
+                  taskId,
+                  hostInput
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                );
+                toast.success("宿主授权集合已更新（动作进审计链）");
+                setHostDirty(false);
+              } catch (err) {
+                toast.error(`保存失败：${String(err)}`);
+              }
+            }}
+          >
+            保存
+          </Button>
+        </div>
+        {hostTargets.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {hostTargets.map((t) => (
+              <Badge key={t} variant="outline" className="text-[10px]">
+                {t}
+              </Badge>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 节点简表 */}

@@ -1539,3 +1539,8 @@ CREATE INDEX IF NOT EXISTS idx_av2_superseded ON assets(superseded_by) WHERE sup
 -- 语义与 builtin（是否平台预置）、role（扮演什么）正交，不复用任何一列。
 -- 存量行默认 true 行为不变；只有显式设 false 的行（如 edge_exec）被藏出选择器。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS chat_visible BOOLEAN NOT NULL DEFAULT true;
+-- 桌面控制的宿主授权清单（0.12.1 A4）：任务路径上桌面动作的授权窗口/应用集合
+-- （JSONB 字符串数组，如 ["app:微信","win:订单系统"]；["*"]=全量授权）。
+-- 闸门第五分支（pass(host_local_action)）以此为据；空数组 = 未授权（拒绝并给
+-- 独立理由，与「无可判定目标」区分）。由任务详情页/REST 维护。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS host_targets JSONB NOT NULL DEFAULT '[]';

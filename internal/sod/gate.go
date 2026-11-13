@@ -124,6 +124,13 @@ type GateInput struct {
 	// pass(local_task_dir)）。链侧已保证「所有路径都在界内」，有任何出界路径
 	// 都不会置位此标志（照旧走完整 scope 判定）。
 	LocalTaskDir bool
+	// HostLocalAction 标记本次调用是桌面控制面动作（0.12.1 A4，第五类）：工具名
+	// 属桌面控制面（db.IsDesktopToolName）且任务的宿主授权集合（tasks.host_targets）
+	// 非空——scope 按构造通过（理由码 pass(host_local_action)），其余检查照跑。
+	// 集合未配置的桌面动作到不了闸门：链侧在规整之前就以独立理由拒绝（与
+	// 「无可判定目标」区分）。它同时意味着跳过 LLM 规整（桌面载荷只有 ref，
+	// 规整器产不出目标线索，编造目标反而制造不稳定放行）。
+	HostLocalAction bool
 	// Degraded 标记本次调用处于规整器降级档（方案 v3 缺陷 B4）：规整器连续
 	// 不可用，Tier1/2 类动作确定性放行。链侧已用分级器保证到达这里的只有
 	// Tier1/2 类（无外部 host 目标的平台动作），scope 按构造通过；其余检查
@@ -168,6 +175,16 @@ func (g *Gate) Evaluate(ctx context.Context, in GateInput) GateOutput {
 	case in.LocalTaskDir:
 		// 本地任务目录（B5）：引用的全部路径都在任务工作区内（链侧确定性判定）。
 		out.Checks["scope_check"] = "pass(local_task_dir)"
+	case in.HostLocalAction:
+		// 宿主本地动作（0.12.1 A4）：桌面控制动作的授权依据不是网络范围，而是
+		// 任务级宿主授权集合（tasks.host_targets：窗口/应用清单）。链侧已判定
+		// 「工具属于桌面控制面 + 集合非空」才置位此标志（工具载荷携带 ref 而非
+		// 主机名，ref→窗口的映射在 agent-desktop 会话态里，闸门解析不到 ⇒
+		// 授权粒度是任务级粗粒度 + guard 层逐动作人工审批的组合）。其余检查
+		// （熔断/额度/tier2）照跑；审计带 bypassed_normalizer + bypass_reason。
+		// 集合之外/未配置的动作到不了这里——链侧给独立拒绝（与「无可判定目标」
+		// 区分，见 chain.go 的 desktop 分支）。
+		out.Checks["scope_check"] = "pass(host_local_action)"
 	case in.Degraded:
 		// 降级档（B4）：Tier1/2 类动作没有外部 host 目标（写侧边界由工具实现
 		// 保证），scope 按构造通过；Tier3 根本到不了这里（链侧分级器已拦）。

@@ -459,7 +459,7 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 
 	// ---- 旧链（off / shadow 的权威路径）：规整 → 闸门 → 裁决 ----
-	// 规整（失败 ⇒ fail-closed）。三类确定性豁免跳过规整：
+	// 规整（失败 ⇒ fail-closed）。四类确定性豁免跳过规整：
 	//   - 任务内结构化写（B2，见 taskInternalWriteTools）；
 	//   - 本地任务目录 Bash（B5）：命令引用的全部绝对路径都在任务工作区内——
 	//     出界路径只要有一个就走完整流程，绝不放宽；
@@ -467,9 +467,26 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	//     （curl 纯 GET/HEAD、nmap -sn/-p、dig/nslookup/whois/host、WebFetch）。
 	//     豁免的是 LLM 规整不是闸门裁决 —— 五道检查照跑，scope 用快路径提取的
 	//     TargetHint 判定；审计带 fast_path 独立标记（§4 不变式 4）。
+	//   - 宿主本地桌面动作（0.12.1 A4）：工具属桌面控制面且任务的宿主授权集合
+	//     非空（tasks.host_targets）——桌面载荷只有 ref，规整器产不出目标线索
+	//     （编造目标反而制造不稳定放行），豁免规整、scope 走第五分支。集合未
+	//     配置的桌面动作在规整之前就以独立理由拒绝（与「无可判定目标」区分）。
 	localBash := name == "Bash" && BashLocalTaskDir(call.taskID, payload)
 	taskInternal := TaskInternalWrite(call.toolName)
 	fastPath, fastHit := DeterministicFastPath(name, payload)
+	// 桌面识别按【解包后的内层名】——延迟桌面工具的外层名是 ExecuteExtraTool，
+	// 载荷 tool_name 才是实际执行的工具（与 guard 侧 intercept.UnwrapDeferredName
+	// 同一语义；一致性由 sod 测试与 intercept 包互验钉死）。
+	effName := deferredInnerName(name, payload)
+	desktopHost := db.IsDesktopToolName(effName)
+	hostTargets, htErr := c.desktopHostTargets(call.taskID)
+	if desktopHost && (htErr != nil || len(hostTargets) == 0) {
+		// 独立拒绝路径：区分「动作作用于未授权/未配置的宿主清单」与「无可判定
+		// 目标」——前者是授权管理问题（先配 host_targets），后者是载荷形态问题。
+		return c.deny(ctx, call, sodpolicy.ReasonOutOfScope,
+			"宿主桌面动作未在本任务授权清单内（host_targets 未配置）——先在任务上配置授权窗口/应用，或改走会话路径")
+	}
+	desktopLocal := desktopHost && len(hostTargets) > 0
 	var (
 		normalized NormalizerResult
 		cacheHit   bool
@@ -479,7 +496,7 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	if fastHit && !taskInternal && !localBash {
 		normalized, cacheHit = fastPath, false
 	}
-	if !taskInternal && !localBash && !fastHit {
+	if !taskInternal && !localBash && !fastHit && !desktopLocal {
 		normalized, cacheHit, patternHit, err = c.normalize(ctx, call)
 		if err != nil {
 			if errors.Is(err, ErrNormalizerUnavailable) {
@@ -519,10 +536,13 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	// §4 不变式 4：所有放行旁路带独立审计标记。任务内结构化写跳过了 LLM 规整
 	// —— 这件事必须能从审计里单独回放出来，而不是混在「全部通过」里。
 	markers := map[string]string{}
-	if taskInternal || localBash {
+	if taskInternal || localBash || desktopLocal {
 		markers["bypassed_normalizer"] = "true"
 		if localBash {
 			markers["bypass_reason"] = "local_task_dir"
+		}
+		if desktopLocal {
+			markers["bypass_reason"] = "host_local_action"
 		}
 	}
 	if fastHit && !taskInternal && !localBash {
@@ -736,8 +756,54 @@ func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized Normali
 		FindingID:         findingIDFromInput(call.payload),
 		TaskInternalWrite: TaskInternalWrite(call.toolName),
 		LocalTaskDir:      call.toolName == "Bash" && BashLocalTaskDir(call.taskID, call.payload),
+		HostLocalAction:   c.hostLocalAction(call.taskID, call.toolName, call.payload),
 		Degraded:          degraded,
 	})
+}
+
+// deferredInnerName 从 ExecuteExtraTool 载荷取内层工具名（非转发器调用回退原名）。
+// 语义与 intercept.UnwrapDeferredName 一致——两包各持一份实现（internal/sod 不
+// import intercept 以保持依赖纪律），一致性由 sod 测试与 intercept 包互验钉死。
+func deferredInnerName(tool string, payload []byte) string {
+	if tool != "ExecuteExtraTool" {
+		return tool
+	}
+	var probe struct {
+		ToolName string `json:"tool_name"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil || probe.ToolName == "" {
+		return tool
+	}
+	return probe.ToolName
+}
+
+// desktopHostTargets 读任务级宿主授权集合（tasks.host_targets）。deps.DB 未装配
+// 或读失败按「未授权」处理（fail-closed：授权读不出来 ⇒ 不放行桌面动作）。
+func (c *Chain) desktopHostTargets(taskID int64) ([]string, error) {
+	if c.deps.DB == nil {
+		return nil, fmt.Errorf("依赖库未装配")
+	}
+	targets, ok, err := c.deps.DB.TaskHostTargets(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return targets, nil
+}
+
+// hostLocalAction 判定本次调用是否走宿主本地动作分支（闸门第五类）：工具属桌面
+// 控制面（解包后的内层名）且任务授权集合非空。读失败一律 false（fail-closed）。
+func (c *Chain) hostLocalAction(taskID int64, tool string, payload []byte) bool {
+	if !db.IsDesktopToolName(deferredInnerName(tool, payload)) {
+		return false
+	}
+	targets, err := c.desktopHostTargets(taskID)
+	if err != nil || len(targets) == 0 {
+		return false
+	}
+	return true
 }
 
 // deny 记一次拒绝并返回拒绝消息。
