@@ -1282,6 +1282,33 @@ export interface EdgeRun {
   stop_detail: Record<string, unknown>;
 }
 
+// 方法论注册表条目（GET /api/edge/methodologies）。
+export interface EdgeMethodology {
+  id: string;
+  name: string;
+  tier: number; // 1=机器可判 2=需改造 3=隐喻
+  evidence_grade: "empirical" | "standard" | "metaphor";
+  summary: string;
+  enabled: boolean;
+  priority: number;
+  heuristic_tags: string[];
+  criterion?: { kind: string; bounds: { kind: string; limit: number }[] };
+}
+
+// 偏锋任务总览行（GET /api/edge/tasks）。
+export interface EdgeTaskOverview {
+  task_id: number;
+  task_desc: string;
+  task_goal: string;
+  status: string;
+  methodology_id: string;
+  cells_total: number;
+  cells_terminal: number;
+  criterion_progress: number;
+  open_run: { id: number; stop_reason: string } | null;
+  stop_stats: Record<string, number>;
+}
+
 export interface EdgeCoverage {
   task_id: number;
   edge_mode: boolean;

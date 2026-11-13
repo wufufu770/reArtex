@@ -304,3 +304,70 @@ FROM edge_runs WHERE stop_reason='' ORDER BY id`)
 	}
 	return out, nil
 }
+
+// ---------- 偏锋总览（前端总览页数据源）----------
+
+// EdgeTaskOverview 是「偏锋总览」一行：一个 edge_mode 任务 + 它的判据进度。
+type EdgeTaskOverview struct {
+	TaskID      int64          `json:"task_id"`
+	TaskDesc    string         `json:"task_desc"`
+	TaskGoal    string         `json:"task_goal"`
+	Status      string         `json:"status"`
+	Methodology string         `json:"methodology_id"`
+	CellsTotal  int            `json:"cells_total"`
+	CellsDone   int            `json:"cells_terminal"`
+	Progress    float64        `json:"criterion_progress"`
+	OpenRun     *EdgeRun       `json:"open_run"`
+	StopStats   map[string]int `json:"stop_stats"`
+}
+
+// ListEdgeTasksOverview 列全部 edge_mode 的未删任务及其判据进度
+//（偏锋总览页的数据源；零 LLM，纯机械汇总）。判据进度 = 终态格点 / 总格点。
+func (d *DB) ListEdgeTasksOverview() ([]*EdgeTaskOverview, error) {
+	rows, err := d.Query(`
+SELECT t.id, t.description, t.goal, t.status, COALESCE(t.methodology_id,'')
+FROM tasks t
+WHERE t.edge_mode=true AND t.deleted_at IS NULL
+ORDER BY t.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EdgeTaskOverview
+	for rows.Next() {
+		o := &EdgeTaskOverview{StopStats: map[string]int{}}
+		if err := rows.Scan(&o.TaskID, &o.TaskDesc, &o.TaskGoal, &o.Status, &o.Methodology); err != nil {
+			return nil, err
+		}
+		cells, err := d.ListEdgeCells(o.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		o.CellsTotal = len(cells)
+		for _, c := range cells {
+			if c.State == EdgeCellConfirmed || c.State == EdgeCellDisproven || c.State == EdgeCellFolded {
+				o.CellsDone++
+			}
+		}
+		if o.CellsTotal > 0 {
+			o.Progress = float64(o.CellsDone) / float64(o.CellsTotal)
+		}
+		if o.OpenRun, err = d.OpenEdgeRun(o.TaskID); err != nil {
+			return nil, err
+		}
+		stopRows, err := d.Query(`SELECT stop_reason, COUNT(*) FROM edge_runs WHERE task_id=$1 GROUP BY stop_reason`, o.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		for stopRows.Next() {
+			var reason string
+			var n int
+			if err := stopRows.Scan(&reason, &n); err == nil {
+				o.StopStats[reason] = n
+			}
+		}
+		stopRows.Close()
+		out = append(out, o)
+	}
+	return out, nil
+}

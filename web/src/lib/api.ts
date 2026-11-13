@@ -46,6 +46,8 @@ import type {
   DeleteTaskResult,
   Edge,
   EdgeCoverage,
+  EdgeMethodology,
+  EdgeTaskOverview,
   EgressGovernanceState,
   EvidenceBodyPreview,
   ExplorationNodePage,
@@ -471,6 +473,10 @@ export const api = {
   // 偏锋格点覆盖与判据进度 + stop_reason 统计（M8 评测口径数据源）。
   taskEdgeCoverage: (id: string) =>
     get<EdgeCoverage & { stop_stats: Record<string, number> }>(`/tasks/${id}/edge-coverage`),
+  // 方法论注册表（偏锋总览页）。
+  edgeMethodologies: () => get<{ methodologies: EdgeMethodology[] }>("/edge/methodologies"),
+  // 偏锋任务总览（判据进度 + stop 统计）。
+  edgeTasks: () => get<{ tasks: EdgeTaskOverview[] }>("/edge/tasks"),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----

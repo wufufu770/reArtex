@@ -251,3 +251,68 @@ func TestBizEdgeIntegration(t *testing.T) {
 		t.Fatalf("存量内置 agent 可见性不应被改动，%d 个被置 false", builtinVisibleCount)
 	}
 }
+
+// TestEdgeTasksOverview 验证偏锋总览查询（GET /api/edge/tasks 的数据源）：
+// edge_mode 任务行被列出、判据进度机械汇总、停用后不再列出。
+func TestEdgeTasksOverview(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	suffix := nowSuffix()
+	companyID, _, _, _, _, err := d.Companies().CreateCompanyWithScope(
+		"偏锋总览公司"+suffix, "", []ScopeInput{{Kind: "domain", Value: "edgeov-" + suffix + ".example.com"}}, "集成测试造数")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	t.Cleanup(func() { _, _ = d.Companies().DeleteCompanyWithAssets(companyID, true) })
+	task, err := d.CreateTaskWithOptions("偏锋总览验证任务 "+suffix, "验证总览",
+		TaskCreateOptions{CompanyIDs: []int64{companyID}})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	tid := task.ID
+	t.Cleanup(func() { _, _ = d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, tid) })
+
+	if err := d.SetTaskEdgeMode(tid, true, "pre-mortem"); err !=  nil {
+		t.Fatalf("set edge mode: %v", err)
+	}
+	for _, c := range []string{"cause:1", "cause:2", "cause:3"} {
+		if err := d.UpsertEdgeCell(tid, c, "pre-mortem", map[string]any{}); err != nil {
+			t.Fatalf("upsert cell: %v", err)
+		}
+	}
+	_ = d.FoldEdgeCell(tid, "cause:1", "confirmed")
+	_ = d.FoldEdgeCell(tid, "cause:2", "disproven")
+	_, _ = d.StartEdgeRun(tid, "pre-mortem")
+
+	ov, err := d.ListEdgeTasksOverview()
+	if err != nil {
+		t.Fatalf("list overview: %v", err)
+	}
+	var found *EdgeTaskOverview
+	for _, o := range ov {
+		if o.TaskID == tid {
+			found = o
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("edge_mode 任务未被总览列出")
+	}
+	if found.Methodology != "pre-mortem" || found.CellsTotal != 3 || found.CellsDone != 2 {
+		t.Fatalf("汇总错误: meth=%s total=%d done=%d", found.Methodology, found.CellsTotal, found.CellsDone)
+	}
+	if found.Progress == 0 || found.OpenRun == nil {
+		t.Fatalf("进度/未收尾运行错误: progress=%v open_run=%v", found.Progress, found.OpenRun)
+	}
+	// 关掉 edge_mode 后不再列出。
+	_ = d.SetTaskEdgeMode(tid, false, "")
+	if ov, _ := d.ListEdgeTasksOverview(); len(ov) > 0 {
+		for _, o := range ov {
+			if o.TaskID == tid {
+				t.Fatal("edge_mode=false 的任务不应被列出")
+			}
+		}
+	}
+}
