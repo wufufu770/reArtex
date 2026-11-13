@@ -250,7 +250,12 @@ func TestChatGroupStateWithoutQuotaRowSucceeds(t *testing.T) {
 		t.Fatalf("查额度行: %v", err)
 	}
 	if exists {
-		t.Fatalf("用例前提不成立：这个群本来就有额度行")
+		// v0.11.2 起建群自动开通默认群预算（「建群即哑巴」的解药）——旧前提
+		// 「建群后没有额度行」不再自然成立。本用例钉的是「无额度行时闸门不参与
+		// 判定」，显式清掉自动额度行即可回到被测形态。
+		if _, err := pg.Exec(`DELETE FROM group_quotas WHERE group_id=$1`, gid); err != nil {
+			t.Fatalf("清理自动额度行: %v", err)
+		}
 	}
 
 	code, out := sodAPIDo(t, h, tok, "PUT", "/api/task-hall/groups/"+strconv.FormatInt(gid, 10)+"/status",

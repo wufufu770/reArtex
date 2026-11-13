@@ -88,15 +88,23 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ts := agent.NewToolSet(task.Store, "planner")
+	// v0.11.1 P0 之后 planner 工具集不再含 report_finding（登记必须有真实执行支撑）；
+	// finding 工作流的登记入口对齐到 worker lane——PlannerTools+WorkerTools 合并装配，
+	// 让装配结果里的 report_finding 是【绑任务 store 的那份】而不是 ToolResolve 注入的
+	// task-less 实例（后者会以「需要任务上下文」拒绝，0.11.3 起 CI 红的原因之一）。
+	ts := agent.NewToolSet(task.Store, "worker")
 	ts.SetTaskID(*f.TaskID)
 	ts.SetFindingRecorder(s.evidenceStore())
 	notices := 0
 	ts.SetNotifyFinding(func(int64, string) { notices++ })
-	tools, def, cleanup := agent.AugmentTools(ctx, "planner", ts.PlannerTools())
+	baseTools := append(append([]actool.CoreTool(nil), ts.PlannerTools()...), ts.WorkerTools()...)
+	tools, def, cleanup := agent.AugmentTools(ctx, "worker", baseTools)
 	defer cleanup()
-	if !strings.Contains(def.FindingGuidance, "evidence_hint_id") || !strings.Contains(def.FindingGuidance, "取消 Worker") {
-		t.Fatal("Planner missed runtime guidance")
+	// guidance 的「取消 Worker」段依赖 prove_goal/goal_met（判目标语义，planner/
+	// 判定 lane 的工具）——worker 装配下 ToolResolve 会按绑定丢弃它们，属预期；
+	// 本用例钉的是登记链路的交接引导（evidence_hint_id）。
+	if !strings.Contains(def.FindingGuidance, "evidence_hint_id") {
+		t.Fatal("worker missed runtime guidance")
 	}
 	report := workflowTool(t, tools, "report_finding")
 	result := workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "Planner handoff fixture", "evidence_hint_id": hints.IDs[0]}, false)
