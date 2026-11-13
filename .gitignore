@@ -73,3 +73,6 @@ secrets/
 # node 容器崩溃残留
 core
 core.*
+
+# Mimosa hook 状态（任意层级，测试产物，永不入库）
+**/.mimosa/
