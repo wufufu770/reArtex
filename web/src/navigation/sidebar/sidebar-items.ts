@@ -28,6 +28,7 @@ import {
   Terminal,
   Users,
   Waypoints,
+  Smartphone,
   Wrench,
 } from "lucide-react";
 
@@ -89,6 +90,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "business-graph", title: "业务建模", url: "/function/business-graph", icon: Waypoints },
       { id: "biz-diffs", title: "差异面板", url: "/function/business-graph/diffs", icon: GitCompareArrows },
       { id: "edge-exploration", title: "偏锋探索", url: "/function/business-graph?mode=edge", icon: Compass },
+      { id: "miniprogram", title: "小程序渗透", url: "/function/miniprogram", icon: Smartphone },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
     ],

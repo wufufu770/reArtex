@@ -5,6 +5,13 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.12.2] - 2026-11-14
+
+### 修复（前后端对齐审计——0.12.0 的 sidebar 补丁静默失配 + skill 绑定缺口）
+- **sidebar 补「小程序渗透」入口**：0.12.0 的补丁因锚串与文件实际内容失配而静默未打上（脚本无断言）——本轮修复并立规矩：**前端补丁必须带断言 + 构建产物必须回验**（本次构建产物 chunk 中 grep 到「小程序渗透」才算过）。
+- **skill 绑定种子**（更严重的功能缺口）：agent_skill_visibility 此前只有 api-recon→3 agent——desktop-ops 与 wechat-miniprogram 两个 skill 没绑任何 agent ⇒ **没有任何 agent 能解锁这两个 skill**（桌面动作面/小程序链路不可用）。builtinSkillVisibility 补两行：desktop-ops→全部 agent（"*" 通配，roledispatch 钉死的纪律 agent 由白名单继续兜）；wechat-miniprogram→auto/pentest/worker/mainagent。
+- 对齐审计全量重过（0.11.9-0.12.1 后端功能点 vs 前端入口）：桌面控制（MCP 页/拦截页/审批页/工具页 + biz-tab 授权编辑）✓；小程序渗透（sidebar+页+token 工具+REST）✓（本轮修复）；偏锋/业务建模既有入口 ✓。
+
 ## [0.12.1] - 2026-11-14
 
 ### 新增（桌面控制 A4——闸门第五分支 HostLocalAction，任务路径桌面动作解锁）

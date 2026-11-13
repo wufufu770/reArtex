@@ -808,6 +808,12 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // that MCP is enabled/configured.
 var builtinSkillVisibility = map[string][]string{
 	"api-recon": {"auto", "pentest", "worker"},
+	// 桌面操作（0.11.9）：mcps 门控的动作面解锁入口——全 agent 共有（用户裁定：
+	// 桌面控制是平台能力，非某功能点专属）。"*" = 绑全部 agent（含自定义 agent）。
+	"desktop-ops": {"*"},
+	// 小程序渗透（0.12.0）：阶段执行在任务路径（worker）与会话驱动（pentest/auto/
+	// mainagent）两条线；token 池工具同绑定。
+	"wechat-miniprogram": {"auto", "pentest", "worker", "mainagent"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default
@@ -816,6 +822,17 @@ var builtinSkillVisibility = map[string][]string{
 func (d *DB) seedBuiltinSkillVisibility() error {
 	for skillName, agentKeys := range builtinSkillVisibility {
 		for _, key := range agentKeys {
+			// "*" 通配 = 全部 agent（桌面操作的全 agent 共有口径；roledispatch
+			// 钉死的纪律 agent 由白名单继续兜——可见不等于可动手）。
+			if key == "*" {
+				if _, err := d.Exec(`
+INSERT INTO agent_skill_visibility(agent_id, skill_name, enabled)
+SELECT id, $1, true FROM agents
+ON CONFLICT (agent_id, skill_name) DO NOTHING`, skillName); err != nil {
+					return fmt.Errorf("skill %s → 全部 agent: %w", skillName, err)
+				}
+				continue
+			}
 			if _, err := d.Exec(`
 INSERT INTO agent_skill_visibility(agent_id, skill_name, enabled)
 SELECT id, $2, true FROM agents WHERE key=$1
