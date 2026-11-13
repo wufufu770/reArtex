@@ -91,10 +91,17 @@ command -v go >/dev/null 2>&1 || die "未检测到 Go（项目需要 Go 1.26 或
 
 ARTEX_GOSUMDB="${ARTEX_GOSUMDB:-sum.golang.org}"
 if [ -z "${ARTEX_BUILD_VERSION:-}" ]; then
-  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    ARTEX_BUILD_VERSION="$(git describe --tags --always --dirty)"
-  else
-    ARTEX_BUILD_VERSION="dev"
+  # 版本优先级：ARTEX_BUILD_VERSION env > VERSION 文件（开发纪律：每次更改进小版本）
+  # > git describe > dev。VERSION 文件是本地构建版本号的权威来源，发布时打 tag 对齐。
+  if [ -f "$(dirname "$0")/VERSION" ]; then
+    ARTEX_BUILD_VERSION="$(tr -d '[:space:]' < "$(dirname "$0")/VERSION")"
+  fi
+  if [ -z "${ARTEX_BUILD_VERSION:-}" ]; then
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      ARTEX_BUILD_VERSION="$(git describe --tags --always --dirty)"
+    else
+      ARTEX_BUILD_VERSION="dev"
+    fi
   fi
 fi
 # Release tags are commonly passed as v0.3.3; keep the binary version consistent.

@@ -5,6 +5,31 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.11.6] - 2026-11-13
+
+### 新增（业务建模 × 偏锋探索 显示与体验对齐）
+- **业务建模图画布跟随页面主题**：G6 画布背景/标签/连线配色按 resolvedThemeMode 双套（暗色不再刺眼）；建图 effect 依赖改为主题（数据变化不再重建整图）。
+- **工作目录固化**（开发纪律 §2）：`config.json` 支持 `data_dir`（优先级：`-data` flag > `ARTEX_DATA_DIR` env > config `data_dir` > 可执行文件同级 `data/`）；版本更新只换二进制、永不删工作目录；预置 `traffic/`、`artifacts/`（功能点产物根）、`workspace/` 子目录与 `WORKDIR.md` 说明。
+- **版本纪律落地**：`VERSION` 文件为版本权威（当前 0.11.6），`build.sh` 优先读它注入 `main.version`；纪律成文 `docs/开发纪律.md`（版本步进/运行后提交/前后端对齐/推送规范/工作目录）。
+
+### 修复（0.11.5 显示缺口复查）
+- 偏锋探索总览页 `/function/edge-exploration` 报"无法载入"——排查为服务重启空窗 + 浏览器缓存旧构建 chunk（服务端 HTML/JS chunk/尾斜杠全部 200），随本轮重发布刷新 chunk 后消除；无代码缺陷。
+
+## [0.11.5] - 2026-11-13
+
+### 新增（前后端显示对齐）
+- sidebar 三入口：**业务建模**（原业务图改名）、**差异面板**、**偏锋探索**。
+- 新页 `/function/edge-exploration`：方法论注册表（判据类型/上限参数/证据等级/启用状态）+ 偏锋任务判据进度与 stop_reason 统计。
+- 新 REST：`GET /api/edge/methodologies`、`GET /api/edge/tasks`（db.ListEdgeTasksOverview：edge_mode 任务+判据机械汇总+未收尾运行+stop 分组）；`TestEdgeTasksOverview` 真库集成测试。
+
+## [0.11.4] - 2026-11-13
+
+### 新增（业务建模 × 偏锋探索合并施工，M0-M8 全量落地；验证记录见分支 feature/biz-edge-modeling 提交 96ba5d9）
+- 业务建模（第三张图）：biz 五表 + 范围读写 + 八类差异规则表（WSTG/STRIDE 内置映射）+ 快照版本 + 资产 supersede（宿主侧唯一写函数 + 审计链）；bizmodeler 自定义 agent（六段流程，触发器默认关）；八工具（含 propose_biz_intent 的归一去重/积压水位/可证伪预测纪律）；REST 四条 + 前端 G6 三视图与差异面板 + 任务详情「业务建模」tab。
+- 偏锋探索：internal/edge 方法论注册表（五类判据+上限参数强制+隐喻不带判据）、两级触发词闸门（本轮注入+工具前置+审计落账）、edge/edge_exec 双 agent（执行体 chat_visible=false）、八工具（绑定矩阵：edge_run 不绑 mainagent）、scheduler fireEdgeWake（轮间接力+判据停滞熔断+判据成立机械收尾）、planner 态势追加 provider、worker「偏锋探索」纪律段、edge-coverage REST（stop_reason 统计=判据触发率口径）。
+- 基础设施：`agents.chat_visible` 列（选择器可见性，与 builtin/role 正交）；`tasks.methodology_id/edge_mode`；`assets.superseded_by`（宿主侧唯一写路径）；独立 DDL 文件 `db/schema_biz.sql`/`db/schema_edge.sql` 走 Ensure*Schema 启动接线。
+- 验证：真库集成测试（TestBizEdgeIntegration）、db 全包、server 两轮回归（失败集合=基线既有）、HTTP 全链路（agents/工具绑定/范围读 fail-closed/差异裁决→审计链 intact）。运行抓出并修复：schema_biz 缺 ON CONFLICT 唯一索引（42P10）、bizDiffsHandler 只传 task_id 时 company_id=0 恒空。
+
 ## [0.11.3] - 2026-11-13
 
 ### 修复（v0.11.2 遗留两项收尾）

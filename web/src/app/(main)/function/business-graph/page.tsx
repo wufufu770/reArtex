@@ -20,6 +20,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { BizGraphNode, BizLayerDiff, Company } from "@/lib/types";
+import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
 
 // ---------- 图元定义（节点类型 → lucide path 白描边 data URI，照 coverage-graph-tab 手法）----------
 
@@ -109,6 +110,8 @@ export function BusinessGraphPage() {
   const [selected, setSelected] = React.useState<BizGraphNode | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
+  // 画布配色跟随页面主题（resolvedThemeMode 由偏好 store 同步 DOM data-theme）。
+  const theme = usePreferencesStore((s) => s.resolvedThemeMode);
 
   React.useEffect(() => {
     api
@@ -232,7 +235,27 @@ export function BusinessGraphPage() {
     if (graphRef.current) applyData();
   }, [applyData]);
 
-  // 建图（一次）。动态 import 避开 SSR/静态导出期的 window 依赖。
+  // 建图（主题切换时销毁重建；数据由上方 applyData effect 单独灌入——
+  // 数据变化不重建整图）。画布配色跟随页面主题：G6 画布背景是硬编码 hex，
+  // 不跟随 CSS 变量，所以按 resolvedThemeMode 手动给两套（暗色下不再刺眼）。
+  const dark = theme === "dark";
+  const canvas = React.useMemo(
+    () =>
+      dark
+        ? { bg: "#111827", labelFill: "#94a3b8", labelBg: "rgba(17,24,39,0.78)", edge: "#475569", edgeLabel: "#94a3b8" }
+        : {
+            bg: "#f0f2f7",
+            labelFill: "#475569",
+            labelBg: "rgba(255,255,255,0.75)",
+            edge: "#94a3b8",
+            edgeLabel: "#64748b",
+          },
+    [dark],
+  );
+  // applyData 走 ref：建图 effect 只依赖 canvas（主题），数据灌入始终用最新闭包
+  // ——数据变化不重建整图（重建由上方 applyData effect 独立负责）。
+  const applyDataRef = React.useRef(applyData);
+  applyDataRef.current = applyData;
   React.useEffect(() => {
     let destroyed = false;
     let graph: G6Graph | null = null;
@@ -243,7 +266,7 @@ export function BusinessGraphPage() {
         container: containerRef.current,
         autoResize: true,
         autoFit: "view",
-        background: "#f0f2f7",
+        background: canvas.bg,
         node: {
           style: {
             size: (d: unknown) => (d as { size?: number }).size ?? 34,
@@ -256,23 +279,24 @@ export function BusinessGraphPage() {
             labelText: (d: unknown) => (d as { labelText?: string }).labelText ?? "",
             labelFontSize: 10,
             labelPlacement: "bottom",
-            labelFill: "#475569",
+            labelFill: canvas.labelFill,
             labelBackground: true,
-            labelBackgroundFill: "rgba(255,255,255,0.75)",
+            labelBackgroundFill: canvas.labelBg,
             labelBackgroundRadius: 3,
             labelPadding: [1, 3],
           },
         },
         edge: {
           style: {
-            stroke: (d: unknown) => (d as { stroke?: string }).stroke ?? "#94a3b8",
+            stroke: (d: unknown) => (d as { stroke?: string }).stroke ?? canvas.edge,
             lineWidth: (d: unknown) => (d as { lineWidth?: number }).lineWidth ?? 1,
             lineDash: (d: unknown) => (d as { lineDash?: number[] }).lineDash ?? [],
             labelText: (d: unknown) => (d as { labelText?: string }).labelText ?? "",
             labelFontSize: (d: unknown) => (d as { labelFontSize?: number }).labelFontSize ?? 9,
-            labelFill: (d: unknown) => (d as { labelFill?: string }).labelFill ?? "#64748b",
+            labelFill: (d: unknown) => (d as { labelFill?: string }).labelFill ?? canvas.edgeLabel,
             labelBackground: (d: unknown) => (d as { labelBackground?: boolean }).labelBackground ?? false,
-            labelBackgroundFill: (d: unknown) => (d as { labelBackgroundFill?: string }).labelBackgroundFill,
+            labelBackgroundFill: (d: unknown) =>
+              (d as { labelBackgroundFill?: string }).labelBackgroundFill ?? canvas.labelBg,
             labelPadding: (d: unknown) => (d as { labelPadding?: number[] }).labelPadding,
           },
         },
@@ -291,7 +315,7 @@ export function BusinessGraphPage() {
         if (n) setSelected(n);
       });
       graphRef.current = graph;
-      applyData();
+      applyDataRef.current();
     })();
     return () => {
       destroyed = true;
@@ -303,8 +327,7 @@ export function BusinessGraphPage() {
       graph?.destroy();
       graphRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyData]);
+  }, [canvas]);
 
   const selectedDiffs = React.useMemo(
     () =>

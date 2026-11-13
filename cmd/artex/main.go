@@ -64,7 +64,7 @@ func main() {
 func run() int {
 	var (
 		addr    = flag.String("addr", ":8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the binary)")
+		dataDir = flag.String("data", config.DataDir(), "data/work directory (precedence: -data flag > ARTEX_DATA_DIR env > config.json data_dir > data/ next to the binary; never deleted on version updates)")
 		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
 		showVer = flag.Bool("version", false, "print build version and exit")
 	)

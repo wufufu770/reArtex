@@ -29,6 +29,24 @@ type Database struct {
 type Config struct {
 	Database Database `json:"database"`
 	SkillDir string   `json:"skill_dir"`
+	// DataDir 固化工作目录（工作空间页展示的共享目录，traffic/产物都在它下面）。
+	// 空串 = 用默认（BaseDir()/data，可执行文件同级）。显式写死后：
+	//   - 版本更新/换装二进制不迁移目录（selfupdate 只换可执行文件本身）；
+	//   - 绝不删除：里面是流量录制、任务工作产物与各功能点的子目录。
+	DataDir string `json:"data_dir"`
+}
+
+// DataDir 返回固化后的工作目录，优先级：env ARTEX_DATA_DIR > config data_dir >
+// BaseDir()/data（默认：可执行文件同级的 data/）。给 main 的 -data flag 默认值
+// 用——flag 显式传参仍然最高（哨兵空串语义见 main.go）。
+func DataDir() string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_DATA_DIR")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(Load().DataDir); v != "" {
+		return v
+	}
+	return filepath.Join(BaseDir(), "data")
 }
 
 // BaseDir is the directory that anchors all runtime artifacts (config.json and
