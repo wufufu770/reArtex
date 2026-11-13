@@ -48,8 +48,11 @@ type Planner struct {
 	todos  map[int64]*actool.TodoStore
 
 	// strategyContext 是「给 planner 注入哪些策略摘要」的回调（宿主侧装配）。
+	// situationAppend 是「业务建模摘要段 + 偏锋判据段」的追加回调（合并施工 G-19）：
+	// 两个功能统一走这一个口子拼进态势，每轮现取（易变内容不进 system）。
 	// nil = 不注入。
-	strategyContext func(taskID int64) string
+	strategyContext  func(taskID int64) string
+	situationAppend  func(taskID int64) string
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
@@ -114,6 +117,30 @@ func (p *Planner) SetConstraintInject(fn func() bool) { p.injectConstraints = fn
 // 渲染，注入路径拿不到策略正文。
 func (p *Planner) SetStrategyContextProvider(fn func(taskID int64) string) {
 	p.strategyContext = fn
+}
+
+// situationAppendProvider 是「业务建模摘要段 + 偏锋判据段」的追加回调（合并施工
+// 的统一注入口，G-19）。两个功能各自给一段文本，宿主侧拼接——一个回调承载两段，
+// 避免改两次 planner.go；返回空串 = 不注入。
+//
+// 为什么是回调而不是直接给 *db.DB：与 SetStrategyContextProvider 同一范式。
+// 为什么拼进 situational（本轮 user 输入）而不是 system：两段内容每轮可能变化
+// （建模增量、判据推进），进 system 会损前缀缓存——与记忆层 W3/T5 水位段同一
+// 通道纪律。
+func (p *Planner) SetSituationAppendProvider(fn func(taskID int64) string) {
+	p.situationAppend = fn
+}
+
+// situationAppendBlock 返回追加段（空串 = 不注入）。
+func (p *Planner) situationAppendBlock(taskID int64) string {
+	if p.situationAppend == nil {
+		return ""
+	}
+	s := strings.TrimSpace(p.situationAppend(taskID))
+	if s == "" {
+		return ""
+	}
+	return "\n\n" + s
 }
 
 // strategyContextBlock 返回注入 planner 态势的策略摘要块（空串 = 不注入）。
@@ -437,6 +464,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	situational := renderTriggers(ts, triggers) + renderGraphOverview(scanData)
 	// 策略摘要：只注入摘要，不注入正文（反模式 8）。
 	situational += p.strategyContextBlock(taskID)
+	// 业务建模摘要段 + 偏锋判据段（合并施工 G-19）：偏锋任务（edge_mode=true）
+	// 注入方法论判据段——planner 按判据选格点派意图、按判据判断「探索够了没有」；
+	// 业务建模有产出时注入摘要段。回调返回空串 = 不注入（两段在宿主侧拼好）。
+	situational += p.situationAppendBlock(taskID)
 	// C5 收尾评估轮例外：本轮触发里带 wrapup ⇒ 硬底线让位（0 意图允许且预期），
 	// planner 的任务改为「证成已有成果或如实给 partial 结论」。
 	wrapupRound := false

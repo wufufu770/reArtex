@@ -1,12 +1,12 @@
 import {
   Activity,
-  FileText,
   Ban,
   BellRing,
   Bot,
   Brain,
   Bug,
   ClipboardList,
+  FileText,
   FolderOpen,
   FolderSync,
   History,
@@ -25,6 +25,7 @@ import {
   Target,
   Terminal,
   Users,
+  Waypoints,
   Wrench,
 } from "lucide-react";
 
@@ -83,6 +84,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "commands", title: "工具执行", url: "/function/commands", icon: Terminal },
       { id: "llm-records", title: "LLM 录制", url: "/function/llm-records", icon: Radio },
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
+      { id: "business-graph", title: "业务图", url: "/function/business-graph", icon: Waypoints },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
     ],

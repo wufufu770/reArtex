@@ -1184,6 +1184,114 @@ export interface Agent {
   mcp_count?: number;
   skill_count?: number;
   tool_count?: number;
+  // 会话选择器可见性(EDGE E1)：false = 不出现在 chat 页选择器(执行体 agent 用)。
+  // absent = 旧后端/默认 true。
+  chat_visible?: boolean;
+}
+
+// ---------- 业务建模（第三张图）与偏锋探索 ----------
+
+// 业务图节点（BizGraphNode）：七类业务节点 × design/behavior 两层。
+export interface BizGraphNode {
+  id: number;
+  company_id: number;
+  task_id: number; // 0 = 无归属任务
+  layer: "design" | "behavior";
+  node_type: "biz_entity" | "biz_action" | "biz_state" | "biz_role" | "biz_trust" | "biz_dataflow" | "biz_external";
+  name: string;
+  raw_name: string;
+  description: string;
+  props: Record<string, unknown>;
+  confidence: "observed" | "inferred";
+  source: string;
+  superseded_by: number; // 0 = 未失效
+  asset_ids: number[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+// 业务图边（BizGraphEdge）：九种关系。
+export interface BizGraphEdge {
+  id: number;
+  company_id: number;
+  task_id: number;
+  layer: "design" | "behavior";
+  src_id: number;
+  dst_id: number;
+  rel:
+    | "owns"
+    | "invokes"
+    | "depends_on"
+    | "trusts"
+    | "flows_to"
+    | "validates"
+    | "requires_state"
+    | "transitions"
+    | "grants";
+  props: Record<string, unknown>;
+  confidence: "observed" | "inferred";
+  superseded_by: number;
+}
+
+export interface BizGraphData {
+  nodes: BizGraphNode[];
+  edges: BizGraphEdge[];
+}
+
+// 双层差异（biz_layer_diffs）：八类差异 × 四档 severity × 四态 status。
+export interface BizLayerDiff {
+  id: number;
+  company_id: number;
+  task_id: number;
+  diff_type:
+    | "missing_validation"
+    | "extra_permission"
+    | "state_bypass"
+    | "trust_violation"
+    | "unexpected_flow"
+    | "timing_anomaly"
+    | "unbounded_consumption"
+    | "workflow_skip";
+  severity: "critical" | "high" | "medium" | "low";
+  design_ref: Record<string, unknown>;
+  behavior_ref: Record<string, unknown>;
+  description: string;
+  wstg_ref: string;
+  stride_ref: string;
+  status: "open" | "pushed" | "confirmed" | "false_positive";
+  created_at?: string;
+}
+
+// 偏锋格点与覆盖（EDGE）。
+export interface EdgeCell {
+  id: number;
+  task_id: number;
+  cell_id: string;
+  methodology_id: string;
+  state: "open" | "dispatched" | "confirmed" | "disproven" | "folded";
+  attempts: number;
+  criterion_state: Record<string, unknown>;
+}
+
+export interface EdgeRun {
+  id: number;
+  task_id: number;
+  methodology_id: string;
+  criterion_trace: unknown[];
+  stop_reason: string;
+  stop_detail: Record<string, unknown>;
+}
+
+export interface EdgeCoverage {
+  task_id: number;
+  edge_mode: boolean;
+  methodology_id: string;
+  cells_total: number;
+  cells_terminal: number;
+  cells_dispatched: number;
+  criterion_progress: number;
+  cells: EdgeCell[];
+  open_run: EdgeRun | null;
 }
 
 // 思考档位能力(方案 v9.2 批次 A：注册表三层解法的第一层)。

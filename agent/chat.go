@@ -11,6 +11,7 @@ import (
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/internal/agentcred"
+	"github.com/Autumn-27/artex/internal/edge"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -177,6 +178,20 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	shared := c.collectSessionSharedContext(ctx, agentKey)
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir)+groupDigest+shared, def)
+	// 触发词闸门（EDGE E6，合并施工）：确定性检测「用户明确提出偏锋探索」。
+	// 注入走【本轮】（拼进传给 runner 的消息），不拼死进 system——chat 是常驻
+	// 会话（transcript 跨轮复用），system 前缀直接关系 KV 缓存（W3 记忆块为
+	// 此改走 SystemReminderFunc，同一纪律）。硬命中额外把 edge 工具前置到工具
+	// 集头部（模型先看见先想起）；软命中只注入建议，不前置（宁漏勿误）。
+	if hit := edge.Scan(message); hit != nil {
+		if hit.Hard {
+			message += edge.HardGatePrompt(hit)
+			tools = promoteEdgeTools(tools)
+		} else {
+			message += edge.SoftHintPrompt(hit)
+		}
+		c.auditTriggerGate(agentKey, hit)
+	}
 	opts := agentcore.Options{
 		Provider:        c.prov,
 		SystemPrompt:    system,

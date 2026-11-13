@@ -30,6 +30,8 @@ import type {
   AuditEventsPage,
   BatchCategoryItem,
   BatchControlItem,
+  BizGraphData,
+  BizLayerDiff,
   ChatAttachment,
   CommandRecord,
   Company,
@@ -43,6 +45,7 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  EdgeCoverage,
   EgressGovernanceState,
   EvidenceBodyPreview,
   ExplorationNodePage,
@@ -84,6 +87,9 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  ReportCandidate,
+  ReportFull,
+  ReportMeta,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -98,11 +104,8 @@ import type {
   SodDecision,
   SodFeed,
   SodHookChain,
-  ReportCandidate,
-  ReportFull,
-  ReportMeta,
-  SodMergedGateMode,
   SodManualOverrideRow,
+  SodMergedGateMode,
   SodReviewItem,
   SSProject,
   SSTask,
@@ -441,6 +444,33 @@ export const api = {
     }>(`/tasks/${id}/coverage`),
   // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
+  // ---- 业务建模（第三张图）× 偏锋探索（合并施工）----
+  // 业务图（按公司；task_id 可选=按任务范围读）。
+  bizGraph: (companyID: number, taskID?: number, layer?: string) =>
+    get<BizGraphData>(
+      `/business-graph?company_id=${companyID}${taskID ? `&task_id=${taskID}` : ""}${layer ? `&layer=${layer}` : ""}`,
+    ),
+  // 双层差异清单。
+  bizDiffs: (params: { company_id?: number; task_id?: number; status?: string; severity?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params.company_id) q.set("company_id", String(params.company_id));
+    if (params.task_id) q.set("task_id", String(params.task_id));
+    if (params.status) q.set("status", params.status);
+    if (params.severity) q.set("severity", params.severity);
+    if (params.limit) q.set("limit", String(params.limit));
+    return get<{ diffs: BizLayerDiff[] }>(`/business-graph/diffs?${q.toString()}`);
+  },
+  // 人工裁决一条差异（confirmed/false_positive/open），写审计链。
+  bizDiffDecision: (diffID: number, status: string, reason: string) =>
+    post<{ ok: boolean }>(`/business-graph/diffs/${diffID}/decision`, { status, reason }),
+  // 任务维度的业务图 + 摘要（任务详情 tab 用）。
+  taskBizGraph: (id: string) =>
+    get<BizGraphData & { summary: { design_nodes: number; behavior_nodes: number; open_diffs: number } }>(
+      `/tasks/${id}/biz-graph`,
+    ),
+  // 偏锋格点覆盖与判据进度 + stop_reason 统计（M8 评测口径数据源）。
+  taskEdgeCoverage: (id: string) =>
+    get<EdgeCoverage & { stop_stats: Record<string, number> }>(`/tasks/${id}/edge-coverage`),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----
@@ -539,8 +569,7 @@ export const api = {
   // ---- 报告中心（/system/reports）----
   reports: () => get<{ reports: ReportMeta[]; count: number }>("/reports").then((r) => r.reports ?? []),
   reportGet: (id: number) => get<ReportFull>(`/reports/${id}`),
-  createReport: (title: string, content = "") =>
-    post<{ id: number }>("/reports", { title, content }),
+  createReport: (title: string, content = "") => post<{ id: number }>("/reports", { title, content }),
   updateReport: (id: number, patch: { title?: string; content?: string }) =>
     put<{ ok: boolean }>(`/reports/${id}`, patch),
   deleteReport: (id: number) => del<{ ok: boolean }>(`/reports/${id}`),

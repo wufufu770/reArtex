@@ -1314,9 +1314,13 @@ export default function ChatPage() {
 
   const agentByKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
   // conversation agents: custom agents + conversational built-ins (role=assistant,
-  // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
-  // are task-specific and stay hidden from the chat page.
-  const chatAgents = React.useMemo(() => agents.filter((a) => !a.builtin || a.role === "assistant"), [agents]);
+  // e.g. Auto / 渗透测试), minus the ones explicitly hidden via chat_visible=false
+  // (执行体 agent，如 偏锋探索·执行). The orchestration built-ins
+  // (goals/planner/mainagent/worker) are task-specific and stay hidden from the chat page.
+  const chatAgents = React.useMemo(
+    () => agents.filter((a) => a.chat_visible !== false && (!a.builtin || a.role === "assistant")),
+    [agents],
+  );
 
   // 旧对话与会话的对应关系（迁移兼容）：会话里带 conversation_id 时直接认；
   // 否则按「单一成员 + 标题与 agent 都对得上且候选唯一」回填出来的会话去认。

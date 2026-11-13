@@ -564,6 +564,8 @@ type AgentDTO struct {
 	// agent 级思考档位覆盖(方案 v9.2 批次 B):''=跟随绑定 profile 默认;
 	// 'enabled'/'disabled'=强制思考开关;其余=effort 档位。
 	ThinkingEffort string `json:"thinking_effort"`
+	// 会话选择器可见性(EDGE E1):false = 不出现在 chat 页选择器(执行体用)。
+	ChatVisible bool `json:"chat_visible"`
 	// binding counts (populated only by the list endpoint) — shown on agent cards.
 	McpCount   int `json:"mcp_count"`
 	SkillCount int `json:"skill_count"`
@@ -588,6 +590,7 @@ func agentDTO(a *db.Agent) AgentDTO {
 		TriggerMergeMode:   a.TriggerMergeMode,
 		TriggerMaxParallel: a.TriggerMaxParallel,
 		ThinkingEffort:     a.ThinkingEffort,
+		ChatVisible:        a.ChatVisible,
 	}
 }
 

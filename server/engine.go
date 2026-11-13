@@ -1072,13 +1072,18 @@ func (e *Engine) strategyContextProvider() func(taskID int64) string {
 
 // wireStrategyContext 给 planner 装上策略摘要注入回调（宿主侧，只装一次）。
 func (e *Engine) wireStrategyContext(pl *agent.Planner) {
-	if e == nil || pl == nil || e.strategyProvider == nil {
+	if e == nil || pl == nil {
 		return
 	}
 	if _, loaded := e.strategyWired.LoadOrStore(pl, struct{}{}); loaded {
 		return // 已装过
 	}
-	pl.SetStrategyContextProvider(e.strategyProvider)
+	if e.strategyProvider != nil {
+		pl.SetStrategyContextProvider(e.strategyProvider)
+	}
+	// 业务建模摘要段 + 偏锋判据段（合并施工 G-19）：同一 LoadOrStore 守卫下
+	// 装第二个回调——两段共用一个注入口（situational 尾部），每轮现取。
+	pl.SetSituationAppendProvider(e.situationAppendProvider)
 }
 
 // attributeSubTaskOutcome 给这个任务跑一轮子任务级归因，并把结论路由成待裁决的提议。

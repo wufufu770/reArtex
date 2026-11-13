@@ -64,10 +64,64 @@ var plannerToolAllow = map[string]bool{
 	"Skill":                    true,
 }
 
+// bizModelerToolAllow 是业务建模 agent 的允许集（BIZ 合并施工）。
+// 与 planner 同款收敛：宿主 FS 与进程接触面清零（无 Bash/Write/Edit/MultiEdit/
+// Glob/Sleep——设计产物读取走 read_design_artifacts 的服务端实现，不经 Read
+// 工具碰宿主 FS）。写组是参数化 server 工具（task_id 入参 + 锚点范围判定前置），
+// 不是 ToolSet 任务工具。
+var bizModelerToolAllow = map[string]bool{
+	// 业务图读写组（server/biz_tools.go）
+	"read_biz_graph":        true,
+	"read_design_artifacts": true,
+	"upsert_biz_node":       true,
+	"upsert_biz_edge":       true,
+	"record_biz_diff":       true,
+	"propose_biz_intent":    true,
+	"biz_refuted_facts":     true, // 增量建模读证伪池（M7）
+	"biz_adjudicate":        true, // 冲突裁决的宿主侧执行入口（M7）
+	// 资产/跨任务只读组
+	"list_assets":           true,
+	"list_companies":        true,
+	"get_task_graph":        true,
+	"list_task_findings":    true,
+	"get_task_node_detail":  true,
+	"get_task_worker_trace": true,
+	// 技能可见性是 per-agent 机制，只是加载技能说明文本（与 planner 回归修订同理）。
+	"Skill": true,
+}
+
+// edgeToolAllow 是偏锋探索方法论顾问的允许集（EDGE）：咨询与发起，不下发不收尾。
+var edgeToolAllow = map[string]bool{
+	"edge_methodologies": true,
+	"edge_coverage":      true,
+	"edge_consult":       true,
+	"edge_run":           true,
+	"list_assets":        true,
+	"list_companies":     true,
+	"Skill":              true,
+}
+
+// edgeExecToolAllow 是偏锋探索执行体的允许集（EDGE）：总控轮四件事——查进度、
+// 下发、收尾、换方法论；跨任务读组让它能看到目标任务的图。
+var edgeExecToolAllow = map[string]bool{
+	"edge_methodologies":    true,
+	"edge_coverage":         true,
+	"edge_dispatch":         true,
+	"edge_conclude":         true,
+	"edge_switch":           true,
+	"get_task_graph":        true,
+	"list_task_findings":    true,
+	"get_task_worker_trace": true,
+	"Skill":                 true,
+}
+
 // roleToolAllow 是角色→允许集的总表；值 nil = 该角色不收敛（维持现状）。
 // 新增受钉角色时在这里加一行——不要在调用点写 if。
 var roleToolAllow = map[string]map[string]bool{
-	"planner": plannerToolAllow,
+	"planner":    plannerToolAllow,
+	"bizmodeler": bizModelerToolAllow,
+	"edge":       edgeToolAllow,
+	"edge_exec":  edgeExecToolAllow,
 	// "worker": nil, "mainagent": nil, "goals": nil, chat/*: 不收敛
 }
 

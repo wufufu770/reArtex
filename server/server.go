@@ -1315,6 +1315,9 @@ func (s *Server) Handler() http.Handler {
 	// 审计链校验：追加有入口，校验也该有 —— 操作者要能自查链有没有被改过。
 	mux.HandleFunc("GET /api/audit/chain", s.auditChainVerify)
 
+	// 业务建模 × 偏锋探索（合并施工）：业务图/差异/人工裁决/edge 覆盖度路由。
+	s.bizRoutes(mux)
+
 	// SoD 链（职责分离）的三个只读观测面。
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；
 	// 对抗复核队列是交给 redteam 证伪的清单，不是人工审批队列。

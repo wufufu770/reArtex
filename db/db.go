@@ -469,6 +469,16 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureBgTaskSchema(); err != nil {
 			return fmt.Errorf("apply bg_task schema: %w", err)
 		}
+		// 业务建模（第三张图）的 DDL：biz_nodes/edges/anchors/layer_diffs/
+		// model_versions 五表（db/schema_biz.sql）。启动期建好的理由同上各层：
+		// 受限运行角色建不了表，懒执行会在建模 agent 第一次写图时报 42P01。
+		if err := schemaDB.EnsureBizSchema(); err != nil {
+			return fmt.Errorf("apply biz schema: %w", err)
+		}
+		// 偏锋探索的 DDL：edge_cells/edge_runs 两表（db/schema_edge.sql）。同上。
+		if err := schemaDB.EnsureEdgeSchema(); err != nil {
+			return fmt.Errorf("apply edge schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
@@ -560,6 +570,17 @@ var builtinAgents = []builtinAgent{
 	// emit_structured_intent 一个工具（见 config.go 的 AdvisoryAgentToolPolicies）。
 	// 不给交互式 shell——它只转换，不动手。
 	{"intent_normalizer", "意图规整", "assistant", "结构化意图转换者：把 worker 的原始动作（shell 命令 / HTTP 请求 / 工具参数）转成结构化意图，交给确定性闸门裁决；不执行、不改写语义、不查 scope。", nil, false, nil},
+	// 偏锋探索（EDGE E0）：方法论顾问（轻量）——出现在会话选择器，可咨询方法论、
+	// 查判据进度、出候选假设；完整运行由 edge_exec 承担。与顾问五件套同属
+	// 「只提议」类 assistant 会话型 agent。
+	{"edge", "偏锋探索", "assistant", "偏锋探索：在既有探索图之上，用可注册的方法论（STPA/pre-mortem/逆向与负空间等）驱动一条与常规路径不同的探索线——方法论咨询、判据进度查询、候选假设；完整探索运行由「偏锋探索·执行」承担。", nil, false, nil},
+	// 偏锋探索·执行（EDGE E0）：完整偏锋运行的调度与判据收尾——查判据进度、下发
+	// 偏锋假设、判完成、封格、换方法论。长跑由任务引擎承担（spawn_task timeout=0），
+	// 它自己是每轮 ≤15min 的总控轮；runSeconds=0（不限时）与 pentest/recon 同款，
+	// 语义是「触发运行的 run 不设墙钟」，轮间隔由 fireEdgeWake 轮转驱动。
+	// ⚠️ chat_visible=false：执行体藏出会话选择器（seedBuiltins 落库后统一置 false，
+	// 见下方 edge_exec_chat_visible_v1 块）——选择器里只出现方法论那个 agent。
+	{"edge_exec", "偏锋探索·执行", "assistant", "偏锋探索的执行体：在指定任务上做总控——查判据进度、下发偏锋假设、判完成、封格、换方法论；判据成立即确定性收尾。", nil, false, intp(0)},
 	//
 	// 以下三者是【确定性基础设施】，刻意不作为 agent 落库：
 	//   - policy-gate：它的裁决（scope、tier2 一致性、工具熔断、群组额度状态、anomaly 标记）
@@ -622,6 +643,19 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 	// 防重播(用户删改不复活)。引擎按类别给 worker 拼纪律段,见 db/task_category_seed.go。
 	if err := d.seedDefaultTaskCategories(); err != nil {
 		return fmt.Errorf("seed task categories: %w", err)
+	}
+	// 功能扩展类别(业务建模/偏锋探索):独立旗标,幂等语义同上——业务建模任务的
+	// 类别落点与偏锋探索热切(SetTaskCategory)的目标类别都在这里。
+	if err := d.seedBizEdgeTaskCategories(); err != nil {
+		return fmt.Errorf("seed biz/edge task categories: %w", err)
+	}
+	// edge_exec 藏出会话选择器（EDGE E1）：种子行落库后置 chat_visible=false。
+	// 一次性旗标：用户之后手动把它开回选择器是有意的，重启不复活。
+	if v, _, _ := d.GetSetting("edge_exec_chat_visible_v1"); v != "true" {
+		if _, err := d.Exec(`UPDATE agents SET chat_visible=false WHERE key='edge_exec'`); err != nil {
+			return fmt.Errorf("seed edge_exec chat_visible: %w", err)
+		}
+		_ = d.SetSetting("edge_exec_chat_visible_v1", "true")
 	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (用户
 	// 需要时自行启用), no proxy by default. The traffic-capture toggle injects/strips

@@ -41,6 +41,8 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools := append(s.m.HostTools(), s.orchestrationTools()...)
 	tools = append(tools, s.findingRetestTools()...)
 	tools = append(tools, s.platformTools()...) // 平台操作工具(建改 skill/工具/MCP，给 Auto 用)
+	tools = append(tools, s.bizTools()...)      // 业务建模工具(BIZ；tools 表按绑定过滤，默认 bizmodeler)
+	tools = append(tools, s.edgeTools()...)     // 偏锋探索工具(EDGE；绑定矩阵见 seedEdgeTools)
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -540,6 +542,11 @@ func (s *Server) seedOrchestrationTools() {
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
+	// 业务建模 × 偏锋探索（合并施工）：工具播种 + agent 注册。都在 tools 表
+	// seed 之后做——AdvisoryAgentToolPolicies 的 Allow 补绑对已注册行立即生效。
+	s.seedBizTools()         // 业务图八工具播种（默认绑 bizmodeler）
+	s.seedBizModelerAgent()  // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
+	s.seedEdgeTools()        // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
 }
 
 // seedReconDefaultBindings gives the recon (资产收集) agent its spawn_task binding

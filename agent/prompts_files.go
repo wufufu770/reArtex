@@ -33,6 +33,10 @@ var advisoryPromptFiles = map[string]string{
 	"redteam":           "prompts/redteam.md",
 	"creative":          "prompts/creative.md",
 	"intent_normalizer": "prompts/intent-normalizer.md",
+	// 偏锋探索（EDGE E0）：方法论顾问与执行体。连字符文件名 + 下划线 agent key
+	//（promptKeyAliases 惯例）。
+	"edge":      "prompts/edge.md",
+	"edge_exec": "prompts/edge-exec.md",
 }
 
 // 下面这些文件【刻意不登记】为 agent：
@@ -89,6 +93,7 @@ func AdvisoryPromptSeeds() map[string]string {
 // 一个不存在的 agent 行。
 var promptKeyAliases = map[string]string{
 	"intent-normalizer": "intent_normalizer",
+	"edge-exec":         "edge_exec",
 }
 
 // BuiltinPromptBody 按 agent key 查内置提示词正文，查不到返回 false。

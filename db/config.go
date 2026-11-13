@@ -553,14 +553,18 @@ type Agent struct {
 	// ''=跟随绑定 profile 的默认；'enabled'/'disabled'=强制思考开关（switch
 	// 形态模型）；其余=reasoning_effort 档位（effort 形态模型）。
 	ThinkingEffort string `json:"thinking_effort"`
+	// ChatVisible 是会话选择器可见性（EDGE E1）：false = 不作为对话对象出现在
+	// chat 页选择器（执行体 agent 用，如 edge_exec）。与 Builtin（是否平台预置）、
+	// Role（扮演什么）三者正交，不复用任何一列。存量行默认 true，行为不变。
+	ChatVisible bool `json:"chat_visible"`
 }
 
-const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),llm_profile_id,COALESCE(thinking_effort,'')`
+const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),llm_profile_id,COALESCE(thinking_effort,''),COALESCE(chat_visible,true)`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var prof sql.NullInt64 // llm_profile_id 可空:未绑定时为 NULL
-	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof, &a.ThinkingEffort)
+	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof, &a.ThinkingEffort, &a.ChatVisible)
 	if err == nil && prof.Valid {
 		v := prof.Int64
 		a.LLMProfileID = &v
@@ -738,6 +742,13 @@ func (d *DB) SetAgentWebSearch(key string, on bool) error {
 // 开关；其余=effort 档位。合法值由服务端白名单校验后传入。
 func (d *DB) SetAgentThinkingEffort(key, effort string) error {
 	_, err := d.Exec(`UPDATE agents SET thinking_effort=NULLIF($1,'') WHERE key=$2`, effort, key)
+	return err
+}
+
+// SetAgentChatVisible 是会话选择器可见性的写入口（EDGE E1）。语义与 builtin/role
+// 正交：false 只影响「是否出现在 chat 页选择器」，不影响触发、编排与工具绑定。
+func (d *DB) SetAgentChatVisible(key string, visible bool) error {
+	_, err := d.Exec(`UPDATE agents SET chat_visible=$1 WHERE key=$2`, visible, key)
 	return err
 }
 
@@ -1467,6 +1478,39 @@ func AdvisoryAgentToolPolicies() []AdvisoryAgentToolPolicy {
 				// 自己判一个 scope 并放行，绕过闸门。
 				"list_companies", "add_task_scope", "add_company_scope", "get_task_scope",
 			},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+		{
+			// 偏锋探索·方法论顾问（EDGE）：只提议——咨询方法论、查判据进度、轻量
+			// 咨询、发起完整运行。下发/收尾/换方法论是执行体（edge_exec）的职责，
+			// 顾问不碰。主 agent 默认不绑 edge_run（任务内角色不建新任务，见
+			// server/edge_tools.go 的绑定注释）；白名单外一律绑不上。
+			Agent: "edge",
+			Allow: []string{
+				"edge_methodologies", // 方法论注册表读取（只读）
+				"edge_coverage",      // 格点覆盖与判据进度（只读）
+				"edge_consult",       // 轻量咨询（留痕，不建任务不落图）
+				"edge_run",           // 发起完整偏锋任务（建任务 + 启动 edge_exec）
+			},
+			Deny:      []string{"report_finding", "add_intent", "add_task_scope", "add_company_scope"},
+			DenyExec:  true,
+			DenyWrite: true,
+		},
+		{
+			// 偏锋探索·执行体（EDGE）：总控轮——查进度、下发假设、判完成、封格、
+			// 换方法论。判定/封格/收尾是确定性层职责的编排入口，不是共享状态写
+			// （判据账本只它自己写）。报告漏洞与直接派生常规意图不在其职责内——
+			// 下发走 edge_dispatch（带溯因门禁），不是 add_intent。
+			Agent: "edge_exec",
+			Allow: []string{
+				"edge_methodologies", // 方法论注册表读取（只读）
+				"edge_coverage",      // 格点覆盖与判据进度（只读）
+				"edge_dispatch",      // 下发一条偏锋假设到指定格点
+				"edge_conclude",      // 判据成立后收尾并写 stop_reason
+				"edge_switch",        // 换方法论、封格（熔断动作）
+			},
+			Deny:      []string{"report_finding", "add_intent", "add_task_scope", "add_company_scope"},
 			DenyExec:  true,
 			DenyWrite: true,
 		},

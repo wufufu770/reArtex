@@ -645,8 +645,25 @@ func workerCategoryDiscipline(categoryName string) string {
 	if db.SameTaskCategoryName(categoryName, db.TaskCategoryAssetCollection) {
 		return workerReconDiscipline
 	}
+	// 偏锋探索（EDGE E4）：偏锋任务的 worker 纪律段——偏锋假设由 edge_dispatch
+	// 下发（带溯因三件套），worker 领到后的执行纪律是「按 prediction 采集、
+	// 对照 falsifier 下三选一结论」。与资产收集类别一样是结构性约束：goal 文本
+	// 拦不住的事（证伪被当失败、顺手改道）由提示词结构兜住。
+	if db.SameTaskCategoryName(categoryName, db.TaskCategoryEdgeExploration) {
+		return workerEdgeDiscipline
+	}
 	return ""
 }
+
+// workerEdgeDiscipline 是「偏锋探索」类别任务的 worker 纪律段（EDGE E4）。
+const workerEdgeDiscipline = `
+
+## 偏锋探索纪律（本任务是方法论驱动的偏锋线）
+
+- 你领到的意图是偏锋假设的验证任务：intent payload 里有 prediction（期待观察到什么）与 edge_falsifier（看到什么算这条假设被反驳）。执行时先采集对照 prediction，结论时明确判定「证实 / 证伪 / 无法判定」三选一，不许含糊。
+- 结论无论正负都写回：record_fact 的 confidence 口径照旧（observed=直接看到，inferred=据现象推断）；**假设被证伪是有效产出，不是失败**——格点判据靠正负结论推进。
+- 你不做超出本假设范围的自由探索；发现顺手线索时写成 fact（供下一轮偏锋选题），不自行改道。
+`
 
 // workerCategoryDisciplineOf returns the per-run resolver handed to the worker:
 // it reads the task's LIVE category name each run (lifecycleMu-guarded), so

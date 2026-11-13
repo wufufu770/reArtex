@@ -369,6 +369,8 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		TriggerMaxParallel *int    `json:"trigger_max_parallel"`
 		// agent 级思考档位覆盖(方案 v9.2 批次 B):''=跟随 profile 默认。
 		ThinkingEffort *string `json:"thinking_effort"`
+		// 会话选择器可见性(EDGE E1):false = 藏出 chat 页选择器。
+		ChatVisible *bool `json:"chat_visible"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -452,6 +454,13 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := pg.SetAgentThinkingEffort(a.Key, *req.ThinkingEffort); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	// 会话选择器可见性（EDGE E1）：与 builtin/role 正交的独立开关，直接写。
+	if req.ChatVisible != nil {
+		if err := pg.SetAgentChatVisible(a.Key, *req.ChatVisible); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

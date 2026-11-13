@@ -858,6 +858,9 @@ CREATE TABLE IF NOT EXISTS agents (
     -- 'enabled'/'disabled'=强制思考开关(switch 形态模型);其余=reasoning_effort 档位
     -- (effort 形态模型)。写入口在服务端白名单校验,库级不加 CHECK(与上方迁移同一纪律)。
     thinking_effort  TEXT,
+    -- 会话选择器可见性(EDGE E1):false = 不作为对话对象出现在 chat 页选择器
+    -- (执行体 agent 用,如 edge_exec)。与 builtin/role 正交;写入口在服务端白名单。
+    chat_visible     BOOLEAN NOT NULL DEFAULT true,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant'))
@@ -1518,3 +1521,21 @@ BEGIN
         )';
     END IF;
 END $$;
+
+-- ---------- 业务建模 × 偏锋探索（合并施工：跨表加列，幂等 ALTER）----------
+-- 偏锋探索（T5 任务内模式）：任务级方法论挂载。edge_mode=true 时 planner 态势
+-- 注入偏锋判据段、worker 纪律段按「偏锋探索」类别走（edge_activate 同时写
+-- category 与这两列，互为兜底——单列损坏时另一列仍能表达模式）。
+-- methodology_id 存方法论注册表的 id 字符串（internal/edge 的注册表 key）。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS methodology_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS edge_mode      BOOLEAN NOT NULL DEFAULT false;
+-- 业务建模（BIZ 裁决）：资产失效指针。只由宿主侧 supersede 路径写（server 层
+-- 唯一写函数 + AppendAuditEvent），普通 upsert 不碰它——assets 的追加合并语义
+-- （auth/params/technologies 的 || EXCLUDED 合并）不变，失效是叠加在合并之上的
+-- 显式动作，不是 upsert 的一部分。
+ALTER TABLE assets ADD COLUMN IF NOT EXISTS superseded_by BIGINT REFERENCES assets(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_av2_superseded ON assets(superseded_by) WHERE superseded_by IS NOT NULL;
+-- 会话选择器可见性（EDGE E1）：是否作为对话对象出现在 chat 页选择器。
+-- 语义与 builtin（是否平台预置）、role（扮演什么）正交，不复用任何一列。
+-- 存量行默认 true 行为不变；只有显式设 false 的行（如 edge_exec）被藏出选择器。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS chat_visible BOOLEAN NOT NULL DEFAULT true;

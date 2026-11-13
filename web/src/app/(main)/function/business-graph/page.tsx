@@ -1,0 +1,457 @@
+"use client";
+
+// 业务建模图（第三张图）主视图（BIZ 合并施工 W-4）。
+//
+// 三种视图按既定口径：语义视图（全部节点，力导向）、权限视图（角色×授权×动作×
+// 资源）、状态机视图（状态与 transitions）。双层图谱按「切换 + diff 高亮」呈现，
+// design/behavior 不叠加显示以避免视觉噪声；diff 用 severity 色高亮在当前层上。
+// 图形手法沿用 coverage-graph-tab（lucide 图标白描边 data URI 作 iconSrc）。
+
+import * as React from "react";
+
+import Link from "next/link";
+
+import type { Graph as G6Graph } from "@antv/g6";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { api } from "@/lib/api";
+import { statusMeta } from "@/lib/status";
+import type { BizGraphNode, BizLayerDiff, Company } from "@/lib/types";
+
+// ---------- 图元定义（节点类型 → lucide path 白描边 data URI，照 coverage-graph-tab 手法）----------
+
+type BizNodeType = BizGraphNode["node_type"];
+
+const svgUri = (inner: string): string =>
+  `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`,
+  )}`;
+
+const TYPE_ICON: Record<BizNodeType, string> = {
+  biz_entity: svgUri(
+    '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  ),
+  biz_action: svgUri('<polygon points="6 3 20 12 6 21 6 3"/>'),
+  biz_state: svgUri('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>'),
+  biz_role: svgUri('<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a6 6 0 0 1 12 0v2"/>'),
+  biz_trust: svgUri('<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>'),
+  biz_dataflow: svgUri('<path d="M4 17c4-8 12 0 16-8"/><path d="M17 5h3v3"/><path d="M4 7h4"/>'),
+  biz_external: svgUri(
+    '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>',
+  ),
+};
+
+const TYPE_META: Record<BizNodeType, { label: string; hex: string; size: number }> = {
+  biz_entity: { label: "实体", hex: "#6366f1", size: 36 },
+  biz_action: { label: "动作", hex: "#f59e0b", size: 34 },
+  biz_state: { label: "状态", hex: "#10b981", size: 32 },
+  biz_role: { label: "角色", hex: "#8b5cf6", size: 34 },
+  biz_trust: { label: "信任边界", hex: "#ef4444", size: 38 },
+  biz_dataflow: { label: "数据流", hex: "#06b6d4", size: 32 },
+  biz_external: { label: "外部系统", hex: "#64748b", size: 36 },
+};
+
+const REL_COLOR: Record<string, string> = {
+  owns: "#8b5cf6",
+  invokes: "#f59e0b",
+  depends_on: "#64748b",
+  trusts: "#ef4444",
+  flows_to: "#06b6d4",
+  validates: "#10b981",
+  requires_state: "#6366f1",
+  transitions: "#10b981",
+  grants: "#8b5cf6",
+};
+
+// severityHexFor 是 severity → 描边色的模块级映射（statusMeta 的 finding 域；
+// 放模块层避免每渲染新引用污染 hook 依赖）。
+function severityHexFor(sev: string): string {
+  const tone = statusMeta("finding", sev).tone;
+  if (tone === "rose") return "#e11d48";
+  if (sev === "high") return "#dc2626";
+  if (sev === "medium") return "#d97706";
+  return "#64748b";
+}
+
+type LayerFilter = "all" | "design" | "behavior";
+type ViewMode = "semantic" | "permission" | "state";
+
+// 权限视图：角色 + grants/owns/invokes/validates 相关子图。
+// 状态机视图：状态节点 + transitions/requires_state 边及两端动作。
+const VIEW_KEEP_EDGE: Record<ViewMode, (rel: string) => boolean> = {
+  semantic: () => true,
+  permission: (rel) => ["grants", "owns", "invokes", "validates"].includes(rel),
+  state: (rel) => ["transitions", "requires_state"].includes(rel),
+};
+
+function _nd(d: unknown): BizGraphNode {
+  return (d as { bizNode?: BizGraphNode }).bizNode ?? (d as unknown as BizGraphNode);
+}
+
+export function BusinessGraphPage() {
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const graphRef = React.useRef<G6Graph | null>(null);
+  const renderMapRef = React.useRef<Map<string, BizGraphNode>>(new Map());
+
+  const [companies, setCompanies] = React.useState<Company[]>([]);
+  const [companyId, setCompanyId] = React.useState<number>(0);
+  const [layer, setLayer] = React.useState<LayerFilter>("all");
+  const [view, setView] = React.useState<ViewMode>("semantic");
+  const [showDiffOnly, setShowDiffOnly] = React.useState(false);
+  const [nodes, setNodes] = React.useState<BizGraphNode[]>([]);
+  const [edges, setEdges] = React.useState<
+    { id: number; src_id: number; dst_id: number; rel: string; layer: string; confidence: string }[]
+  >([]);
+  const [diffs, setDiffs] = React.useState<BizLayerDiff[]>([]);
+  const [selected, setSelected] = React.useState<BizGraphNode | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    api
+      .companies()
+      .then((cs) => {
+        setCompanies(cs);
+        if (cs.length > 0) setCompanyId((prev) => prev || cs[0].id);
+      })
+      .catch(() => setError("公司清单加载失败"));
+  }, []);
+
+  const load = React.useCallback(() => {
+    if (!companyId) return;
+    setLoading(true);
+    setError("");
+    Promise.all([
+      api.bizGraph(companyId, undefined, layer === "all" ? undefined : layer),
+      api.bizDiffs({ company_id: companyId, limit: 200 }),
+    ])
+      .then(([g, ds]) => {
+        setNodes(g.nodes ?? []);
+        setEdges(
+          (g.edges ?? []).map((e) => ({
+            id: e.id,
+            src_id: e.src_id,
+            dst_id: e.dst_id,
+            rel: e.rel,
+            layer: e.layer,
+            confidence: e.confidence,
+          })),
+        );
+        setDiffs(ds.diffs ?? []);
+      })
+      .catch((err) => setError(String(err)))
+      .finally(() => setLoading(false));
+  }, [companyId, layer]);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  // diff 高亮集合：命中任一 diff 的 node_ids 的节点 → severity 描边。
+  const diffNodeSev = React.useMemo(() => {
+    const m = new Map<number, BizLayerDiff["severity"]>();
+    const sevRank: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+    for (const d of diffs) {
+      if (d.status === "false_positive") continue;
+      for (const ref of [d.design_ref, d.behavior_ref]) {
+        const ids = (ref as { node_ids?: unknown })?.node_ids;
+        if (!Array.isArray(ids)) continue;
+        for (const v of ids) {
+          const id = Number(v);
+          if (!id) continue;
+          const cur = m.get(id);
+          if (!cur || sevRank[d.severity] > sevRank[cur]) m.set(id, d.severity);
+        }
+      }
+    }
+    return m;
+  }, [diffs]);
+
+  // 视图过滤。
+  const visibleNodes = React.useMemo(() => {
+    let out = nodes;
+    if (view === "permission")
+      out = out.filter(
+        (n) => n.node_type === "biz_role" || n.node_type === "biz_action" || n.node_type === "biz_entity",
+      );
+    if (view === "state") out = out.filter((n) => n.node_type === "biz_state" || n.node_type === "biz_action");
+    if (showDiffOnly && diffNodeSev.size > 0) out = out.filter((n) => diffNodeSev.has(n.id));
+    return out;
+  }, [nodes, view, showDiffOnly, diffNodeSev]);
+
+  const visibleEdges = React.useMemo(() => {
+    const ids = new Set(visibleNodes.map((n) => n.id));
+    return edges.filter((e) => ids.has(e.src_id) && ids.has(e.dst_id) && VIEW_KEEP_EDGE[view](e.rel));
+  }, [visibleNodes, edges, view]);
+
+  const severityHex = severityHexFor;
+
+  // 数据应用（图已建时增量更新）。
+  const applyData = React.useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const nodeData = visibleNodes.map((n) => {
+      const meta = TYPE_META[n.node_type];
+      const sev = diffNodeSev.get(n.id);
+      renderMapRef.current.set(`b${n.id}`, n);
+      return {
+        id: `b${n.id}`,
+        bizNode: n,
+        size: meta.size,
+        fill: meta.hex,
+        stroke: sev ? severityHex(sev) : "#ffffff",
+        lineWidth: sev ? 4 : 1.5,
+        iconSrc: TYPE_ICON[n.node_type],
+        labelText: n.name,
+        layer: n.layer,
+      };
+    });
+    const edgeData = visibleEdges.map((e) => ({
+      source: `b${e.src_id}`,
+      target: `b${e.dst_id}`,
+      stroke: REL_COLOR[e.rel] ?? "#94a3b8",
+      lineWidth: e.confidence === "observed" ? 2.2 : 1.2,
+      lineDash: e.confidence === "observed" ? [] : [4, 3],
+      labelText: e.rel,
+      labelFontSize: 9,
+      labelFill: "#64748b",
+      labelBackground: true,
+      labelBackgroundFill: "rgba(255,255,255,0.7)",
+      labelPadding: [0, 2],
+    }));
+    graph.setData({ nodes: nodeData, edges: edgeData });
+    void graph.render().catch((err: unknown) => {
+      if (graphRef.current && !graphRef.current.destroyed) console.error("[business-graph] render:", err);
+    });
+  }, [visibleNodes, visibleEdges, diffNodeSev]);
+
+  React.useEffect(() => {
+    if (graphRef.current) applyData();
+  }, [applyData]);
+
+  // 建图（一次）。动态 import 避开 SSR/静态导出期的 window 依赖。
+  React.useEffect(() => {
+    let destroyed = false;
+    let graph: G6Graph | null = null;
+    void (async () => {
+      const { Graph } = await import("@antv/g6");
+      if (destroyed || !containerRef.current) return;
+      graph = new Graph({
+        container: containerRef.current,
+        autoResize: true,
+        autoFit: "view",
+        background: "#f0f2f7",
+        node: {
+          style: {
+            size: (d: unknown) => (d as { size?: number }).size ?? 34,
+            fill: (d: unknown) => (d as { fill?: string }).fill ?? "#6366f1",
+            stroke: (d: unknown) => (d as { stroke?: string }).stroke ?? "#fff",
+            lineWidth: (d: unknown) => (d as { lineWidth?: number }).lineWidth ?? 1.5,
+            iconSrc: (d: unknown) => (d as { iconSrc?: string }).iconSrc,
+            iconWidth: 16,
+            iconHeight: 16,
+            labelText: (d: unknown) => (d as { labelText?: string }).labelText ?? "",
+            labelFontSize: 10,
+            labelPlacement: "bottom",
+            labelFill: "#475569",
+            labelBackground: true,
+            labelBackgroundFill: "rgba(255,255,255,0.75)",
+            labelBackgroundRadius: 3,
+            labelPadding: [1, 3],
+          },
+        },
+        edge: {
+          style: {
+            stroke: (d: unknown) => (d as { stroke?: string }).stroke ?? "#94a3b8",
+            lineWidth: (d: unknown) => (d as { lineWidth?: number }).lineWidth ?? 1,
+            lineDash: (d: unknown) => (d as { lineDash?: number[] }).lineDash ?? [],
+            labelText: (d: unknown) => (d as { labelText?: string }).labelText ?? "",
+            labelFontSize: (d: unknown) => (d as { labelFontSize?: number }).labelFontSize ?? 9,
+            labelFill: (d: unknown) => (d as { labelFill?: string }).labelFill ?? "#64748b",
+            labelBackground: (d: unknown) => (d as { labelBackground?: boolean }).labelBackground ?? false,
+            labelBackgroundFill: (d: unknown) => (d as { labelBackgroundFill?: string }).labelBackgroundFill,
+            labelPadding: (d: unknown) => (d as { labelPadding?: number[] }).labelPadding,
+          },
+        },
+        layout: {
+          type: "d3-force",
+          collide: { radius: 40 },
+          link: { distance: 90 },
+          manyBody: { strength: -180 },
+        },
+        behaviors: ["drag-element-force", "drag-canvas", "zoom-canvas"],
+      });
+      graph.on("node:click", (evt: unknown) => {
+        const id = (evt as { target?: { id?: string } }).target?.id;
+        if (!id) return;
+        const n = renderMapRef.current.get(id);
+        if (n) setSelected(n);
+      });
+      graphRef.current = graph;
+      applyData();
+    })();
+    return () => {
+      destroyed = true;
+      try {
+        graph?.stopLayout();
+      } catch {
+        /* 图可能尚未建成 */
+      }
+      graph?.destroy();
+      graphRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyData]);
+
+  const selectedDiffs = React.useMemo(
+    () =>
+      diffs.filter((d) => {
+        const ids = [d.design_ref, d.behavior_ref].flatMap((ref) =>
+          Array.isArray((ref as { node_ids?: unknown })?.node_ids)
+            ? ((ref as { node_ids: unknown[] }).node_ids as unknown[]).map(Number)
+            : [],
+        );
+        return selected && ids.includes(selected.id);
+      }),
+    [diffs, selected],
+  );
+
+  return (
+    <div className="flex h-full flex-col gap-3 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          className="h-8 rounded-md border bg-background px-2 text-sm"
+          value={companyId}
+          onChange={(e) => setCompanyId(Number(e.target.value))}
+        >
+          {companies.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <Tabs value={layer} onValueChange={(v) => setLayer(v as LayerFilter)}>
+          <TabsList className="h-8">
+            <TabsTrigger value="all" className="text-xs">
+              双层
+            </TabsTrigger>
+            <TabsTrigger value="design" className="text-xs">
+              design（声称）
+            </TabsTrigger>
+            <TabsTrigger value="behavior" className="text-xs">
+              behavior（实际）
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <Tabs value={view} onValueChange={(v) => setView(v as ViewMode)}>
+          <TabsList className="h-8">
+            <TabsTrigger value="semantic" className="text-xs">
+              语义视图
+            </TabsTrigger>
+            <TabsTrigger value="permission" className="text-xs">
+              权限视图
+            </TabsTrigger>
+            <TabsTrigger value="state" className="text-xs">
+              状态机视图
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <Button
+          variant={showDiffOnly ? "default" : "outline"}
+          size="sm"
+          className="h-8 text-xs"
+          onClick={() => setShowDiffOnly((v) => !v)}
+        >
+          仅看差异节点
+        </Button>
+        <Button variant="outline" size="sm" className="h-8 text-xs" onClick={load} disabled={loading}>
+          {loading ? "加载中…" : "刷新"}
+        </Button>
+        <div className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
+          <span>
+            {visibleNodes.length} 节点 / {visibleEdges.length} 关系
+          </span>
+          <Link href="/function/business-graph/diffs" className="underline-offset-2 hover:underline">
+            差异面板 →
+          </Link>
+          <Badge variant="outline" className="text-[10px]">
+            描边=差异 severity（红橙黄）
+          </Badge>
+        </div>
+      </div>
+      {error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-600 text-xs">{error}</div>
+      )}
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
+        <div ref={containerRef} className="h-full w-full" />
+        {visibleNodes.length === 0 && !loading && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
+            该公司暂无业务图数据——在对话里选「业务建模」agent 发起一次建模，或运行 api-recon 后让建模 agent
+            读设计层产物。
+          </div>
+        )}
+      </div>
+      <Sheet
+        open={selected !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelected(null);
+        }}
+      >
+        <SheetContent side="right" className="overflow-y-auto data-[side=right]:sm:max-w-md">
+          {selected && (
+            <>
+              <SheetHeader>
+                <SheetTitle className="flex items-center gap-2">
+                  <span
+                    className="inline-block size-3 rounded-full"
+                    style={{ background: TYPE_META[selected.node_type].hex }}
+                  />
+                  {selected.name}
+                </SheetTitle>
+                <SheetDescription>
+                  {TYPE_META[selected.node_type].label} ·{" "}
+                  {selected.layer === "design" ? "design（声称）" : "behavior（实际）"} ·{" "}
+                  {selected.confidence === "observed" ? "observed（直接看到）" : "inferred（推断）"}
+                </SheetDescription>
+              </SheetHeader>
+              <div className="mt-2 space-y-3 text-sm">
+                {selected.raw_name && selected.raw_name !== selected.name && (
+                  <div className="text-muted-foreground text-xs">原始名：{selected.raw_name}</div>
+                )}
+                {selected.description && <p className="text-muted-foreground">{selected.description}</p>}
+                <div className="flex flex-wrap gap-1">
+                  {selected.asset_ids.map((aid) => (
+                    <Badge key={aid} variant="outline" className="text-[10px]">
+                      资产 #{aid}
+                    </Badge>
+                  ))}
+                </div>
+                {selected.props && Object.keys(selected.props as Record<string, unknown>).length > 0 && (
+                  <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px]">
+                    {JSON.stringify(selected.props, null, 2)}
+                  </pre>
+                )}
+                <div>
+                  <div className="mb-1 font-medium text-xs">相关差异</div>
+                  {selectedDiffs.length === 0 && <div className="text-muted-foreground text-xs">无</div>}
+                  {selectedDiffs.map((d) => (
+                    <div key={d.id} className="mb-1 rounded-md border p-2 text-xs">
+                      <span className="font-medium">{d.diff_type}</span> · {d.wstg_ref || "—"} / {d.stride_ref || "—"} ·{" "}
+                      <span className="text-muted-foreground">{d.status}</span>
+                      <div className="text-muted-foreground">{d.description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+    </div>
+  );
+}
+
+export default BusinessGraphPage;
