@@ -16,6 +16,11 @@
 #      校验只能对到 "dev"，起不到区分新旧的作用）
 FROM python:3.12-slim-bookworm
 ARG TARGETARCH
+# Playwright 浏览器下载源（可选）：官方 CDN（cdn.playwright.dev）不可达的环境，
+# 构建时传 --build-arg PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
+# 走镜像站；默认空 = 官方源（CI/海外环境零改动）。
+ARG PLAYWRIGHT_DOWNLOAD_HOST=""
+ENV PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
 RUN apt-get update && apt-get install -y --no-install-recommends \
