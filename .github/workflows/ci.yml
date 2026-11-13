@@ -42,14 +42,11 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
-      # third_party/norma 是被 .gitignore 排除的本地依赖树：go.mod 用 replace 指向
-      # ./third_party/norma，而那份树由 scripts/prepare-norma.sh 从模块缓存取出原版再
-      # 打 patches/norma-privilege-drop.patch 生成。
-      #
-      # 干净克隆里这个目录根本不存在 ⇒ go build 会直接报
-      # 「replacement directory ./third_party/norma does not exist」。所以这一步必须
-      # 在 go build / go vet 之前，否则门禁第一步就红，后面全被跳过。
-      - run: bash scripts/prepare-norma.sh
+      # third_party/norma 已随仓库分发（225 个文件在 git 内，含领先 v0.4.4 的字段与
+      # 降权补丁，见 b2fe80d 的入库说明）——go.mod replace 直接指向它，干净克隆即可
+      # 构建。历史上这里跑 scripts/prepare-norma.sh 从模块缓存取 v0.4.4 覆盖 vendored
+      # 树，那会把 agent/thinking.go 等对新字段的使用打回编译失败（0.11.3 起 CI 红
+      # 的根因）；入库后该步骤多余且有害，已移除。
       - run: go build ./...
       - run: go vet ./...
       # 镜像构建链路的回归：构建期校验必须能区分「这次编的」与「上次留下的」。
