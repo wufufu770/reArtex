@@ -1317,6 +1317,8 @@ func (s *Server) Handler() http.Handler {
 
 	// 业务建模 × 偏锋探索（合并施工）：业务图/差异/人工裁决/edge 覆盖度路由。
 	s.bizRoutes(mux)
+	// 小程序渗透（0.12.0）：token 池 CRUD + 解包产物浏览。
+	s.mpRoutes(mux)
 
 	// SoD 链（职责分离）的三个只读观测面。
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；

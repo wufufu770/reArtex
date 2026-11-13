@@ -131,6 +131,13 @@ var designArtifactNames = []string{
 	"perm_codes_all.txt", "routes.txt", "api_static.txt",
 }
 
+// miniprogramArtifactNames 是小程序解包还原工程里的设计层文件（0.12.0 §四-B4）：
+// app.json=页面注册树（pages/entryPagePath/window 配置），project.config.json=
+// 编译开关（五关两开的矫正对象）。扫描 artifacts/miniprogram/<appid>/。
+var miniprogramArtifactNames = []string{
+	"app.json", "project.config.json",
+}
+
 // toolReadDesignArtifacts 读共享工作目录里的前端授权产物并解析成结构化摘要
 // （角色乘路由矩阵 / 权限码树 / 路由表）。只读，不改脚本、不跑脚本——解析在
 // 服务端做，模型不经 Read 工具碰宿主 FS（bizModelerToolAllow 收敛为零接触面）。
@@ -176,8 +183,29 @@ func (s *Server) toolReadDesignArtifacts() actool.CoreTool {
 					}
 				}
 			}
+			// 小程序产物（0.12.0 §四-B4）：artifacts/miniprogram/<appid>/ 下解包还原
+			// 的源码工程是设计层的直接来源（app.json=页面注册树，project.config.json=
+			// 编译开关）。key 用 name@appid 区分多应用；摘要按基名走同一解析器。
+			if mpBase, mpOK := s.wsResolve(mpArtifactRootRel); mpOK {
+				if subs, err := os.ReadDir(mpBase); err == nil {
+					for _, sub := range subs {
+						if !sub.IsDir() {
+							continue
+						}
+						for _, name := range miniprogramArtifactNames {
+							key := name + "@" + sub.Name()
+							if _, dup := found[key]; dup {
+								continue
+							}
+							if _, err := os.Stat(filepath.Join(mpBase, sub.Name(), name)); err == nil {
+								found[key] = mpArtifactRootRel + "/" + sub.Name() + "/" + name
+							}
+						}
+					}
+				}
+			}
 			if len(found) == 0 {
-				return actool.Errorf("共享工作目录里没有找到 api-recon 产物（" + strings.Join(designArtifactNames, " / ") + "）。先对该目标跑 skills/api-recon（Phase 4 会产出权限树），或用 paths 参数指定产物目录。"), nil
+				return actool.Errorf("共享工作目录里没有找到设计层产物（api-recon：" + strings.Join(designArtifactNames, " / ") + "；小程序：artifacts/miniprogram/<appid>/ 下的 " + strings.Join(miniprogramArtifactNames, " / ") + "）。先对该目标跑 skills/api-recon（Phase 4 会产出权限树）或 skills/wechat-miniprogram（解包还原），或用 paths 参数指定产物目录。"), nil
 			}
 			out := map[string]any{"artifacts": map[string]any{}}
 			arts := out["artifacts"].(map[string]any)
@@ -197,7 +225,11 @@ func (s *Server) toolReadDesignArtifacts() actool.CoreTool {
 					arts[name] = map[string]any{"path": rel, "error": err.Error()}
 					continue
 				}
-				arts[name] = summarizeDesignArtifact(name, raw, a.Limit)
+				base := name
+				if idx := strings.Index(base, "@"); idx >= 0 {
+					base = name[:idx]
+				}
+				arts[name] = summarizeDesignArtifact(base, raw, a.Limit)
 				arts[name+".path"] = rel
 			}
 			return jsonResult(out)
@@ -245,6 +277,42 @@ func summarizeDesignArtifact(name string, raw []byte, limit int) any {
 			return map[string]any{"error": "解析失败: " + err.Error()}
 		}
 		return map[string]any{"kind": "route map", "routes": len(m), "preview": previewJSON(m, limit)}
+	case name == "app.json":
+		// 小程序页面注册树：pages 数组 + entryPagePath + window 配置（设计层的
+		// 页面注册来源；实体抽取用它枚举界面入口）。
+		var m struct {
+			Pages         []string       `json:"pages"`
+			EntryPagePath string         `json:"entryPagePath"`
+			Window        map[string]any `json:"window"`
+			SubPackages   []struct {
+				Root  string   `json:"root"`
+				Pages []string `json:"pages"`
+			} `json:"subPackages"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return map[string]any{"error": "解析失败: " + err.Error()}
+		}
+		pages := m.Pages
+		if len(pages) > limit {
+			pages = pages[:limit]
+		}
+		subTotals := 0
+		for _, sp := range m.SubPackages {
+			subTotals += len(sp.Pages)
+		}
+		return map[string]any{"kind": "miniprogram page registry", "main_pages": len(m.Pages),
+			"pages_preview": pages, "entry": m.EntryPagePath,
+			"subpackages": len(m.SubPackages), "subpackage_pages": subTotals,
+			"window": m.Window}
+	case name == "project.config.json":
+		// 编译开关（五关两开的矫正对象）：矫正脚本跑完后这里应显示全关。
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return map[string]any{"error": "解析失败: " + err.Error()}
+		}
+		setting, _ := m["setting"].(map[string]any)
+		return map[string]any{"kind": "compile switches", "setting": setting,
+			"compileType": m["compileType"], "libVersion": m["libVersion"]}
 	default:
 		// 文本产物（perm_codes_all.txt / routes.txt / api_static.txt）：行数 + 前 N 行。
 		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")

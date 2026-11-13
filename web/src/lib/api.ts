@@ -81,6 +81,8 @@ import type {
   LLMTask,
   MCPServer,
   MCPTool,
+  MiniprogramArtifact,
+  MiniprogramToken,
   MissingSkill,
   ModelTokenStat,
   NotificationChannel,
@@ -473,6 +475,16 @@ export const api = {
   // 偏锋格点覆盖与判据进度 + stop_reason 统计（M8 评测口径数据源）。
   taskEdgeCoverage: (id: string) =>
     get<EdgeCoverage & { stop_stats: Record<string, number> }>(`/tasks/${id}/edge-coverage`),
+  // 小程序 token 池（清单面：标签+指纹，无凭据内容）。
+  mpTokens: (taskId: number, appId?: string) =>
+    get<{ tokens: MiniprogramToken[] }>(`/miniprogram/tokens?task_id=${taskId}${appId ? `&app_id=${appId}` : ""}`),
+  // 保存/轮换 token（落库即加密；此处只回指纹）。
+  mpTokenSave: (p: { task_id: number; app_id: string; label: string; value: string; scope?: string }) =>
+    post<{ ok: boolean; fingerprint: string }>("/miniprogram/tokens", p),
+  // 删除 token。
+  mpTokenDelete: (id: number) => del<{ ok: boolean }>(`/miniprogram/tokens/${id}`),
+  // 解包产物目录（artifacts/miniprogram/）。
+  mpArtifacts: () => get<{ apps: MiniprogramArtifact[] }>("/miniprogram/artifacts"),
   // 方法论注册表（偏锋总览页）。
   edgeMethodologies: () => get<{ methodologies: EdgeMethodology[] }>("/edge/methodologies"),
   // 偏锋任务总览（判据进度 + stop 统计）。

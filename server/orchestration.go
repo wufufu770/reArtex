@@ -43,6 +43,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.platformTools()...) // 平台操作工具(建改 skill/工具/MCP，给 Auto 用)
 	tools = append(tools, s.bizTools()...)      // 业务建模工具(BIZ；tools 表按绑定过滤，默认 bizmodeler)
 	tools = append(tools, s.edgeTools()...)     // 偏锋探索工具(EDGE；绑定矩阵见 seedEdgeTools)
+	tools = append(tools, s.mpTools()...)       // 小程序渗透工具(MP；token 池作用域工具，绑 pentest/worker/auto/mainagent)
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -547,6 +548,8 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedBizTools()         // 业务图八工具播种（默认绑 bizmodeler）
 	s.seedBizModelerAgent()  // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
 	s.seedEdgeTools()        // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
+	s.seedMpTools()          // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
+	s.ensureMpArtifactsDir() // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）
 }
 
 // seedReconDefaultBindings gives the recon (资产收集) agent its spawn_task binding

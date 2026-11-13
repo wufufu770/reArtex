@@ -1309,6 +1309,24 @@ export interface EdgeTaskOverview {
   stop_stats: Record<string, number>;
 }
 
+// 小程序 token 池（GET /api/miniprogram/tokens；清单面只有标签与指纹）。
+export interface MiniprogramToken {
+  id: number;
+  task_id: number;
+  app_id: string;
+  label: string;
+  fingerprint: string;
+  scope: "task" | "company";
+  created_at?: string;
+  updated_at?: string;
+}
+
+// 解包产物目录（GET /api/miniprogram/artifacts）。
+export interface MiniprogramArtifact {
+  app_id: string;
+  files: string[];
+}
+
 export interface EdgeCoverage {
   task_id: number;
   edge_mode: boolean;

@@ -480,6 +480,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureEdgeSchema(); err != nil {
 			return fmt.Errorf("apply edge schema: %w", err)
 		}
+		// 小程序渗透的 DDL：miniprogram_tokens 一表（db/schema_miniprogram.sql）。
+		// 同上——token 池的表要在启动期建好，受限运行角色建不了表。
+		if err := schemaDB.EnsureMiniprogramSchema(); err != nil {
+			return fmt.Errorf("apply miniprogram schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {

@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.12.0] - 2026-11-14
+
+### 新增（小程序渗透功能点，施工方案 B0-B4；包获取人工口子按 D7）
+- **token 池**（§四-B3）：`db/schema_miniprogram.sql`（miniprogram_tokens，UNIQUE(task,app,label)）+ `EnsureMiniprogramSchema` 启动接线 + db/miniprogram_tokens.go（加密落库照 llm_profiles 的 MasterKey 口径，AAD 绑 app:label——换库挪用解密失败）；transcript/审计面只有标签与指纹，明文仅在 reveal 时刻进工具结果（构造 Burp replacement）。
+- **作用域工具**：mp_token_save / mp_token_list / mp_token_get(reveal)（server 侧参数化，task_id 必填；保存与 reveal 走审计链，凭据值不进审计载荷）；绑定 pentest/worker/auto/mainagent（任务路径与会话驱动两线）。
+- **REST**：GET/POST /api/miniprogram/tokens、DELETE .../{id}、GET /api/miniprogram/artifacts（列 artifacts/miniprogram/<appid>/ 产物）；保存走审计链。
+- **read_design_artifacts 扩类**（§四-B4）：扫 artifacts/miniprogram/<appid>/ 的 app.json（页面注册树摘要：主包/分包页面数）与 project.config.json（编译开关核对）；建模 agent 可直接消费解包源码做设计层。
+- **skills/wechat-miniprogram**：SKILL.md（阶段→kind 映射、两层身份矩阵、包获取人工口子、桌面控制调用口径、证据纪律）+ 五脚本（probe_unpackers 探针 / discover_package 版本分支发现 / unpack.sh 适配器（后端可换）+ fix_miniprogram_config.py（五关两开+componentFramework/plugins/pages 矫正）+ validate_unpack.py（内容级三判据，退出码即判定））。
+- **前端**：/function/miniprogram 页（token 池 CRUD + 产物浏览；**Safari 实测为交付验收首项，失败降级 tab 模式**——pianfeng 教训）+ sidebar「小程序渗透」入口。
+- 验证：build/vet/tsc/biome 全绿；脚本三件实测行为正确（探针诚实报告本机未装解包后端=人工口子的一部分；fix/validate 对无产物目录按退出码 1+失败清单报告）；实跑 0.12.0（schema 落库、工具播种、REST 就绪）。
+- 对齐检查：后端功能点（token 池 REST+工具、产物 API、read_design_artifacts 扩类）前端入口齐备；桌面控制为共有能力，小程序经「桌面操作」skill 调用（B-5 口径）。
+
 ## [0.11.9] - 2026-11-14
 
 ### 新增（桌面控制功能点——全 agent 共有，施工方案 A1+A2+A3 阶段）
