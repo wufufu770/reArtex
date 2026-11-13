@@ -125,9 +125,7 @@ export default function BizDiffsPage() {
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
         {diffs.length === 0 && !loading && (
-          <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-            没有差异记录——业务建模产出 design/behavior 配对差异后会出现在这里。
-          </div>
+          <div className="flex h-full items-center justify-center text-muted-foreground text-sm">暂无差异记录</div>
         )}
         {diffs.map((d) => (
           <div key={d.id} className="rounded-lg border p-3">
@@ -186,7 +184,7 @@ export default function BizDiffsPage() {
               <div className="mt-2 flex gap-2">
                 <input
                   className="h-8 flex-1 rounded-md border bg-background px-2 text-xs"
-                  placeholder="裁决理由（写进审计链，必填）"
+                  placeholder="裁决理由（必填）"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                 />

@@ -48,7 +48,7 @@ export function BizTab({ taskId }: { taskId: string }) {
     criterion_progress: number;
     stop_stats: Record<string, number>;
   } | null>(null);
-  const [hostTargets, setHostTargets] = React.useState<string[]>([]);
+  const [hostTargets, _setHostTargets] = React.useState<string[]>([]);
   const [hostInput, setHostInput] = React.useState("");
   const [hostDirty, setHostDirty] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
@@ -61,7 +61,7 @@ export function BizTab({ taskId }: { taskId: string }) {
       api.taskEdgeCoverage(taskId).catch(() => null),
       api.taskHostTargets(taskId).catch(() => ({ targets: [] })),
     ])
-      .then(([g, ds, ec, ht]) => {
+      .then(([g, ds, ec, _ht]) => {
         if (g) {
           setSummary(g.summary);
           setNodes(
@@ -100,9 +100,7 @@ export function BizTab({ taskId }: { taskId: string }) {
         <Button variant="outline" size="sm" className="h-8 text-xs" onClick={load} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </Button>
-        <span className="text-muted-foreground text-xs">
-          业务图全量视图见侧边栏「业务图」页；派生与裁决动作走「业务建模」agent 对话。
-        </span>
+        <span className="text-muted-foreground text-xs" />
       </div>
 
       {/* 摘要 chips */}
@@ -184,11 +182,8 @@ export function BizTab({ taskId }: { taskId: string }) {
 
       {/* 宿主授权集合（桌面控制闸门第五分支的判定依据，D9） */}
       <div className="rounded-lg border p-3">
-        <div className="mb-1 text-sm font-medium">宿主授权集合（桌面控制）</div>
-        <div className="text-xs text-muted-foreground">
-          任务路径上桌面动作的授权窗口/应用清单（如 <code>app:微信</code>、<code>win:订单系统</code>；空 =
-          桌面动作在任务内拒绝）。变更走审计链。
-        </div>
+        <div className="mb-1 font-medium text-sm">宿主授权集合（桌面控制）</div>
+        <div className="text-muted-foreground text-xs">桌面动作授权清单（空=拒绝）</div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <input
             className="h-8 flex-1 rounded-md border bg-background px-2 text-xs"

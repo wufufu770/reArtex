@@ -58,7 +58,7 @@ export default function MiniprogramPage() {
     }
     try {
       await api.mpTokenSave({ task_id: Number(taskId), ...form });
-      toast.success(`token 已保存（${form.label}）——落库即加密，此处只存指纹`);
+      toast.success(`token 已保存（${form.label}）`);
       setForm({ app_id: form.app_id, label: "", value: "" });
       load();
     } catch (err) {
@@ -91,10 +91,7 @@ export default function MiniprogramPage() {
     <div className="flex h-full flex-col gap-4 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="font-semibold text-lg">小程序渗透</h1>
-        <span className="text-muted-foreground text-xs">
-          链路：包获取（人工口子）→ 解包还原 → 运行时 → 接口发现 → 越权矩阵（任务路径）。执行走「渗透测试」对话 +
-          tasks；本页管理 token 池与产物。
-        </span>
+        <span className="text-muted-foreground text-xs"></span>
         <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={load} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </Button>
@@ -145,9 +142,7 @@ export default function MiniprogramPage() {
           <Button size="sm" className="h-8 text-xs" onClick={addToken}>
             保存
           </Button>
-          <span className="text-[10px] text-muted-foreground">
-            保存后此处只显示指纹；明文只在 Burp 重放的使用时刻经 mp_token_get(reveal) 取用。
-          </span>
+          <span className="text-[10px] text-muted-foreground">保存后仅显示指纹</span>
         </div>
       )}
 
@@ -159,9 +154,7 @@ export default function MiniprogramPage() {
             <div className="px-3 py-4 text-muted-foreground text-xs">输入任务 id 加载该任务的 token 池。</div>
           )}
           {taskId && tokens.length === 0 && !loading && (
-            <div className="px-3 py-4 text-muted-foreground text-xs">
-              该任务还没有 token——用上方表单按角色（admin/userA/userB/anonymous）录入，或在渗透对话里用 mp_token_save。
-            </div>
+            <div className="px-3 py-4 text-muted-foreground text-xs">暂无 token</div>
           )}
           {tokens.map((t) => (
             <div key={t.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
@@ -212,10 +205,6 @@ export default function MiniprogramPage() {
             </Button>
           </div>
         </div>
-        <div className="bg-muted px-3 py-2 text-xs text-muted-foreground">
-          wxa-runner 起 dev server 后把地址填到这里——小程序页面内嵌在下方（同源反代），可直接点击调试；agent 经
-          chrome-devtools 操控同一页面做接口发现。运行时地址为部署配置（agent 不可改）。
-        </div>
         {runtimeUrl ? (
           <iframe
             src="/mp-runtime/"
@@ -224,9 +213,7 @@ export default function MiniprogramPage() {
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
           />
         ) : (
-          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-            未配置运行时地址。用 wxa-runner 起 dev server（地址如 http://127.0.0.1:端口），填入上方并保存。
-          </div>
+          <div className="px-3 py-6 text-center text-xs text-muted-foreground">未配置运行时地址</div>
         )}
       </div>
 
@@ -234,12 +221,7 @@ export default function MiniprogramPage() {
       <div className="rounded-lg border">
         <div className="border-b px-3 py-2 font-medium text-sm">解包产物（artifacts/miniprogram/）</div>
         <div className="divide-y">
-          {artifacts.length === 0 && (
-            <div className="px-3 py-4 text-muted-foreground text-xs">
-              还没有解包产物。跑 skills/wechat-miniprogram 的 unpack.sh（先 probe_unpackers.sh
-              探针；解密密钥部分在微信进程内存——人工口子）。
-            </div>
-          )}
+          {artifacts.length === 0 && <div className="px-3 py-4 text-muted-foreground text-xs">暂无解包产物</div>}
           {artifacts.map((a) => (
             <div key={a.app_id} className="px-3 py-2 text-xs">
               <div className="font-medium">{a.app_id}</div>

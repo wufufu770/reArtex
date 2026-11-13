@@ -34,7 +34,7 @@ function CriterionBadges({ m }: { m: EdgeMethodology }) {
   if (!m.criterion) {
     return (
       <Badge variant="outline" className="text-[10px]">
-        无判据（隐喻只有启发式）
+        无判据
       </Badge>
     );
   }
@@ -75,10 +75,6 @@ export function EdgeOverviewPanel() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <span className="text-xs text-muted-foreground">
-          方法论驱动的另一条探索线——发起走对话（选「偏锋探索」agent，或对主 agent
-          说「这一轮用偏锋探索」）；本面板是只读总览。
-        </span>
         <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={load} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </Button>
@@ -86,17 +82,14 @@ export function EdgeOverviewPanel() {
 
       {/* 偏锋任务与判据进度 */}
       <div className="space-y-2">
-        <div className="text-sm font-medium">偏锋任务与判据进度</div>
+        <div className="font-medium text-sm">偏锋任务与判据进度</div>
         {tasks.length === 0 && (
-          <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
-            还没有偏锋任务。到「对话」页选「偏锋探索」agent 说「做一次完整探索」，或在任务详情对话里对主 agent
-            说「这一轮用偏锋探索」。
-          </div>
+          <div className="rounded-lg border p-6 text-center text-muted-foreground text-sm">暂无偏锋任务</div>
         )}
         {tasks.map((t) => (
           <div key={t.task_id} className="rounded-lg border p-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium">任务 #{t.task_id}</span>
+              <span className="font-medium text-sm">任务 #{t.task_id}</span>
               <Badge variant="outline" className="text-[10px]">
                 {t.methodology_id || "—"}
               </Badge>
@@ -104,11 +97,11 @@ export function EdgeOverviewPanel() {
                 {t.status}
               </Badge>
               {t.open_run && <Badge className="text-[10px]">运行中 #{t.open_run.id}</Badge>}
-              <span className="ml-auto text-xs text-muted-foreground">
+              <span className="ml-auto text-muted-foreground text-xs">
                 判据进度 {t.cells_terminal}/{t.cells_total}（{Math.round((t.criterion_progress || 0) * 100)}%）
               </span>
             </div>
-            <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{t.task_desc || t.task_goal}</div>
+            <div className="mt-1 line-clamp-2 text-muted-foreground text-xs">{t.task_desc || t.task_goal}</div>
             <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-primary transition-all"
@@ -130,12 +123,12 @@ export function EdgeOverviewPanel() {
 
       {/* 方法论注册表 */}
       <div className="space-y-2">
-        <div className="text-sm font-medium">方法论注册表</div>
+        <div className="font-medium text-sm">方法论注册表</div>
         <div className="grid gap-2 md:grid-cols-2">
           {methodologies.map((m) => (
             <div key={m.id} className={`rounded-lg border p-3 ${m.enabled ? "" : "opacity-50"}`}>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium">{m.name}</span>
+                <span className="font-medium text-sm">{m.name}</span>
                 <Badge variant="outline" className="text-[10px]">
                   {TIER_LABEL[m.tier]}
                 </Badge>
@@ -151,7 +144,7 @@ export function EdgeOverviewPanel() {
                   </Badge>
                 )}
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">{m.summary}</p>
+              <p className="mt-1 text-muted-foreground text-xs">{m.summary}</p>
               <div className="mt-2 flex flex-wrap gap-1">
                 <CriterionBadges m={m} />
               </div>
@@ -159,7 +152,7 @@ export function EdgeOverviewPanel() {
                 <div className="mt-1 flex flex-wrap gap-1">
                   {m.heuristic_tags.map((tag) => (
                     <Badge key={tag} variant="outline" className="text-[10px]">
-                      启发式：{tag}
+                      {tag}
                     </Badge>
                   ))}
                 </div>

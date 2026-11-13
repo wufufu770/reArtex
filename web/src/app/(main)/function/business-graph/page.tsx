@@ -443,8 +443,7 @@ export function BusinessGraphPage() {
             <div ref={containerRef} className="h-full w-full" />
             {visibleNodes.length === 0 && !loading && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-                该公司暂无业务图数据——在对话里选「业务建模」agent 发起一次建模，或运行 api-recon 后让建模 agent
-                读设计层产物。
+                暂无业务图数据
               </div>
             )}
           </div>
