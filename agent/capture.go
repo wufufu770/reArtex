@@ -106,9 +106,18 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 			flush()
 			out := blocksText(ev.ToolResult.Content)
+			toolName := toolNames[ev.ToolResult.ToolUseID]
 			lastTool.done(ev.ToolResult.ToolUseID)
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
-			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
+			// 敏感输出元信息化（0.11.9 桌面控制施工 §6.3）：宿主私有内容类工具
+			// （桌面截图/剪贴板/通知）的正文不落库——activity.detail 只留命令名、
+			// 字节数与时间戳。模型上下文仍拿全文（它在工具结果流里，属于推理输入），
+			// 持久层少存一份可被翻页翻到的隐私副本。机制按【类别】注册而非为桌面
+			// 开特例：registerSensitiveResultTool 可扩展。
+			if isSensitiveResultTool(toolName) {
+				out = sensitiveResultMetadata(toolName, out)
+			}
+			rec(db.Activity{Kind: "tool_result", Tool: toolName, ToolUseID: ev.ToolResult.ToolUseID,
 				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
 		case harness.KindText:
 			addDelta("text", ev.Text)

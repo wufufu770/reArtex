@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"net/url"
 	"os"
 	"strings"
@@ -690,6 +691,46 @@ SELECT a.id, 'mcp', m.id, true FROM agents a
 JOIN mcp_servers m ON m.name='playwright-cli'
 ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("seed playwright-cli mcp visibility: %w", err)
+	}
+	// 桌面控制面（0.11.9，全 agent 共有，见 docs/开发纪律.md 与施工方案 §四-D1）：
+	// agent-desktop（vercel-labs，读无障碍树 + 稳定 ref 点击）以 stdio MCP 注册。
+	//   - command 取安装期解析的绝对路径（LookPath；未安装则跳过且不落旗标，
+	//     装好后下次启动自动补种——种子不复活用户手删的行，见旗标语义）；
+	//   - args 固定 ["mcp","--headed"]：物理输入是注册期决策（D6），运行期不可切；
+	//   - 可见性给【全部 agent】（用户裁定：桌面控制是平台共有能力，非某功能点专属）。
+	// 治理由拦截矩阵承担（intercept_desktop_seed_v1 旗标下的启用名单合并 + 四族规则）；
+	// 动作面经「桌面操作」skill 的 mcps 门控延迟加载（skills/desktop-ops）。
+	if v, _, _ := d.GetSetting("agent_desktop_mcp_seed_v1"); v != "true" {
+		abs, err := exec.LookPath("agent-desktop")
+		if err != nil {
+			log.Printf("[seed] agent-desktop 未安装（npm i -g agent-desktop），跳过 MCP 种子；装好后下次启动自动补种")
+		} else {
+			if _, err := d.Exec(`
+INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
+VALUES ('agent-desktop', 'stdio', $1, $2, '{}', true)
+ON CONFLICT (name) DO NOTHING`, abs, `["mcp","--headed"]`); err != nil {
+				return fmt.Errorf("seed agent-desktop mcp: %w", err)
+			}
+			if _, err := d.Exec(`
+INSERT INTO agent_visibility(agent_id, resource_kind, resource_id, enabled)
+SELECT a.id, 'mcp', m.id, true FROM agents a
+JOIN mcp_servers m ON m.name='agent-desktop'
+ON CONFLICT DO NOTHING`); err != nil {
+				return fmt.Errorf("seed agent-desktop mcp visibility: %w", err)
+			}
+			_ = d.SetSetting("agent_desktop_mcp_seed_v1", "true")
+			log.Printf("[seed] agent-desktop 桌面控制 MCP 已注册（%s），可见性=全部 agent", abs)
+		}
+	}
+	// 桌面工具进拦截系统（治理三段之一，施工方案 §四-D1）：启用名单按【内层名】
+	// 逐项合并（延迟调用经 guard 解包后按内层名求值，见 intercept.UnwrapDeferredName）；
+	// 四族规则（观测 allow / 动作 ask / 敏感读取 ask / 高危 deny）。旗标一次性：
+	// 用户之后删规则/改名单是有意的，重启不复活。
+	if v, _, _ := d.GetSetting("intercept_desktop_seed_v1"); v != "true" {
+		if err := d.seedDesktopIntercept(); err != nil {
+			return fmt.Errorf("seed desktop intercept: %w", err)
+		}
+		_ = d.SetSetting("intercept_desktop_seed_v1", "true")
 	}
 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
 	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init

@@ -147,15 +147,20 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
-	if !g.interceptor.IsToolEnabled(ev.ToolName) {
+	// 延迟工具解包（0.11.9 §四-G）：skill 门控的延迟 MCP 工具经 ExecuteExtraTool
+	// 转发，外层名会让启用名单与规则全部失明。取内层【实际执行】的工具名与参数
+	// 做整条求值——审计与审批记录里看到的就是实际执行的工具（保真性论证见
+	// intercept.UnwrapDeferredName）。
+	effName, effInput := intercept.UnwrapDeferredName(ev.ToolName, ev.Input)
+	if !g.interceptor.IsToolEnabled(effName) {
 		return hook.Result{}
 	}
-	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
-	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
+	ctx = intercept.WithCall(ctx, effName, effInput)
+	dec, matched := g.interceptor.Match(effName, effInput)
 	if !matched {
 		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
 		// or unwired, keep current behavior and allow.
-		d, judged := g.interceptor.Judge(ctx, ev.ToolName, ev.Input)
+		d, judged := g.interceptor.Judge(ctx, effName, effInput)
 		if !judged {
 			return hook.Result{}
 		}
@@ -164,22 +169,22 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	switch dec.Action {
 	case "deny":
 		// 观测:deny 命中不阻塞审批,直接记一条 denied（历史/任务拦截页可见）。
-		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
-		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
+		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, effName, effInput, "denied")
+		return g.block(effName, systemBlockMessage(dec.Message), "")
 	case "allow":
 		// Record explicit rule and model approvals so review details remain auditable.
-		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
+		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, effName, effInput, "allowed")
 		return hook.Result{}
 	case "ask":
 		// If the worker context is already cancelled (task stopped / killed), block
 		// immediately without creating a pending record — avoids orphaned DB entries
 		// and makes execOne complete fast, reducing the race against drainSynthetic.
 		if ctx.Err() != nil {
-			return g.block(ev.ToolName, systemBlockMessage("工作已取消，平台安全管控阻止执行"), "")
+			return g.block(effName, systemBlockMessage("工作已取消，平台安全管控阻止执行"), "")
 		}
 		convID := intercept.ConvIDFromContext(ctx)
-		if !g.interceptor.HandleAsk(ctx, convID, dec, ev.ToolName, ev.Input) {
-			return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
+		if !g.interceptor.HandleAsk(ctx, convID, dec, effName, effInput) {
+			return g.block(effName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
 		}
 		return hook.Result{}
 	}
