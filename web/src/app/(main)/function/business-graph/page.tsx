@@ -13,6 +13,7 @@ import Link from "next/link";
 
 import type { Graph as G6Graph } from "@antv/g6";
 
+import { EdgeOverviewPanel } from "@/components/edge-overview-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -93,6 +94,18 @@ function _nd(d: unknown): BizGraphNode {
 }
 
 export function BusinessGraphPage() {
+  // 页面双模式（0.11.8 重构）：graph=业务图（默认）；edge=偏锋探索总览。
+  // 偏锋总览不再是独立静态路由（独立路由是该功能点唯一与其它可达页面的结构差异，
+  // 用户 Safari 上反复无法载入）——sidebar「偏锋探索」= 本页 + ?mode=edge。
+  // 初始 mode 从 URL query 读（静态导出下用 window.location，绕开
+  // useSearchParams 的 CSR bailout 限制）。
+  const [mode, setMode] = React.useState<"graph" | "edge">("graph");
+  React.useEffect(() => {
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "edge") {
+      setMode("edge");
+    }
+  }, []);
+
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const graphRef = React.useRef<G6Graph | null>(null);
   const renderMapRef = React.useRef<Map<string, BizGraphNode>>(new Map());
@@ -344,135 +357,155 @@ export function BusinessGraphPage() {
 
   return (
     <div className="flex h-full flex-col gap-3 p-4">
+      {/* 页面模式切换：业务图 / 偏锋探索（偏锋总览并入本页，见组件头注释） */}
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          className="h-8 rounded-md border bg-background px-2 text-sm"
-          value={companyId}
-          onChange={(e) => setCompanyId(Number(e.target.value))}
-        >
-          {companies.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <Tabs value={layer} onValueChange={(v) => setLayer(v as LayerFilter)}>
+        <Tabs value={mode} onValueChange={(v) => setMode(v as "graph" | "edge")}>
           <TabsList className="h-8">
-            <TabsTrigger value="all" className="text-xs">
-              双层
+            <TabsTrigger value="graph" className="text-xs">
+              业务图
             </TabsTrigger>
-            <TabsTrigger value="design" className="text-xs">
-              design（声称）
-            </TabsTrigger>
-            <TabsTrigger value="behavior" className="text-xs">
-              behavior（实际）
+            <TabsTrigger value="edge" className="text-xs">
+              偏锋探索
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        <Tabs value={view} onValueChange={(v) => setView(v as ViewMode)}>
-          <TabsList className="h-8">
-            <TabsTrigger value="semantic" className="text-xs">
-              语义视图
-            </TabsTrigger>
-            <TabsTrigger value="permission" className="text-xs">
-              权限视图
-            </TabsTrigger>
-            <TabsTrigger value="state" className="text-xs">
-              状态机视图
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <Button
-          variant={showDiffOnly ? "default" : "outline"}
-          size="sm"
-          className="h-8 text-xs"
-          onClick={() => setShowDiffOnly((v) => !v)}
-        >
-          仅看差异节点
-        </Button>
-        <Button variant="outline" size="sm" className="h-8 text-xs" onClick={load} disabled={loading}>
-          {loading ? "加载中…" : "刷新"}
-        </Button>
-        <div className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
-          <span>
-            {visibleNodes.length} 节点 / {visibleEdges.length} 关系
-          </span>
-          <Link href="/function/business-graph/diffs" className="underline-offset-2 hover:underline">
-            差异面板 →
-          </Link>
-          <Badge variant="outline" className="text-[10px]">
-            描边=差异 severity（红橙黄）
-          </Badge>
-        </div>
+        <Link href="/function/business-graph/diffs" className="text-xs underline-offset-2 hover:underline">
+          差异面板 →
+        </Link>
       </div>
-      {error && (
-        <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-600 text-xs">{error}</div>
-      )}
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
-        <div ref={containerRef} className="h-full w-full" />
-        {visibleNodes.length === 0 && !loading && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
-            该公司暂无业务图数据——在对话里选「业务建模」agent 发起一次建模，或运行 api-recon 后让建模 agent
-            读设计层产物。
+      {mode === "edge" && <EdgeOverviewPanel />}
+      {mode === "graph" && (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="h-8 rounded-md border bg-background px-2 text-sm"
+              value={companyId}
+              onChange={(e) => setCompanyId(Number(e.target.value))}
+            >
+              {companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <Tabs value={layer} onValueChange={(v) => setLayer(v as LayerFilter)}>
+              <TabsList className="h-8">
+                <TabsTrigger value="all" className="text-xs">
+                  双层
+                </TabsTrigger>
+                <TabsTrigger value="design" className="text-xs">
+                  design（声称）
+                </TabsTrigger>
+                <TabsTrigger value="behavior" className="text-xs">
+                  behavior（实际）
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Tabs value={view} onValueChange={(v) => setView(v as ViewMode)}>
+              <TabsList className="h-8">
+                <TabsTrigger value="semantic" className="text-xs">
+                  语义视图
+                </TabsTrigger>
+                <TabsTrigger value="permission" className="text-xs">
+                  权限视图
+                </TabsTrigger>
+                <TabsTrigger value="state" className="text-xs">
+                  状态机视图
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Button
+              variant={showDiffOnly ? "default" : "outline"}
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => setShowDiffOnly((v) => !v)}
+            >
+              仅看差异节点
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={load} disabled={loading}>
+              {loading ? "加载中…" : "刷新"}
+            </Button>
+            <div className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
+              <span>
+                {visibleNodes.length} 节点 / {visibleEdges.length} 关系
+              </span>
+              <Badge variant="outline" className="text-[10px]">
+                描边=差异 severity（红橙黄）
+              </Badge>
+            </div>
           </div>
-        )}
-      </div>
-      <Sheet
-        open={selected !== null}
-        onOpenChange={(open) => {
-          if (!open) setSelected(null);
-        }}
-      >
-        <SheetContent side="right" className="overflow-y-auto data-[side=right]:sm:max-w-md">
-          {selected && (
-            <>
-              <SheetHeader>
-                <SheetTitle className="flex items-center gap-2">
-                  <span
-                    className="inline-block size-3 rounded-full"
-                    style={{ background: TYPE_META[selected.node_type].hex }}
-                  />
-                  {selected.name}
-                </SheetTitle>
-                <SheetDescription>
-                  {TYPE_META[selected.node_type].label} ·{" "}
-                  {selected.layer === "design" ? "design（声称）" : "behavior（实际）"} ·{" "}
-                  {selected.confidence === "observed" ? "observed（直接看到）" : "inferred（推断）"}
-                </SheetDescription>
-              </SheetHeader>
-              <div className="mt-2 space-y-3 text-sm">
-                {selected.raw_name && selected.raw_name !== selected.name && (
-                  <div className="text-muted-foreground text-xs">原始名：{selected.raw_name}</div>
-                )}
-                {selected.description && <p className="text-muted-foreground">{selected.description}</p>}
-                <div className="flex flex-wrap gap-1">
-                  {selected.asset_ids.map((aid) => (
-                    <Badge key={aid} variant="outline" className="text-[10px]">
-                      资产 #{aid}
-                    </Badge>
-                  ))}
-                </div>
-                {selected.props && Object.keys(selected.props as Record<string, unknown>).length > 0 && (
-                  <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px]">
-                    {JSON.stringify(selected.props, null, 2)}
-                  </pre>
-                )}
-                <div>
-                  <div className="mb-1 font-medium text-xs">相关差异</div>
-                  {selectedDiffs.length === 0 && <div className="text-muted-foreground text-xs">无</div>}
-                  {selectedDiffs.map((d) => (
-                    <div key={d.id} className="mb-1 rounded-md border p-2 text-xs">
-                      <span className="font-medium">{d.diff_type}</span> · {d.wstg_ref || "—"} / {d.stride_ref || "—"} ·{" "}
-                      <span className="text-muted-foreground">{d.status}</span>
-                      <div className="text-muted-foreground">{d.description}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </>
+          {error && (
+            <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-600 text-xs">
+              {error}
+            </div>
           )}
-        </SheetContent>
-      </Sheet>
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
+            <div ref={containerRef} className="h-full w-full" />
+            {visibleNodes.length === 0 && !loading && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
+                该公司暂无业务图数据——在对话里选「业务建模」agent 发起一次建模，或运行 api-recon 后让建模 agent
+                读设计层产物。
+              </div>
+            )}
+          </div>
+          <Sheet
+            open={selected !== null}
+            onOpenChange={(open) => {
+              if (!open) setSelected(null);
+            }}
+          >
+            <SheetContent side="right" className="overflow-y-auto data-[side=right]:sm:max-w-md">
+              {selected && (
+                <>
+                  <SheetHeader>
+                    <SheetTitle className="flex items-center gap-2">
+                      <span
+                        className="inline-block size-3 rounded-full"
+                        style={{ background: TYPE_META[selected.node_type].hex }}
+                      />
+                      {selected.name}
+                    </SheetTitle>
+                    <SheetDescription>
+                      {TYPE_META[selected.node_type].label} ·{" "}
+                      {selected.layer === "design" ? "design（声称）" : "behavior（实际）"} ·{" "}
+                      {selected.confidence === "observed" ? "observed（直接看到）" : "inferred（推断）"}
+                    </SheetDescription>
+                  </SheetHeader>
+                  <div className="mt-2 space-y-3 text-sm">
+                    {selected.raw_name && selected.raw_name !== selected.name && (
+                      <div className="text-muted-foreground text-xs">原始名：{selected.raw_name}</div>
+                    )}
+                    {selected.description && <p className="text-muted-foreground">{selected.description}</p>}
+                    <div className="flex flex-wrap gap-1">
+                      {selected.asset_ids.map((aid) => (
+                        <Badge key={aid} variant="outline" className="text-[10px]">
+                          资产 #{aid}
+                        </Badge>
+                      ))}
+                    </div>
+                    {selected.props && Object.keys(selected.props as Record<string, unknown>).length > 0 && (
+                      <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px]">
+                        {JSON.stringify(selected.props, null, 2)}
+                      </pre>
+                    )}
+                    <div>
+                      <div className="mb-1 font-medium text-xs">相关差异</div>
+                      {selectedDiffs.length === 0 && <div className="text-muted-foreground text-xs">无</div>}
+                      {selectedDiffs.map((d) => (
+                        <div key={d.id} className="mb-1 rounded-md border p-2 text-xs">
+                          <span className="font-medium">{d.diff_type}</span> · {d.wstg_ref || "—"} /{" "}
+                          {d.stride_ref || "—"} · <span className="text-muted-foreground">{d.status}</span>
+                          <div className="text-muted-foreground">{d.description}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </SheetContent>
+          </Sheet>
+        </>
+      )}
     </div>
   );
 }

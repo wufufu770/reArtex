@@ -21,10 +21,25 @@ var webuiDist embed.FS
 // legacyPageRedirects 是页面路径改名的兼容重定向（规范 URL）：老路径 308 到新路径，
 // 用户收藏/历史记录不断链。只做前缀级整条重定向，不做通配。
 var legacyPageRedirects = map[string]string{
-	// v0.11.7：edge-exploration → pianfeng（偏锋总览页路径去 "edge" 关键词——
-	// 排查 Safari 报"无法载入"时服务端全 200、唯独该 URL 失败，绕开用户侧
-	// 代理按 URL 关键词分流与失败缓存两个无法从服务端排除的因素）。
+	// v0.11.7：edge-exploration → pianfeng（偏锋总览页路径去 "edge" 关键词）。
 	"/function/edge-exploration": "/function/pianfeng",
+	// v0.11.8 重构：偏锋总览并入业务建模页（?mode=edge）， pianfeng 独立路由取消。
+	// Redirect 落到已验证可达的页面 + query 参数切换模式。
+	"/function/pianfeng": "/function/business-graph?mode=edge",
+}
+
+// redirectTarget 拼重定向 Location：原请求带 query 时用 `?` 合并（legacy 目标自带
+// query 时以原请求 query 追加）；原请求无 query 时不产生悬挂 `?`——悬挂 `?` 会让
+// 目标 query 的最后一个参数值带上 `?`（实测 `mode=edge?` ⇒ 前端 `get("mode")` 拿到
+// "edge?" 比较失败，模式切换失效，0.11.8 首版踩坑）。
+func redirectTarget(target, rawQuery string) string {
+	if rawQuery == "" {
+		return target
+	}
+	if strings.Contains(target, "?") {
+		return target + "&" + rawQuery
+	}
+	return target + "?" + rawQuery
 }
 
 // webuiHandler serves the embedded SPA. Public (no JWT) — auth is enforced
@@ -46,11 +61,11 @@ func (s *Server) webuiHandler() http.Handler {
 			if target == "" {
 				target = "/"
 			}
-			http.Redirect(w, r, target+"?"+r.URL.RawQuery, http.StatusPermanentRedirect)
+			http.Redirect(w, r, redirectTarget(target, r.URL.RawQuery), http.StatusPermanentRedirect)
 			return
 		}
 		if target, ok := legacyPageRedirects[raw]; ok {
-			http.Redirect(w, r, target+"?"+r.URL.RawQuery, http.StatusPermanentRedirect)
+			http.Redirect(w, r, redirectTarget(target, r.URL.RawQuery), http.StatusPermanentRedirect)
 			return
 		}
 		p := strings.TrimPrefix(path.Clean(raw), "/")

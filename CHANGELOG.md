@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.11.8] - 2026-11-13
+
+### 重构（偏锋探索功能点 0.11.7 后仍报"无法载入"——按用户指令重构功能点本身）
+- **取消独立静态路由**：偏锋总览不再有自己的页面路径（pianfeng 路由删除），**并入业务建模页作为第二种模式**——sidebar「偏锋探索」= `/function/business-graph?mode=edge`，页内顶部「业务图 / 偏锋探索」Tabs 切换。业务建模页是用户实测可正常打开的页面；独立路由是该功能点与其它可达页面唯一的结构差异，重构后该差异不复存在。
+- 总览面板抽为共享组件 `components/edge-overview-panel.tsx`（方法论注册表 + 偏锋任务判据进度 + stop 统计），数据走既有 API（`/api/edge/methodologies`、`/api/edge/tasks`——API 层从未失败）。
+- 兼容链：`/function/pianfeng` → 308 → `/function/business-graph?mode=edge`；`/function/edge-exploration`（含尾斜杠）→ 308 链式到达同页。收藏不断链。
+- 对齐检查：无新后端功能点；偏锋功能的前端入口由"独立页"变为"页内模式"，功能面（总览/方法论/判据进度/stop 统计）一个不少。
+
 ## [0.11.7] - 2026-11-13
 
 ### 修复（偏锋总览页 Safari"无法载入"——用户二次报障根治）

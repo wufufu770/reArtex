@@ -1,14 +1,14 @@
 "use client";
 
-// 偏锋探索总览页（EDGE 总览）：方法论注册表展示 + 全部偏锋任务的判据进度
-// 与 stop_reason 统计。功能入口的完整口径：
-//   - 发起：对话页选「偏锋探索」agent（或对 Auto 说「用偏锋探索做完整探索」）
-//   - 任务内热切：主 agent 对话里「这一轮用偏锋探索」（edge_activate）
-//   - 本页：只读总览——哪些任务在跑偏锋、跑到哪了、为什么停
+// 偏锋探索总览面板（EDGE 总览；0.11.8 重构：并入业务建模页作为 edge 模式，
+// 不再是独立静态路由——独立路由是这个功能点唯一与其它可达页面的结构差异）。
+//
+// 完整入口口径：
+//   - 发起：对话页选「偏锋探索」agent，或对主 agent 说「这一轮用偏锋探索」
+//   - 本面板：只读总览——方法论注册表 + 全部偏锋任务的判据进度与停止原因统计
+//   - sidebar「偏锋探索」→ /function/business-graph?mode=edge
 
 import * as React from "react";
-
-import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,7 +52,7 @@ function CriterionBadges({ m }: { m: EdgeMethodology }) {
   );
 }
 
-export default function EdgeExplorationPage() {
+export function EdgeOverviewPanel() {
   const [methodologies, setMethodologies] = React.useState<EdgeMethodology[]>([]);
   const [tasks, setTasks] = React.useState<EdgeTaskOverview[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -73,12 +73,11 @@ export default function EdgeExplorationPage() {
   }, [load]);
 
   return (
-    <div className="flex h-full flex-col gap-4 p-4">
+    <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <h1 className="font-semibold text-lg">偏锋探索</h1>
-        <span className="text-muted-foreground text-xs">
+        <span className="text-xs text-muted-foreground">
           方法论驱动的另一条探索线——发起走对话（选「偏锋探索」agent，或对主 agent
-          说「这一轮用偏锋探索」）；本页是只读总览。
+          说「这一轮用偏锋探索」）；本面板是只读总览。
         </span>
         <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={load} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
@@ -87,9 +86,9 @@ export default function EdgeExplorationPage() {
 
       {/* 偏锋任务与判据进度 */}
       <div className="space-y-2">
-        <div className="font-medium text-sm">偏锋任务与判据进度</div>
+        <div className="text-sm font-medium">偏锋任务与判据进度</div>
         {tasks.length === 0 && (
-          <div className="rounded-lg border p-6 text-center text-muted-foreground text-sm">
+          <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
             还没有偏锋任务。到「对话」页选「偏锋探索」agent 说「做一次完整探索」，或在任务详情对话里对主 agent
             说「这一轮用偏锋探索」。
           </div>
@@ -97,12 +96,7 @@ export default function EdgeExplorationPage() {
         {tasks.map((t) => (
           <div key={t.task_id} className="rounded-lg border p-3">
             <div className="flex flex-wrap items-center gap-2">
-              <Link
-                href={`/function/tasks/detail?id=${t.task_id}`}
-                className="font-medium text-sm underline-offset-2 hover:underline"
-              >
-                任务 #{t.task_id}
-              </Link>
+              <span className="text-sm font-medium">任务 #{t.task_id}</span>
               <Badge variant="outline" className="text-[10px]">
                 {t.methodology_id || "—"}
               </Badge>
@@ -110,11 +104,11 @@ export default function EdgeExplorationPage() {
                 {t.status}
               </Badge>
               {t.open_run && <Badge className="text-[10px]">运行中 #{t.open_run.id}</Badge>}
-              <span className="ml-auto text-muted-foreground text-xs">
+              <span className="ml-auto text-xs text-muted-foreground">
                 判据进度 {t.cells_terminal}/{t.cells_total}（{Math.round((t.criterion_progress || 0) * 100)}%）
               </span>
             </div>
-            <div className="mt-1 line-clamp-2 text-muted-foreground text-xs">{t.task_desc || t.task_goal}</div>
+            <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{t.task_desc || t.task_goal}</div>
             <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-primary transition-all"
@@ -136,12 +130,12 @@ export default function EdgeExplorationPage() {
 
       {/* 方法论注册表 */}
       <div className="space-y-2">
-        <div className="font-medium text-sm">方法论注册表</div>
+        <div className="text-sm font-medium">方法论注册表</div>
         <div className="grid gap-2 md:grid-cols-2">
           {methodologies.map((m) => (
             <div key={m.id} className={`rounded-lg border p-3 ${m.enabled ? "" : "opacity-50"}`}>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium text-sm">{m.name}</span>
+                <span className="text-sm font-medium">{m.name}</span>
                 <Badge variant="outline" className="text-[10px]">
                   {TIER_LABEL[m.tier]}
                 </Badge>
@@ -157,7 +151,7 @@ export default function EdgeExplorationPage() {
                   </Badge>
                 )}
               </div>
-              <p className="mt-1 text-muted-foreground text-xs">{m.summary}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{m.summary}</p>
               <div className="mt-2 flex flex-wrap gap-1">
                 <CriterionBadges m={m} />
               </div>
