@@ -88,7 +88,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
       { id: "business-graph", title: "业务建模", url: "/function/business-graph", icon: Waypoints },
       { id: "biz-diffs", title: "差异面板", url: "/function/business-graph/diffs", icon: GitCompareArrows },
-      { id: "edge-exploration", title: "偏锋探索", url: "/function/edge-exploration", icon: Compass },
+      { id: "edge-exploration", title: "偏锋探索", url: "/function/pianfeng", icon: Compass },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
     ],
