@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { reportClientError } from "@/lib/client-error-reporter";
 import { statusMeta } from "@/lib/status";
 import type { BizGraphNode, BizLayerDiff, Company } from "@/lib/types";
 import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
@@ -55,6 +56,16 @@ const TYPE_META: Record<BizNodeType, { label: string; hex: string; size: number 
   biz_dataflow: { label: "数据流", hex: "#06b6d4", size: 32 },
   biz_external: { label: "外部系统", hex: "#64748b", size: 36 },
 };
+
+// 枚举外的 node_type 兜底（0.13.5）：后端新增枚举而前端未更新时，查表缺失
+// 曾直接崩渲染（审查 P0 F1）——所有取用点一律走 nodeMeta/nodeIcon。
+const FALLBACK_NODE_META: { label: string; hex: string; size: number } = {
+  label: "未知",
+  hex: "#94a3b8",
+  size: 32,
+};
+const nodeMeta = (t: string) => TYPE_META[t as BizNodeType] ?? FALLBACK_NODE_META;
+const nodeIcon = (t: string) => TYPE_ICON[t as BizNodeType] ?? "";
 
 const REL_COLOR: Record<string, string> = {
   owns: "#8b5cf6",
@@ -123,6 +134,9 @@ export function BusinessGraphPage() {
   const [selected, setSelected] = React.useState<BizGraphNode | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [graphError, setGraphError] = React.useState("");
+  // graphEpoch：G6 建图 effect 的重试代（引擎加载失败后 +1 重建）。
+  const [graphEpoch, setGraphEpoch] = React.useState(0);
   // 画布配色跟随页面主题（resolvedThemeMode 由偏好 store 同步 DOM data-theme）。
   const theme = usePreferencesStore((s) => s.resolvedThemeMode);
 
@@ -131,7 +145,9 @@ export function BusinessGraphPage() {
       .companies()
       .then((cs) => {
         setCompanies(cs);
+        // F4（0.13.5）：空公司不再是静默空图——给出去向（资产页建公司配范围）。
         if (cs.length > 0) setCompanyId((prev) => prev || cs[0].id);
+        else setError("暂无公司——先在「资产」页创建公司并配置范围，再回到本页建模");
       })
       .catch(() => setError("公司清单加载失败"));
   }, []);
@@ -210,7 +226,7 @@ export function BusinessGraphPage() {
     const graph = graphRef.current;
     if (!graph) return;
     const nodeData = visibleNodes.map((n) => {
-      const meta = TYPE_META[n.node_type];
+      const meta = nodeMeta(n.node_type);
       const sev = diffNodeSev.get(n.id);
       renderMapRef.current.set(`b${n.id}`, n);
       return {
@@ -220,7 +236,7 @@ export function BusinessGraphPage() {
         fill: meta.hex,
         stroke: sev ? severityHex(sev) : "#ffffff",
         lineWidth: sev ? 4 : 1.5,
-        iconSrc: TYPE_ICON[n.node_type],
+        iconSrc: nodeIcon(n.node_type),
         labelText: n.name,
         layer: n.layer,
       };
@@ -269,6 +285,8 @@ export function BusinessGraphPage() {
   // ——数据变化不重建整图（重建由上方 applyData effect 独立负责）。
   const applyDataRef = React.useRef(applyData);
   applyDataRef.current = applyData;
+  // graphEpoch 是刻意的重试代（引擎加载失败后 +1 触发重建），不参与闭包。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 重试代语义见上。
   React.useEffect(() => {
     let destroyed = false;
     let graph: G6Graph | null = null;
@@ -329,7 +347,14 @@ export function BusinessGraphPage() {
       });
       graphRef.current = graph;
       applyDataRef.current();
-    })();
+    })().catch((err) => {
+      // G6 是独立的大 chunk：代理拦截/发版后旧 HTML 指到新 chunk hash（404）都会
+      // 让这个 import reject——此前无人接管，图静默不初始化（审查 P0 F2）。
+      if (destroyed) return;
+      console.error("[business-graph] 图引擎加载失败:", err);
+      reportClientError(`g6 import failed: ${err instanceof Error ? err.message : String(err)}`);
+      setGraphError("图引擎加载失败，请刷新重试");
+    });
     return () => {
       destroyed = true;
       try {
@@ -340,7 +365,7 @@ export function BusinessGraphPage() {
       graph?.destroy();
       graphRef.current = null;
     };
-  }, [canvas]);
+  }, [canvas, graphEpoch]);
 
   const selectedDiffs = React.useMemo(
     () =>
@@ -441,6 +466,24 @@ export function BusinessGraphPage() {
           )}
           <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
             <div ref={containerRef} className="h-full w-full" />
+            {graphError && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="text-center">
+                  <div className="mb-2 text-red-500 text-sm">{graphError}</div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      setGraphError("");
+                      setGraphEpoch((k) => k + 1);
+                    }}
+                  >
+                    重试
+                  </Button>
+                </div>
+              </div>
+            )}
             {visibleNodes.length === 0 && !loading && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground text-sm">
                 暂无业务图数据
@@ -460,12 +503,12 @@ export function BusinessGraphPage() {
                     <SheetTitle className="flex items-center gap-2">
                       <span
                         className="inline-block size-3 rounded-full"
-                        style={{ background: TYPE_META[selected.node_type].hex }}
+                        style={{ background: nodeMeta(selected.node_type).hex }}
                       />
                       {selected.name}
                     </SheetTitle>
                     <SheetDescription>
-                      {TYPE_META[selected.node_type].label} ·{" "}
+                      {nodeMeta(selected.node_type).label} ·{" "}
                       {selected.layer === "design" ? "design（声称）" : "behavior（实际）"} ·{" "}
                       {selected.confidence === "observed" ? "observed（直接看到）" : "inferred（推断）"}
                     </SheetDescription>

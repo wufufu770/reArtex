@@ -988,6 +988,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
+	mux.HandleFunc("POST /api/logs/client", s.clientLogIngest)
 
 	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
 	// /api/health），所以这几个改动程序自身的接口天然需要登录。

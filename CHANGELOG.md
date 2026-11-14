@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.13.5] - 2026-11-14
+
+### 修复（外部审查批 P0 前端半边——渲染健壮性；审查报告基于 0.13.1，逐项核实后施工）
+- **error boundary 落地**（审查 P0②）：新增 `app/error.tsx`（路由段级，重试/返回仪表盘）与 `app/global-error.tsx`（根级，自带 html/body 内联样式）——此前客户端渲染抛错即整树卸载纯白屏。
+- **前端错误上报管道**（审查 P0③ 配套 + 6.7 错误上报延伸）：新 `POST /api/logs/client`（server/client_log_api.go）——走既有 logsink（日志页/SSE 自动带出，tag=webclient），每 IP 令牌桶限流 60/min 突发 10，字段硬截断，payload 上限 8KB；前端 `lib/client-error-reporter.ts`（同 message 60s 去重 + 会话上限 20 条，上报永不比业务错误更吵）+ `app/client-error-boot.tsx` 挂 window.onerror/unhandledrejection。
+- **removeConsole 保留 error/warn**（审查 P0③）：next.config 改 `{ exclude: ["error", "warn"] }`——此前 prod 整批删除，渲染出错时控制台一片空白无从排查。
+- **business-graph 渲染防御**（审查 P0 F1/F2）：TYPE_META/TYPE_ICON 全部经 nodeMeta/nodeIcon 兜底（枚举外 node_type 曾直接崩渲染）；G6 动态 import 补 catch（大 chunk 加载失败曾静默不初始化）——失败态画布内提示 + 重试按钮（graphEpoch 代数重建）+ 上报。
+- **F4 空公司指引**：公司清单为空时给出明确去向（"先在资产页创建公司并配置范围"），不再是静默空图。
+- 验证：go build/vet + 前端 build:static/tsc/biome 全绿；产物 chunk 回验；人为抛错实测 boundary 兜底与上报落账见运行核查。
+- 对齐检查：新增后端功能点 POST /api/logs/client 的前端入口=上报器（行为面，非 UI）；日志页既有面自动消费。
+
 ## [0.13.4] - 2026-11-14
 
 ### 修复（补交缺口——0.13.2 声明的前端改动有两个文件漏出提交清单）

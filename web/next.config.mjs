@@ -16,7 +16,9 @@ const nextConfig = {
   // 注意：Next 出于安全禁止裸 "*"，需用分段通配；"*.*.*.*" 匹配任意 IPv4。
   allowedDevOrigins: ["*.*.*.*"],
   compiler: {
-    removeConsole: process.env.NODE_ENV === "production",
+    // prod 只删 log/debug，保留 error/warn——渲染期诊断曾被整批删除，页面
+    // 出错时控制台一片空白无从排查（0.13.5，审查 P0③）。
+    removeConsole: process.env.NODE_ENV === "production" ? { exclude: ["error", "warn"] } : false,
   },
   ...(isExport
     ? {
