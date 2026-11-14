@@ -536,20 +536,34 @@ func (d *DB) bizNodesAnchors(nodeIDs []int64) (map[int64][]int64, error) {
 
 // ListBizDiffs 按公司/任务列差异（宿主与前端面板用；diff 不锚资产，按 task 归属
 // 过滤而不是锚点过滤——它的授权边界是建模任务本身）。
+//
+// companyID=0 且 taskID>0 时跳过公司过滤、按任务维度查全库：任务行 company_id
+// 为 NULL（未归属公司）时，bizDiffsHandler 的回退补不出公司 id，再按
+// company_id=0 过滤就永远空（0.13.2 修复：差异面板按任务维度查未归属公司
+// 任务恒空）。companyID 与 taskID 不得同时 ≤0（调用方 handler 已挡，此处再守）。
 func (d *DB) ListBizDiffs(companyID, taskID int64, status, severity string, limit int) ([]*BizLayerDiff, error) {
 	if err := d.ensureBizSchema(); err != nil {
 		return nil, err
+	}
+	if companyID <= 0 && taskID <= 0 {
+		return nil, fmt.Errorf("company_id 或 task_id 至少传一个")
 	}
 	if limit <= 0 {
 		limit = 200
 	}
 	q := `SELECT id, company_id, COALESCE(task_id,0), diff_type, severity, design_ref, behavior_ref,
 	      description, wstg_ref, stride_ref, status, created_at
-FROM biz_layer_diffs WHERE company_id=$1`
-	args := []any{companyID}
+FROM biz_layer_diffs`
+	args := []any{}
+	if companyID > 0 {
+		q += ` WHERE company_id=$1`
+		args = append(args, companyID)
+	} else {
+		q += ` WHERE TRUE`
+	}
 	if taskID > 0 {
-		q += ` AND task_id=$2`
 		args = append(args, taskID)
+		q += fmt.Sprintf(` AND task_id=$%d`, len(args))
 	}
 	if status != "" {
 		q += fmt.Sprintf(` AND status=$%d`, len(args)+1)

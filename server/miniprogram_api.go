@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -55,7 +56,7 @@ func (s *Server) mpTokensHandler(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "请求体非法")
 			return
 		}
-		fp, err := pg.UpsertMiniprogramToken(req.TaskID, req.AppID, req.Label, req.Value, req.Scope)
+		fp, encrypted, err := pg.UpsertMiniprogramToken(req.TaskID, req.AppID, req.Label, req.Value, req.Scope)
 		if err != nil {
 			writeErr(w, 400, err.Error())
 			return
@@ -73,7 +74,9 @@ func (s *Server) mpTokensHandler(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			log.Printf("[mp] token 保存审计链写入失败（忽略）: %v", err)
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "fingerprint": fp})
+		// 0.13.2：如实告知加密状态——未配置主密钥时凭据明文落 token_plain
+		// （token_plain/token_cipher 双列口径的过渡列），操作者必须看得见。
+		writeJSON(w, 200, map[string]any{"ok": true, "fingerprint": fp, "encrypted": encrypted})
 	default:
 		writeErr(w, 405, "method 不支持")
 	}
@@ -133,6 +136,17 @@ func (s *Server) mpArtifactsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"apps": out})
 }
 
+// mpEncryptionHandler 处理 GET /api/miniprogram/encryption：主密钥配置状态。
+// 0.13.2 加密告知面——未配置主密钥时 token 池明文落库（过渡列），前端据此在
+// 小程序页与系统设置页挂持久告警。
+func (s *Server) mpEncryptionHandler(w http.ResponseWriter, r *http.Request) {
+	configured := false
+	if key, err := config.MasterKey(); err == nil && len(key) > 0 {
+		configured = true
+	}
+	writeJSON(w, 200, map[string]any{"master_key_configured": configured})
+}
+
 // mpRoutes 注册小程序渗透的路由（在 requireAuth 之内）。
 func (s *Server) mpRoutes(mux *http.ServeMux) {
 	// 运行时反代目标从 settings 加载（部署配置；agent 不可改，仅操作者经 REST）。
@@ -145,6 +159,7 @@ func (s *Server) mpRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/miniprogram/tokens", s.mpTokensHandler)
 	mux.HandleFunc("DELETE /api/miniprogram/tokens/{id}", s.mpTokenDeleteHandler)
 	mux.HandleFunc("GET /api/miniprogram/artifacts", s.mpArtifactsHandler)
+	mux.HandleFunc("GET /api/miniprogram/encryption", s.mpEncryptionHandler)
 	mux.HandleFunc("PUT /api/tasks/{id}/host-targets", s.taskHostTargetsHandler)
 	mux.HandleFunc("GET /api/miniprogram/runtime", s.mpRuntimeGetHandler)
 	mux.HandleFunc("PUT /api/miniprogram/runtime", s.mpRuntimeSetHandler)
@@ -189,6 +204,13 @@ func (s *Server) taskHostTargetsHandler(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 400, "task id 非法")
 		return
 	}
+	// 0.13.2：任务必须存在——此前对不存在任务也 200 并写审计链，审计里留孤儿
+	// 事件（全量审查 P3 实测坐实）。
+	var exists int
+	if err := pg.QueryRow(`SELECT count(*) FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&exists); err != nil || exists == 0 {
+		writeErr(w, 404, "任务不存在")
+		return
+	}
 	var req struct {
 		Targets []string `json:"targets"`
 	}
@@ -229,5 +251,4 @@ func (s *Server) ensureMpArtifactsDir() {
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		log.Printf("[mp] 产物目录创建失败（忽略）: %v", err)
 	}
-	_ = strings.TrimSpace("")
 }

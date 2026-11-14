@@ -357,3 +357,71 @@ func TestTaskHostTargetsRoundtrip(t *testing.T) {
 		t.Fatalf("清空后应 0 项: %v", targets)
 	}
 }
+
+// TestListBizDiffsNullCompany 钉住差异按任务维度查询的 NULL-company 场景：
+// 任务 company_id 为 NULL（未归属公司）时，bizDiffsHandler 的回退补不出公司 id，
+// ListBizDiffs(0, task) 必须跳过公司过滤返回差异——此前 WHERE company_id=0 恒空
+// （0.13.2 修复，真库回归）。
+func TestListBizDiffsNullCompany(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_ = d.ensureBizSchema()
+	suffix := nowSuffix()
+	// 差异表的 company_id 是 NOT NULL+FK：造一家公司承载差异归属，任务行刻意
+	// 不挂公司（company_id NULL）——复现「只传 task_id」的回退路径。
+	companyID, _, _, _, _, err := d.Companies().CreateCompanyWithScope(
+		"差异回退公司"+suffix, "", []ScopeInput{{Kind: "domain", Value: "diffnull-" + suffix + ".example.com"}}, "集成测试造数")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM biz_layer_diffs WHERE company_id=$1`, companyID)
+		_, _ = d.Companies().DeleteCompanyWithAssets(companyID, true)
+	})
+	task, err := d.CreateTaskWithOptions("差异回退任务 "+suffix, "验证", TaskCreateOptions{})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	tid := task.ID
+	t.Cleanup(func() { _, _ = d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, tid) })
+
+	var gotCompany any
+	if err := d.QueryRow(`SELECT company_id FROM tasks WHERE id=$1`, tid).Scan(&gotCompany); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if gotCompany != nil {
+		t.Fatalf("夹具任务应 company_id NULL，got %v", gotCompany)
+	}
+	var diffID int64
+	if err := d.QueryRow(`INSERT INTO biz_layer_diffs (company_id, task_id, diff_type, severity, description)
+VALUES ($1,$2,'missing_validation','high','NULL-company 回退验证') RETURNING id`,
+		companyID, tid).Scan(&diffID); err != nil {
+		t.Fatalf("insert diff: %v", err)
+	}
+
+	// 修复点：company=0 + task 维度必须命中（此前恒空）。
+	diffs, err := d.ListBizDiffs(0, tid, "", "", 0)
+	if err != nil {
+		t.Fatalf("ListBizDiffs(0, task): %v", err)
+	}
+	found := false
+	for _, df := range diffs {
+		if df.ID == diffID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListBizDiffs(0, task) 应命中差异 #%d（got %d 条）", diffID, len(diffs))
+	}
+	// 公司维度路径回归不受影响。
+	diffs, err = d.ListBizDiffs(companyID, tid, "", "", 0)
+	if err != nil || len(diffs) != 1 {
+		t.Fatalf("ListBizDiffs(company, task) 应恰好 1 条: err=%v n=%d", err, len(diffs))
+	}
+	// 双零调用必须拒绝（不再有全表扫口子）。
+	if _, err := d.ListBizDiffs(0, 0, "", "", 0); err == nil {
+		t.Fatalf("company=0 且 task=0 应报错")
+	}
+}

@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.13.2] - 2026-11-14
+
+### 修复（全量审查批——P1 熔断死代码 + 两个 P2 + 三个 P3；实测驱动）
+- **P1 偏锋停滞熔断是死代码（实测坐实并修复）**：fireEdgeWake 正常路径推进 StallRounds 后从不落库（只有熔断分支才 save）——loadEdgeBreaker 每次读回空 lastHash，stallAdvance 归零，StallRounds 永远到不了阈值 4，判据停滞熔断（EDGE E7 三熔断之一）永不触发。审查期经 API 建任务+插入 open edge_run 实测 35 秒（7 个 tick）不熔断坐实。**修复**：停滞对账移入水位 gate 之后（每 60s 推进一次 ≈ 一轮对账语义，与 StallTracker 的「轮」对齐）且推进即落库；判据成立机械收尾（主路径）保持在水位前每 tick 判定不被延迟。同时钉住反向风险：若只补 save 不改节奏，5s tick 会变成 20s 误熔断。新增 TestStallAdvance 钉死计数语义；实机验证：夹具任务 4 个对账周期后 criterion_stalled 熔断 + 审计落账。
+- **P2 差异按任务维度查询对未归属公司任务恒空（实测坐实并修复）**：bizDiffsHandler 的 company_id 回退对 company_id NULL 的任务补出 0，ListBizDiffs `WHERE company_id=0` 恒空——差异面板按任务维度查不到该类差异（diff 行确凿在库，`?task_id=2` 空、`?company_id=2&task_id=2` 命中）。**修复**：ListBizDiffs 在 company=0 且 task>0 时跳过公司过滤按任务维度查全库；双零调用显式拒绝（补全表扫口子）。真库集成测试 TestListBizDiffsNullCompany 钉死。
+- **P2 token 加密告知**：无主密钥时凭据明文落 token_plain 过渡列（既有文档化降级），但操作者无感知。现：db 层返回加密状态；REST 保存响应带 `encrypted` 字段；mp_token_save 工具响应如实报加密状态；GET /api/miniprogram/encryption 暴露主密钥配置状态；小程序页未配置主密钥时挂持久告警条 + 保存 toast 区分两种状态；系统设置页新增「加密主密钥」状态卡。
+- **P3 host-targets 校验任务存在**：此前对不存在任务也 200 并写审计链（审计留孤儿事件，实测坐实）；现先查任务行（含 deleted_at 过滤），不存在 404。
+- **P3 ScopeSentry 构造失败 502→503**：数据源不存在/未配置 URL 是依赖面缺口，503 才是「没配置」的语义（此前 502 伪装成「上游坏了」）；上游调用失败保持 502。
+- **P3 死代码清除**：miniprogram_api.go ensureMpArtifactsDir 的 `_ = strings.TrimSpace("")` 遗留行删除。
+- 验证：go build/vet 全绿；TestStallAdvance 过；实机观测见上；全量 go test（CI 同款环境）后跑。
+- 对齐检查：新增前端功能点——加密告警条（小程序页）、加密主密钥卡（设置页）、GET /api/miniprogram/encryption（小程序页+设置页双入口）。
+
 ## [0.13.1] - 2026-11-14
 
 ### 修剪（前端小动作：砍标语/提示文字/次要标签——目标·架构·设计·实现全部从简）

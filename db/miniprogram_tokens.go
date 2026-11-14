@@ -64,18 +64,19 @@ func TokenFingerprint(value string) string {
 
 // UpsertMiniprogramToken 保存/轮换一条 token（唯一键 task+app+label）。
 // 加密跟随主密钥配置：有密钥走 cipher（AAD 绑 app+label），无密钥明文过渡列。
-// 返回指纹。
-func (d *DB) UpsertMiniprogramToken(taskID int64, appID, label, value, scope string) (string, error) {
+// 返回指纹与加密状态（encrypted=false 时凭据明文落 token_plain——调用方必须
+// 把该状态如实告知操作者，0.13.2 加密告知面）。
+func (d *DB) UpsertMiniprogramToken(taskID int64, appID, label, value, scope string) (string, bool, error) {
 	if err := d.ensureMiniprogramSchema(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	appID = strings.TrimSpace(appID)
 	label = strings.TrimSpace(label)
 	if taskID <= 0 {
-		return "", fmt.Errorf("task_id 必填：token 池按任务作用域绑定")
+		return "", false, fmt.Errorf("task_id 必填：token 池按任务作用域绑定")
 	}
 	if appID == "" || label == "" || strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("app_id / label / token 值均必填")
+		return "", false, fmt.Errorf("app_id / label / token 值均必填")
 	}
 	if scope != "task" && scope != "company" {
 		scope = "task"
@@ -84,12 +85,12 @@ func (d *DB) UpsertMiniprogramToken(taskID int64, appID, label, value, scope str
 	plain, cipher := value, ""
 	key, err := config.MasterKey()
 	if err != nil {
-		return "", fmt.Errorf("读主密钥: %w", err)
+		return "", false, fmt.Errorf("读主密钥: %w", err)
 	}
 	if len(key) > 0 {
 		c, err := encryptSecret(value, key, appID+":"+label)
 		if err != nil {
-			return "", fmt.Errorf("加密 token: %w", err)
+			return "", false, fmt.Errorf("加密 token: %w", err)
 		}
 		cipher = c
 		plain = ""
@@ -104,9 +105,9 @@ ON CONFLICT (task_id, app_id, label) DO UPDATE SET
   scope = EXCLUDED.scope,
   updated_at = now()`,
 		taskID, appID, label, plain, cipher, fp, scope); err != nil {
-		return "", fmt.Errorf("upsert miniprogram token: %w", err)
+		return "", false, fmt.Errorf("upsert miniprogram token: %w", err)
 	}
-	return fp, nil
+	return fp, len(key) > 0, nil
 }
 
 // ListMiniprogramTokens 列 token（清单面：标签 + 指纹，无凭据内容）。

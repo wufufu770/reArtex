@@ -173,7 +173,9 @@ func (s *Server) syncSSProjects(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cl, err := s.scopeSentryClient(ctx)
 	if err != nil {
-		writeErr(w, 502, err.Error())
+		// 构造失败=数据源不存在/未配置 URL——依赖面缺口用 503（0.13.2：
+		// 此前 502 会把「没配置」伪装成「上游坏了」）；上游调用失败仍 502。
+		writeErr(w, 503, err.Error())
 		return
 	}
 	defer cl.Close()
@@ -216,7 +218,9 @@ func (s *Server) syncSSTasks(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cl, err := s.scopeSentryClient(ctx)
 	if err != nil {
-		writeErr(w, 502, err.Error())
+		// 构造失败=数据源不存在/未配置 URL——依赖面缺口用 503（0.13.2：
+		// 此前 502 会把「没配置」伪装成「上游坏了」）；上游调用失败仍 502。
+		writeErr(w, 503, err.Error())
 		return
 	}
 	defer cl.Close()
@@ -292,7 +296,9 @@ func (s *Server) syncSSRun(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cl, err := s.scopeSentryClient(ctx)
 	if err != nil {
-		writeErr(w, 502, err.Error())
+		// 构造失败=数据源不存在/未配置 URL——依赖面缺口用 503（0.13.2：
+		// 此前 502 会把「没配置」伪装成「上游坏了」）；上游调用失败仍 502。
+		writeErr(w, 503, err.Error())
 		return
 	}
 	defer cl.Close()

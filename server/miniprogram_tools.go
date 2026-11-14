@@ -65,13 +65,17 @@ func (s *Server) toolMpTokenSave() actool.CoreTool {
 				Scope  string `json:"scope"`
 			}
 			_ = json.Unmarshal(in, &a)
-			fp, err := s.m.pg.UpsertMiniprogramToken(a.TaskID, a.AppID, a.Label, a.Value, a.Scope)
+			fp, encrypted, err := s.m.pg.UpsertMiniprogramToken(a.TaskID, a.AppID, a.Label, a.Value, a.Scope)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			s.appendMpAudit("mp-token-save", fmt.Sprintf("task=%d app=%s label=%s", a.TaskID, a.AppID, a.Label),
 				map[string]any{"task_id": a.TaskID, "app_id": a.AppID, "label": a.Label, "fingerprint": fp})
-			return actool.Text(fmt.Sprintf("token 已保存（task=%d app=%s label=%s fingerprint=%s）。凭据值未进本会话消息与审计载荷。", a.TaskID, a.AppID, a.Label, fp)), nil
+			state := "已加密落库"
+			if !encrypted {
+				state = "未配置主密钥，明文落 token_plain 过渡列（配置 ARTEX_MASTER_KEY_FILE 后新写入即加密）"
+			}
+			return actool.Text(fmt.Sprintf("token 已保存（task=%d app=%s label=%s fingerprint=%s）。加密状态：%s。凭据值未进本会话消息与审计载荷。", a.TaskID, a.AppID, a.Label, fp, state)), nil
 		})
 }
 

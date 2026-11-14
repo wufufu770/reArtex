@@ -5,8 +5,11 @@ package server
 // 为什么存在：edge_exec 是内置 agent，HTTP 面不能给它配 agent_triggers
 //（server/triggers.go:58 对内置 400）；它又是每轮 ≤15min 的总控轮，轮间接力
 // 不能靠 interval 触发器。fireEdgeWake 每 tick 扫未收尾的 edge_runs：
-//   - 判据停滞熔断（criterion_stalled）在这里判：格点判据状态的规范化哈希连续
-//     N 轮不变 ⇒ ConcludeEdgeRun(criterion_stalled) + 审计，不再唤醒；
+//   - 判据成立机械收尾（doctrine_complete）每 tick 判——主路径不被水位延迟；
+//   - 判据停滞熔断（criterion_stalled）按水位间隔（60s）对账：格点判据状态的
+//     规范化哈希连续 N 个对账周期不变 ⇒ ConcludeEdgeRun(criterion_stalled)
+//     + 审计，不再唤醒。对账节奏必须与水位对齐——按 5s tick 推进会把正常
+//     执行中的长轮（LLM dispatch 间隔分钟级）误判成停滞；
 //   - 其余情况按水位间隔（60s）唤醒 edge_exec 跑下一轮总控
 //    （StartTriggeredRun → per-agent FIFO serial+by_task 队列，同任务突发合并）。
 //
@@ -39,28 +42,9 @@ func (sc *Scheduler) fireEdgeWake() {
 		if t == nil {
 			continue // 任务已归档/删除：运行行留待人工收（不自动判 stop）
 		}
-		// ① 判据停滞对账（熔断③）：聚合格点判据状态做规范化哈希。
-		st := sc.s.loadEdgeBreaker(run.TaskID)
 		cells, _ := sc.pg.ListEdgeCells(run.TaskID)
-		agg := map[string]any{}
-		for _, c := range cells {
-			agg[c.CellID] = json.RawMessage(c.CriterionState)
-		}
-		hash := edge.CriterionHash(agg)
-		st.StallRounds = stallAdvance(st.StallLastHash, hash, st.StallRounds)
-		st.StallLastHash = hash
-		if st.StallRounds >= edge.StallThreshold {
-			_ = sc.pg.ConcludeEdgeRun(run.ID, db.StopReasonStalled, map[string]any{
-				"reason": fmt.Sprintf("判据状态连续 %d 轮无推进（规范化哈希不变）", st.StallRounds),
-				"hash":   hash,
-			})
-			sc.s.saveEdgeBreaker(run.TaskID, &edgeBreakerState{})
-			sc.s.appendEdgeAudit("edge-circuit-breaker", "fireEdgeWake",
-				fmt.Sprintf("task=%d 熔断 criterion_stalled（%d 轮无推进）", run.TaskID, st.StallRounds),
-				map[string]any{"task_id": run.TaskID, "stop_reason": db.StopReasonStalled, "rounds": st.StallRounds})
-			continue
-		}
-		// ② 判据成立检测：全部格点终态且非空 ⇒ 主路径收尾（不需要模型确认）。
+		// ① 判据成立检测：全部格点终态且非空 ⇒ 主路径收尾（不需要模型确认）。
+		//    机械判定代价小，每 tick 跑——不被水位 gate 延迟主路径。
 		if len(cells) > 0 {
 			allTerminal := true
 			for _, c := range cells {
@@ -80,13 +64,38 @@ func (sc *Scheduler) fireEdgeWake() {
 				continue
 			}
 		}
-		// ③ 水位去重：同一任务两次唤醒至少隔 60s（serial+by_task 队列兜并发）。
+		// ② 水位去重：同一任务两次对账/唤醒至少隔 60s（serial+by_task 队列兜并发）。
+		//    停滞对账的「轮」节奏由这里承载——每水位推进一次 ≈ 一轮对账。
 		if lastRaw, err := sc.pg.GetSchedState(edgeWakeKey(run.TaskID)); err == nil && lastRaw != "" {
 			if last, err := strconv.ParseInt(lastRaw, 10, 64); err == nil && now-last < int64(edgeWakeMinInterval().Seconds()) {
 				continue
 			}
 		}
 		_ = sc.pg.SetSchedState(edgeWakeKey(run.TaskID), strconv.FormatInt(now, 10))
+		// ③ 判据停滞对账（熔断③）：聚合格点判据状态做规范化哈希；推进即落库
+		//    （0.13.2 修复：此前推进不在持久层落盘，StallLastHash 每 tick 从空
+		//    读回，stallAdvance 归零——熔断永不触发；且当时按 5s tick 推进，
+		//    补 save 会反向变成 20s 误熔断，故与水位节奏对齐）。
+		agg := map[string]any{}
+		for _, c := range cells {
+			agg[c.CellID] = json.RawMessage(c.CriterionState)
+		}
+		hash := edge.CriterionHash(agg)
+		st := sc.s.loadEdgeBreaker(run.TaskID)
+		st.StallRounds = stallAdvance(st.StallLastHash, hash, st.StallRounds)
+		st.StallLastHash = hash
+		sc.s.saveEdgeBreaker(run.TaskID, st)
+		if st.StallRounds >= edge.StallThreshold {
+			_ = sc.pg.ConcludeEdgeRun(run.ID, db.StopReasonStalled, map[string]any{
+				"reason": fmt.Sprintf("判据状态连续 %d 个对账周期无推进（规范化哈希不变，周期=%s）", st.StallRounds, edgeWakeMinInterval()),
+				"hash":   hash,
+			})
+			sc.s.saveEdgeBreaker(run.TaskID, &edgeBreakerState{})
+			sc.s.appendEdgeAudit("edge-circuit-breaker", "fireEdgeWake",
+				fmt.Sprintf("task=%d 熔断 criterion_stalled（%d 轮无推进）", run.TaskID, st.StallRounds),
+				map[string]any{"task_id": run.TaskID, "stop_reason": db.StopReasonStalled, "rounds": st.StallRounds})
+			continue
+		}
 		// ④ 唤醒 edge_exec 跑一轮总控（mergeable=true：同任务突发合并进一个会话）。
 		goal, desc := "", ""
 		if t != nil {
