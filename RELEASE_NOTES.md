@@ -1,59 +1,38 @@
-**reArtex v0.11.3** —— v0.11.2 收尾：会话轮 15min 硬顶（防 LLM 流式挂死永久占用）；规整输入按 schema 矫正标量类型（MiniMax 的 bool 字符串错法不再炸成 malformed）。
+**reArtex v0.13.1** —— 桌面控制（平台共有能力）与小程序渗透两大功能点全量落地；前后端对齐修复与界面文案修剪。
 
-**reArtex v0.11.2** —— 群聊发命令无人认领根治：大厅消息入库即唤醒（定向→成员、广播→auto 分发者，回复镜像回群），群成员会话自动获得任务身份（此前恒零导致收信为空、工具不可用）。
+## 桌面控制（平台共有能力）
 
-**reArtex v0.11.1** —— P0 幻觉收口缺口根治。planner 不再能登记漏洞（实测 LLM 零执行即编造漏洞并 20 秒假完成）；goalless 收尾加零产出守卫（无 fact/finding 不落 done，转暂停等人确认）。对升级用户无破坏性。
+- agent-desktop（读无障碍树 + 稳定 ref）以 stdio MCP 注册：种子按 LookPath 解析（未安装跳过不落旗标，装好后下次启动补种）；可见性=全部 agent。
+- ExecuteExtraTool 转发治理闭环：延迟工具经外层转发器调用时，guard/规整按载荷内层实际工具名与参数求值——启用名单、规则匹配、审计与审批回归真实身份；载荷畸形回退外层名（执行侧同拒，无旁路窗口）。
+- 拦截系统接入：启用名单 8+75=83 项；四族规则——观测类 allow（12）/ 动作类 ask（33）/ 敏感读取类 ask（3：截图/剪贴板/通知）/ 高危类 deny（16）；以实测 75 个真实工具名快照钉死族间互斥与全覆盖，上游加新命令时测试失败提醒分族。
+- 敏感输出元信息化：desktop_screenshot / clipboard_get / list_notifications 的持久层正文替换为元信息（工具名/字节数/时间），模型上下文不受影响。
+- 「桌面操作」skill（mcps: agent-desktop 门控）：命令族说明、ref 重快照纪律、渗透场景用法。
+- 闸门第五分支 HostLocalAction（任务路径桌面动作解锁）：任务宿主授权集合（tasks.host_targets；REST `PUT /api/tasks/{id}/host-targets` + 任务详情「业务建模」tab 编辑器）非空时桌面动作 scope 按构造通过，其余四道检查照跑；未配置集合的桌面动作在规整前以独立理由拒绝。授权变更写审计链。语义边界（如实）：任务级粗粒度授权 + guard 层逐动作人工审批的组合；窗口级精控排后续。
 
-**reArtex v0.11.0** —— 治理面收口 + 现场事故根治 + 报告中心。对运行用户升级无破坏性：schema 幂等自动应用；唯一行为变化是 `llm_pool_enabled` 默认翻开（多 profile 故障/额度耗尽自动落链；单 profile 与直连等价）。
+## 小程序渗透
 
-## 新功能
+- token 池：miniprogram_tokens 表（UNIQUE(task,app,label)），加密落库 AAD 绑 app:label；transcript 与审计面只有标签与指纹，明文仅在构造 Burp 重放 replacement 的 reveal 时刻进工具结果。
+- 作用域工具 mp_token_save / mp_token_list / mp_token_get(reveal)（task_id 必填）+ REST（tokens CRUD、`GET /api/miniprogram/artifacts` 产物浏览）；保存与 reveal 走审计哈希链，凭据值不进审计载荷。
+- read_design_artifacts 扩类：消费解包源码 app.json（页面注册树）与 project.config.json（编译开关）——建模 agent 直接做设计层。
+- skills/wechat-miniprogram：解包后端探针（实测可用性）、包发现（版本分支）、解包适配器、配置矫正（五关两开 + componentFramework/plugins）、内容级校验（退出码即判定）；包获取为人工口子。
+- 专用 miniprogram agent（六阶段：包获取→解包还原→配置矫正→运行时→接口发现→越权矩阵→结论复核；阶段→kind 映射）。
+- chrome-devtools MCP 种子（LookPath，未安装跳过）——接口发现阶段的浏览器操控入口。
+- 内嵌浏览器：`/mp-runtime/` 反代到 wxa-runner dev server（settings `miniprogram_runtime_url`，操作者经 REST 设置，agent 不可改）；小程序渗透页内嵌面板同源直接调试点击。SSRF 面关闭：scheme 仅 http/https、单固定目标（路径转发 host 恒等配置值）。wxa-runner 需 Node≥18。
 
-- **报告中心**（系统 → 报告中心）：最终报告统一管理。新建/导入（扫工作空间 *.md/*.txt/*.html 点选入库，原文件不动）/点击直接展示/**实时编辑**保存落库/下载导出 .md（与工作空间下载同体验）。
-- **message_group**：大厅任务里 worker 向群信箱投递进展、请求决策（Tier2 + 出口消毒 + 存储层准入）。
-- **漏洞存量重评**：确定性规则出候选（severity 乱值、纯信息泄露虚高），默认 dry-run、apply 才落库。
-- **工作空间 initdb 兜底**：全新库冷启动自动建受限角色；**大厅语义化状态**；**web_search 出网判定**。
+## 前端修复与文案修剪
 
-## 修复与治理
+- sidebar 补「小程序渗透」入口；skill 绑定种子修复（desktop-ops / wechat-miniprogram 此前未绑任何 agent，桌面动作面与小程序链路不可用）。
+- 偏锋探索入口去查询参数：sidebar 指向 /function/business-graph，模式由页内「业务图 / 偏锋探索」标签切换；老路径 308 兼容链保留。
+- 界面文案修剪（业务建模图 / 差异面板 / 偏锋总览 / 小程序渗透 / 任务建模 tab）：砍标语、提示文字、次要徽章，空态只留一句事实；零逻辑改动，`git revert` 单提交整体回滚。
 
-- **竖向放权真生效**：审批「同类放行」凭据与执行器查表逐字节同源（此前格式错位恒空查）。
-- **额度耗尽自动暂停**（人工恢复），不再假完成；**复盘/证据门可带理由越级**；**系统事件一条条消息渲染**，需要人工处理的事件内联操作。
-- 裁决大屏 SQL 根治（恒 0 条/吞错）；拼装 API panic 根治；复核层接线补缺。
-- **评级基准**（纯信息泄露一律 info、拿不准降一档）进工具描述+提示词；范围内出网降标 Tier2·egress_in_scope；生效 hook 链读实表。
-- **侧边栏/MCP 页紧凑化**；裁决大屏窄屏并排。
-- **推送闸门**补扫祖先历史（漏检修复）+ 误报修复。
+## 兼容与升级
 
-**reArtex v0.9.6** —— v0.9 线收官：LLM 韧性（多级故障转移）+ 治理闭环（监督环/合并闸）+ 全新库冷启动零手工。
+- 全新库首启自动播种：miniprogram agent、桌面拦截规则与 83 项启用名单、mp 工具与绑定（chrome-devtools 已安装才种）。
+- 桌面动作默认拒绝：tasks.host_targets 未配置 = 拒绝；需任务级配置宿主授权集合，动作面另经 guard 逐动作审批。
+- DDL 幂等自动应用（db/schema_miniprogram.sql 走 Ensure*Schema 启动接线），对既有库无破坏性。
+- 工作目录固化不变：版本更新只换二进制，解包产物落 data_dir/artifacts/miniprogram/<appid>/，工作空间页可见。
 
-## 装了什么（相对 v0.4.9 时代公开版）
+## 验证
 
-**LLM 韧性（v0.9 主线）**
-
-- **LLM Pool**：多成员池化 + 熔断/冷却/健康持久化；401-404/408/429 立即切换成员；流式两阶段（首事件前可切、流中如实透传）；根除「互填备用地址」无限乒乓（成员构建专用裸路径）。
-- **endpoint failover**：profile 的 base_urls 多候选，连接类失败自动切下一个，主地址恢复回切。
-- **角色链统一出口**：所有 lane（worker/planner/auditor/governance…）的模型解析统一走 Pool——单个网关挂掉不再拖死整条链。
-
-**治理闭环**
-
-- **合并闸三态**（off/shadow/enforce）+ 确定性分类器 + **auditor 裁决岗**（并发闸/裁决缓存/严格 JSON）：渗透动作绝大多数自动放行（早期实测约九成；比例随种类表动作/cap 配置浮动，不是固定常量，也没有「92%」这个硬编码口径），人工确认收敛到「写入/爆破/扩权」三类，锁定基线（删除/破坏/平台凭据）永远硬拦。
-- **监督环**：周期性任务快照 → 监督者判断继续/转向/收尾；8 个治理工具（调 cap/意图延期/意图停止/drain/双签收尾/结束会话/重跑阻塞/任务转向）+ 确定性护栏，cap 可自适应调整。
-- **裁决大屏**：放行/裁决/人工/硬拦/cap 实时刻度。
-
-**工程与交付（本 tag 批次）**
-
-- **全新库冷启动零手工**：应用启动自举受限运行角色（缺失即创建、口令漂移即对齐），initdb.d 脚本兜底；冷启动 ping 时序修正。
-- **cap 事件直触监督轮**：配额命中即时通知（30s/任务节流），不再等轮询空窗。
-- **收尾终态洁癖**：任务收尾后残留 open/blocked 意图统一 stopped，监督快照不再被旧尾巴污染。
-- **JWT key 可持久化**（`ARTEX_KEY_DIR` 独立挂载卷）：容器重建不再全端掉线。
-- **norma 入库**：`third_party/norma` 随仓库分发（含 bg_task/privdrop/egress-scope 等领先已发布版的改动），公开 CI 可直接构建。
-- **质量门**：敏感信息扫描闸全树+全历史对齐（测试夹具改用 TEST-NET/RFC2606 占位），前端 lint 门清零，go-test（真实 Postgres）绿。
-
-## 升级注意
-
-- 建议给容器配 `ARTEX_KEY_DIR`（指向独立挂载卷，如 `/app/key`），JWT 不再随重建轮转。
-- 迁移连接（超级用户）走 `ARTEX_PG_ADMIN_DSN_FILE`；仅有受限运行角色也能启动（schema 已就位时自动校验通过）。
-- 全新数据库：`artex_app` 角色自动创建，不再需要手工 `CREATE ROLE`。
-
-## 还欠着什么
-
-- 429 的健康分语义（限流不计失败账）与 format×地址全组合遍历排在下一批次。
-- 测试套件存在已知抖动：`TestSessionAPISmoke` 偶发 teardown 竞态（重跑即绿），测试基建修复单列。
+- 真库集成测试（biz/edge/desktop 往返、TestEdgeTasksOverview）；intercept 解包三钉、desktop 分族覆盖钉、sod 闸门分支钉；db/server 包回归；go build/vet、tsc、biome 全绿。
+- 镜像交付门（CI 内建）：编译+vet+全量测试通过才产出二进制；ghcr 多架构镜像发布后冒烟——真实起服务、/api/health 版本核对、环境块洁净性验收。
