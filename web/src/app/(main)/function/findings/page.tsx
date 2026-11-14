@@ -161,6 +161,9 @@ export default function FindingsPage() {
   const [stats, setStats] = React.useState<FindingStats>(EMPTY_STATS);
   const [statsLoaded, setStatsLoaded] = React.useState(false);
   const [preferencesHydrated, setPreferencesHydrated] = React.useState(false);
+  // 存量重评（E1-7）：两段式——dry-run 只列候选，确认后才 apply 落库。
+  const [rerateCands, setRerateCands] = React.useState<number | null>(null);
+  const [rerating, setRerating] = React.useState(false);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(10);
   const [deepenFinding, setDeepenFinding] = React.useState<Finding | null>(null);
@@ -715,6 +718,31 @@ export default function FindingsPage() {
     [edit, refreshAfterMutation, setFindings],
   );
 
+  // runRerate 存量重评（E1-7）：确定性规则出候选（severity 乱值/纯信息泄露虚高），
+  // 第一段 dry-run 只读，第二段 apply 才落库——改判级是人做决定。
+  const runRerate = async (apply: boolean) => {
+    setRerating(true);
+    try {
+      const r = await api.findingsRerate(null, apply);
+      if (!apply) {
+        setRerateCands(r.count);
+        toast.success(r.count > 0 ? `重评候选 ${r.count} 条（未落库，确认后应用）` : "无重评候选");
+      } else {
+        toast.success(`已应用改判 ${r.applied}/${r.count} 条`);
+        setRerateCands(null);
+        void loadFlat();
+        api
+          .findingStats()
+          .then(setStats)
+          .catch(() => undefined);
+      }
+    } catch (e) {
+      toast.error(`重评失败：${(e as Error).message}`);
+    } finally {
+      setRerating(false);
+    }
+  };
+
   // deleteFinding 删除一个漏洞(需二次确认):删成功后从列表移除、收起行、刷新统计。
   const deleteFinding = React.useCallback(
     async (f: Finding) => {
@@ -855,6 +883,27 @@ export default function FindingsPage() {
           <h1 className="text-xl font-semibold tracking-tight">发现</h1>
           <p className="text-muted-foreground text-sm">跨任务漏洞汇总</p>
         </div>
+        {rerateCands !== null && rerateCands > 0 ? (
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-8 text-xs"
+            disabled={rerating}
+            onClick={() => runRerate(true)}
+          >
+            应用改判（{rerateCands} 条）
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            disabled={rerating}
+            onClick={() => runRerate(false)}
+          >
+            {rerating ? "评估中…" : "存量重评"}
+          </Button>
+        )}
         <Tabs value={view} onValueChange={(v) => setView(v as FindingView)}>
           <TabsList>
             <TabsTrigger value="flat">全部发现</TabsTrigger>

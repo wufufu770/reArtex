@@ -6,10 +6,13 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { ArrowLeftIcon } from "lucide-react";
+import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
@@ -61,6 +64,11 @@ function TaskHallDetailInner() {
   const [settings, setSettings] = React.useState<Settings | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // 群状态控制（状态机是代码常量，变更必须带理由——0.13.3 前端对齐批接入）。
+  const [statusEditing, setStatusEditing] = React.useState(false);
+  const [statusValue, setStatusValue] = React.useState("");
+  const [statusReason, setStatusReason] = React.useState("");
+  const [statusBusy, setStatusBusy] = React.useState(false);
 
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
@@ -69,6 +77,26 @@ function TaskHallDetailInner() {
       aliveRef.current = false;
     };
   }, []);
+
+  const changeGroupStatus = async () => {
+    if (!detail) return;
+    if (!statusValue || !statusReason.trim()) {
+      toast.error("目标状态与变更理由必填");
+      return;
+    }
+    setStatusBusy(true);
+    try {
+      await api.taskHallGroupStatus(detail.id, statusValue, statusReason.trim());
+      toast.success(`群状态已变更为 ${statusValue}`);
+      setStatusEditing(false);
+      setStatusReason("");
+      await loadFast(detail.id);
+    } catch (e) {
+      toast.error(`状态变更失败：${(e as Error).message}`);
+    } finally {
+      setStatusBusy(false);
+    }
+  };
 
   const loadFast = React.useCallback(async (groupId: number) => {
     try {
@@ -170,7 +198,46 @@ function TaskHallDetailInner() {
             #{detail.id}
           </code>
           <StatusBadge domain="group" value={detail.status} dot />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => {
+              setStatusEditing((v) => !v);
+              setStatusValue(detail.status);
+            }}
+          >
+            状态
+          </Button>
         </div>
+        {statusEditing && (
+          <div className="mx-9 flex flex-wrap items-end gap-2 rounded-md border p-3">
+            <Select value={statusValue} onValueChange={setStatusValue}>
+              <SelectTrigger className="h-8 w-40 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["draft", "active", "draining", "parked", "resuming", "closed", "failed"].map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              className="h-8 w-64 text-xs"
+              value={statusReason}
+              onChange={(e) => setStatusReason(e.target.value)}
+              placeholder="变更理由（必填）"
+            />
+            <Button size="sm" className="h-8 text-xs" disabled={statusBusy} onClick={changeGroupStatus}>
+              应用
+            </Button>
+            <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setStatusEditing(false)}>
+              取消
+            </Button>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2 pl-9 text-muted-foreground text-xs">
           <span>任务</span>
           {task ? (

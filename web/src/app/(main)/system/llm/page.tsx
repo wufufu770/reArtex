@@ -1079,6 +1079,8 @@ export default function LLMPage() {
   // 「编辑 X」闪成「新建」。editing = null 表示新建。
   const [editOpen, setEditOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<LLMProfile | null>(null);
+  // 探索累计 token（W9 /llm/totals，按探索聚合的总量面——0.13.3 前端对齐批接入）。
+  const [totalsSum, setTotalsSum] = React.useState<{ input: number; output: number } | null>(null);
   const openEditor = React.useCallback((p: LLMProfile | null) => {
     setEditing(p);
     setEditOpen(true);
@@ -1095,6 +1097,18 @@ export default function LLMPage() {
   const load = React.useCallback(async () => {
     try {
       setProfiles(await api.llmProfiles());
+    } catch {
+      /* ignore */
+    }
+    try {
+      const t = await api.llmTotals();
+      let input = 0;
+      let output = 0;
+      for (const u of Object.values(t.totals ?? {})) {
+        input += u.input_tokens ?? 0;
+        output += u.output_tokens ?? 0;
+      }
+      setTotalsSum({ input, output });
     } catch {
       /* ignore */
     }
@@ -1148,6 +1162,11 @@ export default function LLMPage() {
           <h1 className="font-semibold text-xl tracking-tight">LLM</h1>
           <p className="text-muted-foreground text-sm">
             全 Agent 共享的格式 / 模型 / 限速配置。点击卡片编辑，星标为当前激活配置。
+            {totalsSum && totalsSum.input + totalsSum.output > 0 && (
+              <span className="ml-2 tabular-nums">
+                探索累计：输入 {totalsSum.input.toLocaleString()} / 输出 {totalsSum.output.toLocaleString()} token
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">

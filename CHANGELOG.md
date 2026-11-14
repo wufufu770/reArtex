@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.13.3] - 2026-11-14
+
+### 新增（前端对齐批——审查报告的 BE→FE 缺口按分类处置；补 UI 或入盘点表）
+- **记忆治理页**（/system/memory + sidebar「记忆治理」）：X4+X2 宿主侧最小治理面——分页列表（active/quarantined 筛选）+ 晋级/退役按钮；操作人与理由必填（后端强制，写审计哈希链 source=memory-curation）；promote 被三门评估拒绝时如实展示确定性缺口清单（409）。
+- **发现页存量重评入口**（E1-7）：两段式——「存量重评」先 dry-run 列候选（未落库），确认后「应用改判（N 条）」才写库；应用后刷新列表与统计。
+- **大厅群详情状态控制**：StatusBadge 旁「状态」按钮展开七态选择 + 变更理由（状态机=代码常量，理由必填），应用即 PUT /api/task-hall/groups/{id}/status 并刷新。
+- **LLM 页探索累计总量**：头部显示全探索聚合的输入/输出 token 总量（W9 /llm/totals）。
+- **仪表盘调度循环指标行**：任务卡头部显示意图 done/blocked/exhausted、空转率与 pending_items 待落地项（M3 /metrics/loop，15s 慢轮询面）——F2/F4 待落地项从此在仪表盘可见。
+- **Mimosa L3 加固**：theme 生成脚本路径内敛校验（readdirSync 产物再入 join 前钉住解析结果落 presetDir 内）+ chatUpload id 白名单（与服务端 safeChatID 同口径，本地先手校验）+ 查询串 URLSearchParams 化——消除 L3 高危拦截，剩 4 个跨文件污点 medium（上传目标 id 源自服务端响应属正常数据流，见提交说明）。
+- **docs/前端对齐盘点.md（新）**：全量基线快照——有入口的功能面全清单、行为面标注（无独立 UI 的理由逐条写明）、已知排期项（sessions 会话面/策略库三面/窗口级精控等 6 项必须排批次）。此前审查发现的 21 条 BE→FE 缺口全部处置完毕：5 个补了 UI（memory/rerate/status/totals/loop），其余按行为面或排期项入表。
+- 验证：npm build:static + tsc + biome 全绿；构建产物回验（记忆治理页 chunk 存在）。
+- 对齐检查：本轮新增前端功能点（记忆治理页/重评入口/状态控制/总量行/指标行）与后端端点一一对应；21 条缺口处置结果全部落盘点表。
+
 ## [0.13.2] - 2026-11-14
 
 ### 修复（全量审查批——P1 熔断死代码 + 两个 P2 + 三个 P3；实测驱动）

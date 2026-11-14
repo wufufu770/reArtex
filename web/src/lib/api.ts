@@ -79,8 +79,10 @@ import type {
   LLMRetryOverride,
   LLMRetryPolicy,
   LLMTask,
+  LoopMetrics,
   MCPServer,
   MCPTool,
+  MemoryEntry,
   MiniprogramArtifact,
   MiniprogramToken,
   MissingSkill,
@@ -94,6 +96,7 @@ import type {
   ReportCandidate,
   ReportFull,
   ReportMeta,
+  RerateCandidate,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -478,11 +481,46 @@ export const api = {
   // 小程序 token 池（清单面：标签+指纹，无凭据内容）。
   mpTokens: (taskId: number, appId?: string) =>
     get<{ tokens: MiniprogramToken[] }>(`/miniprogram/tokens?task_id=${taskId}${appId ? `&app_id=${appId}` : ""}`),
-  // 保存/轮换 token（落库即加密；此处只回指纹）。
+  // 保存/轮换 token（有主密钥走加密，无则明文过渡列；encrypted 如实回传）。
   mpTokenSave: (p: { task_id: number; app_id: string; label: string; value: string; scope?: string }) =>
-    post<{ ok: boolean; fingerprint: string }>("/miniprogram/tokens", p),
+    post<{ ok: boolean; fingerprint: string; encrypted?: boolean }>("/miniprogram/tokens", p),
+  // 主密钥配置状态（0.13.2 加密告知面：未配置时 token 池明文落库）。
+  mpEncryptionStatus: () => get<{ master_key_configured: boolean }>("/miniprogram/encryption"),
   // 删除 token。
   mpTokenDelete: (id: number) => del<{ ok: boolean }>(`/miniprogram/tokens/${id}`),
+  // 记忆治理（X4+X2：host-only；promote 先过三门评估，409=缺哪门的确定性清单）。
+  memoryEntries: (state = "", limit = 50, offset = 0) =>
+    get<{ entries: MemoryEntry[]; total: number; limit: number; offset: number }>(
+      `/memory/entries?state=${encodeURIComponent(state)}&limit=${limit}&offset=${offset}`,
+    ),
+  memoryPromote: (id: number, actor: string, reason: string) =>
+    post<{ ok: boolean }>(`/memory/entries/${id}/promote`, { actor, reason }),
+  memoryRetire: (id: number, actor: string, reason: string) =>
+    post<{ ok: boolean }>(`/memory/entries/${id}/retire`, { actor, reason }),
+  // 存量重评（E1-7：确定性规则出候选；默认 dry-run，apply=true 才落库）。
+  findingsRerate: (taskId: number | null, apply: boolean) =>
+    post<{ items: RerateCandidate[]; count: number; applied: number; apply: boolean }>("/exploration/findings/rerate", {
+      task_id: taskId,
+      apply,
+    }),
+  // 大厅群状态控制（状态机=代码常量；变更必须带理由）。
+  taskHallGroupStatus: (id: number | string, status: string, reason: string) =>
+    put<{ ok: boolean }>(`/task-hall/groups/${id}/status`, { status, reason }),
+  // 全任务 token 总量（W9，按探索聚合）与调度循环指标（M3）。
+  llmTotals: () =>
+    get<{
+      totals: Record<
+        string,
+        {
+          worker?: string;
+          input_tokens: number;
+          output_tokens: number;
+          cache_read_tokens?: number;
+          cache_write_tokens?: number;
+        }
+      >;
+    }>("/llm/totals"),
+  loopMetrics: () => get<LoopMetrics>("/metrics/loop"),
   // 解包产物目录（artifacts/miniprogram/）。
   mpArtifacts: () => get<{ apps: MiniprogramArtifact[] }>("/miniprogram/artifacts"),
   // 运行时地址（内嵌浏览器面板的数据面；部署配置，agent 不可改）。
@@ -490,8 +528,7 @@ export const api = {
   mpRuntimeSet: (url: string) => put<{ ok: boolean }>("/miniprogram/runtime", { url }),
   // 任务级宿主授权集合（桌面控制闸门第五分支的判定依据）。
   taskHostTargets: (id: string) => get<{ targets: string[] }>(`/tasks/${id}/host-targets`),
-  taskSetHostTargets: (id: string, targets: string[]) =>
-    put<{ ok: boolean }>(`/tasks/${id}/host-targets`, { targets }),
+  taskSetHostTargets: (id: string, targets: string[]) => put<{ ok: boolean }>(`/tasks/${id}/host-targets`, { targets }),
   // 方法论注册表（偏锋总览页）。
   edgeMethodologies: () => get<{ methodologies: EdgeMethodology[] }>("/edge/methodologies"),
   // 偏锋任务总览（判据进度 + stop 统计）。
@@ -1048,7 +1085,11 @@ export const api = {
     const fd = new FormData();
     for (const f of files) fd.append("file", f);
     const token = getToken();
-    const r = await fetch(`/api/chat/upload?scope=${scope}&id=${encodeURIComponent(id)}`, {
+    // 会话/任务 id 白名单（0.13.3：与服务端 safeChatID 同口径）——id 在进 URL
+    // 前过严格校验：非法字符直接本地拒绝（后端还有同一道闸；这里是前端先手）。
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`非法上传目标 id：${id.slice(0, 32)}`);
+    const qs = new URLSearchParams({ scope, id });
+    const r = await fetch(`/api/chat/upload?${qs.toString()}`, {
       method: "POST",
       headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: fd,

@@ -23,12 +23,12 @@ import {
   Settings2,
   ShieldAlert,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Target,
   Terminal,
   Users,
   Waypoints,
-  Smartphone,
   Wrench,
 } from "lucide-react";
 
@@ -105,6 +105,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "skills", title: "Skill", url: "/system/skills", icon: Sparkles },
       { id: "tools", title: "工具", url: "/system/tools", icon: Wrench },
       { id: "notify", title: "通知推送", url: "/system/notify", icon: BellRing },
+      { id: "memory", title: "记忆治理", url: "/system/memory", icon: Brain },
       { id: "intercept", title: "拦截规则", url: "/system/intercept", icon: ShieldAlert },
       { id: "asset-intercept", title: "资产拦截", url: "/system/intercept/assets", icon: Ban },
       { id: "approvals", title: "审批记录", url: "/system/intercept/approvals", icon: ClipboardList },

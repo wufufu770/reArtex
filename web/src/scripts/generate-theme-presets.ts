@@ -34,37 +34,47 @@ if (files.length === 0) {
   console.warn("⚠️ No preset CSS files found. Only default preset will be included.");
 }
 
-const presets = files.map((file) => {
-  const filePath = path.join(presetDir, file);
-  const content = fs.readFileSync(filePath, "utf8");
+const presets = files
+  .map((file) => {
+    const filePath = path.join(presetDir, file);
+    // 路径内敛校验（Mimosa L3 0.13.3）：readdirSync 的产物再入 path.join 前，
+    // 显式钉住解析结果必须落在 presetDir 之内——文件名来自目录列举而非用户输入，
+    // 校验是防御性的，但让「读哪」在静态层面无歧义。
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(presetDir + path.sep)) {
+      console.warn(`⚠️ Skipping ${file}: resolved path escapes preset dir.`);
+      return null;
+    }
+    const content = fs.readFileSync(resolved, "utf8");
 
-  const labelMatch = content.match(/label:\s*(.+)/);
-  const valueMatch = content.match(/value:\s*(.+)/);
+    const labelMatch = content.match(/label:\s*(.+)/);
+    const valueMatch = content.match(/value:\s*(.+)/);
 
-  if (!labelMatch) {
-    console.warn(`⚠️ No 'label:' found in ${file}, using filename as fallback.`);
-  }
-  if (!valueMatch) {
-    console.warn(`⚠️ No 'value:' found in ${file}, using filename as fallback.`);
-  }
+    if (!labelMatch) {
+      console.warn(`⚠️ No 'label:' found in ${file}, using filename as fallback.`);
+    }
+    if (!valueMatch) {
+      console.warn(`⚠️ No 'value:' found in ${file}, using filename as fallback.`);
+    }
 
-  const label = labelMatch?.[1]?.trim() ?? file.replace(".css", "");
-  const value = valueMatch?.[1]?.trim() ?? file.replace(".css", "");
+    const label = labelMatch?.[1]?.trim() ?? file.replace(".css", "");
+    const value = valueMatch?.[1]?.trim() ?? file.replace(".css", "");
 
-  const lightPrimaryMatch = content.match(/:root\[data-theme-preset="[^"]*"\][\s\S]*?--primary:\s*([^;]+);/);
-  const darkPrimaryMatch = content.match(/\.dark:root\[data-theme-preset="[^"]*"\][\s\S]*?--primary:\s*([^;]+);/);
+    const lightPrimaryMatch = content.match(/:root\[data-theme-preset="[^"]*"\][\s\S]*?--primary:\s*([^;]+);/);
+    const darkPrimaryMatch = content.match(/\.dark:root\[data-theme-preset="[^"]*"\][\s\S]*?--primary:\s*([^;]+);/);
 
-  const primary = {
-    light: lightPrimaryMatch?.[1]?.trim() ?? "",
-    dark: darkPrimaryMatch?.[1]?.trim() ?? "",
-  };
+    const primary = {
+      light: lightPrimaryMatch?.[1]?.trim() ?? "",
+      dark: darkPrimaryMatch?.[1]?.trim() ?? "",
+    };
 
-  if (!lightPrimaryMatch || !darkPrimaryMatch) {
-    console.warn(`⚠️ Missing --primary for ${file} (light or dark). Check CSS syntax.`);
-  }
+    if (!lightPrimaryMatch || !darkPrimaryMatch) {
+      console.warn(`⚠️ Missing --primary for ${file} (light or dark). Check CSS syntax.`);
+    }
 
-  return { label, value, primary };
-});
+    return { label, value, primary };
+  })
+  .filter((p): p is { label: string; value: string; primary: { light: string; dark: string } } => p !== null);
 
 const globalStylesPath = path.resolve(__dirname, "../app/globals.css");
 

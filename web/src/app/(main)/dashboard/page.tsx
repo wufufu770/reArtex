@@ -29,6 +29,7 @@ import type {
   Finding,
   InterceptPending,
   LLMProfile,
+  LoopMetrics,
   MCPServer,
   Settings,
   SkillItem,
@@ -139,6 +140,8 @@ export default function DashboardPage() {
   const [activity, setActivity] = React.useState<Activity[]>([]);
   const [tokens, setTokens] = React.useState<TokenTotal | null>(null);
   const [convTokens, setConvTokens] = React.useState<ConvTokenSummary[]>([]);
+  // 调度循环指标（M3 /metrics/loop——0.13.3 前端对齐批接入；慢轮询面）。
+  const [loop, setLoop] = React.useState<LoopMetrics | null>(null);
   const [usageStats, setUsageStats] = React.useState<UsageStats | null>(null);
   const [assetCounts, setAssetCounts] = React.useState<Record<string, number>>({});
   const [traffic, setTraffic] = React.useState<TrafficExchange[]>([]);
@@ -223,16 +226,18 @@ export default function DashboardPage() {
     let alive = true;
     const load = async () => {
       try {
-        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
-          api.traffic(0, 50),
-          api.assetCounts(),
-          api.agents(),
-          api.mcpServers(),
-          api.skills(),
-          api.tools(),
-          api.llmProfiles(),
-          api.usageStats(365),
-        ]);
+        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage, loopMetrics] =
+          await Promise.all([
+            api.traffic(0, 50),
+            api.assetCounts(),
+            api.agents(),
+            api.mcpServers(),
+            api.skills(),
+            api.tools(),
+            api.llmProfiles(),
+            api.usageStats(365),
+            api.loopMetrics().catch(() => null),
+          ]);
         if (!alive) return;
         setTraffic(traf.exchanges ?? []);
         setAssetCounts(counts ?? {});
@@ -242,6 +247,7 @@ export default function DashboardPage() {
         setTools(toolList);
         setLLMProfiles(profileList);
         setUsageStats(usage);
+        setLoop(loopMetrics);
       } catch {
         /* transient errors */
       }
@@ -984,6 +990,13 @@ export default function DashboardPage() {
             <ClockIcon className="size-3.5 text-muted-foreground" />
             任务
           </div>
+          {loop && (
+            <div className="text-[10px] text-muted-foreground">
+              意图 done {loop.intent_done} / blocked {loop.intent_blocked} / exhausted {loop.intent_exhausted} · 空转率{" "}
+              {(loop.wasted_loop_rate * 100).toFixed(1)}%
+              {loop.pending_items.length > 0 && ` · 待落地：${loop.pending_items.join("、")}`}
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-muted-foreground">{tasks.length} 个任务</span>
             <Link

@@ -1327,6 +1327,47 @@ export interface MiniprogramArtifact {
   files: string[];
 }
 
+// 记忆治理条目（GET /api/memory/entries；Go 默认序列化，字段名与 db.MemoryEntry 一致）。
+export interface MemoryEntry {
+  ID: number;
+  ScopeType: string;
+  ScopeID: number;
+  TopicKey: string;
+  Version: number;
+  Kind: string;
+  Title: string;
+  SummaryLine: string;
+  Tags: string[];
+  WrittenBy: string;
+  ContentDigest: string;
+  State: "active" | "quarantined";
+  SupersededBy: number | null;
+  CreatedAt: string;
+  ValidFrom: string;
+  ValidTo: string | null;
+}
+
+// 存量重评候选（POST /api/exploration/findings/rerate；dry-run 候选面）。
+export interface RerateCandidate {
+  id: number;
+  current: string;
+  proposed: string;
+  reason: string;
+}
+
+// 调度循环指标（GET /api/metrics/loop）。
+export interface LoopMetrics {
+  intent_blocked: number;
+  intent_done: number;
+  intent_exhausted: number;
+  pending_items: string[];
+  strategy_reuse: { active_strategies: number; hit: number; miss: number; rate: number; usage: number };
+  wasted_loop_rate: number;
+  wish_coverage: number;
+  wish_total: number;
+  wish_with_prediction: number;
+}
+
 export interface EdgeCoverage {
   task_id: number;
   edge_mode: boolean;
