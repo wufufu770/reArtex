@@ -5,7 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.2] - 2026-11-14
+## [0.14.3] - 2026-11-14
+
+### 新增（v0.14 批次二收官：F4 gap 实体——覆盖缺口对账 + 派生候选消费面；pending_items 清零）
+- **数据层**：`db/schema_gap.sql`（coverage_gaps：task×asset 唯一，状态机 open→targeted→closed 原位演进）+ `db/gap.go`（ComputeCoverageGaps 确定性对账 / CloseCoverageGap 宿主闭合 / ListCoverageGaps）+ EnsureGapSchema 启动接线。缺口判据（宁漏勿误）：链接到任务且无 open 意图锚的资产 = 缺口；获得锚 → targeted；closed 不被重扫复活。真库集成测试 TestCoverageGapLifecycle 全链 PASS（open 计算/重算幂等/targeted 演进/closed 恒定/二次闭合拒/清单过滤）。
+- **派生决策纪律**：缺口面只作数据与消费面（planner/bizmodeler 读缺口自主派生意图——LLM 提议、确定性层闸门的既有纪律），平台不做自动派生（防意图洪水）。
+- **对账覆盖面**（运行抓出并修正）：调度器 60s 重扫轮对全部链接了资产的活动任务做缺口对账——初版只扫有 open 意图的探索，而无意图任务恰是缺口主体，实测修正为独立任务集（ListTasksWithLinkedAssets）。
+- **REST**：GET /api/tasks/{id}/gaps + POST /api/tasks/{id}/gaps/{gid}/close（理由必填写审计链 source=coverage-gap）；实测 400 校验/200 落账/二次闭合拒/审计落账。
+- **metrics/loop pending_items 清零**：F2（0.14.1 arbiter）与 F4（本版）落地，待办清单空——仪表盘指标行不再显示待落地项。
+- **前端**：biz-tab 覆盖缺口块（未闭合计数 + 清单 + 人工闭合入口，理由必填）；api/types 接线。
+- 验证：build/vet/真库测试/前端三件全绿；实机——重扫自动对账产出缺口（task×asset open）→ 闭合 → 审计链 seq13 coverage-gap ✓；夹具测后即清。
+- 对齐检查：缺口块=biz-tab + REST；metrics/loop 仪表盘行为变化如实记录（pending_items 恒空）。
+
+
 
 ### 新增（v0.14 批次二下：仲裁闭环收尾——状态联动 + 周期重扫 + 前端冲突块；实机全链验证）
 - **意图状态联动**：仲裁落笔压制败方（open → blocked + blocked_reason=arbiter_deferred，只动 open 态不回溯终态）；reopen 反向释放（只解 arbiter_deferred）。**实机全链验证**：verify×exploit 意图对 → 检测登记 → host-rule 直裁 → 败方 blocked=arbiter_deferred ✓；reopen → 两方回 open ✓。

@@ -490,6 +490,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureIntent2Schema(); err != nil {
 			return fmt.Errorf("apply intent-conflict schema: %w", err)
 		}
+		// 覆盖缺口的 DDL：coverage_gaps 一表（db/schema_gap.sql）。同上——缺口
+		// 对账跑在调度器重扫轮（确定性层），懒执行会撞 42P01。
+		if err := schemaDB.EnsureGapSchema(); err != nil {
+			return fmt.Errorf("apply gap schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {

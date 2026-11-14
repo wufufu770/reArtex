@@ -219,6 +219,27 @@ GROUP BY n.exploration_id ORDER BY n.exploration_id`)
 	return out, nil
 }
 
+// ListTasksWithLinkedAssets 列全部链接了资产的活动任务——缺口对账的候选流
+// （无 open 意图的任务恰恰是缺口主体，不能只扫有意图的探索）。
+func (d *DB) ListTasksWithLinkedAssets() ([]int64, error) {
+	rows, err := d.Query(`
+SELECT DISTINCT l.task_id FROM task_asset_links l
+JOIN tasks t ON t.id = l.task_id AND t.deleted_at IS NULL
+ORDER BY l.task_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 // ListConflictsByExploration 列一个探索的冲突（state 过滤，空=全部）。
 func (d *DB) ListConflictsByExploration(explorationID int64, state string, limit int) ([]*IntentConflict, error) {
 	if err := d.EnsureIntent2Schema(); err != nil {

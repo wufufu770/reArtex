@@ -40,6 +40,7 @@ import type {
   Conversation,
   ConvTokenSummary,
   CoverageAssetRefs,
+  CoverageGap,
   CoverageGraphData,
   DailyTokenBucket,
   DeleteTaskOptions,
@@ -506,6 +507,11 @@ export const api = {
     ),
   intentConflictReopen: (id: number, reason: string) =>
     post<{ ok: boolean }>(`/intents/conflicts/${id}/reopen`, { reason }),
+  // 覆盖缺口（0.14.3：链接到任务但无 open 意图锚的资产；对账在调度器重扫轮）。
+  coverageGaps: (taskId: string, state = "") =>
+    get<{ gaps: CoverageGap[]; total: number }>(`/tasks/${taskId}/gaps${state ? `?state=${state}` : ""}`),
+  coverageGapClose: (taskId: string, gid: number, reason: string) =>
+    post<{ ok: boolean }>(`/tasks/${taskId}/gaps/${gid}/close`, { reason }),
   // 存量重评（E1-7：确定性规则出候选；默认 dry-run，apply=true 才落库）。
   findingsRerate: (taskId: number | null, apply: boolean) =>
     post<{ items: RerateCandidate[]; count: number; applied: number; apply: boolean }>("/exploration/findings/rerate", {

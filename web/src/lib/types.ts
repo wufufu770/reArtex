@@ -2540,3 +2540,15 @@ export interface IntentConflict {
   created_at: string;
   updated_at: string;
 }
+
+// 覆盖缺口（GET /api/tasks/{id}/gaps；0.14.3：链接到任务但无 open 意图锚的资产）。
+export interface CoverageGap {
+  id: number;
+  task_id: number;
+  asset_id: number;
+  reason: string;
+  state: "open" | "targeted" | "closed";
+  targeted_by: number | null;
+  created_at: string;
+  updated_at: string;
+}

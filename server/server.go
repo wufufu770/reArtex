@@ -1322,6 +1322,8 @@ func (s *Server) Handler() http.Handler {
 	s.mpRoutes(mux)
 	// 意图冲突仲裁（0.14.1）：冲突清单 + 人工重开。
 	s.registerIntentConflictRoutes(mux)
+	// 覆盖缺口（0.14.3）：缺口清单 + 人工闭合。
+	s.registerGapRoutes(mux)
 
 	// SoD 链（职责分离）的三个只读观测面。
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；

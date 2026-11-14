@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 
 	actool "github.com/Autumn-27/norma/tool"
@@ -121,6 +122,14 @@ func (sc *Scheduler) fireConflictArbitration() {
 		if exps, err := sc.pg.ListExplorationsWithOpenIntents(); err == nil {
 			for _, e := range exps {
 				sc.s.scanAndRecordConflicts(e.TaskID, e.ExplorationID)
+			}
+		}
+		// 缺口对账覆盖全部链接了资产的活动任务（无 open 意图的任务恰是缺口主体）。
+		if taskIDs, err := sc.pg.ListTasksWithLinkedAssets(); err == nil {
+			for _, tid := range taskIDs {
+				if _, err := sc.pg.ComputeCoverageGaps(tid); err != nil {
+					log.Printf("[arbitration] 缺口对账失败 task=%d: %v", tid, err)
+				}
 			}
 		}
 	}

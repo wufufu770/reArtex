@@ -12,7 +12,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import type { BizLayerDiff, EdgeCell, IntentConflict } from "@/lib/types";
+import type { BizLayerDiff, CoverageGap, EdgeCell, IntentConflict } from "@/lib/types";
 
 const CELL_STATE_LABEL: Record<EdgeCell["state"], string> = {
   open: "未开",
@@ -56,6 +56,10 @@ export function BizTab({ taskId }: { taskId: string }) {
   const [conflicts, setConflicts] = React.useState<IntentConflict[]>([]);
   const [reopenID, setReopenID] = React.useState<number | null>(null);
   const [reopenReason, setReopenReason] = React.useState("");
+  // 覆盖缺口（0.14.3）：链接到任务但无 open 意图锚的资产（对账在调度器重扫轮）。
+  const [gaps, setGaps] = React.useState<CoverageGap[]>([]);
+  const [closeGapID, setCloseGapID] = React.useState<number | null>(null);
+  const [closeGapReason, setCloseGapReason] = React.useState("");
 
   const load = React.useCallback(() => {
     setLoading(true);
@@ -65,8 +69,9 @@ export function BizTab({ taskId }: { taskId: string }) {
       api.taskEdgeCoverage(taskId).catch(() => null),
       api.taskHostTargets(taskId).catch(() => ({ targets: [] })),
       api.intentConflicts(taskId).catch(() => null),
+      api.coverageGaps(taskId).catch(() => null),
     ])
-      .then(([g, ds, ec, _ht, cf]) => {
+      .then(([g, ds, ec, _ht, cf, gp]) => {
         if (g) {
           setSummary(g.summary);
           setNodes(
@@ -91,6 +96,7 @@ export function BizTab({ taskId }: { taskId: string }) {
           });
         }
         if (cf) setConflicts(cf.conflicts ?? []);
+        if (gp) setGaps(gp.gaps ?? []);
       })
       .finally(() => setLoading(false))
       .catch(() => setLoading(false)); // 各请求已自带 catch 兜底；这里的 catch 只兜 finally 链本身
@@ -109,6 +115,22 @@ export function BizTab({ taskId }: { taskId: string }) {
       load();
     } catch (e) {
       toast.error(`重开失败：${(e as Error).message}`);
+    }
+  };
+
+  const closeGap = async (id: number) => {
+    if (!closeGapReason.trim()) {
+      toast.error("闭合理由必填（写审计链）");
+      return;
+    }
+    try {
+      await api.coverageGapClose(taskId, id, closeGapReason.trim());
+      toast.success(`缺口 #${id} 已闭合（审计链已记）`);
+      setCloseGapID(null);
+      setCloseGapReason("");
+      load();
+    } catch (e) {
+      toast.error(`闭合失败：${(e as Error).message}`);
     }
   };
 
@@ -144,6 +166,61 @@ export function BizTab({ taskId }: { taskId: string }) {
           <div className="font-semibold text-2xl">{edgesCount || "—"}</div>
         </div>
       </div>
+
+      {/* 覆盖缺口（0.14.3）：链接到任务但无 open 意图锚的资产；targeted=已有意图认领 */}
+      {gaps.length > 0 && (
+        <div className="rounded-lg border p-3">
+          <div className="mb-2 flex items-center gap-2 font-medium text-sm">
+            覆盖缺口
+            <Badge variant="outline" className="text-[10px]">
+              {gaps.filter((g) => g.state !== "closed").length} 未闭合
+            </Badge>
+          </div>
+          <div className="space-y-2">
+            {gaps.map((g) => (
+              <div key={g.id} className="flex flex-wrap items-center gap-2 rounded-md border px-2 py-1.5">
+                <span className="font-mono text-xs">#{g.id}</span>
+                <Badge
+                  variant={g.state === "open" ? "destructive" : g.state === "targeted" ? "secondary" : "outline"}
+                  className="text-[10px]"
+                >
+                  {g.state}
+                </Badge>
+                <span className="text-muted-foreground text-xs">资产 #{g.asset_id}</span>
+                {g.state !== "closed" && closeGapID !== g.id && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto h-6 text-[10px]"
+                    onClick={() => {
+                      setCloseGapID(g.id);
+                      setCloseGapReason("");
+                    }}
+                  >
+                    闭合
+                  </Button>
+                )}
+                {closeGapID === g.id && (
+                  <div className="flex w-full flex-wrap items-center gap-1.5">
+                    <input
+                      className="h-7 w-72 rounded-md border bg-background px-2 text-xs"
+                      value={closeGapReason}
+                      onChange={(e) => setCloseGapReason(e.target.value)}
+                      placeholder="闭合理由（必填，写审计链）"
+                    />
+                    <Button size="sm" className="h-7 text-xs" onClick={() => closeGap(g.id)}>
+                      确认闭合
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setCloseGapID(null)}>
+                      取消
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 意图冲突仲裁（0.14.2）：检测确定性 + arbiter 调研判定；frozen=等人兜底 */}
       {conflicts.length > 0 && (

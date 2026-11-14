@@ -143,7 +143,9 @@ FROM strategies WHERE state='active'`).Scan(&sTotal, &sUsage, &sHit, &sMiss)
 			"active_strategies": sTotal, "usage": sUsage, "hit": sHit, "miss": sMiss,
 			"rate": ratio64(sHit, sUsage),
 		},
-		"pending_items": []string{"矛盾转化率（待 F2 矛盾检测器）", "缺口闭合时间（待 F4 gap 实体）"},
+		// F2 矛盾检测器（0.14.1 arbiter）与 F4 gap 实体（0.14.3）已落地，
+		// 待办清单清空——矛盾转化率/缺口闭合时间的可计算口径随其数据面演进。
+		"pending_items": []string{},
 	}
 	writeJSON(w, 200, out)
 }
