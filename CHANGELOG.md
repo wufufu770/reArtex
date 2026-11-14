@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.13.7] - 2026-11-14
+
+### 修复（外部审查批 P1——导航一致性与死代码清除）
+- **F7 高亮歧义修复**：「业务建模」与「偏锋探索」共享 /function/business-graph，此前按 pathname 判定两者同时高亮。现 NavMain 记录最近点击的入口 id（点击 Link 时 setState），同 URL 组只亮点击项；刚进入（未点击，如刷新/直达）只亮同 URL 组的第一个（业务建模）。URL 不动——维持 0.12.3 去查询参数的裁定。
+- **F11 删除 proxy.ts**：静态导出（output:export）从不运行 Next middleware，该文件是死代码且误导维护者以为服务端有鉴权；全库零 import 核实后删除，layout.tsx 注释同步更新（客户端守卫=唯一鉴权入口成文）。
+- 验证：npm build:static + tsc + biome 全绿；构建产物回验（chunk 含高亮消歧逻辑）。
+- 对齐检查：无新功能点；sidebar 高亮为既有 UI 行为修正。
+
 ## [0.13.6] - 2026-11-14
 
 ### 修复（外部审查批 P0 服务端半边——URL 形态统一 + B7 尾巴清理）

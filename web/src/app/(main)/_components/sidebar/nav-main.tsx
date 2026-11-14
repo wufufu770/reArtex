@@ -46,12 +46,14 @@ interface NavItemProps {
   readonly isItemActive: (item: NavMainItem) => boolean;
   readonly isSubItemActive: (url: string) => boolean;
   readonly isSubmenuOpen: (item: NavMainParentItem) => boolean;
+  readonly onNavigate: (id: string) => void;
 }
 
 interface NavLinkItemProps {
   readonly item: NavMainLinkItem;
   readonly isActive: boolean;
   readonly showIconFallback: boolean;
+  readonly onNavigate: (id: string) => void;
 }
 
 interface NavLinkIconProps {
@@ -95,12 +97,32 @@ export function NavMain({ items }: NavMainProps) {
     }
   })();
 
+  // 同 URL 双入口消歧（0.13.7，审查 F7）：「业务建模」与「偏锋探索」共享
+  // /function/business-graph——按 pathname 判定两者同时高亮。记录最近点击的
+  // 入口 id；刚进入（未点击）时只亮同 URL 组的第一个。
+  const [activeEntryId, setActiveEntryId] = React.useState<string | null>(null);
+  const firstLinkIdForUrl = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of items) {
+      for (const it of g.items) {
+        if (!hasSubItems(it) && !m.has(it.url)) m.set(it.url, it.id);
+      }
+    }
+    return m;
+  }, [items]);
+
   const isItemActive = (item: NavMainItem) => {
     if (hasSubItems(item)) {
       return item.subItems.some((sub) => path.startsWith(sub.url));
     }
 
-    return path === item.url;
+    if (path !== item.url) return false;
+    const ambiguous = items.some((g) =>
+      g.items.some((it) => !hasSubItems(it) && it.url === item.url && it.id !== item.id),
+    );
+    if (!ambiguous) return true;
+    if (activeEntryId !== null) return activeEntryId === item.id;
+    return firstLinkIdForUrl.get(item.url) === item.id;
   };
 
   const isSubItemActive = (url: string) => {
@@ -129,6 +151,7 @@ export function NavMain({ items }: NavMainProps) {
                   isItemActive={isItemActive}
                   isSubItemActive={isSubItemActive}
                   isSubmenuOpen={isSubmenuOpen}
+                  onNavigate={setActiveEntryId}
                 />
               ))}
             </SidebarMenu>
@@ -139,12 +162,19 @@ export function NavMain({ items }: NavMainProps) {
   );
 }
 
-function NavItem({ item, isItemActive, isSubItemActive, isSubmenuOpen }: NavItemProps) {
+function NavItem({ item, isItemActive, isSubItemActive, isSubmenuOpen, onNavigate }: NavItemProps) {
   const { state, isMobile } = useSidebar();
   const isCollapsedDesktop = state === "collapsed" && !isMobile;
 
   if (!hasSubItems(item)) {
-    return <NavLinkItem item={item} isActive={isItemActive(item)} showIconFallback={isCollapsedDesktop} />;
+    return (
+      <NavLinkItem
+        item={item}
+        isActive={isItemActive(item)}
+        showIconFallback={isCollapsedDesktop}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
   if (isCollapsedDesktop) {
@@ -190,7 +220,7 @@ function InterceptPendingBadge() {
   );
 }
 
-function NavLinkItem({ item, isActive, showIconFallback }: NavLinkItemProps) {
+function NavLinkItem({ item, isActive, showIconFallback, onNavigate }: NavLinkItemProps) {
   return (
     <SidebarMenuItem>
       <SidebarMenuButton asChild aria-disabled={item.disabled} tooltip={item.title} isActive={isActive}>
@@ -199,6 +229,7 @@ function NavLinkItem({ item, isActive, showIconFallback }: NavLinkItemProps) {
           href={item.url}
           target={item.newTab ? "_blank" : undefined}
           rel={item.newTab ? "noreferrer" : undefined}
+          onClick={() => onNavigate(item.id)}
         >
           <NavLinkIcon item={item} showFallback={showIconFallback} />
           <span>{item.title}</span>

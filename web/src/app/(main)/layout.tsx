@@ -29,17 +29,17 @@ function readPref<T extends string>(key: string, allowed: readonly T[], fallback
 }
 
 export default function Layout({ children }: Readonly<{ children: ReactNode }>) {
-  // Client-side auth gate — replaces the Next proxy/middleware that static export
-  // disables. No token → bounce to /login; render nothing until confirmed so no
-  // protected UI (or its API calls) flashes for a logged-out visitor.
+  // Client-side auth gate — the ONLY auth gate (0.13.7 removed proxy.ts, which
+  // static export never ran anyway). No token → bounce to /login; render nothing
+  // until confirmed so no protected UI (or its API calls) flashes.
   const [authed, setAuthed] = React.useState(false);
   React.useEffect(() => {
     if (auth.getToken()) {
       setAuthed(true);
     } else {
-      // 客户端守卫认为未登录时，必须同时清掉 cookie：否则 proxy.ts 仅凭
-      // “cookie 存在”就把我们从 /login 又重定向回主界面，与本守卫来回弹跳
-      // 形成无限重定向 → 白屏（cookie 与 localStorage 不一致时触发）。
+      // 客户端守卫认为未登录时，必须同时清掉 cookie：cookie 与 localStorage
+      // 不一致会让登录态出现两个真相来源（0.13.7 已删除静态导出下从不运行的
+      // proxy.ts，本守卫是唯一鉴权入口），清 cookie 保证单一来源。
       auth.clearToken();
       window.location.href = "/login";
     }
