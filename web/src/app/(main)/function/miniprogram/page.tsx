@@ -23,9 +23,14 @@ export default function MiniprogramPage() {
   const [runtimeUrl, setRuntimeUrl] = React.useState("");
   const [runtimeInput, setRuntimeInput] = React.useState("");
   const [runtimeDirty, setRuntimeDirty] = React.useState(false);
+  const [keyConfigured, setKeyConfigured] = React.useState<boolean | null>(null);
 
   const load = React.useCallback(() => {
     const id = taskId.trim();
+    api
+      .mpEncryptionStatus()
+      .then((st) => setKeyConfigured(st.master_key_configured))
+      .catch(() => setKeyConfigured(null));
     if (!id) {
       setTokens([]);
       return;
@@ -57,8 +62,12 @@ export default function MiniprogramPage() {
       return;
     }
     try {
-      await api.mpTokenSave({ task_id: Number(taskId), ...form });
-      toast.success(`token 已保存（${form.label}）`);
+      const res = await api.mpTokenSave({ task_id: Number(taskId), ...form });
+      toast.success(
+        res.encrypted === false
+          ? `token 已保存（${form.label}）——未加密：未配置主密钥，明文落过渡列`
+          : `token 已保存（${form.label}）`,
+      );
       setForm({ app_id: form.app_id, label: "", value: "" });
       load();
     } catch (err) {
@@ -91,11 +100,17 @@ export default function MiniprogramPage() {
     <div className="flex h-full flex-col gap-4 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="font-semibold text-lg">小程序渗透</h1>
-        <span className="text-muted-foreground text-xs"></span>
+        <span className="text-muted-foreground text-xs" />
         <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={load} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </Button>
       </div>
+
+      {keyConfigured === false && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+          未配置主密钥（ARTEX_MASTER_KEY_FILE）：token 明文落过渡列，配置后新写入即加密。
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <input
@@ -130,7 +145,7 @@ export default function MiniprogramPage() {
             />
           </label>
           <label className="text-muted-foreground text-xs">
-            凭据值（落库即加密）
+            凭据值（有主密钥时加密落库）
             <input
               className="ml-1 h-8 w-72 rounded-md border bg-background px-2 text-sm"
               type="password"

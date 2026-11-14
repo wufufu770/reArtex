@@ -39,6 +39,7 @@ export default function SystemSettingsPage() {
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
+  const [masterKeyConfigured, setMasterKeyConfigured] = React.useState<boolean | null>(null);
   // 操作约束注入范围(默认都开)。
   const [injectPlanner, setInjectPlanner] = React.useState(true);
   const [injectWorker, setInjectWorker] = React.useState(true);
@@ -106,6 +107,12 @@ export default function SystemSettingsPage() {
       .then(apply)
       .catch(() => undefined)
       .finally(() => setLoaded(true));
+    // 加密主密钥状态（0.13.2 告知面）：llm_profiles 与小程序 token 池的加密
+    // 落库都跟随它，未配置时这两类凭据明文落过渡列。
+    api
+      .mpEncryptionStatus()
+      .then((st) => setMasterKeyConfigured(st.master_key_configured))
+      .catch(() => setMasterKeyConfigured(null));
   }, [apply]);
 
   const toggleTraffic = (v: boolean) => {
@@ -272,6 +279,24 @@ export default function SystemSettingsPage() {
           column-gap 只管列间距，行间距要由子元素自己给。 */}
       <div className="columns-1 gap-4 md:gap-6 lg:columns-2">
         <UpdateCard />
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">加密主密钥</CardTitle>
+            <CardDescription>
+              llm_profiles 与小程序 token 池的加密落库跟随主密钥（ARTEX_MASTER_KEY_FILE 环境变量指向密钥文件）。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <span className="text-sm text-muted-foreground">
+              {masterKeyConfigured === null
+                ? "状态读取失败"
+                : masterKeyConfigured
+                  ? "已配置 · 新写入的凭据 AES-256-GCM 加密落库"
+                  : "未配置 · 凭据明文落过渡列（token_plain / api_key），配置环境变量后新写入即加密"}
+            </span>
+          </CardContent>
+        </Card>
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
