@@ -1262,6 +1262,10 @@ export interface BizLayerDiff {
   created_at?: string;
 }
 
+// BizDiffRow 是差异清单行（0.14.4：suggest_close=派生意图产生了 confirmed
+// 高危 finding，建议人工 confirmed 关差——裁决永远人工）。
+export type BizDiffRow = BizLayerDiff & { suggest_close: boolean };
+
 // 偏锋格点与覆盖（EDGE）。
 export interface EdgeCell {
   id: number;

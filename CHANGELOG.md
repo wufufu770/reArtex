@@ -5,7 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.3] - 2026-11-14
+## [0.14.4] - 2026-11-15
+
+### 新增（v0.14 批次三：biz 差异反向消费——关差建议闭环 + 批量裁决 + 筛选分页）
+- **suggest_close 建议关差**：pushed 差异的派生意图（behavior_ref.intent_id）所在探索产生了 confirmed 高危 finding ⇒ 差异清单带建议关差标记——**裁决永远人工**（不自动落），前端琥珀色徽章提示。BizDiffSuggestCloseByTask 单 SQL EXISTS 判定。
+- **批量裁决**：POST /api/business-graph/diffs/batch-decision（ids+status+理由必填；逐条容错 applied/failed 分账——不存在的 id 进 failed，RowsAffected 校验；一次审计落账）。前端复选框 + 批量状态/理由模板（5 个常用模板一键填入可改）。
+- **ListBizDiffs 参数收敛**：opts 结构化（wstg/stride 前缀筛选 + offset 分页 + CountBizDiffs 总数面）；旧签名保留委托。差异面板加 WSTG/STRIDE 输入筛选、上一页/下一页与 total 显示。
+- 验证：build/vet/真库集成测试 TestBizDiffBatchAndSuggest（批量 applied/failed 分账 + suggest 两态判定 + wstg 筛选）全绿；前端 build/tsc/biome + 产物 chunk 回验（"建议关差"在产物）；实机——批量端点校验（ids 必填 400）/wstg 筛选 200。
+- 对齐检查：差异面板新增的批量条/suggest 徽章/筛选/分页与后端参数一一对应；新端点 batch-decision 前端入口=面板批量条。
+
+
 
 ### 新增（v0.14 批次二收官：F4 gap 实体——覆盖缺口对账 + 派生候选消费面；pending_items 清零）
 - **数据层**：`db/schema_gap.sql`（coverage_gaps：task×asset 唯一，状态机 open→targeted→closed 原位演进）+ `db/gap.go`（ComputeCoverageGaps 确定性对账 / CloseCoverageGap 宿主闭合 / ListCoverageGaps）+ EnsureGapSchema 启动接线。缺口判据（宁漏勿误）：链接到任务且无 open 意图锚的资产 = 缺口；获得锚 → targeted；closed 不被重扫复活。真库集成测试 TestCoverageGapLifecycle 全链 PASS（open 计算/重算幂等/targeted 演进/closed 恒定/二次闭合拒/清单过滤）。

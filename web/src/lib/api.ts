@@ -30,6 +30,7 @@ import type {
   AuditEventsPage,
   BatchCategoryItem,
   BatchControlItem,
+  BizDiffRow,
   BizGraphData,
   BizLayerDiff,
   ChatAttachment,
@@ -459,19 +460,39 @@ export const api = {
     get<BizGraphData>(
       `/business-graph?company_id=${companyID}${taskID ? `&task_id=${taskID}` : ""}${layer ? `&layer=${layer}` : ""}`,
     ),
-  // 双层差异清单。
-  bizDiffs: (params: { company_id?: number; task_id?: number; status?: string; severity?: string; limit?: number }) => {
+  // 双层差异清单（0.14.4：wstg/stride 前缀筛选 + offset 分页 + suggest_close
+  // 建议关差——派生意图产生了 confirmed 高危 finding）。
+  bizDiffs: (params: {
+    company_id?: number;
+    task_id?: number;
+    status?: string;
+    severity?: string;
+    wstg?: string;
+    stride?: string;
+    offset?: number;
+    limit?: number;
+  }) => {
     const q = new URLSearchParams();
     if (params.company_id) q.set("company_id", String(params.company_id));
     if (params.task_id) q.set("task_id", String(params.task_id));
     if (params.status) q.set("status", params.status);
     if (params.severity) q.set("severity", params.severity);
+    if (params.wstg) q.set("wstg", params.wstg);
+    if (params.stride) q.set("stride", params.stride);
+    if (params.offset) q.set("offset", String(params.offset));
     if (params.limit) q.set("limit", String(params.limit));
-    return get<{ diffs: BizLayerDiff[] }>(`/business-graph/diffs?${q.toString()}`);
+    return get<{ diffs: BizDiffRow[]; total: number; offset: number }>(`/business-graph/diffs?${q.toString()}`);
   },
   // 人工裁决一条差异（confirmed/false_positive/open），写审计链。
   bizDiffDecision: (diffID: number, status: string, reason: string) =>
     post<{ ok: boolean }>(`/business-graph/diffs/${diffID}/decision`, { status, reason }),
+  // 批量人工裁决（0.14.4）：一次审计落账；逐条容错（failed 回传）。
+  bizDiffBatchDecision: (ids: number[], status: string, reason: string) =>
+    post<{ ok: boolean; applied: number[]; failed: number[] }>("/business-graph/diffs/batch-decision", {
+      ids,
+      status,
+      reason,
+    }),
   // 任务维度的业务图 + 摘要（任务详情 tab 用）。
   taskBizGraph: (id: string) =>
     get<BizGraphData & { summary: { design_nodes: number; behavior_nodes: number; open_diffs: number } }>(

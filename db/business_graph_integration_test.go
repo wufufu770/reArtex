@@ -425,3 +425,105 @@ VALUES ($1,$2,'missing_validation','high','NULL-company 回退验证') RETURNING
 		t.Fatalf("company=0 且 task=0 应报错")
 	}
 }
+
+// TestBizDiffBatchAndSuggest 钉住 0.14.4 批次三的两个写读面：
+// ① 批量裁决逐条落 status（applied/failed 分账，不存在的 id 进 failed）；
+// ② suggest_close 判定——pushed diff 的派生意图探索里出现 confirmed 高危
+// finding 时建议关差；③ wstg 前缀筛选。
+func TestBizDiffBatchAndSuggest(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_ = d.ensureBizSchema()
+	suffix := nowSuffix()
+	companyID, _, _, _, _, err := d.Companies().CreateCompanyWithScope(
+		"批裁公司"+suffix, "", []ScopeInput{{Kind: "domain", Value: "batchdiff-" + suffix + ".example.com"}}, "集成测试造数")
+	if err != nil {
+		t.Fatalf("create company: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM findings WHERE task_id IN (SELECT id FROM tasks WHERE company_id=$1)`, companyID)
+		_, _ = d.Exec(`DELETE FROM biz_layer_diffs WHERE company_id=$1`, companyID)
+		_, _ = d.Exec(`DELETE FROM exploration_nodes WHERE exploration_id IN (SELECT exploration_id FROM tasks WHERE company_id=$1)`, companyID)
+		_, _ = d.Companies().DeleteCompanyWithAssets(companyID, true)
+	})
+	task, err := d.CreateTaskWithOptions("批裁任务 "+suffix, "验证", TaskCreateOptions{CompanyIDs: []int64{companyID}})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	tid := task.ID
+	var eid int64
+	if err := d.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1`, tid).Scan(&eid); err != nil || eid <= 0 {
+		t.Fatalf("read exploration_id: %v", err)
+	}
+
+	// 两条差异。
+	var d1, d2 int64
+	if err := d.QueryRow(`INSERT INTO biz_layer_diffs (company_id, task_id, diff_type, severity, description)
+VALUES ($1,$2,'missing_validation','high','批裁甲') RETURNING id`, companyID, tid).Scan(&d1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`INSERT INTO biz_layer_diffs (company_id, task_id, diff_type, severity, description)
+VALUES ($1,$2,'extra_permission','medium','批裁乙') RETURNING id`, companyID, tid).Scan(&d2); err != nil {
+		t.Fatal(err)
+	}
+	var iid int64
+	if err := d.QueryRow(`INSERT INTO exploration_nodes (exploration_id, kind, payload, state)
+VALUES ($1,'intent','{"summary":"派生源"}','open') RETURNING id`, eid).Scan(&iid); err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 批量裁决：applied=2（d1,d2），failed=1（不存在的 id）。
+	applied, failed, berr := d.BatchUpdateBizDiffStatus([]int64{d1, d2, 99999999}, "confirmed", "模板理由")
+	if berr != nil {
+		t.Fatalf("批量裁决: %v", berr)
+	}
+	if len(applied) != 2 || len(failed) != 1 {
+		t.Fatalf("批量裁决 applied=2 failed=1，got %v / %v", applied, failed)
+	}
+	var st string
+	if err := d.QueryRow(`SELECT status FROM biz_layer_diffs WHERE id=$1`, d1).Scan(&st); err != nil || st != "confirmed" {
+		t.Fatalf("批量后 status 应 confirmed，got %s err=%v", st, err)
+	}
+	// d2 改回 pushed（模拟建模派生写回——批量裁决已被派生路径覆盖的场景之后，
+	// 建模侧重新 push；suggest 判定只看 pushed 行）。
+	if _, err := d.Exec(`UPDATE biz_layer_diffs SET status='pushed',
+behavior_ref=jsonb_build_object('intent_id', $2::bigint) WHERE id=$1`, d2, iid); err != nil {
+		t.Fatal(err)
+	}
+
+	// ② suggest：先无 finding=false；造 confirmed 高危 finding 后=true。
+	sug, err := d.BizDiffSuggestCloseByTask(tid)
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if sug[d2] {
+		t.Fatal("无 confirmed 高危 finding 时不应建议关差")
+	}
+	var fnid int64
+	if err := d.QueryRow(`INSERT INTO exploration_nodes (exploration_id, kind, payload, state)
+VALUES ($1,'finding','{"finding_id":"fx"}','confirmed') RETURNING id`, eid).Scan(&fnid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO findings (task_id, node_id, vulnclass, severity, status, summary)
+VALUES ($1,$2,'authz_bypass','high','confirmed','批裁夹具 finding')`, tid, fnid); err != nil {
+		t.Fatalf("seed finding: %v", err)
+	}
+	sug, err = d.BizDiffSuggestCloseByTask(tid)
+	if err != nil {
+		t.Fatalf("suggest 2: %v", err)
+	}
+	if !sug[d2] {
+		t.Fatal("有 confirmed 高危 finding 后应建议关差")
+	}
+
+	// ③ wstg 前缀筛选。
+	if _, err := d.Exec(`UPDATE biz_layer_diffs SET wstg_ref='WSTG-BUSL-01' WHERE id=$1`, d1); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := d.ListBizDiffsP(ListBizDiffsOpts{CompanyID: companyID, WSTG: "WSTG-BUSL", Limit: 0})
+	if err != nil || len(rows) != 1 || rows[0].ID != d1 {
+		t.Fatalf("WSTG 前缀筛选应命中 d1: n=%d err=%v", len(rows), err)
+	}
+}

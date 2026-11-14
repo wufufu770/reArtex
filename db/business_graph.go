@@ -541,40 +541,78 @@ func (d *DB) bizNodesAnchors(nodeIDs []int64) (map[int64][]int64, error) {
 // 为 NULL（未归属公司）时，bizDiffsHandler 的回退补不出公司 id，再按
 // company_id=0 过滤就永远空（0.13.2 修复：差异面板按任务维度查未归属公司
 // 任务恒空）。companyID 与 taskID 不得同时 ≤0（调用方 handler 已挡，此处再守）。
+// ListBizDiffsOpts 是差异清单的筛选/分页参数（0.14.4：wstg/stride 前缀筛选 +
+// offset 分页——既有位置参数调用方较多，收敛为 opts 结构，旧签名保留委托）。
+type ListBizDiffsOpts struct {
+	CompanyID int64
+	TaskID    int64
+	Status    string
+	Severity  string
+	WSTG      string // 前缀匹配（如 WSTG-BUSL-01 精确或 WSTG-BUSL 前缀）
+	STRIDE    string // 同上（如 S4）
+	Offset    int
+	Limit     int
+}
+
+// ListBizDiffs 旧签名委托（既有调用方不变）。
 func (d *DB) ListBizDiffs(companyID, taskID int64, status, severity string, limit int) ([]*BizLayerDiff, error) {
+	return d.ListBizDiffsP(ListBizDiffsOpts{CompanyID: companyID, TaskID: taskID, Status: status, Severity: severity, Limit: limit})
+}
+
+// ListBizDiffsP 按公司/任务列差异（宿主与前端面板用；diff 不锚资产，按 task 归属
+// 过滤而不是锚点过滤——它的授权边界是建模任务本身）。
+//
+// companyID=0 且 taskID>0 时跳过公司过滤、按任务维度查全库：任务行 company_id
+// 为 NULL（未归属公司）时，bizDiffsHandler 的回退补不出公司 id，再按
+// company_id=0 过滤就永远空（0.13.2 修复：差异面板按任务维度查未归属公司
+// 任务恒空）。companyID 与 taskID 不得同时 ≤0（调用方 handler 已挡，此处再守）。
+func (d *DB) ListBizDiffsP(o ListBizDiffsOpts) ([]*BizLayerDiff, error) {
 	if err := d.ensureBizSchema(); err != nil {
 		return nil, err
 	}
-	if companyID <= 0 && taskID <= 0 {
+	if o.CompanyID <= 0 && o.TaskID <= 0 {
 		return nil, fmt.Errorf("company_id 或 task_id 至少传一个")
 	}
-	if limit <= 0 {
-		limit = 200
+	if o.Limit <= 0 {
+		o.Limit = 200
 	}
 	q := `SELECT id, company_id, COALESCE(task_id,0), diff_type, severity, design_ref, behavior_ref,
 	      description, wstg_ref, stride_ref, status, created_at
 FROM biz_layer_diffs`
 	args := []any{}
-	if companyID > 0 {
+	if o.CompanyID > 0 {
 		q += ` WHERE company_id=$1`
-		args = append(args, companyID)
+		args = append(args, o.CompanyID)
 	} else {
 		q += ` WHERE TRUE`
 	}
-	if taskID > 0 {
-		args = append(args, taskID)
+	if o.TaskID > 0 {
+		args = append(args, o.TaskID)
 		q += fmt.Sprintf(` AND task_id=$%d`, len(args))
 	}
-	if status != "" {
-		q += fmt.Sprintf(` AND status=$%d`, len(args)+1)
-		args = append(args, status)
+	if o.Status != "" {
+		args = append(args, o.Status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
-	if severity != "" {
-		q += fmt.Sprintf(` AND severity=$%d`, len(args)+1)
-		args = append(args, severity)
+	if o.Severity != "" {
+		args = append(args, o.Severity)
+		q += fmt.Sprintf(` AND severity=$%d`, len(args))
 	}
-	q += fmt.Sprintf(` ORDER BY id DESC LIMIT $%d`, len(args)+1)
-	args = append(args, limit)
+	if o.WSTG != "" {
+		args = append(args, o.WSTG+"%")
+		q += fmt.Sprintf(` AND wstg_ref LIKE $%d`, len(args))
+	}
+	if o.STRIDE != "" {
+		args = append(args, o.STRIDE+"%")
+		q += fmt.Sprintf(` AND stride_ref LIKE $%d`, len(args))
+	}
+	q += ` ORDER BY id DESC`
+	if o.Offset > 0 {
+		args = append(args, o.Offset)
+		q += fmt.Sprintf(` OFFSET $%d`, len(args))
+	}
+	args = append(args, o.Limit)
+	q += fmt.Sprintf(` LIMIT $%d`, len(args))
 	rows, err := d.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -617,6 +655,106 @@ func (d *DB) UpdateBizDiffStatus(id int64, status string, behaviorRef map[string
 	}
 	_, err := d.Exec(`UPDATE biz_layer_diffs SET status=$2 WHERE id=$1`, id, status)
 	return err
+}
+
+// CountBizDiffs 与 ListBizDiffsP 同筛选条件的总数（前端分页面）。
+func (d *DB) CountBizDiffs(o ListBizDiffsOpts) (int, error) {
+	if err := d.ensureBizSchema(); err != nil {
+		return 0, err
+	}
+	if o.CompanyID <= 0 && o.TaskID <= 0 {
+		return 0, fmt.Errorf("company_id 或 task_id 至少传一个")
+	}
+	q := `SELECT count(*) FROM biz_layer_diffs`
+	args := []any{}
+	if o.CompanyID > 0 {
+		q += ` WHERE company_id=$1`
+		args = append(args, o.CompanyID)
+	} else {
+		q += ` WHERE TRUE`
+	}
+	if o.TaskID > 0 {
+		args = append(args, o.TaskID)
+		q += fmt.Sprintf(` AND task_id=$%d`, len(args))
+	}
+	if o.Status != "" {
+		args = append(args, o.Status)
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
+	}
+	if o.Severity != "" {
+		args = append(args, o.Severity)
+		q += fmt.Sprintf(` AND severity=$%d`, len(args))
+	}
+	if o.WSTG != "" {
+		args = append(args, o.WSTG+"%")
+		q += fmt.Sprintf(` AND wstg_ref LIKE $%d`, len(args))
+	}
+	if o.STRIDE != "" {
+		args = append(args, o.STRIDE+"%")
+		q += fmt.Sprintf(` AND stride_ref LIKE $%d`, len(args))
+	}
+	var n int
+	err := d.QueryRow(q, args...).Scan(&n)
+	return n, err
+}
+
+// BizDiffSuggestCloseByTask 计算任务内 pushed 差异的「建议关差」标记：
+// diff 派生的意图（behavior_ref->>'intent_id'）所在探索产生了 confirmed 高危
+// finding ⇒ 该差异大概率已被验证坐实，建议人工 confirmed 关差（不自动落，
+// 裁决永远人工）。返回 diff_id → suggest。
+func (d *DB) BizDiffSuggestCloseByTask(taskID int64) (map[int64]bool, error) {
+	if err := d.ensureBizSchema(); err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`
+SELECT d.id, EXISTS (
+  SELECT 1
+  FROM findings f
+  JOIN exploration_nodes fn ON fn.id = f.node_id
+  JOIN exploration_nodes ino ON ino.exploration_id = fn.exploration_id
+  WHERE f.status='confirmed' AND f.severity IN ('high','critical')
+    AND ino.id = (d.behavior_ref->>'intent_id')::bigint
+) AS suggest
+FROM biz_layer_diffs d
+WHERE d.status='pushed' AND d.behavior_ref->>'intent_id' IS NOT NULL AND d.task_id=$1`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		var suggest bool
+		if err := rows.Scan(&id, &suggest); err != nil {
+			continue
+		}
+		out[id] = suggest
+	}
+	return out, nil
+}
+
+// BatchUpdateBizDiffStatus 批量裁决（宿主侧循环唯一写入口 + 调用方一次审计）。
+// 逐条容错：不存在的 id 进 failed（RowsAffected 校验——批量来源是前端复选，
+// 面板与库可能错位）；状态非法整批拒。
+func (d *DB) BatchUpdateBizDiffStatus(ids []int64, status, reason string) (applied []int64, failed []int64, err error) {
+	switch status {
+	case "open", "pushed", "confirmed", "false_positive":
+	default:
+		return nil, nil, fmt.Errorf("未知差异状态 %q", status)
+	}
+	for _, id := range ids {
+		res, e := d.Exec(`UPDATE biz_layer_diffs SET status=$2 WHERE id=$1`, id, status)
+		if e != nil {
+			failed = append(failed, id)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			failed = append(failed, id)
+			continue
+		}
+		applied = append(applied, id)
+	}
+	return applied, failed, nil
 }
 
 // ---------- 快照版本（增量建模的回滚点）----------

@@ -17,6 +17,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -80,6 +81,8 @@ func (s *Server) bizTaskGraphHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // bizDiffsHandler 处理 GET /api/business-graph/diffs。
+// 0.14.4：wstg/stride 前缀筛选 + offset/total 分页 + suggest_close 建议关差标记
+// （派生意图产生了 confirmed 高危 finding ⇒ 建议人工 confirmed，不自动落）。
 func (s *Server) bizDiffsHandler(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
@@ -89,6 +92,7 @@ func (s *Server) bizDiffsHandler(w http.ResponseWriter, r *http.Request) {
 	companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64)
 	taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
 	if companyID <= 0 && taskID <= 0 {
 		writeErr(w, 400, "company_id 或 task_id 至少传一个")
 		return
@@ -96,12 +100,82 @@ func (s *Server) bizDiffsHandler(w http.ResponseWriter, r *http.Request) {
 	// company=0 且 task>0 时 ListBizDiffs 跳过公司过滤按任务维度查（0.13.2 修复
 	// NULL-company 任务恒空）——此前这里的「从任务行补 company_id」回填已冗余，
 	// 0.13.6 清除（B7 尾巴）。
-	diffs, err := pg.ListBizDiffs(companyID, taskID, q.Get("status"), q.Get("severity"), limit)
+	opts := db.ListBizDiffsOpts{
+		CompanyID: companyID, TaskID: taskID,
+		Status: q.Get("status"), Severity: q.Get("severity"),
+		WSTG: q.Get("wstg"), STRIDE: q.Get("stride"),
+		Offset: offset, Limit: limit,
+	}
+	diffs, err := pg.ListBizDiffsP(opts)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"diffs": diffs})
+	total, _ := pg.CountBizDiffs(opts)
+	suggest := map[int64]bool{}
+	if taskID > 0 {
+		suggest, _ = pg.BizDiffSuggestCloseByTask(taskID)
+	}
+	type diffRow struct {
+		*db.BizLayerDiff
+		SuggestClose bool `json:"suggest_close"`
+	}
+	rows := make([]diffRow, 0, len(diffs))
+	for _, d := range diffs {
+		rows = append(rows, diffRow{BizLayerDiff: d, SuggestClose: suggest[d.ID]})
+	}
+	writeJSON(w, 200, map[string]any{"diffs": rows, "total": total, "offset": offset})
+}
+
+// bizDiffBatchDecisionHandler 处理 POST /api/business-graph/diffs/batch-decision：
+// 批量人工裁决（0.14.4）。status 白名单同单条；一次审计落账（ids+applied+failed）。
+func (s *Server) bizDiffBatchDecisionHandler(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var req struct {
+		IDs    []int64 `json:"ids"`
+		Status string  `json:"status"`
+		Reason string  `json:"reason"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "请求体非法")
+		return
+	}
+	switch req.Status {
+	case "confirmed", "false_positive", "open":
+	default:
+		writeErr(w, 400, "status 只接受 confirmed|false_positive|open")
+		return
+	}
+	if req.Reason == "" {
+		writeErr(w, 400, "裁决理由必填（写审计链）")
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeErr(w, 400, "ids 必填")
+		return
+	}
+	applied, failed, berr := pg.BatchUpdateBizDiffStatus(req.IDs, req.Status, req.Reason)
+	if berr != nil {
+		writeErr(w, 400, berr.Error())
+		return
+	}
+	auditBody, _ := json.Marshal(map[string]any{"ids": req.IDs, "status": req.Status,
+		"reason": req.Reason, "applied": applied, "failed": failed})
+	if _, err := pg.AppendAuditEvent(db.AuditEvent{
+		Actor:    "operator",
+		ToolName: "biz",
+		Action:   "diff-batch-decision",
+		Reason:   fmt.Sprintf("status=%s applied=%d failed=%d", req.Status, len(applied), len(failed)),
+		Payload:  auditBody,
+		Source:   "biz-diff",
+	}); err != nil {
+		log.Printf("[biz] 批量裁决审计链写入失败（忽略）: %v", err)
+	}
+	writeJSON(w, 200, map[string]any{"ok": len(failed) == 0, "applied": applied, "failed": failed})
 }
 
 // bizDiffDecisionHandler 处理 POST /api/business-graph/diffs/{id}/decision：
@@ -238,6 +312,7 @@ func (s *Server) bizRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/business-graph", s.bizGraphHandler)
 	mux.HandleFunc("GET /api/business-graph/diffs", s.bizDiffsHandler)
 	mux.HandleFunc("POST /api/business-graph/diffs/{id}/decision", s.bizDiffDecisionHandler)
+	mux.HandleFunc("POST /api/business-graph/diffs/batch-decision", s.bizDiffBatchDecisionHandler)
 	mux.HandleFunc("GET /api/tasks/{id}/biz-graph", s.bizTaskGraphHandler)
 	mux.HandleFunc("GET /api/tasks/{id}/edge-coverage", s.taskEdgeCoverageHandler)
 	mux.HandleFunc("GET /api/edge/methodologies", s.edgeMethodologiesHandler)
