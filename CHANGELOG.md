@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.14.0] - 2026-11-14
+
+### 新增（v0.14 批次一：调度可观测性与测试基建——自主循环的质量必须可观测）
+- **调度器可注入时钟**：Scheduler 增 `now func() time.Time`（生产 time.Now，测试 fake 控制水位/熔断推进节奏，不再靠真实等待）。
+- **fireEdgeWake 决策核心抽纯函数**（A1）：`decideEdgeWake(hasCells, doctrineReady, inWatermark, stallAdvances, stallRounds)` ——doctrine > 水位 skip > 熔断 > fire 四路径与优先级钉死；熔断要求 stallAdvances=true（本对账轮哈希与上轮相同——重构时抓出并修正了一个语义缺口：纯计数判断会在判据刚动过的轮误熔断）。`TestDecideEdgeWake` 8 例。
+- **调度面过程计数器 + GET /api/metrics**（A2）：Prometheus 文本格式——tick_total / edge_wake_fired / watermark_skips / circuit_breaks / doctrine_concludes / task_missing 六计数器（进程内原子，重启归零为已知口径边界）；挂 requireAuth 之内。停滞熔断死代码（0.13.2 修复）当时零测试零指标——此类回归从此先被测试和指标抓住。
+- **core_test 目标播种窗口加固**：3s→10s——LLM 拆解超时回退链路在套件满载下实测可超 3s（三度假失败均为同因，单跑恒 PASS、CI 同码全绿）。
+- 验证：build/vet/新增测试（decide 8 例+metrics 渲染+stallAdvance+WebUI 矩阵回归）全绿；/api/metrics 实机验证见运行核查。
+- 对齐检查：GET /api/metrics 为行为面（脚本/curl 消费，Prometheus 抓取口径），无独立 UI（入盘点表）；仪表盘既有 loop 行不受影响。
+
 ## [0.13.7] - 2026-11-14
 
 ### 修复（外部审查批 P1——导航一致性与死代码清除）

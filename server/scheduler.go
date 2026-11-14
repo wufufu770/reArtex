@@ -25,6 +25,10 @@ type Scheduler struct {
 	pg   *db.DB
 	tick time.Duration
 
+	// now 是可注入时钟（0.14.0 批次一 A1）：生产用 time.Now；测试用 fake
+	// 控制水位/熔断的推进节奏，不再靠真实等待。
+	now func() time.Time
+
 	// curatorRunning 保证同一时刻只有一轮 curator 在跑。
 	//
 	// 为什么需要：curator 的水位在跑**完之后**才写（崩重启要能立刻再跑一轮）
@@ -43,7 +47,7 @@ const (
 )
 
 func newScheduler(s *Server) *Scheduler {
-	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second}
+	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second, now: time.Now}
 }
 
 // Run loops until ctx is done, ticking the scheduler. Started once from server New.
@@ -133,6 +137,7 @@ func (sc *Scheduler) step() {
 	sc.sweepStaleReviews()
 	// 偏锋轮转唤醒（EDGE E7）：放在 triggers 提前返回之前——edge_exec 是内置
 	// agent，不能配 agent_triggers（HTTP 面对内置 400），它的轮间接力走这里。
+	schedCounters.tickTotal.Add(1)
 	sc.fireEdgeWake()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {

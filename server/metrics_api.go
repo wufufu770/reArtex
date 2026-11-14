@@ -2,6 +2,8 @@ package server
 
 // ---------- 运行度量 API（P0 评估基线）----------
 //
+// GET /api/metrics                 —— Prometheus 文本格式（0.14.0 批次一：调度面
+//                                     过程计数器；抓取方用 token query 或 Bearer）
 // GET /api/metrics/run?task_id=N   —— run 快照 JSON（tokens by lane / $ / judge 单列 /
 //                                     blocked 数 / planner 扫描构成）
 // GET /api/metrics/prices          —— 读单价表
@@ -17,9 +19,16 @@ import (
 )
 
 func (s *Server) registerMetricsRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/metrics", s.metricsPrometheus)
 	mux.HandleFunc("GET /api/metrics/run", s.metricsRun)
 	mux.HandleFunc("GET /api/metrics/prices", s.metricsPricesGet)
 	mux.HandleFunc("PUT /api/metrics/prices", s.metricsPricesPut)
+}
+
+// metricsPrometheus 输出调度面过程计数器（Prometheus 文本格式）。
+func (s *Server) metricsPrometheus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	renderSchedMetrics(w)
 }
 
 func (s *Server) metricsRun(w http.ResponseWriter, r *http.Request) {
