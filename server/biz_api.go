@@ -93,12 +93,9 @@ func (s *Server) bizDiffsHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "company_id 或 task_id 至少传一个")
 		return
 	}
-	// 只传 task_id 时从任务行补 company_id：ListBizDiffs 的 WHERE company_id=$1
-	// 在 companyID=0 时永远空（运行验证抓到的第一个 API bug——集成测试用的是
-	// (company>0, task) 组合没暴露它）。
-	if companyID <= 0 && taskID > 0 {
-		_ = pg.QueryRow(`SELECT COALESCE(company_id,0) FROM tasks WHERE id=$1`, taskID).Scan(&companyID)
-	}
+	// company=0 且 task>0 时 ListBizDiffs 跳过公司过滤按任务维度查（0.13.2 修复
+	// NULL-company 任务恒空）——此前这里的「从任务行补 company_id」回填已冗余，
+	// 0.13.6 清除（B7 尾巴）。
 	diffs, err := pg.ListBizDiffs(companyID, taskID, q.Get("status"), q.Get("severity"), limit)
 	if err != nil {
 		writeErr(w, 500, err.Error())

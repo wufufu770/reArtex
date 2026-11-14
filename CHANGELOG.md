@@ -5,7 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.13.5] - 2026-11-14
+## [0.13.6] - 2026-11-14
+
+### 修复（外部审查批 P0 服务端半边——URL 形态统一 + B7 尾巴清理）
+- **尾斜杠直接 200 serve，不再 308**（审查 P0①/B1）：`webui_embed.go` 的 serve 逻辑抽到无 build-tag 的 `server/webui_serve.go`（`serveWebUIFromFS(fsys)`——embedui 构建与 CI 测试共用同一实现），归一化改为：`path.Clean` 后先查 legacy（原始路径与 Clean 后路径都查——`/pianfeng/` 带尾斜杠的收藏也断链成功），然后 **serve `<path>/index.html` 直接 200**。此前「尾斜杠 308 到无尾斜杠」与 next.config `trailingSlash:true` 方向相反，prefetch/软导航取 RSC 分片遇 308 不跟随即导航挂起（0.12.3 排查记录的"浏览器侧挂起"与此吻合）；serve 优于 redirect：零跳、无永久缓存语义。规范 URL 仍是干净路径，HTML no-cache 无缓存键漂移。
+- **路径矩阵单测**（`server/webui_serve_test.go`，fstest.MapFS 注入导出产物）：干净路径/尾斜杠/双斜杠/根路径/_next 资源/SPA 兜底六类 200 语义 + legacy 三形态 308（含 query 保留）+ HTML no-cache 缓存语义，11 用例钉死——CI（无 embedui tag）全量覆盖。
+- **bizDiffsHandler 冗余回填清除**（B7 尾巴）：company=0 时「从任务行补 company_id」的回填查询已由 0.13.2 的 ListBizDiffs `WHERE TRUE` 分支取代，删除冗余 `QueryRow`。
+- 验证：go build 双形态（含 -tags embedui）/vet/矩阵测试全绿；换装实测见运行核查（尾斜杠 200、legacy 308 链不断）。
+- 对齐检查：无新前端功能点；URL 语义变化对前端透明（fetch 一律干净路径，尾斜杠行为仅影响外部书签/软导航）。
+
+
 
 ### 修复（外部审查批 P0 前端半边——渲染健壮性；审查报告基于 0.13.1，逐项核实后施工）
 - **error boundary 落地**（审查 P0②）：新增 `app/error.tsx`（路由段级，重试/返回仪表盘）与 `app/global-error.tsx`（根级，自带 html/body 内联样式）——此前客户端渲染抛错即整树卸载纯白屏。
@@ -15,6 +24,10 @@
 - **F4 空公司指引**：公司清单为空时给出明确去向（"先在资产页创建公司并配置范围"），不再是静默空图。
 - 验证：go build/vet + 前端 build:static/tsc/biome 全绿；产物 chunk 回验；人为抛错实测 boundary 兜底与上报落账见运行核查。
 - 对齐检查：新增后端功能点 POST /api/logs/client 的前端入口=上报器（行为面，非 UI）；日志页既有面自动消费。
+
+## [0.13.5] - 2026-11-14
+
+### 修复（外部审查批 P0 前端半边——渲染健壮性；标题行因编辑失误被吞，正文即上方紧邻条目，按序列修回）
 
 ## [0.13.4] - 2026-11-14
 
