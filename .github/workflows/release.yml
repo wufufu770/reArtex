@@ -92,6 +92,10 @@ jobs:
     needs: binaries
     runs-on: ubuntu-latest
     steps:
+      # body_path 指向仓库里的 RELEASE_NOTES.md —— 本 job 此前没有 checkout，
+      # 文件不存在被静默忽略，正文只剩自动生成的 compare 链接（v0.13.1 实证，
+      # 当时靠 API 事后补写）。
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: pkg-*
