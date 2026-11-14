@@ -5,7 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.1] - 2026-11-14
+## [0.14.2] - 2026-11-14
+
+### 新增（v0.14 批次二下：仲裁闭环收尾——状态联动 + 周期重扫 + 前端冲突块；实机全链验证）
+- **意图状态联动**：仲裁落笔压制败方（open → blocked + blocked_reason=arbiter_deferred，只动 open 态不回溯终态）；reopen 反向释放（只解 arbiter_deferred）。**实机全链验证**：verify×exploit 意图对 → 检测登记 → host-rule 直裁 → 败方 blocked=arbiter_deferred ✓；reopen → 两方回 open ✓。
+- **周期重扫统一三条派生入路**（B）：fireConflictArbitration 60s 全局水位对全部持有 open 意图的探索重跑检测——planner（agent 包不能挂 server 钩子）/edge_dispatch/bizmodeler 三线统一覆盖，写入点挂点（propose_biz_intent）只做即时加速。运行抓出并修复两个 bug：①重扫水位首见空键永不触发（else 挂错层）；②规则直裁分支缺败方压制联动。
+- **重扫堆积修复**：RecordConflict 同对已有非 closed 行即幂等跳过——此前每 60s 对已裁决对重复 INSERT（实测 #7/#8/#9 同对堆积）；reopen 是唯一再登记通道（回 open 后幂等跳过、等 arbiter 判定——重开语义=绕过规则直裁）。70s 复测零新行 ✓。
+- **前端冲突块**（biz-tab）：冲突对清单（规则/状态/verdict/理由/重开数）+ frozen/adjudicated 行「重开」按钮（行内理由必填，写审计链）——人工覆盖与 frozen 兜底的 UI 入口。
+- 验证：go build/vet/真库测试（生命周期回归含堆积幂等）/前端 build+tsc+biome 全绿；实机三链全过（见上）。
+- 对齐检查：冲突块=biz-tab（任务详情「业务建模」tab）+ REST 双入口；arbiter agent（Agent 页）/arbiter_resolve（工具页）既有入口复用。
+
+
 
 ### 新增（v0.14 批次二上：意图冲突仲裁——确定性检测 + arbiter agent 自行调研判定；减少人的参与，人只兜底熔断）
 - **数据层**：`db/schema_intent2.sql`（intent_conflicts 一表：归一对 open 唯一 / verdict 枚举 / state 机 open→adjudicated→reopen / open→frozen）+ `db/intent_conflicts.go`（RecordConflict 幂等登记 / ResolveConflict 宿主落笔（枚举+理由校验）/ FreezeConflict / ReopenConflict（reopen_count+1）/ ListConflictsByExploration）+ EnsureIntent2Schema 启动接线。真库集成测试 TestIntentConflictLifecycle 全链 PASS（归一幂等/校验拒/状态机迁移与拒绝路径/清单面）。

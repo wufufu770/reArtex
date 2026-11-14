@@ -144,7 +144,7 @@ func (s *Server) scanAndRecordConflicts(taskID, explorationID int64) {
 			continue // 已登记的 open 冲突不重复处理
 		}
 		if f.Winner != "" {
-			// 规则直裁：宿主落笔（host-rule），审计走裁决同款。
+			// 规则直裁：宿主落笔（host-rule），审计走裁决同款；败方意图联动压制。
 			verdict := "proceed_a"
 			if f.Winner == "b" {
 				verdict = "proceed_b"
@@ -152,6 +152,13 @@ func (s *Server) scanAndRecordConflicts(taskID, explorationID int64) {
 			if err := pg.ResolveConflict(id, verdict, f.Reason, "host-rule"); err != nil {
 				log.Printf("[arbitration] 规则直裁落笔失败 conflict=%d: %v", id, err)
 				continue
+			}
+			loser := f.SideB.NodeID
+			if f.Winner == "b" {
+				loser = f.SideA.NodeID
+			}
+			if err := pg.SuppressIntentForArbitration(loser); err != nil {
+				log.Printf("[arbitration] 败方意图压制失败 conflict=%d loser=%d: %v", id, loser, err)
 			}
 			s.appendArbitrationAudit("intent-arbitration", "rule-resolve",
 				fmt.Sprintf("conflict=%d rule=%s winner=%s task=%d", id, f.RuleID, f.Winner, taskID),
@@ -174,6 +181,7 @@ func arbiterDeferKey(conflictID int64) string {
 }
 
 // resolveIntentConflict 是 arbiter_resolve 工具的宿主落笔（agent 提议 → 这里写）。
+// proceed 时联动压制败方意图（open → blocked + arbiter_deferred，0.14.2）；
 // defer_both 计数连续达阈值即冻结（等人兜底，唯一进人路径）。
 func (s *Server) resolveIntentConflict(conflictID int64, verdict, reason string) error {
 	pg := s.m.pg
@@ -183,6 +191,19 @@ func (s *Server) resolveIntentConflict(conflictID int64, verdict, reason string)
 	s.appendArbitrationAudit("intent-arbitration", "arbiter-resolve",
 		fmt.Sprintf("conflict=%d verdict=%s", conflictID, verdict),
 		map[string]any{"conflict_id": conflictID, "verdict": verdict, "resolved_by": "arbiter", "reason": reason})
+	if verdict == "proceed_a" || verdict == "proceed_b" {
+		// 败方压制：读冲突行的归一对，proceed_a 压 b / proceed_b 压 a。
+		var aNode, bNode int64
+		if err := pg.QueryRow(`SELECT a_node_id, b_node_id FROM intent_conflicts WHERE id=$1`, conflictID).Scan(&aNode, &bNode); err == nil {
+			loser := bNode
+			if verdict == "proceed_b" {
+				loser = aNode
+			}
+			if err := pg.SuppressIntentForArbitration(loser); err != nil {
+				log.Printf("[arbitration] 败方意图压制失败 conflict=%d loser=%d: %v", conflictID, loser, err)
+			}
+		}
+	}
 	if verdict == "defer_both" {
 		n := 0
 		if raw, _, _ := pg.GetSetting(arbiterDeferKey(conflictID)); raw != "" {

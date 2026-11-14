@@ -2523,3 +2523,20 @@ export interface ReportCandidate {
   size?: number;
   is_dir?: boolean;
 }
+
+// 意图冲突仲裁（GET /api/intents/conflicts；0.14.1/0.14.2）。
+export interface IntentConflict {
+  id: number;
+  exploration_id: number;
+  a_node_id: number;
+  b_node_id: number;
+  detect_rule: string;
+  basis: Record<string, unknown>;
+  state: "open" | "adjudicated" | "frozen" | "closed";
+  verdict: "proceed_a" | "proceed_b" | "defer_both" | null;
+  verdict_reason: string;
+  resolved_by: "" | "arbiter" | "host" | "host-rule";
+  reopen_count: number;
+  created_at: string;
+  updated_at: string;
+}

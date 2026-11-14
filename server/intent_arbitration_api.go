@@ -65,6 +65,12 @@ func (s *Server) intentConflictReopen(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 反向联动（0.14.2）：被本仲裁压制的意图回 open（只解 arbiter_deferred）。
+	var aNode, bNode int64
+	if err := pg.QueryRow(`SELECT a_node_id, b_node_id FROM intent_conflicts WHERE id=$1`, id).Scan(&aNode, &bNode); err == nil {
+		_ = pg.ReleaseIntentForArbitration(aNode)
+		_ = pg.ReleaseIntentForArbitration(bNode)
+	}
 	s.appendArbitrationAudit("intent-arbitration", "conflict-reopen",
 		"conflict="+strconv.FormatInt(id, 10)+" 人工重开",
 		map[string]any{"conflict_id": id, "reason": req.Reason, "resolved_by": "host"})

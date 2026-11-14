@@ -64,6 +64,7 @@ import type {
   FindingTraffic,
   FindingTrafficDetail,
   IntentAsset,
+  IntentConflict,
   InterceptApprovalFilter,
   InterceptApprovalRow,
   InterceptDetail,
@@ -497,6 +498,14 @@ export const api = {
     post<{ ok: boolean }>(`/memory/entries/${id}/promote`, { actor, reason }),
   memoryRetire: (id: number, actor: string, reason: string) =>
     post<{ ok: boolean }>(`/memory/entries/${id}/retire`, { actor, reason }),
+  // 意图冲突仲裁（0.14.1/0.14.2：检测确定性 + arbiter 调研判定；重开=人工覆盖
+  // 或新事实，理由必填写审计链）。
+  intentConflicts: (taskId: string, state = "") =>
+    get<{ conflicts: IntentConflict[]; total: number }>(
+      `/intents/conflicts?task_id=${taskId}${state ? `&state=${state}` : ""}`,
+    ),
+  intentConflictReopen: (id: number, reason: string) =>
+    post<{ ok: boolean }>(`/intents/conflicts/${id}/reopen`, { reason }),
   // 存量重评（E1-7：确定性规则出候选；默认 dry-run，apply=true 才落库）。
   findingsRerate: (taskId: number | null, apply: boolean) =>
     post<{ items: RerateCandidate[]; count: number; applied: number; apply: boolean }>("/exploration/findings/rerate", {

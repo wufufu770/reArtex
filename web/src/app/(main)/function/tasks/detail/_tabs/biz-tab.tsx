@@ -12,7 +12,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import type { BizLayerDiff, EdgeCell } from "@/lib/types";
+import type { BizLayerDiff, EdgeCell, IntentConflict } from "@/lib/types";
 
 const CELL_STATE_LABEL: Record<EdgeCell["state"], string> = {
   open: "未开",
@@ -52,6 +52,10 @@ export function BizTab({ taskId }: { taskId: string }) {
   const [hostInput, setHostInput] = React.useState("");
   const [hostDirty, setHostDirty] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
+  // 意图冲突仲裁（0.14.2）：冲突对清单 + 人工重开（理由必填，写审计链）。
+  const [conflicts, setConflicts] = React.useState<IntentConflict[]>([]);
+  const [reopenID, setReopenID] = React.useState<number | null>(null);
+  const [reopenReason, setReopenReason] = React.useState("");
 
   const load = React.useCallback(() => {
     setLoading(true);
@@ -60,8 +64,9 @@ export function BizTab({ taskId }: { taskId: string }) {
       api.bizDiffs({ task_id: Number(taskId), limit: 100 }).catch(() => null),
       api.taskEdgeCoverage(taskId).catch(() => null),
       api.taskHostTargets(taskId).catch(() => ({ targets: [] })),
+      api.intentConflicts(taskId).catch(() => null),
     ])
-      .then(([g, ds, ec, _ht]) => {
+      .then(([g, ds, ec, _ht, cf]) => {
         if (g) {
           setSummary(g.summary);
           setNodes(
@@ -85,10 +90,27 @@ export function BizTab({ taskId }: { taskId: string }) {
             stop_stats: ec.stop_stats ?? {},
           });
         }
+        if (cf) setConflicts(cf.conflicts ?? []);
       })
       .finally(() => setLoading(false))
       .catch(() => setLoading(false)); // 各请求已自带 catch 兜底；这里的 catch 只兜 finally 链本身
   }, [taskId]);
+
+  const reopenConflict = async (id: number) => {
+    if (!reopenReason.trim()) {
+      toast.error("重开理由必填（写审计链）");
+      return;
+    }
+    try {
+      await api.intentConflictReopen(id, reopenReason.trim());
+      toast.success(`冲突 #${id} 已重开（被压制的意图已恢复待命）`);
+      setReopenID(null);
+      setReopenReason("");
+      load();
+    } catch (e) {
+      toast.error(`重开失败：${(e as Error).message}`);
+    }
+  };
 
   React.useEffect(() => {
     load();
@@ -122,6 +144,71 @@ export function BizTab({ taskId }: { taskId: string }) {
           <div className="font-semibold text-2xl">{edgesCount || "—"}</div>
         </div>
       </div>
+
+      {/* 意图冲突仲裁（0.14.2）：检测确定性 + arbiter 调研判定；frozen=等人兜底 */}
+      {conflicts.length > 0 && (
+        <div className="rounded-lg border p-3">
+          <div className="mb-2 flex items-center gap-2 font-medium text-sm">
+            意图冲突
+            <Badge variant="outline" className="text-[10px]">
+              {conflicts.length}
+            </Badge>
+          </div>
+          <div className="space-y-2">
+            {conflicts.map((c) => (
+              <div key={c.id} className="rounded-md border px-2 py-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs">#{c.id}</span>
+                  <Badge variant="outline" className="text-[10px]">
+                    {c.detect_rule}
+                  </Badge>
+                  <Badge variant={c.state === "frozen" ? "destructive" : "secondary"} className="text-[10px]">
+                    {c.state}
+                  </Badge>
+                  {c.verdict && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {c.verdict} · {c.resolved_by || "—"}
+                    </Badge>
+                  )}
+                  {c.reopen_count > 0 && (
+                    <span className="text-muted-foreground text-[10px]">重开×{c.reopen_count}</span>
+                  )}
+                  {(c.state === "frozen" || c.state === "adjudicated") && reopenID !== c.id && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="ml-auto h-6 text-[10px]"
+                      onClick={() => {
+                        setReopenID(c.id);
+                        setReopenReason("");
+                      }}
+                    >
+                      重开
+                    </Button>
+                  )}
+                </div>
+                {c.verdict_reason && <div className="text-muted-foreground mt-1 text-xs">{c.verdict_reason}</div>}
+                {reopenID === c.id && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <input
+                      className="h-7 w-72 rounded-md border bg-background px-2 text-xs"
+                      value={reopenReason}
+                      onChange={(e) => setReopenReason(e.target.value)}
+                      placeholder="重开理由（必填，写审计链）"
+                    />
+                    <Button size="sm" className="h-7 text-xs" onClick={() => reopenConflict(c.id)}>
+                      确认重开
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setReopenID(null)}>
+                      取消
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 偏锋判据进度（edge_mode 任务才显示） */}
       {edgeMeta?.edge_mode && (

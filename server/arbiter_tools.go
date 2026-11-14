@@ -99,15 +99,35 @@ ORDER BY c.id`)
 	return out
 }
 
-// fireConflictArbitration 每 tick 由 step() 调：open 冲突按水位（60s/冲突）唤醒
-// arbiter 做一轮调研判定（与 fireEdgeWake 同款水位语义；serial+by_task 队列兜
-// 并发）。任务缺失的冲突行跳过（留人工收，不自动判）。
+// conflictRescanKey 是周期重扫的全局水位键（60s 一轮——planner/edge/bizmodeler
+// 三条派生入路统一由重扫覆盖，写入点挂点只做即时性加速）。
+const conflictRescanKey = "conflict_rescan"
+
+// fireConflictArbitration 每 tick 由 step() 调：
+// ① 周期重扫（60s 水位）：全部持有 open 意图的探索重跑冲突检测——新增意图
+//    进对，三条派生入路统一覆盖；
+// ② open 冲突按水位（60s/冲突）唤醒 arbiter 做一轮调研判定（serial+by_task
+//    队列兜并发）。任务缺失的冲突行跳过（留人工收，不自动判）。
 func (sc *Scheduler) fireConflictArbitration() {
+	now := sc.now().Unix()
+	needRescan := true
+	if lastRaw, err := sc.pg.GetSchedState(conflictRescanKey); err == nil && lastRaw != "" {
+		if last, err := strconv.ParseInt(lastRaw, 10, 64); err == nil && now-last < int64(edgeWakeMinInterval().Seconds()) {
+			needRescan = false // 水位期内不重扫，唤醒检查照跑（见下）
+		}
+	}
+	if needRescan {
+		_ = sc.pg.SetSchedState(conflictRescanKey, strconv.FormatInt(now, 10))
+		if exps, err := sc.pg.ListExplorationsWithOpenIntents(); err == nil {
+			for _, e := range exps {
+				sc.s.scanAndRecordConflicts(e.TaskID, e.ExplorationID)
+			}
+		}
+	}
 	overviews := sc.s.listOpenConflictsForArbitration()
 	if len(overviews) == 0 {
 		return
 	}
-	now := sc.now().Unix()
 	for _, o := range overviews {
 		if o.TaskID <= 0 {
 			continue // 任务已删：冲突行留人工收

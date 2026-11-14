@@ -10,6 +10,7 @@ package db
 //     EnsureIntent2Schema 启动期接线。
 
 import (
+	"database/sql"
 	_ "embed"
 	"fmt"
 	"sync"
@@ -58,8 +59,9 @@ func conflictPair(a, b int64) (int64, int64) {
 	return b, a
 }
 
-// RecordConflict 登记一条冲突（open 态；归一对已 open 时幂等返回既有 id）。
-// 返回 (conflictID, created, err)。
+// RecordConflict 登记一条冲突（open 态；归一对已有非 closed 行时幂等跳过——
+// 重扫每 60s 跑一轮，已裁决/冻结的对不得重复堆积；reopen 是唯一的再登记通道，
+// 它把行回 open 后本函数幂等跳过、等 arbiter 判定）。返回 (conflictID, created, err)。
 func (d *DB) RecordConflict(explorationID, nodeA, nodeB int64, rule string, basis []byte) (int64, bool, error) {
 	if err := d.EnsureIntent2Schema(); err != nil {
 		return 0, false, err
@@ -71,18 +73,24 @@ func (d *DB) RecordConflict(explorationID, nodeA, nodeB int64, rule string, basi
 		return 0, false, fmt.Errorf("detect_rule 必填")
 	}
 	a, b := conflictPair(nodeA, nodeB)
-	var id int64
-	var created bool
+	var existing int64
 	err := d.QueryRow(`
+SELECT id FROM intent_conflicts
+WHERE exploration_id=$1 AND a_node_id=$2 AND b_node_id=$3 AND state != 'closed'
+ORDER BY id LIMIT 1`, explorationID, a, b).Scan(&existing)
+	if err == nil {
+		return existing, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("record conflict lookup: %w", err)
+	}
+	var id int64
+	if err := d.QueryRow(`
 INSERT INTO intent_conflicts (exploration_id, a_node_id, b_node_id, detect_rule, basis)
-VALUES ($1,$2,$3,$4,$5)
-ON CONFLICT (exploration_id, a_node_id, b_node_id) WHERE state='open'
-DO UPDATE SET updated_at = now()
-RETURNING id, (xmax = 0) AS created`, explorationID, a, b, rule, basis).Scan(&id, &created)
-	if err != nil {
+VALUES ($1,$2,$3,$4,$5) RETURNING id`, explorationID, a, b, rule, basis).Scan(&id); err != nil {
 		return 0, false, fmt.Errorf("record conflict: %w", err)
 	}
-	return id, created, nil
+	return id, true, nil
 }
 
 // ResolveConflict 宿主落笔：open/frozen → adjudicated，写 verdict 与理由。
@@ -150,6 +158,65 @@ WHERE id=$1 AND state IN ('adjudicated','frozen')`, id)
 		return fmt.Errorf("冲突 #%d 不存在或不在可重开态", id)
 	}
 	return nil
+}
+
+// SuppressIntentForArbitration 是仲裁结果的意图状态联动（宿主唯一写路径）：
+// 被压制方 open → blocked + blocked_reason=arbiter_deferred。只动 open 态——
+// 已终态（done/exhausted）的意图不回溯。
+func (d *DB) SuppressIntentForArbitration(nodeID int64) error {
+	if err := d.EnsureIntent2Schema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`
+UPDATE exploration_nodes SET state='blocked', blocked_reason='arbiter_deferred', updated_at=now()
+WHERE id=$1 AND state='open'`, nodeID)
+	return err
+}
+
+// ReleaseIntentForArbitration 是重开时的反向联动：被本仲裁压制的意图回 open。
+// 只解 arbiter_deferred（别的 blocked 原因不是本机制的，不碰）。
+func (d *DB) ReleaseIntentForArbitration(nodeID int64) error {
+	if err := d.EnsureIntent2Schema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`
+UPDATE exploration_nodes SET state='open', blocked_reason='', updated_at=now()
+WHERE id=$1 AND state='blocked' AND blocked_reason='arbiter_deferred'`, nodeID)
+	return err
+}
+
+// OpenIntentExploration 是一个持有 open 意图的探索（冲突周期重扫的候选流）。
+type OpenIntentExploration struct {
+	ExplorationID int64
+	TaskID        int64 // 代表任务（审计日志用；多任务共享探索时任取其一）
+}
+
+// ListExplorationsWithOpenIntents 列全部持有 open 意图的探索——冲突检测的
+// 周期重扫流（planner/edge/bizmodeler 三条派生入路统一由此覆盖，不依赖
+// 各写入点挂钩）。
+func (d *DB) ListExplorationsWithOpenIntents() ([]OpenIntentExploration, error) {
+	if err := d.EnsureIntent2Schema(); err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`
+SELECT n.exploration_id, COALESCE(MIN(t.id),0)
+FROM exploration_nodes n
+LEFT JOIN tasks t ON t.exploration_id = n.exploration_id AND t.deleted_at IS NULL
+WHERE n.kind='intent' AND n.state='open'
+GROUP BY n.exploration_id ORDER BY n.exploration_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []OpenIntentExploration{}
+	for rows.Next() {
+		var o OpenIntentExploration
+		if err := rows.Scan(&o.ExplorationID, &o.TaskID); err != nil {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // ListConflictsByExploration 列一个探索的冲突（state 过滤，空=全部）。
