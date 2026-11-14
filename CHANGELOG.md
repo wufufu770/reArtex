@@ -5,7 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.0] - 2026-11-14
+## [0.14.1] - 2026-11-14
+
+### 新增（v0.14 批次二上：意图冲突仲裁——确定性检测 + arbiter agent 自行调研判定；减少人的参与，人只兜底熔断）
+- **数据层**：`db/schema_intent2.sql`（intent_conflicts 一表：归一对 open 唯一 / verdict 枚举 / state 机 open→adjudicated→reopen / open→frozen）+ `db/intent_conflicts.go`（RecordConflict 幂等登记 / ResolveConflict 宿主落笔（枚举+理由校验）/ FreezeConflict / ReopenConflict（reopen_count+1）/ ListConflictsByExploration）+ EnsureIntent2Schema 启动接线。真库集成测试 TestIntentConflictLifecycle 全链 PASS（归一幂等/校验拒/状态机迁移与拒绝路径/清单面）。
+- **确定性检测器**（`internal/intent`，代码常量规则带稳定 ID）：三条起步规则——asset_mutex（同资产 verify×exploit 互斥，tie-break 判验证先行=host-rule 直裁）、reverse_predicate（同资产+同漏洞类+对偶词摘要，交 arbiter）、resource_clash（双 mutating 共工具，交 arbiter）。宁漏勿误：无锚/缺预测字段的意图不参与检测；任务资产范围是权威基线（锚点写入已 fail-closed）。单测 5 例（三规则正反例+无锚跳过+归一口径）。
+- **arbiter agent**（平台一等 agent，chat_visible=false 不进选择器）：种子链全套——prompts/arbiter.md（调研纪律/判定纪律「宁 defer 勿瞎裁」/输出枚举）走 SeedPromptIfEmpty（可编辑可重置）；arbiter_resolve 唯一写工具（宿主落笔，绑定只给 arbiter，roledispatch 钉死允许集=只读调研面+resolve）；serial 单轮 15min。**红线不动**：候选集是已过闸的合法意图，只决定谁先做，不触碰闸门层。
+- **调度唤醒**：fireConflictArbitration 每 tick 扫 open 冲突按水位（60s/冲突）唤醒 arbiter 调研判定（与 fireEdgeWake 同款水位语义）；defer_both 连续 3 次→FreezeConflict 冻结等人（唯一进人路径，UI 重开/人工覆盖在 0.14.2 接前端块）。
+- **派生挂点**：propose_biz_intent 派生成功后异步 scanAndRecordConflicts（规则直裁落账 host-rule + 审计；检测失败不影响派生）。planner/edge_dispatch 线挂点与意图状态联动（被压制方 blocked）+ 前端冲突块排 0.14.2。
+- **REST**：GET /api/intents/conflicts?task_id、POST .../{id}/reopen（理由必填写审计链）；实测 404/校验。
+- 验证：build/vet 全绿；新增测试全过；实机——intent_conflicts 表建好、arbiter agent 落库（chat_visible=false）、arbiter_resolve 播种绑定、REST 就绪。
+- 对齐检查：冲突清单/重开的前端块在 0.14.2（下一版）；arbiter agent 在 Agent 页可见可编辑（提示词可改可重置）；arbiter_resolve 工具页可见。
+
+
 
 ### 新增（v0.14 批次一：调度可观测性与测试基建——自主循环的质量必须可观测）
 - **调度器可注入时钟**：Scheduler 增 `now func() time.Time`（生产 time.Now，测试 fake 控制水位/熔断推进节奏，不再靠真实等待）。

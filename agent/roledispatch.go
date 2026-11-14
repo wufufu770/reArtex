@@ -115,6 +115,20 @@ var edgeExecToolAllow = map[string]bool{
 	"Skill":                 true,
 }
 
+// arbiterToolAllow 是意图仲裁者的允许集（0.14.1）：调研全只读（意图细节/任务
+// 图/发现/业务图读面）+ 唯一写工具 arbiter_resolve（宿主落笔）。agent 无任何
+// 直接改库路径——红线：仲裁只决定「谁先做」，不触碰闸门层。
+var arbiterToolAllow = map[string]bool{
+	"arbiter_resolve":       true,
+	"get_task_graph":        true,
+	"list_task_findings":    true,
+	"list_assets":           true,
+	"list_companies":        true,
+	"read_biz_graph":        true,
+	"get_task_worker_trace": true,
+	"Skill":                 true,
+}
+
 // roleToolAllow 是角色→允许集的总表；值 nil = 该角色不收敛（维持现状）。
 // 新增受钉角色时在这里加一行——不要在调用点写 if。
 var roleToolAllow = map[string]map[string]bool{
@@ -122,6 +136,7 @@ var roleToolAllow = map[string]map[string]bool{
 	"bizmodeler": bizModelerToolAllow,
 	"edge":       edgeToolAllow,
 	"edge_exec":  edgeExecToolAllow,
+	"arbiter":    arbiterToolAllow,
 	// "worker": nil, "mainagent": nil, "goals": nil, chat/*: 不收敛
 }
 

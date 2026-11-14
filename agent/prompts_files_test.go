@@ -65,8 +65,9 @@ func TestBuiltinPromptDigestAnchors(t *testing.T) {
 	}
 }
 
-// TestBuiltinPromptSeedsKeys 保证种子目录的构成是「七个既有 + 五个顾问 + 两个偏锋 + 小程序渗透」，不多不少。
-// （EDGE E0：edge=方法论顾问、edge_exec=执行体；miniprogram=小程序渗透专用 agent，0.13.0 入种子目录。）
+// TestBuiltinPromptSeedsKeys 保证种子目录的构成是「七个既有 + 五个顾问 + 两个偏锋 + 小程序渗透 + 意图仲裁」，不多不少。
+// （EDGE E0：edge=方法论顾问、edge_exec=执行体；miniprogram=小程序渗透专用 agent，0.13.0 入种子目录；
+// arbiter=意图顺序仲裁者，0.14.1 入种子目录。）
 func TestBuiltinPromptSeedsKeys(t *testing.T) {
 	seeds := BuiltinPromptSeeds()
 	want := map[string]bool{
@@ -76,6 +77,7 @@ func TestBuiltinPromptSeedsKeys(t *testing.T) {
 		"intent_normalizer": true,
 		"edge":              true, "edge_exec": true,
 		"miniprogram":       true,
+		"arbiter":           true,
 	}
 	if len(seeds) != len(want) {
 		t.Fatalf("提示词种子数量不对：got %d want %d（%v）", len(seeds), len(want), seeds)

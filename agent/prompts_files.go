@@ -37,6 +37,8 @@ var advisoryPromptFiles = map[string]string{
 	//（promptKeyAliases 惯例）。
 	"edge":      "prompts/edge.md",
 	"edge_exec": "prompts/edge-exec.md",
+	// 意图顺序仲裁者（0.14.1 批次二）：冲突对调研与顺序判定，chat_visible=false。
+	"arbiter": "prompts/arbiter.md",
 	"miniprogram": "prompts/miniprogram.md",
 }
 

@@ -44,6 +44,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.bizTools()...)      // 业务建模工具(BIZ；tools 表按绑定过滤，默认 bizmodeler)
 	tools = append(tools, s.edgeTools()...)     // 偏锋探索工具(EDGE；绑定矩阵见 seedEdgeTools)
 	tools = append(tools, s.mpTools()...)       // 小程序渗透工具(MP；token 池作用域工具，绑 pentest/worker/auto/mainagent)
+	tools = append(tools, s.arbiterTools()...)  // 意图仲裁工具(0.14.1；绑 arbiter，宿主落笔)
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -549,6 +550,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedBizModelerAgent()  // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
 	s.seedEdgeTools()        // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
 	s.seedMpTools()          // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
+	s.seedArbiterTools()     // 意图仲裁工具播种（0.14.1，绑 arbiter）
 	s.ensureMpArtifactsDir() // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）
 }
 

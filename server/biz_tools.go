@@ -575,6 +575,8 @@ func (s *Server) toolProposeBizIntent() actool.CoreTool {
 					msg += fmt.Sprintf("，biz diff #%d → pushed", a.DiffID)
 				}
 			}
+			// 冲突检测挂点（0.14.1）：派生后异步扫描——检测失败不影响派生本身。
+			go s.scanAndRecordConflicts(a.TaskID, mustExplorationID(s.m.pg, a.TaskID))
 			return actool.Text(msg), nil
 		})
 }

@@ -139,6 +139,8 @@ func (sc *Scheduler) step() {
 	// agent，不能配 agent_triggers（HTTP 面对内置 400），它的轮间接力走这里。
 	schedCounters.tickTotal.Add(1)
 	sc.fireEdgeWake()
+	// 意图仲裁唤醒（0.14.1 批次二）：open 冲突按水位唤醒 arbiter 调研判定。
+	sc.fireConflictArbitration()
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return

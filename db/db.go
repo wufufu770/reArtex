@@ -485,6 +485,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureMiniprogramSchema(); err != nil {
 			return fmt.Errorf("apply miniprogram schema: %w", err)
 		}
+		// 意图冲突仲裁的 DDL：intent_conflicts 一表（db/schema_intent2.sql）。
+		// 同上——冲突登记发生在意图派生钩子（确定性层），懒执行会撞 42P01。
+		if err := schemaDB.EnsureIntent2Schema(); err != nil {
+			return fmt.Errorf("apply intent-conflict schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {
@@ -593,6 +598,11 @@ var builtinAgents = []builtinAgent{
 	// desktop-ops（微信 PC 客户端原生交互，全 agent 共有能力的调用方）。单次 run
 	// 不限时（intp(0)，与 pentest/recon 同款长跑形态）。
 	{"miniprogram", "小程序渗透", "assistant", "小程序渗透 agent：从 wxapkg 解包还原源码工程、起运行时、接口发现、Burp 重放越权矩阵到结论回写的完整小程序渗透链；token 池与证据纪律内置。", nil, false, intp(0)},
+	// 意图顺序仲裁者（0.14.1 批次二）：冲突对调研与顺序判定——候选集是已过闸
+	// 的合法意图（只决定谁先做，不触碰闸门层），arbiter_resolve 提议 + 宿主落
+	// 笔。chat_visible=false 不进选择器（与 edge_exec 同款）；serial 单轮 15min
+	// （intp(900)）。
+	{"arbiter", "意图仲裁", "assistant", "意图顺序仲裁者：两个意图被判定互斥时，调研双方证据（覆盖进度/事实/发现/业务图）并判定先执行哪一方；证据同级宁 defer 勿瞎裁，连续 defer 触发熔断冻结等人。", nil, false, intp(900)},
 	//
 	// 以下三者是【确定性基础设施】，刻意不作为 agent 落库：
 	//   - policy-gate：它的裁决（scope、tier2 一致性、工具熔断、群组额度状态、anomaly 标记）
@@ -668,6 +678,14 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 			return fmt.Errorf("seed edge_exec chat_visible: %w", err)
 		}
 		_ = d.SetSetting("edge_exec_chat_visible_v1", "true")
+	}
+	// arbiter 同款藏出（0.14.1 批次二）：仲裁者是后台调度唤醒的执行体，不进
+	// 选择器；一次性旗标同款语义。
+	if v, _, _ := d.GetSetting("arbiter_chat_visible_v1"); v != "true" {
+		if _, err := d.Exec(`UPDATE agents SET chat_visible=false WHERE key='arbiter'`); err != nil {
+			return fmt.Errorf("seed arbiter chat_visible: %w", err)
+		}
+		_ = d.SetSetting("arbiter_chat_visible_v1", "true")
 	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (用户
 	// 需要时自行启用), no proxy by default. The traffic-capture toggle injects/strips
