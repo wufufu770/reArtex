@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.0] - 2026-11-15
+
+### 移除（用户裁定：版本错位提示弹窗——换装提醒是一次性场景，不需要常驻轮询机制）
+- 移除 0.14.6 F12 的版本错位检测（client-error-boot 的 /api/health 轮询比对 + 无限期 toast + build.sh 的 NEXT_PUBLIC_ARTEX_VERSION 注入）。错误上报（0.13.5）不受影响。
+- 验证：build/tsc/biome 全绿；产物中提示串清零。
+- 对齐检查：无新功能点；/api/health 既有面不受影响。
+
+
+
+本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+
+> 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
+> 不自动同步上游 ARTEX 的变更。
+
 ## [0.14.9] - 2026-11-15
 
 ### 新增（v0.14 批次八收官：交付质量——e2e 进 CI / precommit 执行化 / 备份脚本 / 供应链可信）

@@ -127,9 +127,7 @@ else
   if [ "${ARTEX_SKIP_NPM_CI:-0}" != "1" ]; then
     (cd web && npm ci)
   fi
-  # 版本注入（0.14.6 F12）：前端拿构建时版本与运行中 /api/health 比对，错位即
-  # 提示刷新（发版后旧 HTML 指向新 chunk 的错位面）。
-  (cd web && NEXT_PUBLIC_ARTEX_VERSION="${ARTEX_BUILD_VERSION:-$(cat VERSION 2>/dev/null || echo dev)}" npm run build:static)
+  (cd web && npm run build:static)
   info "同步前端资源到 server/webui/dist"
   mkdir -p server/webui/dist
   rsync -a --delete web/out/ server/webui/dist/
