@@ -5,7 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.8] - 2026-11-15
+## [0.14.9] - 2026-11-15
+
+### 新增（v0.14 批次八收官：交付质量——e2e 进 CI / precommit 执行化 / 备份脚本 / 供应链可信）
+- **H1 e2e 冒烟进 CI**：scripts/e2e_smoke.sh（起内嵌前端真服务 → 45 条路由 HTTP 200 → 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识）；ci.yml 新增独立 e2e-smoke job（frontend 产物 + PG service，本地已实测通过）。渲染层回归从此在 CI 里跑，不再靠人肉。
+- **H2 precommit 执行化**：scripts/precommit-test.sh（go build/vet + 全量测试 CI 同款 + tsc + biome 相对基线；--quick 跳全量）——开发纪律 §1「先运行后提交」从纪律变成一条命令。
+- **H3 备份脚本**：scripts/backup.sh（pg_dump + 工作目录打包排除 logs + **审计链头单独导出**——哈希链的跨介质防篡改闭环）。compose 一键栈核对确认已在位（secret 供给/cap_drop/迁移连接分离，不重复施工）。
+- **E11 供应链可信**：release.yml 增 syft SBOM（SPDX JSON，挂 release 资产）+ GitHub artifact build provenance（attestation 可验证产物由本仓库本 workflow 构建）。
+- **B2/B3 核对确认**：建群 UI 无套餐/证据保全写入口（写入口仅 API 且显式拒绝带明确文案）——UI 置灰实际已在位，不重复施工。
+- 验证：e2e 冒烟本地实跑通过（45 页/URL 语义/标识全过）；脚本可执行位赋权；YAML 合法性校验。
+- 对齐检查：无新用户功能面；交付质量设施（CI/脚本）为行为面，入盘点表。
+
+
 
 ### 改进（v0.14 批次七：前端可维护性——温和拆分试点；大改按「不能弄坏任何东西」纪律分批推进）
 - **G1 试点：findings 页统计卡提取**（1300+ 行页文件 → `_components/finding-stats.tsx` 纯展示组件）——零行为变化（stats 进、卡片网格出）；页文件后续拆分按同款「独立可读的展示块」粒度分批推进。tasks 页（3200 行）拆分排后续批次（拆分是机械工作但验证成本高，一次全拆与红线冲突）。

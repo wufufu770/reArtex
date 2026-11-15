@@ -104,11 +104,25 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip > SHA256SUMS
+      # 供应链可信（0.14.9 批次八 E11）：SBOM（syft，SPDX JSON）+ 构建来源
+      # 证明（GitHub artifact attestation——证明产物由本仓库本 workflow 在此
+      # commit 构建，可 gh attestation verify 验证）。SBOM 也挂 release 资产。
+      - uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          artifact-name: artex-linux-amd64.zip
+          output-file: dist/sbom.spdx.json
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/SHA256SUMS
+            dist/sbom.spdx.json
           # 正文取仓库里的 RELEASE_NOTES.md（打 tag 前写好）：自动生成的提交列表
           # 附在其后。此前正文只有一行 compare 链接 —— 没人话。
           body_path: RELEASE_NOTES.md

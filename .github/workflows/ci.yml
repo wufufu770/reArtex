@@ -159,3 +159,40 @@ jobs:
           fetch-depth: 0
       - name: 扫描敏感信息（整棵树 + 全部历史）
         run: bash scripts/scan-sensitive.sh all
+
+  # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
+  # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend
+  # job 的 web-dist）与真实 PG（service；应用起库即跑迁移）。
+  e2e-smoke:
+    needs: [frontend, test]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: artex
+          POSTGRES_PASSWORD: artex
+          POSTGRES_DB: artex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U artex -d artex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ARTEX_PG_DSN: postgres://artex:artex@localhost:5432/artex?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: server/webui/dist
+      - name: e2e smoke（45 路由 + URL 语义 + 平台标识）
+        run: |
+          go build -tags embedui -o /tmp/artex-e2e ./cmd/artex
+          ./scripts/e2e_smoke.sh /tmp/artex-e2e 8791
