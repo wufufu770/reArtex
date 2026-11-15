@@ -1048,6 +1048,7 @@ func (s *Server) Handler() http.Handler {
 	// 报告中心（/system/reports）：最终报告统一管理——存库/在线编辑/下载导出。
 	mux.HandleFunc("GET /api/reports", s.reportsList)
 	mux.HandleFunc("POST /api/reports", s.reportsCreate)
+	mux.HandleFunc("POST /api/reports/generate", s.reportGenerate)
 	mux.HandleFunc("GET /api/reports/discover", s.reportsDiscover)
 	mux.HandleFunc("POST /api/reports/import", s.reportsImport)
 	mux.HandleFunc("GET /api/reports/{id}", s.reportsGet)

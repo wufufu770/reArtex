@@ -533,6 +533,12 @@ export const api = {
     get<{ gaps: CoverageGap[]; total: number }>(`/tasks/${taskId}/gaps${state ? `?state=${state}` : ""}`),
   coverageGapClose: (taskId: string, gid: number, reason: string) =>
     post<{ ok: boolean }>(`/tasks/${taskId}/gaps/${gid}/close`, { reason }),
+  // 报告生成器（0.14.5 批次四：确定性拼装初稿；终审人工）。
+  reportGenerate: (taskId: number, title?: string) =>
+    post<{ ok: boolean; report_id: number; title: string; findings: number; diffs: number }>("/reports/generate", {
+      task_id: taskId,
+      title: title ?? "",
+    }),
   // 存量重评（E1-7：确定性规则出候选；默认 dry-run，apply=true 才落库）。
   findingsRerate: (taskId: number | null, apply: boolean) =>
     post<{ items: RerateCandidate[]; count: number; applied: number; apply: boolean }>("/exploration/findings/rerate", {

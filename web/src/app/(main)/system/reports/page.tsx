@@ -47,6 +47,25 @@ export default function ReportsPage() {
   const [importLoaded, setImportLoaded] = React.useState(false);
   const [importing, setImporting] = React.useState("");
 
+  // 从任务生成（0.14.5 批次四）：确定性拼装初稿，终审人工。
+  const [genTaskID, setGenTaskID] = React.useState("");
+  const [genBusy, setGenBusy] = React.useState(false);
+
+  const doGenerate = async () => {
+    if (!genTaskID.trim()) return;
+    setGenBusy(true);
+    try {
+      const r = await api.reportGenerate(Number(genTaskID));
+      toast.success(`初稿已生成：「${r.title}」（报告中心可编辑）`);
+      setGenTaskID("");
+      load();
+    } catch (e) {
+      toast.error(`生成失败：${(e as Error).message}`);
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
   const load = React.useCallback(() => {
     api
       .reports()
@@ -161,11 +180,11 @@ export default function ReportsPage() {
             type="button"
             disabled={importing === c.path}
             onClick={() => doImport(c)}
-            className="hover:bg-muted/50 flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-sm transition disabled:opacity-50"
+            className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-sm transition hover:bg-muted/50 disabled:opacity-50"
           >
-            <FileTextIcon className="text-muted-foreground size-4 shrink-0" />
+            <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate font-mono text-xs">{c.path}</span>
-            <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+            <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
               {c.size != null ? fmtBytes(c.size) : ""}
             </span>
           </button>
@@ -200,10 +219,10 @@ export default function ReportsPage() {
           </TableHeader>
           <TableBody>
             {reports.map((r) => (
-              <TableRow key={r.id} className="hover:bg-muted/40 cursor-pointer" onClick={() => openRow(r)}>
+              <TableRow key={r.id} className="cursor-pointer hover:bg-muted/40" onClick={() => openRow(r)}>
                 <TableCell className="font-medium">
                   <span className="flex items-center gap-2">
-                    <FileTextIcon className="text-muted-foreground size-4 shrink-0" />
+                    <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
                     {r.title}
                   </span>
                 </TableCell>
@@ -219,8 +238,8 @@ export default function ReportsPage() {
                 </TableCell>
                 <TableCell className="text-muted-foreground text-xs tabular-nums">{fmtTime(r.updated_at)}</TableCell>
                 <TableCell className="text-right">
-                  // biome-ignore lint/a11y/noStaticElementInteractions: 行内操作区仅阻止冒泡，不做交互元素（与 system/mcp 页同款纪律）
                   <span
+                    // biome-ignore lint/a11y/noStaticElementInteractions: 行内操作区仅阻止冒泡，不做交互元素（与 system/mcp 页同款纪律）
                     className="inline-flex items-center gap-1"
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => e.stopPropagation()}
@@ -232,7 +251,7 @@ export default function ReportsPage() {
                       <DownloadIcon className="size-3.5" />
                     </Button>
                     <Button size="icon" variant="ghost" className="size-7" title="删除" onClick={() => remove(r)}>
-                      <Trash2Icon className="text-destructive size-3.5" />
+                      <Trash2Icon className="size-3.5 text-destructive" />
                     </Button>
                   </span>
                 </TableCell>
@@ -254,6 +273,24 @@ export default function ReportsPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          {/* 从任务生成（0.14.5 批次四）：确定性拼装初稿，终审人工 */}
+          <div className="flex items-center gap-1.5 rounded-md border px-2">
+            <input
+              className="h-8 w-28 bg-transparent text-sm outline-none"
+              placeholder="任务 id"
+              value={genTaskID}
+              onChange={(e) => setGenTaskID(e.target.value)}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={!genTaskID.trim() || genBusy}
+              onClick={doGenerate}
+            >
+              {genBusy ? "生成中…" : "从任务生成初稿"}
+            </Button>
+          </div>
           <Button variant="outline" onClick={openImport}>
             <FileTextIcon /> 从工作空间导入
           </Button>
