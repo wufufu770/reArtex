@@ -5,7 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.6] - 2026-11-15
+## [0.14.7] - 2026-11-15
+
+### 新增（v0.14 批次六：方法论 DB 化——内置本体留代码常量，DB 存覆盖与自定义）
+- **数据层**：`db/schema_edge2.sql`（edge_methodologies：source=custom|builtin-override；tier/grade CHECK）+ db/edge_methodology.go（Upsert/Delete（custom 删，builtin-override 恢复默认）/List）+ EnsureEdge2Schema 启动接线。**红线**：内置 12 条的本体与判据在代码常量（internal/edge 注册表编译期钉死），DB 只持久化内置条目的启停/排序覆盖与用户自定义全量。
+- **internal/edge 增量**：Register 增 initDone/builtinRegistered 标记（init 注册=内置，运行期注册=自定义）+ Unregister（内置 id 拒绝移除）——自定义条目经同一套注册期校验（五类判据/上限强制/隐喻不带判据）后落 DB，不进本轮内置轮换 map（读取侧重新校验合成，无重启前后行为漂移）。
+- **REST 五条**：GET 合并视图（内置 ∪ 自定义，覆盖行生效）/ PUT /{id}（内置=覆盖行本体从代码常量补齐）/ DELETE /{id}（custom 删 / 内置=恢复默认）/ export / import（逐条过同套校验，rejected 回传）。旧只读 handler 替换为合并视图。
+- 运行抓出并修复两处：PUT 内置覆盖行本体字段空撞 CHECK（从代码常量补齐）；List 的 heuristic_tags jsonb 直接 Scan []string 失败（RawMessage 中转 Unmarshal）。
+- 验证：build/vet/edge 包回归全绿；实机八步全链——合并视图 12 内置→内置覆盖生效（enabled=False/priority=5）→恢复默认（True/90）→非法导入拒（隐喻带判据 rejected）→合法导入→清理。
+- 对齐检查：合并视图=偏锋总览页既有数据源（前端零改动自动获得自定义条目）；import/export 为行为面（运维通道，入盘点表）。
+
+
 
 ### 新增（v0.14 批次五：平台健壮性——五件套）
 - **E1 getTask 只读回源**：内存任务注册表 miss 时回 DB 读任务元信息（readonly_backfill=true 标记 + engine_mode=readonly，不重建 manager 态）——直插 DB 的任务行此前对运行中服务不可见（全量审查实测的管理面 404）。实机验证 ✓。

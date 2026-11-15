@@ -129,7 +129,31 @@ func Register(m Methodology) error {
 	}
 	cp := m
 	registry[m.ID] = &cp
+	if initDone {
+		return nil // init 之后的运行期注册（自定义条目校验路径）不标记内置
+	}
+	builtinRegistered[m.ID] = true
 	return nil
+}
+
+// initDone 在 builtin() 全部注册完成后置位（Register 的内置标记依据）。
+var initDone bool
+
+// builtinRegistered 记录 init 注册的内置 id 集合（Unregister 的拒绝依据）。
+var builtinRegistered = map[string]bool{}
+
+// Unregister 从进程注册表移除一条方法论（0.14.7 批次六）：自定义方法论经
+// Register 校验后落 DB 持久化，不进本轮内置轮换 map（读取侧重新校验合成，
+// 避免重启前后的行为漂移）。内置 id（init 注册）拒绝移除——代码常量纪律。
+func Unregister(id string) bool {
+	if builtinRegistered[id] {
+		return false
+	}
+	if _, ok := registry[id]; !ok {
+		return false
+	}
+	delete(registry, id)
+	return true
 }
 
 // Get 按 id 取方法论；未启用也返回（调用方按 Enabled 决定是否可用——前端要能
@@ -298,4 +322,5 @@ func init() {
 		HeuristicTags: []string{"自行暴露", "调试面", "低接触优先"},
 		Enabled:       true, Priority: 7,
 	}))
+	initDone = true
 }

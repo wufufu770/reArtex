@@ -495,6 +495,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureGapSchema(); err != nil {
 			return fmt.Errorf("apply gap schema: %w", err)
 		}
+		// 方法论配置的 DDL：edge_methodologies 一表（db/schema_edge2.sql）。
+		// 同上——内置本体留代码常量，DB 只存启停/排序覆盖与用户自定义。
+		if err := schemaDB.EnsureEdge2Schema(); err != nil {
+			return fmt.Errorf("apply edge-methodology schema: %w", err)
+		}
 		// 把受限运行角色的权限收敛到最小集（幂等）。表集随 schema 演进，
 		// 所以每次启动都重授一次：新增的表自动进授权范围，不用重跑脚本。
 		if adminDSN != "" {

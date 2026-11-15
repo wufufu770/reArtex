@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/internal/edge"
 )
 
 // bizGraphHandler 处理 GET /api/business-graph。
@@ -270,25 +269,6 @@ func (s *Server) taskEdgeCoverageHandler(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// edgeMethodologiesHandler 处理 GET /api/edge/methodologies：方法论注册表
-//（判据类型/上限参数/证据等级/启用状态——偏锋总览页与人工复盘的数据源）。
-func (s *Server) edgeMethodologiesHandler(w http.ResponseWriter, r *http.Request) {
-	all := edge.ListAll()
-	out := make([]map[string]any, 0, len(all))
-	for _, m := range all {
-		row := map[string]any{
-			"id": m.ID, "name": m.Name, "tier": m.Tier,
-			"evidence_grade": string(m.EvidenceGrade), "summary": m.Summary,
-			"enabled": m.Enabled, "priority": m.Priority, "heuristic_tags": m.HeuristicTags,
-		}
-		if m.Criterion != nil {
-			row["criterion"] = m.Criterion
-		}
-		out = append(out, row)
-	}
-	writeJSON(w, 200, map[string]any{"methodologies": out})
-}
-
 // edgeTasksHandler 处理 GET /api/edge/tasks：全部偏锋任务的总览
 //（判据进度 + 未收尾运行 + stop_reason 统计——判据触发率的评测口径数据源）。
 func (s *Server) edgeTasksHandler(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +295,10 @@ func (s *Server) bizRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/business-graph/diffs/batch-decision", s.bizDiffBatchDecisionHandler)
 	mux.HandleFunc("GET /api/tasks/{id}/biz-graph", s.bizTaskGraphHandler)
 	mux.HandleFunc("GET /api/tasks/{id}/edge-coverage", s.taskEdgeCoverageHandler)
-	mux.HandleFunc("GET /api/edge/methodologies", s.edgeMethodologiesHandler)
+	mux.HandleFunc("GET /api/edge/methodologies", s.edgeMethodologiesMerged)
+	mux.HandleFunc("PUT /api/edge/methodologies/{id}", s.edgeMethodologyPut)
+	mux.HandleFunc("DELETE /api/edge/methodologies/{id}", s.edgeMethodologyDelete)
+	mux.HandleFunc("GET /api/edge/methodologies/export", s.edgeMethodologyExport)
+	mux.HandleFunc("POST /api/edge/methodologies/import", s.edgeMethodologyImport)
 	mux.HandleFunc("GET /api/edge/tasks", s.edgeTasksHandler)
 }
