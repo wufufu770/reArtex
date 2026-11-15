@@ -14,10 +14,9 @@ import (
 // 用户收藏/历史记录不断链。只做整条重定向，不做通配。
 var legacyPageRedirects = map[string]string{
 	// v0.11.7：edge-exploration → pianfeng（偏锋总览页路径去 "edge" 关键词）。
+	// v0.15.1 拆分：pianfeng 恢复为独立真页面（0.11.8 的"并页"结构按用户裁定
+	// 还原），本链直达新页。
 	"/function/edge-exploration": "/function/pianfeng",
-	// v0.11.8 重构：偏锋总览并入业务建模页（?mode=edge）， pianfeng 独立路由取消。
-	// Redirect 落到已验证可达的页面 + query 参数切换模式。
-	"/function/pianfeng": "/function/business-graph?mode=edge",
 }
 
 // redirectTarget 拼重定向 Location：原请求带 query 时用 `?` 合并（legacy 目标自带

@@ -1295,7 +1295,9 @@ export interface EdgeMethodology {
   summary: string;
   enabled: boolean;
   priority: number;
-  heuristic_tags: string[];
+  // 兼容旧响应（0.14.7 前 omitempty 会省略空标签 → undefined）：消费侧一律
+  // (m.heuristic_tags ?? []) 防御，类型放宽为可选。
+  heuristic_tags?: string[];
   criterion?: { kind: string; bounds: { kind: string; limit: number }[] };
 }
 

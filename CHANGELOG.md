@@ -5,7 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.0] - 2026-11-15
+## [0.15.1] - 2026-11-15
+
+### 修复 + 拆分（用户报障根治：偏锋探索"页面渲染出错"的序列化回归 + 两入口拆分独立页面）
+- **偏锋探索渲染崩溃根因（实证修复）**：错误信息 `Cannot read properties of undefined (reading 'length')` 的根因是 **0.14.7 合并视图的序列化回归**——`methodologyPayload.HeuristicTags` 带 `omitempty`，内置一二级条目（8 条）无启发式标签时字段被省略 → 前端 `m.heuristic_tags` undefined → `EdgeOverviewPanel` 的 `.length` 崩溃。0.14.7 前的旧 handler 直接 marshal 结构体（无 json tag、字段恒在）故不崩。**不是技术栈问题**。修复三层：① 后端去 omitempty 且 nil→[]（实机：12 条全部输出 list）；② 前端类型放宽 + `(m.heuristic_tags ?? [])` 防御；③ 0.13.5 error boundary 兜底（本次报障正是它把白屏变成了带错误信息的可定位页面）。
+- **页面拆分（用户裁定还原 0.11.8 的"并页"结构）**：偏锋探索独立为 `/function/pianfeng` 真页面（sidebar 直达，复用 EdgeOverviewPanel）；business-graph 页移除"业务图/偏锋探索"tab 机制回归纯业务建模；legacy 链反转——pianfeng 恢复真路由（200），edge-exploration 308 直达 pianfeng；URL 矩阵测试同步更新（新增 pianfeng 200 两例 + legacy 链头带 query 用例）。F7 同 URL 消歧逻辑保留（通用机制，URL 不同后自然不触发）。
+- 验证：go build/vet/URL 矩阵测试全绿；前端 build/tsc/biome 全绿；pianfeng 页静态产物导出确认；实机——heuristic_tags 12 条全 list、pianfeng 200、business-graph 无 tab 残留、legacy 308 → pianfeng。
+- 对齐检查：偏锋探索前端入口从"页内模式"变回独立页（sidebar URL 更新）；无新后端功能点。
+
+
 
 ### 移除（用户裁定：版本错位提示弹窗——换装提醒是一次性场景，不需要常驻轮询机制）
 - 移除 0.14.6 F12 的版本错位检测（client-error-boot 的 /api/health 轮询比对 + 无限期 toast + build.sh 的 NEXT_PUBLIC_ARTEX_VERSION 注入）。错误上报（0.13.5）不受影响。

@@ -19,6 +19,7 @@ func webuiTestFS() fs.FS {
 	return fstest.MapFS{
 		"index.html":                         &fstest.MapFile{Data: []byte("<html>root</html>")},
 		"function/business-graph/index.html": &fstest.MapFile{Data: []byte("<html>biz</html>")},
+		"function/pianfeng/index.html":       &fstest.MapFile{Data: []byte("<html>edge</html>")},
 		"_next/static/x.js":                  &fstest.MapFile{Data: []byte("console.log(1)")},
 	}
 }
@@ -44,10 +45,10 @@ func TestWebUIPathMatrix(t *testing.T) {
 		{name: "根路径200", path: "/", wantCode: 200, wantBody: "<html>root</html>"},
 		{name: "静态资源200", path: "/_next/static/x.js", wantCode: 200, wantBody: "console.log(1)"},
 		{name: "未知路径SPA兜底200", path: "/no/such/route", wantCode: 200, wantBody: "<html>root</html>"},
-		{name: "legacy干净路径308", path: "/function/pianfeng", wantCode: 308, wantLoc: "/function/business-graph?mode=edge"},
-		{name: "legacy带尾斜杠也308", path: "/function/pianfeng/", wantCode: 308, wantLoc: "/function/business-graph?mode=edge"},
+		{name: "pianfeng已恢复真页面200", path: "/function/pianfeng", wantCode: 200, wantBody: "<html>edge</html>"},
+		{name: "pianfeng尾斜杠200同内容", path: "/function/pianfeng/", wantCode: 200, wantBody: "<html>edge</html>"},
 		{name: "legacy链头308", path: "/function/edge-exploration", wantCode: 308, wantLoc: "/function/pianfeng"},
-		{name: "legacy带query保留", path: "/function/pianfeng?from=x", wantCode: 308, wantLoc: "/function/business-graph?mode=edge&from=x"},
+		{name: "legacy链头带query保留", path: "/function/edge-exploration?from=x", wantCode: 308, wantLoc: "/function/pianfeng?from=x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

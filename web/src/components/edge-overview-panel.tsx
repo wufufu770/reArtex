@@ -148,9 +148,9 @@ export function EdgeOverviewPanel() {
               <div className="mt-2 flex flex-wrap gap-1">
                 <CriterionBadges m={m} />
               </div>
-              {m.heuristic_tags.length > 0 && (
+              {(m.heuristic_tags ?? []).length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-1">
-                  {m.heuristic_tags.map((tag) => (
+                  {(m.heuristic_tags ?? []).map((tag) => (
                     <Badge key={tag} variant="outline" className="text-[10px]">
                       {tag}
                     </Badge>

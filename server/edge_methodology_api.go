@@ -29,7 +29,7 @@ type methodologyPayload struct {
 	EvidenceGrade string                  `json:"evidence_grade"`
 	Summary       string                  `json:"summary"`
 	Criterion     *edge.CompletionCriterion `json:"criterion,omitempty"`
-	HeuristicTags []string                `json:"heuristic_tags,omitempty"`
+	HeuristicTags []string                `json:"heuristic_tags"` // 无 omitempty：空标签也输出 []，旧前端对 undefined.length 无防御（0.14.7 序列化回归根因）
 	Enabled       bool                    `json:"enabled"`
 	Priority      int                     `json:"priority"`
 	Source        string                  `json:"source,omitempty"` // 导出时标注
@@ -75,10 +75,14 @@ func (s *Server) mergedMethodologies() ([]methodologyPayload, error) {
 	}
 	out := []methodologyPayload{}
 	for _, m := range edge.ListAll() {
+		tags := m.HeuristicTags
+		if tags == nil {
+			tags = []string{} // nil → []（前端 undefined/null 防御双保险，0.15.1 根因修复）
+		}
 		p := methodologyPayload{
 			ID: m.ID, Name: m.Name, Tier: m.Tier,
 			EvidenceGrade: string(m.EvidenceGrade), Summary: m.Summary,
-			Criterion: m.Criterion, HeuristicTags: m.HeuristicTags,
+			Criterion: m.Criterion, HeuristicTags: tags,
 			Enabled: m.Enabled, Priority: m.Priority, Source: "builtin",
 		}
 		if ov, ok := overrides[m.ID]; ok {
