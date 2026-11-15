@@ -62,10 +62,13 @@ echo "── 关键内容检查"
 grep -q "ARTEX" "$TMP/data" 2>/dev/null || true
 BODY=$(curl -s -m 5 "$BASE/login")
 echo "$BODY" | grep -q "ARTEX" || { echo "   ✗ 登录页缺平台标识"; FAIL=1; }
-# 尾斜杠与 legacy 兼容链（0.13.6 语义：尾斜杠 200 serve）
+# 尾斜杠与 legacy 兼容链（0.15.1 语义：pianfeng 真页面 200（无斜杠/尾斜杠同内容），
+# legacy 链头 edge-exploration 308 → pianfeng；与 server/webui_serve_test.go 矩阵同口径）
 CODE_TRAIL=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$BASE/function/business-graph/")
 [ "$CODE_TRAIL" = "200" ] || { echo "   ✗ 尾斜杠应 200 serve，got $CODE_TRAIL"; FAIL=1; }
-CODE_LEGACY=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$BASE/function/pianfeng")
-[ "$CODE_LEGACY" = "308" ] || { echo "   ✗ legacy 应 308，got $CODE_LEGACY"; FAIL=1; }
+CODE_PIANFENG=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$BASE/function/pianfeng")
+[ "$CODE_PIANFENG" = "200" ] || { echo "   ✗ pianfeng 无斜杠应 200（0.15.1 真页面），got $CODE_PIANFENG"; FAIL=1; }
+CODE_LEGACY=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "$BASE/function/edge-exploration")
+[ "$CODE_LEGACY" = "308" ] || { echo "   ✗ legacy 链头应 308 → pianfeng，got $CODE_LEGACY"; FAIL=1; }
 
 [ "$FAIL" = "0" ] && echo "✅ e2e 冒烟通过" || { echo "✗ e2e 冒烟失败"; exit 1; }
