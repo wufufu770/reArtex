@@ -256,14 +256,21 @@ export function BusinessGraphPage() {
 
   // 建图（主题切换时销毁重建；数据由上方 applyData effect 单独灌入——
   // 数据变化不重建整图）。画布配色跟随页面主题：G6 画布背景是硬编码 hex，
-  // 不跟随 CSS 变量，所以按 resolvedThemeMode 手动给两套（暗色下不再刺眼）。
+  // 不跟随 CSS 变量，所以画布用透明、由外层 bg-background 承担底色（0.15.4：
+  // 不再用 #111827 自成一块，UI 风格与全站主题一致），文字/边按明暗两套。
   const dark = theme === "dark";
   const canvas = React.useMemo(
     () =>
       dark
-        ? { bg: "#111827", labelFill: "#94a3b8", labelBg: "rgba(17,24,39,0.78)", edge: "#475569", edgeLabel: "#94a3b8" }
+        ? {
+            bg: "transparent",
+            labelFill: "#94a3b8",
+            labelBg: "rgba(17,24,39,0.78)",
+            edge: "#475569",
+            edgeLabel: "#94a3b8",
+          }
         : {
-            bg: "#f0f2f7",
+            bg: "transparent",
             labelFill: "#475569",
             labelBg: "rgba(255,255,255,0.75)",
             edge: "#94a3b8",
@@ -440,7 +447,7 @@ export function BusinessGraphPage() {
       {error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-600 text-xs">{error}</div>
       )}
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border">
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border bg-background">
         <div ref={containerRef} className="h-full w-full" />
         {graphError && (
           <div className="absolute inset-0 flex items-center justify-center">

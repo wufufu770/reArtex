@@ -137,3 +137,80 @@ func TestCriterionHash(t *testing.T) {
 		t.Fatal("unreachable")
 	}
 }
+
+// Upsert/RestoreBuiltin 运行期覆盖与恢复（0.15.4）：内置本体可全量覆盖且可
+// 回退；自定义可运行期注册/移除；硬约束对覆盖路径一视同仁。
+func TestUpsertOverrideRestore(t *testing.T) {
+	orig, _ := Get("stpa-uca")
+	if orig == nil {
+		// 兜底取任意内置条目（防御：id 变更时测试仍有效）。
+		all := ListAll()
+		if len(all) == 0 {
+			t.Fatal("注册表为空")
+		}
+		orig = all[0]
+	}
+	origSummary := orig.Summary
+	origPrio := orig.Priority
+
+	// ① 全量覆盖内置本体（换说明/优先级/停用）。
+	over := *orig
+	over.Summary = "覆盖后的说明"
+	over.Priority = 99
+	over.Enabled = false
+	if err := Upsert(over); err != nil {
+		t.Fatalf("内置覆盖被拒: %v", err)
+	}
+	got, ok := Get(over.ID)
+	if !ok {
+		t.Fatal("覆盖后 Get 失败")
+	}
+	if got.Summary != "覆盖后的说明" || got.Priority != 99 || got.Enabled {
+		t.Fatalf("覆盖未生效: %+v", got)
+	}
+	if got == orig {
+		t.Fatal("覆盖后仍是原指针")
+	}
+
+	// ② 覆盖路径过同套硬约束：tier1 缺判据被拒。
+	bad := *orig
+	bad.Tier = 1
+	bad.Criterion = nil
+	if err := Upsert(bad); err == nil {
+		t.Fatal("tier1 缺判据的覆盖未被拒")
+	}
+
+	// ③ 恢复默认：本体/启停/优先级回到代码常量。
+	restored, ok := RestoreBuiltin(over.ID)
+	if !ok {
+		t.Fatal("RestoreBuiltin 失败")
+	}
+	if restored.Summary != origSummary || restored.Priority != origPrio {
+		t.Fatalf("恢复默认不一致: %+v", restored)
+	}
+	if !IsBuiltin(over.ID) || IsBuiltin("no-such") {
+		t.Fatal("IsBuiltin 判定异常")
+	}
+
+	// ④ 自定义运行期注册/移除（写穿路径）。
+	cust := Methodology{ID: "test-custom", Name: "测试自定义", Tier: 2,
+		EvidenceGrade: "standard", Summary: "测试",
+		Criterion: &CompletionCriterion{Kind: CriterionCoverage,
+			Bounds: []UpperBound{{Kind: "target_set", Limit: 5}}},
+		Enabled: true, Priority: 1}
+	if err := Upsert(cust); err != nil {
+		t.Fatalf("自定义 Upsert 被拒: %v", cust.ID)
+	}
+	if _, ok := Get("test-custom"); !ok {
+		t.Fatal("自定义未注册进运行时")
+	}
+	if !Unregister("test-custom") {
+		t.Fatal("自定义 Unregister 失败")
+	}
+	if _, ok := Get("test-custom"); ok {
+		t.Fatal("自定义删除后仍驻留运行时")
+	}
+	if Unregister("stpa-uca") {
+		t.Fatal("内置 id 不应允许 Unregister")
+	}
+}

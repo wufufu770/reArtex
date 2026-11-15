@@ -1,15 +1,14 @@
 "use client";
 
-// 偏锋探索（0.15.3，按用户反馈二改）：
-//   · 方法论行可点开：完整说明/判据全称/全部标签/档位语义直接可读——0.15.2 把
-//     说明折进 hover title 是错误实现（悬停不可发现），点开看完整内容才是要求；
-//   · 轮换优先级就地可改、失焦/回车自动保存，砍掉逐行"保存"按钮；数字含义
-//     （大者优先，决定轮换顺序）在行 title 与展开档位行双处可读；
-//   · 内置条目本体与判据是代码常量（红线）——展开区如实只读，只可调启停/优先级，
-//     覆盖行可"恢复默认"；自定义条目展开区全量可编辑（名称/说明/档位/判据/标签）；
-//   · 运行记录展示真实数据（目标/状态/判据进度/运行态/停止史），可跳任务详情、
-//     可停止；有进行中的运行时 5s 轻轮询。
-// 视觉纪律延续：无标语/引导文字；文字只作为数据出现（档位行/判据行/状态行）。
+// 偏锋探索（0.15.4，按用户反馈三改）：
+//   · 每一条方法论（内置与自定义）都可点开全量编辑——名称/档位/证据级/判据
+//     类型与上限/说明/标签/优先级，走同一套注册期校验；内置条目保存为覆盖
+//     配置（builtin-override），「恢复默认」随时回退代码常量本体；
+//   · 后端配置写穿运行时注册表：启停/优先级/本体改动立即进入轮换与判定
+//     （0.15.3 前只改展示，轮换读不到——这是"功能是虚的"的最后一处根因）；
+//   · 方法论行可点开看完整内容；轮换优先级就地自动保存；运行记录展示真实
+//     数据并可跳任务详情（0.15.3 既定）。
+// 视觉纪律延续：无标语/引导文字；文字只作为数据出现。
 
 import * as React from "react";
 
@@ -219,7 +218,7 @@ export default function PianfengPage() {
       return;
     }
     setExpanded(m.id);
-    setDraft(m.source === "custom" ? draftOf(m) : null);
+    setDraft(draftOf(m)); // 所有条目统一全量编辑（内置=覆盖配置，恢复默认可回退）
   };
 
   const draftPayload = (d: MethDraft, enabled: boolean) => {
@@ -250,7 +249,7 @@ export default function PianfengPage() {
     };
   };
 
-  const saveCustom = async (m: MethRow) => {
+  const saveDraft = async (m: MethRow) => {
     if (!draft) return;
     const p = draftPayload(draft, m.enabled);
     if (p.error) {
@@ -264,7 +263,7 @@ export default function PianfengPage() {
       setDraft(null);
       load();
     } catch (e) {
-      // 自定义条目走注册期同套校验，后端会给出具体拒绝原因。
+      // 全量编辑走注册期同套校验，后端会给出具体拒绝原因。
       toast.error(`保存被拒：${(e as Error).message}`);
     }
   };
@@ -561,7 +560,7 @@ export default function PianfengPage() {
                       </div>
                     )}
 
-                    {m.source === "custom" && draft ? (
+                    {draft && (
                       <div className="mt-2.5 space-y-1.5">
                         <div className="flex flex-wrap items-center gap-2">
                           <Input
@@ -602,23 +601,30 @@ export default function PianfengPage() {
                             value={draft.priority}
                             onChange={(e) => setDraft({ ...draft, priority: e.target.value })}
                           />
-                          <Button size="sm" className="h-7 text-xs" onClick={() => saveCustom(m)}>
+                          <Button size="sm" className="h-7 text-xs" onClick={() => saveDraft(m)}>
                             保存
                           </Button>
+                          {m.source === "builtin-override" && (
+                            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => removeOrRestore(m)}>
+                              恢复默认
+                            </Button>
+                          )}
+                          {m.source === "custom" && !m.enabled && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-destructive text-xs"
+                              onClick={() => removeOrRestore(m)}
+                            >
+                              删除
+                            </Button>
+                          )}
                         </div>
-                      </div>
-                    ) : m.source === "builtin-override" ? (
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <span className="text-[11px] text-muted-foreground">
-                          内置条目：本体与判据为代码常量；当前为覆盖配置（启停/优先级）。
-                        </span>
-                        <Button variant="ghost" size="sm" className="h-6 text-[10px]" onClick={() => removeOrRestore(m)}>
-                          恢复默认
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="mt-2 text-[11px] text-muted-foreground">
-                        内置条目：本体与判据为代码常量，只可调启停与轮换优先级。
+                        {m.source === "builtin" && (
+                          <div className="text-[11px] text-muted-foreground">
+                            保存后将存为覆盖配置，可随时恢复默认。
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

@@ -96,16 +96,17 @@ type Methodology struct {
 	Priority      int                 // 轮换表盲选的排序（人配）
 }
 
-// registry 是进程级注册表。注册全部发生在 init（代码常量），无运行时注册入口
-// ——「三级条目不得自带判据」这类约束在编译期就定死，不给运行期留口子。
+// registry 是进程级注册表。init 注册内置本体（代码常量，备份于 builtinBackup）；
+// 运行期由 Upsert 写穿 DB 配置（内置覆盖/自定义）——轮换与判定读到的永远是
+// 合并后状态。「三级条目不得自带判据」这类约束对两条路径一视同仁（validate）。
 var registry = map[string]*Methodology{}
 
 // ErrInvalidMethodology 是 Register 的统一错误前缀。
 var ErrInvalidMethodology = errors.New("方法论注册被拒")
 
-// Register 注册一条方法论，注册期校验全部硬约束。返回错误即拒绝（E2 验收口径：
-// 空 CompletionCriterion 的条目无法注册；上限参数缺失无法注册）。
-func Register(m Methodology) error {
+// validate 是注册/覆盖共用的硬约束校验（E2 验收口径：空 CompletionCriterion
+// 无法落表；上限参数缺失无法落表；隐喻级不得自带判据）。
+func validate(m Methodology) error {
 	if m.ID == "" || m.Name == "" {
 		return fmt.Errorf("%w: id/name 必填", ErrInvalidMethodology)
 	}
@@ -124,6 +125,15 @@ func Register(m Methodology) error {
 	default:
 		return fmt.Errorf("%w: %s tier 必须是 1/2/3", ErrInvalidMethodology, m.ID)
 	}
+	return nil
+}
+
+// Register 注册一条方法论，注册期校验全部硬约束。返回错误即拒绝（E2 验收口径：
+// 空 CompletionCriterion 的条目无法注册；上限参数缺失无法注册）。
+func Register(m Methodology) error {
+	if err := validate(m); err != nil {
+		return err
+	}
 	if _, dup := registry[m.ID]; dup {
 		return fmt.Errorf("%w: %s 重复注册", ErrInvalidMethodology, m.ID)
 	}
@@ -133,6 +143,7 @@ func Register(m Methodology) error {
 		return nil // init 之后的运行期注册（自定义条目校验路径）不标记内置
 	}
 	builtinRegistered[m.ID] = true
+	builtinBackup[m.ID] = cp // 内置本体备份（RestoreBuiltin 的恢复源）
 	return nil
 }
 
@@ -141,6 +152,45 @@ var initDone bool
 
 // builtinRegistered 记录 init 注册的内置 id 集合（Unregister 的拒绝依据）。
 var builtinRegistered = map[string]bool{}
+
+// builtinBackup 备份 init 注册的内置本体（0.15.4：RestoreBuiltin 的恢复源——
+// 内置条目可被运行期 Upsert 全量覆盖，代码常量仍是「恢复默认」的源头）。
+var builtinBackup = map[string]Methodology{}
+
+// Upsert 运行期注册/覆盖（0.15.4，配置写穿）：条目存在则整体覆盖、不存在则
+// 注册；两条路径都过 validate 同套硬约束。内置条目被覆盖时 builtinBackup
+// 不动——恢复默认随时可回退。轮换（ListEnabled）、判定（Get）、agent 工具
+// （ListAll）读到的即此合并后状态。
+func Upsert(m Methodology) error {
+	if err := validate(m); err != nil {
+		return err
+	}
+	cp := m
+	registry[m.ID] = &cp
+	return nil
+}
+
+// UpsertValidate 只校验不落表（合并视图跳行判定用，与 Upsert 同一套硬约束）。
+func UpsertValidate(m Methodology) error {
+	return validate(m)
+}
+
+// RestoreBuiltin 恢复内置本体（删除覆盖行的运行期回退）：仅内置 id 有效。
+func RestoreBuiltin(id string) (Methodology, bool) {
+	orig, ok := builtinBackup[id]
+	if !ok {
+		return Methodology{}, false
+	}
+	cp := orig
+	registry[id] = &cp
+	return orig, true
+}
+
+// IsBuiltin 报告 id 是否为 init 注册的内置条目——内置性是代码事实，不受运行期
+// 覆盖影响（配置行 source 的判定依据）。
+func IsBuiltin(id string) bool {
+	return builtinRegistered[id]
+}
 
 // Unregister 从进程注册表移除一条方法论（0.14.7 批次六）：自定义方法论经
 // Register 校验后落 DB 持久化，不进本轮内置轮换 map（读取侧重新校验合成，

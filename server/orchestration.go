@@ -549,6 +549,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedBizTools()         // 业务图八工具播种（默认绑 bizmodeler）
 	s.seedBizModelerAgent()  // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
 	s.seedEdgeTools()        // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
+	s.syncEdgeRegistry()     // 方法论配置写穿运行时注册表（0.15.4：启停/优先级/本体覆盖+自定义，轮换读到合并态）
 	s.seedMpTools()          // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
 	s.seedArbiterTools()     // 意图仲裁工具播种（0.14.1，绑 arbiter）
 	s.ensureMpArtifactsDir() // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）

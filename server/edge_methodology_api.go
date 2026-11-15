@@ -1,18 +1,21 @@
 package server
 
-// 方法论配置的 REST 与合并视图（0.14.7，批次六 F2）：
+// 方法论配置的 REST 与合并视图（0.14.7，批次六 F2；0.15.4 全量可编+写穿运行时）：
 //
 //	GET  /api/edge/methodologies          合并视图（内置 ∪ 自定义，覆盖行生效）
-//	PUT  /api/edge/methodologies/{id}     写配置（内置=启停/排序覆盖；自定义=全量 upsert）
-//	DELETE /api/edge/methodologies/{id}   删自定义（内置行=恢复默认：删覆盖）
+//	PUT  /api/edge/methodologies/{id}     写配置（内置=全量覆盖存 builtin-override，可恢复默认；自定义=全量 upsert）
+//	DELETE /api/edge/methodologies/{id}   删自定义（内置行=恢复默认：删覆盖+运行时回退代码常量）
 //	GET  /api/edge/methodologies/export   导出 JSON（内置全量+自定义）
 //	POST /api/edge/methodologies/import   导入 JSON（逐条过 internal/edge 同套校验）
 //
-// 红线：内置方法论【本体】与判据在代码常量（internal/edge 注册表，编译期钉死）；
-// 导入的内/外部数据只能新增自定义条目或覆盖内置的启停/排序——覆盖不了判据。
+// 0.15.4 起内置条目【本体】也可经交互面全量编辑（用户授权：同套校验 +
+// builtin-override 持久化 + 恢复默认随时回退代码常量），且配置写穿运行时
+// 注册表——轮换/判定/agent 工具读到的即合并后状态（此前只改展示不生效，
+// 自定义条目甚至进不了轮换）。批量导入面维持只落启停/排序：外部数据不注入本体。
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 
@@ -35,7 +38,21 @@ type methodologyPayload struct {
 	Source        string                  `json:"source,omitempty"` // 导出时标注
 }
 
-// mergedMethodologies 是配置表 + 内置注册表的合并视图。
+// rowCriterion 解出配置行的判据 JSON（无/损坏返回 nil）。
+func rowCriterion(raw []byte) *edge.CompletionCriterion {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var c edge.CompletionCriterion
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil
+	}
+	return &c
+}
+
+// mergedMethodologies 是配置表 + 内置注册表的合并视图。覆盖行全量生效：
+// 0.15.4 起内置覆盖行携带本体（PUT 全量写入；0.15.4 前的旧行本体字段=当时
+// 从代码常量补齐的值，全量读行与读常量等价）。
 func (s *Server) mergedMethodologies() ([]methodologyPayload, error) {
 	pg := s.m.pg
 	rows, err := pg.ListEdgeMethodologies()
@@ -55,46 +72,58 @@ func (s *Server) mergedMethodologies() ([]methodologyPayload, error) {
 			EvidenceGrade: edge.EvidenceGrade(r.EvidenceGrade),
 			Summary:       r.Summary, HeuristicTags: r.HeuristicTags,
 			Enabled: r.Enabled, Priority: r.Priority,
+			Criterion: rowCriterion(r.Criterion),
 		}
-		if len(r.Criterion) > 0 && string(r.Criterion) != "null" {
-			var c edge.CompletionCriterion
-			if err := json.Unmarshal(r.Criterion, &c); err != nil {
-				continue // 损坏行跳过（导入时校验过，这里是防御）
-			}
-			m.Criterion = &c
-		}
-		if err := m.Criterion.Validate(); (m.Tier == 1 || m.Tier == 2) && err != nil {
+		if err := validatePayloadMethodology(m); (m.Tier == 1 || m.Tier == 2) && err != nil {
 			continue // 校验不过的 custom 行跳过（不进视图）
+		}
+		tags := m.HeuristicTags
+		if tags == nil {
+			tags = []string{}
 		}
 		customs = append(customs, methodologyPayload{
 			ID: m.ID, Name: m.Name, Tier: m.Tier,
 			EvidenceGrade: string(m.EvidenceGrade), Summary: m.Summary,
-			Criterion: m.Criterion, HeuristicTags: m.HeuristicTags,
+			Criterion: m.Criterion, HeuristicTags: tags,
 			Enabled: m.Enabled, Priority: m.Priority, Source: "custom",
 		})
 	}
 	out := []methodologyPayload{}
 	for _, m := range edge.ListAll() {
-		tags := m.HeuristicTags
-		if tags == nil {
-			tags = []string{} // nil → []（前端 undefined/null 防御双保险，0.15.1 根因修复）
-		}
 		p := methodologyPayload{
 			ID: m.ID, Name: m.Name, Tier: m.Tier,
 			EvidenceGrade: string(m.EvidenceGrade), Summary: m.Summary,
-			Criterion: m.Criterion, HeuristicTags: tags,
+			Criterion: m.Criterion, HeuristicTags: tagsOrEmpty(m.HeuristicTags),
 			Enabled: m.Enabled, Priority: m.Priority, Source: "builtin",
 		}
 		if ov, ok := overrides[m.ID]; ok {
-			p.Enabled = ov.Enabled
-			p.Priority = ov.Priority
-			p.Source = "builtin-override" // 前端据此区分「恢复默认」与「删除」（导入侧不读 source，无回环影响）
+			// 覆盖行全量生效（运行时注册表同样已被写穿——两处一致）。
+			p = methodologyPayload{
+				ID: ov.ID, Name: ov.Name, Tier: ov.Tier,
+				EvidenceGrade: ov.EvidenceGrade, Summary: ov.Summary,
+				Criterion: rowCriterion(ov.Criterion),
+				HeuristicTags: tagsOrEmpty(ov.HeuristicTags),
+				Enabled:       ov.Enabled, Priority: ov.Priority,
+				Source: "builtin-override",
+			}
 		}
 		out = append(out, p)
 	}
 	out = append(out, customs...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
 	return out, nil
+}
+
+func tagsOrEmpty(t []string) []string {
+	if t == nil {
+		return []string{} // nil → []（前端 undefined/null 防御，0.15.1 根因口径）
+	}
+	return t
+}
+
+// validatePayloadMethodology 复用注册表硬约束（不落表，只判合法性）。
+func validatePayloadMethodology(m edge.Methodology) error {
+	return edge.UpsertValidate(m)
 }
 
 func (s *Server) edgeMethodologiesMerged(w http.ResponseWriter, _ *http.Request) {
@@ -113,41 +142,23 @@ func (s *Server) edgeMethodologyPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.ID = r.PathValue("id")
-	_, isBuiltin := edge.Get(p.ID)
 	source := "custom"
-	if isBuiltin {
-		// 内置条目：只接受启停/排序覆盖（本体与判据不可被外部数据改）；
-		// 覆盖行的本体字段从代码常量补齐（payload 可能只带 enabled/priority）。
-		if p.Name != "" && p.Name != edgeMustName(p.ID) {
-			writeErr(w, 400, "内置方法论的本体不可修改：只能改 enabled/priority")
-			return
-		}
-		p.Name, p.Tier, p.EvidenceGrade, p.Summary, p.Criterion, p.HeuristicTags = edgeMustAll(p.ID)
+	if edge.IsBuiltin(p.ID) {
+		// 内置条目：全量覆盖（本体/判据/标签/说明 + 启停/优先级），存
+		// builtin-override——同套校验，恢复默认随时回退代码常量（0.15.4）。
 		source = "builtin-override"
 	}
-	// 自定义条目：全量过注册期校验（同 internal/edge.Register 的硬约束）。
+	// 全量过注册期同套校验（UpsertValidate 的规则）并写穿运行时注册表：
+	// 轮换（ListEnabled）、判定（Get）、agent 工具（ListAll）立即生效。
 	m := edge.Methodology{
 		ID: p.ID, Name: p.Name, Tier: p.Tier,
 		EvidenceGrade: edge.EvidenceGrade(p.EvidenceGrade),
 		Summary:       p.Summary, Criterion: p.Criterion,
 		HeuristicTags: p.HeuristicTags, Enabled: p.Enabled, Priority: p.Priority,
 	}
-	if !isBuiltin {
-		if err := edge.Register(m); err != nil {
-			// 注册失败=校验拒（重复/缺判据/隐喻带判据等）——Register 会污染进程
-			// map 吗？不会：Register 校验失败时不写 map（先校验后赋值）。
-			writeErr(w, 400, err.Error())
-			return
-		}
-		// 校验过的条目从进程 map 移除（它是持久化条目，读取时再校验合成——
-		// 不参与本轮内置轮换，避免重启前后的行为漂移）。
-		edge.Unregister(p.ID)
-	} else {
-		// 内置覆盖行：tier/evidence 不改动（保留 payload 校验语义）。
-		if _, ok := edge.Get(p.ID); !ok {
-			writeErr(w, 404, "内置方法论不存在")
-			return
-		}
+	if err := edge.Upsert(m); err != nil {
+		writeErr(w, 400, err.Error())
+		return
 	}
 	row := db.EdgeMethodologyRow{
 		ID: p.ID, Source: source, Name: p.Name, Tier: p.Tier,
@@ -168,11 +179,14 @@ func (s *Server) edgeMethodologyPut(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) edgeMethodologyDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, isBuiltin := edge.Get(id); isBuiltin {
-		// 内置覆盖行删除=恢复默认（启停/排序回到代码常量值）。
+	if edge.IsBuiltin(id) {
+		// 内置覆盖行删除=恢复默认（删 DB 覆盖 + 运行时回退代码常量本体）。
 		if err := s.m.pg.DeleteEdgeMethodologyBuiltinOverride(id); err != nil {
 			writeErr(w, 400, err.Error())
 			return
+		}
+		if _, ok := edge.RestoreBuiltin(id); !ok {
+			log.Printf("[edge] 恢复默认 %s：运行时无内置备份（仅告警，DB 已回退）", id)
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "restored_default": true})
 		return
@@ -181,7 +195,31 @@ func (s *Server) edgeMethodologyDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	edge.Unregister(id) // 写穿反向：自定义删除后从运行时注册表移除（0.15.4）
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// syncEdgeRegistry 把 DB 方法论配置写穿进程注册表（0.15.4）：builtin-override
+// 行全量覆盖（本体+启停+优先级），custom 行注册。启动一次 + 配写后调用；
+// 校验不过的行跳过并记日志（不阻断启动，运行时退回代码常量）。
+func (s *Server) syncEdgeRegistry() {
+	rows, err := s.m.pg.ListEdgeMethodologies()
+	if err != nil {
+		log.Printf("[edge] 方法论配置同步失败（运行时用代码常量）: %v", err)
+		return
+	}
+	for _, r := range rows {
+		m := edge.Methodology{
+			ID: r.ID, Name: r.Name, Tier: r.Tier,
+			EvidenceGrade: edge.EvidenceGrade(r.EvidenceGrade),
+			Summary:       r.Summary, HeuristicTags: r.HeuristicTags,
+			Enabled: r.Enabled, Priority: r.Priority,
+			Criterion: rowCriterion(r.Criterion),
+		}
+		if err := edge.Upsert(m); err != nil {
+			log.Printf("[edge] 配置行 %s(%s) 校验不过，跳过: %v", r.ID, r.Source, err)
+		}
+	}
 }
 
 func (s *Server) edgeMethodologyExport(w http.ResponseWriter, _ *http.Request) {
@@ -227,11 +265,10 @@ func (s *Server) edgeMethodologyImport(w http.ResponseWriter, r *http.Request) {
 				Summary:       p.Summary, Criterion: p.Criterion,
 				HeuristicTags: p.HeuristicTags, Enabled: p.Enabled, Priority: p.Priority,
 			}
-			if err := edge.Register(m); err != nil {
+			if err := edge.UpsertValidate(m); err != nil {
 				rejected = append(rejected, p.ID)
 				continue
 			}
-			edge.Unregister(p.ID)
 		}
 		if err := s.m.pg.UpsertEdgeMethodology(row); err != nil {
 			rejected = append(rejected, p.ID)
@@ -239,6 +276,7 @@ func (s *Server) edgeMethodologyImport(w http.ResponseWriter, r *http.Request) {
 		}
 		applied = append(applied, p.ID)
 	}
+	s.syncEdgeRegistry() // 导入写穿运行时（0.15.4：自定义条目立即参与轮换/判定）
 	writeJSON(w, 200, map[string]any{"ok": true, "applied": applied, "rejected": rejected})
 }
 
