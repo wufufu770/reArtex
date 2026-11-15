@@ -44,18 +44,23 @@ func (s *Server) mpTokensHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"tokens": tokens})
 	case http.MethodPost:
-		var req struct {
-			TaskID int64  `json:"task_id"`
-			AppID  string `json:"app_id"`
-			Label  string `json:"label"`
-			Value  string `json:"value"`
-			Scope  string `json:"scope"`
-		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err := json.Unmarshal(body, &req); err != nil {
-			writeErr(w, 400, "请求体非法")
-			return
-		}
+	var req struct {
+		TaskID int64  `json:"task_id"`
+		AppID  string `json:"app_id"`
+		Label  string `json:"label"`
+		Value  string `json:"value"`
+		Scope  string `json:"scope"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "请求体非法")
+		return
+	}
+	// 凭据强制加密模式（0.14.6 E2）：开启后未配置主密钥时拒绝明文凭据写入。
+	if requireMasterKeyBlocked(s) {
+		writeErr(w, 409, "已开启凭据强制加密模式（require_master_key）：未配置主密钥（ARTEX_MASTER_KEY_FILE），请先配置主密钥再保存 token")
+		return
+	}
 		fp, encrypted, err := pg.UpsertMiniprogramToken(req.TaskID, req.AppID, req.Label, req.Value, req.Scope)
 		if err != nil {
 			writeErr(w, 400, err.Error())
@@ -136,15 +141,29 @@ func (s *Server) mpArtifactsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"apps": out})
 }
 
+// requireMasterKeyBlocked 报告「凭据强制加密模式」是否阻断明文凭据写入：
+// settings 键 require_master_key=true 且主密钥未配置时为真（0.14.6 E2）。
+func requireMasterKeyBlocked(s *Server) bool {
+	if v, _, _ := s.m.pg.GetSetting("require_master_key"); v != "true" {
+		return false
+	}
+	key, err := config.MasterKey()
+	return err != nil || len(key) == 0
+}
+
 // mpEncryptionHandler 处理 GET /api/miniprogram/encryption：主密钥配置状态。
 // 0.13.2 加密告知面——未配置主密钥时 token 池明文落库（过渡列），前端据此在
-// 小程序页与系统设置页挂持久告警。
+// 小程序页与系统设置页挂持久告警。0.14.6 起回传 require_master_key 开关值。
 func (s *Server) mpEncryptionHandler(w http.ResponseWriter, r *http.Request) {
 	configured := false
 	if key, err := config.MasterKey(); err == nil && len(key) > 0 {
 		configured = true
 	}
-	writeJSON(w, 200, map[string]any{"master_key_configured": configured})
+	enforced := false
+	if v, _, _ := s.m.pg.GetSetting("require_master_key"); v == "true" {
+		enforced = true
+	}
+	writeJSON(w, 200, map[string]any{"master_key_configured": configured, "require_master_key": enforced})
 }
 
 // mpRoutes 注册小程序渗透的路由（在 requireAuth 之内）。

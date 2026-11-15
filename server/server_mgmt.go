@@ -1871,6 +1871,12 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 凭据强制加密模式（0.14.6 E2）：开启后未配置主密钥时拒绝携带明文凭据的
+	// 写入——降级必须显式选择，不能是默认。
+	if strings.TrimSpace(body.APIKey) != "" && requireMasterKeyBlocked(s) {
+		writeErr(w, 409, "已开启凭据强制加密模式（require_master_key）：未配置主密钥（ARTEX_MASTER_KEY_FILE），请先配置主密钥再写入 api_key")
+		return
+	}
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming

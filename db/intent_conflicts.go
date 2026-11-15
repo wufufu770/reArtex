@@ -240,6 +240,37 @@ ORDER BY l.task_id`)
 	return out, nil
 }
 
+// TaskMeta 是任务行的基础元信息（只读回源面）。
+type TaskMeta struct {
+	ID            int64
+	Name          string
+	Goal          string
+	Description   string
+	Status        string
+	ExplorationID int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// GetTaskMeta 按 id 读任务基础元信息（不存在返回 nil, nil）——getTask HTTP
+// handler 在内存注册表 miss 时的只读回源（0.14.6 E1）。
+func (d *DB) GetTaskMeta(id string) (*TaskMeta, error) {
+	var m TaskMeta
+	var idInt int64
+	err := d.QueryRow(`
+SELECT id, name, goal, description, status, exploration_id, created_at, updated_at
+FROM tasks WHERE id=$1::bigint AND deleted_at IS NULL`, id).Scan(
+		&idInt, &m.Name, &m.Goal, &m.Description, &m.Status, &m.ExplorationID, &m.CreatedAt, &m.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.ID = idInt
+	return &m, nil
+}
+
 // ListConflictsByExploration 列一个探索的冲突（state 过滤，空=全部）。
 func (d *DB) ListConflictsByExploration(explorationID int64, state string, limit int) ([]*IntentConflict, error) {
 	if err := d.EnsureIntent2Schema(); err != nil {

@@ -1048,7 +1048,6 @@ func (s *Server) Handler() http.Handler {
 	// 报告中心（/system/reports）：最终报告统一管理——存库/在线编辑/下载导出。
 	mux.HandleFunc("GET /api/reports", s.reportsList)
 	mux.HandleFunc("POST /api/reports", s.reportsCreate)
-	mux.HandleFunc("POST /api/reports/generate", s.reportGenerate)
 	mux.HandleFunc("GET /api/reports/discover", s.reportsDiscover)
 	mux.HandleFunc("POST /api/reports/import", s.reportsImport)
 	mux.HandleFunc("GET /api/reports/{id}", s.reportsGet)
@@ -1325,6 +1324,10 @@ func (s *Server) Handler() http.Handler {
 	s.registerIntentConflictRoutes(mux)
 	// 覆盖缺口（0.14.3）：缺口清单 + 人工闭合。
 	s.registerGapRoutes(mux)
+	// 报告生成器（0.14.5）。
+	s.registerReportGenRoutes(mux)
+	// 启动诊断清单（0.14.6 E3）：降级/未配置状态聚合面。
+	mux.HandleFunc("GET /api/diagnostics", s.diagnosticsHandler)
 
 	// SoD 链（职责分离）的三个只读观测面。
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；
@@ -2203,6 +2206,20 @@ func (s *Server) seedFirstIntent(t *Task) {
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
+		// 只读回源（0.14.6 E1）：内存任务注册表 miss 时回 DB 读元信息——
+		// 直插 DB 的任务行此前对运行中的服务不可见（全量审查实测），管理面
+		// 的只读查看不该因此 404。注意：不重建 manager 态（引擎/会话仍不可用），
+		// 返回的是基础元信息面。
+		if meta, err := s.m.PG().GetTaskMeta(r.PathValue("id")); err == nil && meta != nil {
+			writeJSON(w, 200, map[string]any{
+				"id": meta.ID, "name": meta.Name, "goal": meta.Goal,
+				"description": meta.Description, "status": meta.Status,
+				"engine_mode": "readonly", "readonly_backfill": true,
+				"exploration_id": meta.ExplorationID,
+				"created_at":     meta.CreatedAt, "updated_at": meta.UpdatedAt,
+			})
+			return
+		}
 		writeErr(w, 404, "task not found")
 		return
 	}

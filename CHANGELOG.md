@@ -5,7 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.5] - 2026-11-15
+## [0.14.6] - 2026-11-15
+
+### 新增（v0.14 批次五：平台健壮性——五件套）
+- **E1 getTask 只读回源**：内存任务注册表 miss 时回 DB 读任务元信息（readonly_backfill=true 标记 + engine_mode=readonly，不重建 manager 态）——直插 DB 的任务行此前对运行中服务不可见（全量审查实测的管理面 404）。实机验证 ✓。
+- **E2 凭据强制加密模式**：settings 键 `require_master_key`（默认关）——开启后未配置主密钥时，mp token 保存与 llm_profiles api_key 写入 409 并明确文案；加密状态端点回传开关值。降级从默认变显式选择。
+- **E3 启动诊断清单**：GET /api/diagnostics——master_key / agent_desktop / chrome_devtools / wxa_runner / mp_runtime_url / unpack_backend / scopesentry / master_key_file 八项实时求值（warn 附原因与去向）。实机 warn=4 与环境实况吻合。
+- **F12 版本错位提示**：构建注入 NEXT_PUBLIC_ARTEX_VERSION（build.sh 从 VERSION 注入），前端每 5 分钟比对 /api/health——错位即无限期 toast + 一键刷新（会话内只提醒一次）。
+- **B5 任务终局会话播报**：mirrorDecision 放行 system 的【治理收尾】行（精确前缀，不泛化 text 防洪水）——收口 0.11 时代的 v1 妥协。
+- 运行抓出并修复：/api/reports/generate 双重注册路由 panic（server.go 与分组注册各挂一次，启动即 panic 被守护退避抓住）。
+- 验证：build/vet 全绿；前端 build/tsc/biome 全绿；实机三项（诊断/E1 回源/加密端点回传）全过。
+- 对齐检查：/api/diagnostics 前端入口排后续（数据面先落，设置页聚合展示随批次七）；其余为行为面。
+
+
 
 ### 新增（v0.14 批次四：报告生成器——任务维度初稿的确定性拼装；终审永远人工）
 - **POST /api/reports/generate**（task_id+可选标题）：全量来自库内事实的确定性拼装——执行概览（目标/发现四级计数/差异状态计数/缺口计数/偏锋运行分布）、发现清单表、业务差异表、未闭合缺口、任务相关审计摘要（尾部 10 条）；生成稿 created_by=report-gen 标记初稿来源，落报告中心（可编辑/可导出 .md）。不引入模型判断（LLM 润色为后续可选，终审永远人工）。

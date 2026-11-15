@@ -270,7 +270,9 @@ func (s *Server) say(sessionID, taskID int64, worker, from, body string) {
 // 返回 (正文, 节流键, 是否播报)。高信号白名单：
 //   - kind='result'（worker/planner 的轮次结论 —— capture.go 的收尾行）
 //   - kind='tool_result' 且 tool='report_finding'（漏洞登记确认）
-// 其余（thinking/tool_use/text/usage/round/progress/…）不进会话流。
+//   - kind='text' 且 worker='system' 且前缀【治理收尾】（任务终局判定播报，
+//     0.14.6 B5 收口 v1 妥协——精确前缀匹配，不泛化 text 防洪水）
+// 其余（thinking/tool_use/usage/round/progress/…）不进会话流。
 func mirrorDecision(r db.Activity) (string, string, bool) {
 	worker := strings.TrimSpace(r.Worker)
 	switch r.Kind {
@@ -292,6 +294,14 @@ func mirrorDecision(r db.Activity) (string, string, bool) {
 			return "", "", false
 		}
 		return "发现漏洞：" + truncateRunes(body, mirrorBodyMaxRunes), "finding:" + worker, true
+	case "text":
+		if worker == "system" && strings.HasPrefix(strings.TrimSpace(r.Summary), "【治理收尾】") {
+			body := truncateRunes(strings.TrimSpace(r.Summary), mirrorBodyMaxRunes)
+			if body == "" {
+				return "", "", false
+			}
+			return body, "conclude:system", true
+		}
 	}
 	return "", "", false
 }
