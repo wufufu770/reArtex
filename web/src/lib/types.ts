@@ -1299,6 +1299,9 @@ export interface EdgeMethodology {
   // (m.heuristic_tags ?? []) 防御，类型放宽为可选。
   heuristic_tags?: string[];
   criterion?: { kind: string; bounds: { kind: string; limit: number }[] };
+  // 条目来源（0.15.3 合并视图新增）：builtin=内置原样；builtin-override=内置
+  // 被启停/优先级覆盖（可"恢复默认"）；custom=自定义（可删）。消费侧用 ?? 防御。
+  source?: "builtin" | "builtin-override" | "custom";
 }
 
 // 偏锋任务总览行（GET /api/edge/tasks）。

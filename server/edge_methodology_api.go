@@ -88,6 +88,7 @@ func (s *Server) mergedMethodologies() ([]methodologyPayload, error) {
 		if ov, ok := overrides[m.ID]; ok {
 			p.Enabled = ov.Enabled
 			p.Priority = ov.Priority
+			p.Source = "builtin-override" // 前端据此区分「恢复默认」与「删除」（导入侧不读 source，无回环影响）
 		}
 		out = append(out, p)
 	}
