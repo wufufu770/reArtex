@@ -5,7 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.1] - 2026-11-15
+## [0.15.2] - 2026-11-15
+
+### 改进（偏锋页重写，按用户裁定：可点击、可编辑、能直接布置任务、从简布局）
+- **能直接布置任务**：POST /api/edge/run——发起偏锋探索（goal/范围说明/方法论下拉），与 edge_run 工具共用宿主链 StartEdgeExploration（0.15.2 抽取：CreateTask(edge 类别,不限时)→edge_mode→StartEdgeRun→绑会话播报→launchTask→执行体排队，不另造第二条）；**实机全链验证**：REST 发起→真实建任务+开运行（run_id=1）→edge/tasks 出现新运行→人工停止（cancelled）→清理。
+- **可交互**：POST /api/edge/tasks/{id}/stop（人工停止写审计）+ 运行记录块（判据进度/stop 分布/停止按钮）。
+- **可编辑**（0.14.7 的 PUT/DELETE 落地到 UI）：方法论紧凑行——启停一键（PUT 内置覆盖/自定义）、优先级行内编辑保存、删（custom 删/内置恢复默认）、新增自定义表单（tier/判据类型/上限，导入通道同一套校验拒绝非法条目）。
+- **从简布局**（砍标语/提示文字/次要标签）：方法论改紧凑行——色点=证据等级、T{tier} 缩写、判据缩写（覆盖/收敛/穷举/耗尽/衰减+上限）、summary 折进 title 悬停、隐喻不显示"无判据"、无引导文字；tier≤3 上限输入在新增表单。
+- 验证：go build/vet 全绿；REST 全链实机五步全过（见上）；前端 build/tsc/biome 全绿。
+- 对齐检查：POST /api/edge/run 与 /api/edge/tasks/{id}/stop 的新前端入口=偏锋页发起区与运行记录块；方法论编辑=偏锋页紧凑行（0.14.7 行为面转正）。
+
+
 
 ### 修复 + 拆分（用户报障根治：偏锋探索"页面渲染出错"的序列化回归 + 两入口拆分独立页面）
 - **偏锋探索渲染崩溃根因（实证修复）**：错误信息 `Cannot read properties of undefined (reading 'length')` 的根因是 **0.14.7 合并视图的序列化回归**——`methodologyPayload.HeuristicTags` 带 `omitempty`，内置一二级条目（8 条）无启发式标签时字段被省略 → 前端 `m.heuristic_tags` undefined → `EdgeOverviewPanel` 的 `.length` 崩溃。0.14.7 前的旧 handler 直接 marshal 结构体（无 json tag、字段恒在）故不崩。**不是技术栈问题**。修复三层：① 后端去 omitempty 且 nil→[]（实机：12 条全部输出 list）；② 前端类型放宽 + `(m.heuristic_tags ?? [])` 防御；③ 0.13.5 error boundary 兜底（本次报障正是它把白屏变成了带错误信息的可定位页面）。

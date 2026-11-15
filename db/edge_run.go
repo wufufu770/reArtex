@@ -280,6 +280,26 @@ func (d *DB) TaskEdgeFields(taskID int64) (edgeMode bool, methodologyID string, 
 	return edgeMode, methodologyID, true
 }
 
+// StopOpenEdgeRun 人工停止任务的 open 运行（stop_reason=cancelled，0.15.2
+// 偏锋页交互面）。无 open 行返回错误。返回收尾的 run id。
+func (d *DB) StopOpenEdgeRun(taskID int64, reason string) (int64, error) {
+	if err := d.ensureEdgeSchema(); err != nil {
+		return 0, err
+	}
+	var runID int64
+	err := d.QueryRow(`
+UPDATE edge_runs SET stop_reason=$2, stop_detail=jsonb_build_object('reason','人工停止'), updated_at=now()
+WHERE id = (SELECT id FROM edge_runs WHERE task_id=$1 AND stop_reason='' ORDER BY id DESC LIMIT 1)
+RETURNING id`, taskID, reason).Scan(&runID)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("任务 #%d 无进行中的偏锋运行", taskID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("stop open run: %w", err)
+	}
+	return runID, nil
+}
+
 // ListOpenEdgeRuns 列全部未收尾的偏锋运行（fireEdgeWake 的候选流；与 fireGoals
 // 同款：调度器按 scheduler_state 水位去重，这里只给「还没停」的行）。
 func (d *DB) ListOpenEdgeRuns() ([]*EdgeRun, error) {

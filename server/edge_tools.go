@@ -225,6 +225,59 @@ func (s *Server) toolEdgeConsult() actool.CoreTool {
 		})
 }
 
+// StartEdgeExploration 是发起偏锋探索的宿主函数（0.15.2 抽取：edge_run 工具与
+// REST POST /api/edge/run 共用同一条链——CreateTask(edge 类别,不限时) →
+// edge_mode → StartEdgeRun → 绑会话播报 → launchTask → 执行体排队）。
+func (s *Server) StartEdgeExploration(goal, description, methodologyID string, companyIDs, sourceTaskIDs []int64) (int64, int64, error) {
+	// 方法论校验：必须已注册且启用（agent/REST 都不得自选未启用的条目）。
+	if methodologyID != "" {
+		if m, ok := edge.Get(methodologyID); !ok || !m.Enabled {
+			return 0, 0, fmt.Errorf("方法论 %q 未注册或未启用（edge_methodologies 查清单）", methodologyID)
+		}
+	} else if enabled := edge.ListEnabled(); len(enabled) > 0 {
+		methodologyID = enabled[0].ID
+	}
+	category, err := s.m.pg.TaskCategoryByName(db.TaskCategoryEdgeExploration)
+	if err != nil || category == nil {
+		return 0, 0, fmt.Errorf("「偏锋探索」任务类别不存在（种子缺失）")
+	}
+	t, err := s.m.CreateTaskWithOptions(description, goal, db.TaskCreateOptions{
+		CategoryID:     &category.ID,
+		CompanyIDs:     companyIDs,
+		SourceTaskIDs:  sourceTaskIDs,
+		// timeout 0 = 不限时（无预算上限：任务层不设墙钟；终止靠判据+熔断+人设兜底）。
+		TimeoutSeconds: 0,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	if taskID <= 0 {
+		return 0, 0, fmt.Errorf("task id 解析失败")
+	}
+	if err := s.m.pg.SetTaskEdgeMode(taskID, true, methodologyID); err != nil {
+		log.Printf("[edge] task %d 写 edge_mode 失败: %v", taskID, err)
+	}
+	runID, err := s.m.pg.StartEdgeRun(taskID, methodologyID)
+	if err != nil {
+		log.Printf("[edge] task %d 开运行失败: %v", taskID, err)
+	}
+	// 会话里发起的 edge_run：绑回发起会话并播报（与 spawn_task 同款 UX）。
+	if sessID, convID := s.bindSpawnedTaskToSession(context.Background(), taskID); sessID > 0 {
+		s.announceSpawnedTask(sessID, taskID, convID, description, goal)
+	}
+	// 共享建后流程：seed + 目标分解 + engine.Run（与 spawn_task/HTTP 建任务同一条）。
+	s.launchTask(t, description+" "+goal, false)
+	// 拉起执行体：per-agent FIFO 队列（serial+by_task），首轮总控。
+	s.StartTriggeredRun("edge_exec", "偏锋探索启动",
+		fmt.Sprintf("【偏锋探索】任务 #%d 已启动，方法论=%s。请开始总控：读 edge_coverage 建立格点坐标系，下发第一批偏锋假设（edge_dispatch），并持续对账判据进度。", taskID, methodologyID),
+		taskID, true, description, goal)
+	s.appendEdgeAudit("edge-run", "edge_run",
+		fmt.Sprintf("task=%d methodology=%s run=%d", taskID, methodologyID, runID),
+		map[string]any{"task_id": taskID, "methodology_id": methodologyID, "run_id": runID})
+	return taskID, runID, nil
+}
+
 // toolEdgeRun 发起一次完整偏锋任务（auto/edge 的路径）。
 func (s *Server) toolEdgeRun() actool.CoreTool {
 	return wrTool("edge_run",
@@ -245,53 +298,10 @@ func (s *Server) toolEdgeRun() actool.CoreTool {
 				SourceTaskIDs  []int64  `json:"source_task_ids"`
 			}
 			_ = json.Unmarshal(in, &a)
-			// 方法论校验：必须已注册且启用（agent 不得自选未启用的条目）。
-			if a.MethodologyID != "" {
-				if m, ok := edge.Get(a.MethodologyID); !ok || !m.Enabled {
-					return actool.Errorf(fmt.Sprintf("方法论 %q 未注册或未启用（edge_methodologies 查清单）", a.MethodologyID)), nil
-				}
-			} else if enabled := edge.ListEnabled(); len(enabled) > 0 {
-				a.MethodologyID = enabled[0].ID
-			}
-			category, err := s.m.pg.TaskCategoryByName(db.TaskCategoryEdgeExploration)
-			if err != nil || category == nil {
-				return actool.Errorf("「偏锋探索」任务类别不存在（种子缺失）"), nil
-			}
-			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
-				CategoryID:    &category.ID,
-				CompanyIDs:    a.CompanyIDs,
-				SourceTaskIDs: a.SourceTaskIDs,
-				// timeout 0 = 不限时（无预算上限：任务层不设墙钟；终止靠判据+熔断+人设兜底）。
-				TimeoutSeconds: 0,
-			})
+			taskID, runID, err := s.StartEdgeExploration(a.Goal, a.Description, a.MethodologyID, a.CompanyIDs, a.SourceTaskIDs)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-			if taskID <= 0 {
-				return actool.Errorf("task id 解析失败"), nil
-			}
-			// 任务级偏锋标记 + 开运行行（判据轨迹的挂点）。
-			if err := s.m.pg.SetTaskEdgeMode(taskID, true, a.MethodologyID); err != nil {
-				log.Printf("[edge] task %d 写 edge_mode 失败: %v", taskID, err)
-			}
-			runID, err := s.m.pg.StartEdgeRun(taskID, a.MethodologyID)
-			if err != nil {
-				log.Printf("[edge] task %d 开运行失败: %v", taskID, err)
-			}
-			// 会话里发起的 edge_run：绑回发起会话并播报（与 spawn_task 同款 UX）。
-			if sessID, convID := s.bindSpawnedTaskToSession(context.Background(), taskID); sessID > 0 {
-				s.announceSpawnedTask(sessID, taskID, convID, a.Description, a.Goal)
-			}
-			// 共享建后流程：seed + 目标分解 + engine.Run（与 spawn_task/HTTP 建任务同一条）。
-			s.launchTask(t, a.Description+" "+a.Goal, false)
-			// 拉起执行体：per-agent FIFO 队列（serial+by_task），首轮总控。
-			s.StartTriggeredRun("edge_exec", "偏锋探索启动",
-				fmt.Sprintf("【偏锋探索】任务 #%d 已启动，方法论=%s。请开始总控：读 edge_coverage 建立格点坐标系，下发第一批偏锋假设（edge_dispatch），并持续对账判据进度。", taskID, a.MethodologyID),
-				taskID, true, a.Description, a.Goal)
-			s.appendEdgeAudit("edge-run", "edge_run",
-				fmt.Sprintf("task=%d methodology=%s run=%d", taskID, a.MethodologyID, runID),
-				map[string]any{"task_id": taskID, "methodology_id": a.MethodologyID, "run_id": runID})
 			return actool.Text(fmt.Sprintf("偏锋任务 #%d 已创建（方法论=%s，运行 #%d），执行体已排队。", taskID, a.MethodologyID, runID)), nil
 		})
 }

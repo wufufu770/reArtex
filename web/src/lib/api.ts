@@ -575,6 +575,20 @@ export const api = {
   edgeMethodologies: () => get<{ methodologies: EdgeMethodology[] }>("/edge/methodologies"),
   // 偏锋任务总览（判据进度 + stop 统计）。
   edgeTasks: () => get<{ tasks: EdgeTaskOverview[] }>("/edge/tasks"),
+  // 偏锋运行交互（0.15.2：直接布置任务 + 人工停止；与 edge_run 工具同宿主链）。
+  edgeRun: (goal: string, description: string, methodologyId?: string) =>
+    post<{ ok: boolean; task_id: number; run_id: number }>("/edge/run", {
+      goal,
+      description,
+      methodology_id: methodologyId ?? "",
+    }),
+  edgeStop: (taskId: string | number) => post<{ ok: boolean; run_id: number }>(`/edge/tasks/${taskId}/stop`, {}),
+  // 方法论配置（0.14.7/0.15.2：内置=启停/排序覆盖；custom=全量）。
+  edgeMethodologyPut: (id: string, body: Partial<EdgeMethodology> & { enabled: boolean; priority: number }) =>
+    put<{ ok: boolean; source: string }>(`/edge/methodologies/${id}`, { id, ...body }),
+  edgeMethodologyDelete: (id: string) => del<{ ok: boolean; restored_default?: boolean }>(`/edge/methodologies/${id}`),
+  edgeMethodologyImport: (methodologies: unknown[]) =>
+    post<{ ok: boolean; applied: string[]; rejected: string[] }>("/edge/methodologies/import", { methodologies }),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
   // ---- 目标管理（总览）----

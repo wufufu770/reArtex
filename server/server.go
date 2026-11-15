@@ -1328,6 +1328,8 @@ func (s *Server) Handler() http.Handler {
 	s.registerReportGenRoutes(mux)
 	// 启动诊断清单（0.14.6 E3）：降级/未配置状态聚合面。
 	mux.HandleFunc("GET /api/diagnostics", s.diagnosticsHandler)
+	// 偏锋运行 REST（0.15.2）：发起/人工停止。
+	s.registerEdgeRunRoutes(mux)
 
 	// SoD 链（职责分离）的三个只读观测面。
 	// 决策账本读不出来必须报错（fail closed），不能报成「没有决策」；
