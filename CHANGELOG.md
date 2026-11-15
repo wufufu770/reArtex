@@ -5,7 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.14.7] - 2026-11-15
+## [0.14.8] - 2026-11-15
+
+### 改进（v0.14 批次七：前端可维护性——温和拆分试点；大改按「不能弄坏任何东西」纪律分批推进）
+- **G1 试点：findings 页统计卡提取**（1300+ 行页文件 → `_components/finding-stats.tsx` 纯展示组件）——零行为变化（stats 进、卡片网格出）；页文件后续拆分按同款「独立可读的展示块」粒度分批推进。tasks 页（3200 行）拆分排后续批次（拆分是机械工作但验证成本高，一次全拆与红线冲突）。
+- **G3 核对确认**：ScopeSentry 未配置引导已在位（未就绪 → 配置卡 + 引导文案；502→503 语义修正已在 0.13.2）——审查判定的缺口核对后确认已闭合，不重复施工。
+- **如实降级**：批量操作乐观更新与虚拟滚动（@tanstack/react-virtual 引入+表格改造）移入延伸池——依赖引入与表格改造的回归面在连续施工批次里无法充分验证，不做半成品。
+- 验证：npm build/tsc/biome 全绿（拆分前后产物同构）。
+- 对齐检查：无新功能点；纯结构重构。
+
+
 
 ### 新增（v0.14 批次六：方法论 DB 化——内置本体留代码常量，DB 存覆盖与自定义）
 - **数据层**：`db/schema_edge2.sql`（edge_methodologies：source=custom|builtin-override；tier/grade CHECK）+ db/edge_methodology.go（Upsert/Delete（custom 删，builtin-override 恢复默认）/List）+ EnsureEdge2Schema 启动接线。**红线**：内置 12 条的本体与判据在代码常量（internal/edge 注册表编译期钉死），DB 只持久化内置条目的启停/排序覆盖与用户自定义全量。

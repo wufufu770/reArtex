@@ -4,18 +4,7 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import {
-  ArrowUpRightIcon,
-  BugIcon,
-  ChevronRightIcon,
-  CircleAlertIcon,
-  ClockIcon,
-  DownloadIcon,
-  InfoIcon,
-  SearchIcon,
-  ShieldAlertIcon,
-  TriangleAlertIcon,
-} from "lucide-react";
+import { ArrowUpRightIcon, BugIcon, ChevronRightIcon, DownloadIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
@@ -54,6 +43,7 @@ import type {
 import { cn } from "@/lib/utils";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
+import { FindingStatsCards } from "./_components/finding-stats";
 import { FindingsCards } from "./_components/findings-cards";
 import {
   FINDING_STATUSES,
@@ -799,15 +789,8 @@ export default function FindingsPage() {
     }
   }
 
-  const statCards = [
-    { label: "发现总数", value: stats.total, icon: BugIcon },
-    { label: "待处理", value: stats.pending, tone: "text-amber-500", icon: ClockIcon },
-    { label: "严重", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
-    { label: "高危", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
-    { label: "中危", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
-    { label: "低危", value: stats.low, tone: "text-slate-500", icon: CircleAlertIcon },
-    { label: "信息", value: stats.info, tone: "text-muted-foreground", icon: InfoIcon },
-  ];
+  // 统计卡已提取为 <FindingStatsCards stats={stats} />（0.14.8 G1 温和拆分试点，
+  // 零行为变化；页文件的后续拆分按同款粒度分批推进）。
 
   // 导出弹窗里「当前筛选」的条数:两个视图的筛选一致,只是统计口径来源不同。
   // 平铺与资产视图共用 flat 列表状态,分组视图的口径来自组接口的 finding_total。
@@ -880,7 +863,7 @@ export default function FindingsPage() {
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">发现</h1>
+          <h1 className="font-semibold text-xl tracking-tight">发现</h1>
           <p className="text-muted-foreground text-sm">跨任务漏洞汇总</p>
         </div>
         {rerateCands !== null && rerateCands > 0 ? (
@@ -913,22 +896,7 @@ export default function FindingsPage() {
         </Tabs>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
-          {statCards.map((stat) => {
-            const StatIcon = stat.icon;
-            return (
-              <Card key={stat.label} className="gap-1 py-4">
-                <CardHeader className="px-4">
-                  <CardDescription>{stat.label}</CardDescription>
-                  <CardTitle className={cn("flex items-center gap-2 text-2xl tabular-nums", stat.tone)}>
-                    <StatIcon className="size-5" aria-hidden="true" />
-                    {stat.value}
-                  </CardTitle>
-                </CardHeader>
-              </Card>
-            );
-          })}
-        </div>
+        <FindingStatsCards stats={stats} />
 
         <div className="flex flex-wrap items-center gap-2">
           <InputGroup className="w-full sm:w-72">
@@ -1054,7 +1022,7 @@ export default function FindingsPage() {
 
           <div className="ml-auto flex items-center gap-3">
             {selectedIds.size > 0 && (
-              <span className="text-xs text-muted-foreground tabular-nums">已选 {selectedIds.size} 条</span>
+              <span className="text-muted-foreground text-xs tabular-nums">已选 {selectedIds.size} 条</span>
             )}
             <Button size="sm" variant="outline" onClick={openExport}>
               <DownloadIcon /> 导出
@@ -1087,7 +1055,7 @@ export default function FindingsPage() {
               </CardContent>
             </Card>
             <div className="flex min-w-0 flex-col gap-2">
-              <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-muted-foreground">
+              <div className="flex min-w-0 flex-wrap items-center gap-1 text-muted-foreground text-sm">
                 <button
                   type="button"
                   className={cn("hover:text-foreground", assetScope === null && "font-medium text-foreground")}
@@ -1168,11 +1136,11 @@ export default function FindingsPage() {
                           return (
                             <span key={level} className="inline-flex items-center gap-1">
                               <StatusBadge domain="severity" value={level} dot />
-                              <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+                              <span className="text-muted-foreground text-xs tabular-nums">{count}</span>
                             </span>
                           );
                         })}
-                        <span className="text-xs tabular-nums text-muted-foreground">
+                        <span className="text-muted-foreground text-xs tabular-nums">
                           {fmtTime(group.last_found_at)}
                         </span>
                         {group.task_id !== null && (
@@ -1213,7 +1181,7 @@ export default function FindingsPage() {
             })}
             {groups.length === 0 && (
               <Card>
-                <CardContent className="py-12 text-center text-sm text-muted-foreground">没有匹配的发现。</CardContent>
+                <CardContent className="py-12 text-center text-muted-foreground text-sm">没有匹配的发现。</CardContent>
               </Card>
             )}
             <TablePagination
@@ -1313,7 +1281,7 @@ export default function FindingsPage() {
 
           <div className="flex flex-col gap-5 py-1">
             <div className="flex flex-col gap-2">
-              <span className="text-xs text-muted-foreground">导出范围</span>
+              <span className="text-muted-foreground text-xs">导出范围</span>
               <RadioGroup value={exportScope} onValueChange={(v) => setExportScope(v as typeof exportScope)}>
                 <label htmlFor="export-scope-filtered" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-scope-filtered" value="filtered" /> 导出当前筛选结果（共 {filteredTotal}{" "}
@@ -1333,7 +1301,7 @@ export default function FindingsPage() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <span className="text-xs text-muted-foreground">导出格式</span>
+              <span className="text-muted-foreground text-xs">导出格式</span>
               <RadioGroup value={exportFormat} onValueChange={(v) => setExportFormat(v as typeof exportFormat)}>
                 <label htmlFor="export-format-md-single" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-md-single" value="md-single" /> Markdown 汇总报告（单个 .md 文件）
