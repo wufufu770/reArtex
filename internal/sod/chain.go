@@ -472,6 +472,10 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	//     （编造目标反而制造不稳定放行），豁免规整、scope 走第五分支。集合未
 	//     配置的桌面动作在规整之前就以独立理由拒绝（与「无可判定目标」区分）。
 	localBash := name == "Bash" && BashLocalTaskDir(call.taskID, payload)
+	// 0.15.5：文件写工具落在本任务工作区内 ⇒ 与 B5 同一豁免面（跳规整，
+	// scope 按构造通过；审计带 bypassed_normalizer + bypass_reason）。
+	fileLocal := FileToolLocalWrite(call.taskID, name, payload)
+	taskLocal := localBash || fileLocal
 	taskInternal := TaskInternalWrite(call.toolName)
 	fastPath, fastHit := DeterministicFastPath(name, payload)
 	// 桌面识别按【解包后的内层名】——延迟桌面工具的外层名是 ExecuteExtraTool，
@@ -493,10 +497,10 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		patternHit bool
 	)
 	degradeOn := false
-	if fastHit && !taskInternal && !localBash {
+	if fastHit && !taskInternal && !taskLocal {
 		normalized, cacheHit = fastPath, false
 	}
-	if !taskInternal && !localBash && !fastHit && !desktopLocal {
+	if !taskInternal && !taskLocal && !fastHit && !desktopLocal {
 		normalized, cacheHit, patternHit, err = c.normalize(ctx, call)
 		if err != nil {
 			if errors.Is(err, ErrNormalizerUnavailable) {
@@ -527,7 +531,31 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 
 	// ⑦ 确定性闸门。**每次调用都重跑全部五道检查** —— 缓存里只有规整结果，
 	// 裁决依赖实时状态，缓存它等于用过期状态放行。
-	out := c.evaluate(ctx, call, normalized, degradeOn)
+	// 0.15.5 复合动作：规整器把原始动作拆成 N 条子意图时，每条都独立过闸
+	// —— 全部放行才放行原始动作；任一拒绝以该条的原因拒绝整个动作
+	// （needs_review 同样按拒绝收口：复合动作里有一段需要对抗复核，
+	// 放行整段等于让未复核的部分溜过去）。
+	if len(normalized.MultiIntent) > 1 {
+		for i := range normalized.MultiIntent {
+			sub := normalized
+			sub.StructuredIntent = normalized.MultiIntent[i]
+			sub.MultiIntent = nil
+			// 复合动作的本地子段（无 target_hint，如 `cd dir && curl host && grep
+			// file` 里的 grep/cd）：目标段已逐条对 scope 裁决，本地段无法被拿来
+			// 出网——scope 按构造通过（记 compound_local_segment），其余四道检查
+			// 照跑。有目标的子段照常逐条对 scope 裁决。
+			pass := ""
+			if sub.StructuredIntent.TargetHint == "" {
+				pass = "compound_local_segment"
+			}
+			if subOut := c.evaluate(ctx, call, sub, degradeOn, pass); subOut.Verdict != sodpolicy.VerdictApprove {
+				c.shadowCompare(call, subOut)
+				return c.deny(ctx, call, subOut.ReasonCode,
+					fmt.Sprintf("复合动作第 %d/%d 条子意图被闸门拒绝：%s", i+1, len(normalized.MultiIntent), subOut.Note))
+			}
+		}
+	}
+	out := c.evaluate(ctx, call, normalized, degradeOn, "")
 	if mode == sodpolicy.MergedGateShadow {
 		// 影子对照（§11-G1）：新链只记差异，最终动作仍由旧链给出。
 		c.shadowCompare(call, out)
@@ -536,9 +564,9 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	// §4 不变式 4：所有放行旁路带独立审计标记。任务内结构化写跳过了 LLM 规整
 	// —— 这件事必须能从审计里单独回放出来，而不是混在「全部通过」里。
 	markers := map[string]string{}
-	if taskInternal || localBash || desktopLocal {
+	if taskInternal || taskLocal || desktopLocal {
 		markers["bypassed_normalizer"] = "true"
-		if localBash {
+		if taskLocal {
 			markers["bypass_reason"] = "local_task_dir"
 		}
 		if desktopLocal {
@@ -550,6 +578,11 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 	if patternHit {
 		markers["fast_cache"] = "true"
+	}
+	if len(normalized.MultiIntent) > 1 {
+		// 复合动作审计标记：N 条子意图全部过闸的事实必须可回放（§4 不变式 4
+		// 同一纪律——审计里能看出这次放行裁决了什么）。
+		markers["multi_intent"] = strconv.Itoa(len(normalized.MultiIntent))
 	}
 	if degradeOn {
 		markers["degraded"] = "true"
@@ -736,7 +769,9 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 }
 
 // evaluate 跑确定性闸门。degraded 由调用方传入（B4 降级档放行的调用）。
-func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized NormalizerResult, degraded bool) GateOutput {
+// scopePassOverride 非空时按构造通过 scope（复合动作的本地子段：目标段已
+// 逐条对 scope 裁决，本地段无法被拿来出网——理由如实进审计）。
+func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized NormalizerResult, degraded bool, scopePassOverride string) GateOutput {
 	if c.deps.Gate == nil {
 		return GateOutput{
 			Verdict:    sodpolicy.VerdictDeny,
@@ -755,9 +790,11 @@ func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized Normali
 		Normalized:        normalized,
 		FindingID:         findingIDFromInput(call.payload),
 		TaskInternalWrite: TaskInternalWrite(call.toolName),
-		LocalTaskDir:      call.toolName == "Bash" && BashLocalTaskDir(call.taskID, call.payload),
-		HostLocalAction:   c.hostLocalAction(call.taskID, call.toolName, call.payload),
-		Degraded:          degraded,
+		LocalTaskDir: (call.toolName == "Bash" && BashLocalTaskDir(call.taskID, call.payload)) ||
+			FileToolLocalWrite(call.taskID, call.toolName, call.payload),
+		HostLocalAction: c.hostLocalAction(call.taskID, call.toolName, call.payload),
+		Degraded:        degraded,
+		ScopePassReason: scopePassOverride,
 	})
 }
 
@@ -876,6 +913,13 @@ var taskInternalWriteTools = map[string]bool{
 	"record_progress": true,
 	"add_hint":        true,
 	"message_group":   true,
+	// report_finding（0.15.5）：发现清单是任务自己的账本——worker 把验证过的
+	// 漏洞写回平台，与 record_fact 同性质（不触网、无外部目标）。实测靶场任务
+	// 中 LFI/注入证据被规整器标「evidence 里嵌了 shell 命令」→ needs_review →
+	// 复核拒绝 ⇒ 平台的核心产出物（findings）丢失。闸门其余检查（熔断/额度/
+	// tier2）照跑；账本写入的正确性由 findings 域自身的校验管（资产绑定/证据
+	// 去重），不由 SoD 的网络范围管。
+	"report_finding": true,
 }
 
 // TaskInternalWrite 报告该工具是否为任务内结构化写（跳过规整、scope 按构造通过）。
@@ -908,7 +952,7 @@ func BashLocalTaskDir(taskID int64, payload []byte) bool {
 	if networkIndicatorRe.Match(payload) {
 		return false
 	}
-	prefix := "/app/data/tasks/" + strconv.FormatInt(taskID, 10)
+	prefix := taskDirBase + "/" + strconv.FormatInt(taskID, 10)
 	found := false
 	for _, m := range localPathTokenRe.FindAllStringSubmatch(string(payload), -1) {
 		tok := m[1]
@@ -921,6 +965,52 @@ func BashLocalTaskDir(taskID int64, payload []byte) bool {
 		found = true
 	}
 	return found
+}
+
+// taskDirBase 是任务工作区根（<data_dir>/tasks，B5 判定依据）。默认值是容器
+// 部署的约定路径；宿主/裸机部署必须在启动时经 SetTaskDirPrefix 注入实际值
+// ——前缀错了 ⇒ 本地任务目录豁免永不命中 ⇒ 全部本地文件操作（grep/排序/读
+// 改写）被当「无可判定目标」越界拒绝（0.15.5 实测：授权测试靶场 靶场任务在本
+// 机部署全量被 out_of_scope 拒绝，worker 无法对自己下载的产物做任何本地分析；
+// classifier 的 taskDirPrefix() 同源）。
+var taskDirBase = "/app/data/tasks"
+
+// SetTaskDirPrefix 注入任务工作区根（<data_dir>/tasks）。server 启动时调用；
+// 空串忽略（保留默认）。
+func SetTaskDirPrefix(p string) {
+	if strings.TrimSpace(p) == "" {
+		return
+	}
+	taskDirBase = strings.TrimRight(p, "/")
+}
+
+// FileToolLocalWrite 判定一次文件写工具调用是否只落在本任务工作区内
+// （0.15.5，B5 的文件工具扩展）：Write/Edit 的 file_path 必须在前缀下。
+// 写文件动作本身不碰网络（脚本内容里的 URL 不算网络指示符——执行它的是
+// 后续 Bash，那条有自己的判定），所以反向守卫不适用于这类载荷。
+func FileToolLocalWrite(taskID int64, toolName string, payload []byte) bool {
+	if taskID <= 0 || len(payload) == 0 {
+		return false
+	}
+	if toolName != "Write" && toolName != "Edit" {
+		return false
+	}
+	var req struct {
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return false
+	}
+	p := req.FilePath
+	if p == "" {
+		p = req.Path
+	}
+	if p == "" {
+		return false
+	}
+	prefix := taskDirBase + "/" + strconv.FormatInt(taskID, 10)
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 // GatedTool 报告该工具是否要进 SoD 链。

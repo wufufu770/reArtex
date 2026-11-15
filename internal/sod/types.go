@@ -49,6 +49,10 @@ type NormalizerResult struct {
 	AnomalyReason    string           `json:"anomaly_reason"`
 	SourceAgent      string           `json:"source_agent"`
 	TaskID           int64            `json:"task_id"`
+	// MultiIntent 是复合动作被模型拆成多条结构化意图时的全部子意图（按原序，
+	// 0.15.5；首元素与 StructuredIntent 相同）。闸门对每条分别裁决，全部放行
+	// 才放行原始动作——SoD 不变式不变：每条子意图都受确定性裁决约束。
+	MultiIntent []StructuredIntent `json:"multi_intent,omitempty"`
 }
 
 // Verdict 是闸门的裁决（**只有代码能产出它**）。

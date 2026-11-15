@@ -323,16 +323,18 @@ func TestSoDGateTaskInternalWriteBypassesScopeLookup(t *testing.T) {
 	}
 }
 
-// TestTaskInternalWriteClassifier 钉住分类器：四工具入列，扩权工具与 shell 家族
-// 绝不入列（它们照旧走完整链）。
+// TestTaskInternalWriteClassifier 钉住分类器：任务账本写（含 report_finding，
+// 0.15.5——发现清单是任务自己的产出物，与 record_fact 同性质，见
+// taskInternalWriteTools 注释）入列；扩权工具与 shell 家族绝不入列
+// （它们照旧走完整链）。
 func TestTaskInternalWriteClassifier(t *testing.T) {
-	for _, name := range []string{"record_fact", "record_progress", "add_hint", "message_group"} {
+	for _, name := range []string{"record_fact", "record_progress", "add_hint", "message_group", "report_finding"} {
 		if !TaskInternalWrite(name) {
 			t.Errorf("%q 应判为任务内结构化写", name)
 		}
 	}
 	for _, name := range []string{"Bash", "insert_assets", "add_task_scope", "add_company_scope",
-		"report_finding", "shell_open", "WebFetch", ""} {
+		"shell_open", "WebFetch", ""} {
 		if TaskInternalWrite(name) {
 			t.Errorf("%q 不应判为任务内结构化写（扩权/出网/有外部目标的动作照旧进规整）", name)
 		}

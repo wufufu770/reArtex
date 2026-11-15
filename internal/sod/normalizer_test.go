@@ -3,6 +3,7 @@ package sod
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
@@ -378,6 +379,85 @@ func TestSoDNormalizerConstructorRejectsMissingDependencies(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.expect) {
 				t.Fatalf("err = %v, 期望提到 %s", err, tc.expect)
+			}
+		})
+	}
+}
+
+// multiToolUseEvents 造一次「模型连续调用了 N 个同名工具」的流事件序列
+// （复合动作的多意图输出形态，0.15.5 起合法）。
+func multiToolUseEvents(name string, inputs []string) []llm.StreamEvent {
+	evs := make([]llm.StreamEvent, 0, len(inputs)*2+1)
+	for i, in := range inputs {
+		evs = append(evs,
+			llm.StreamEvent{Type: llm.SEToolUseStart, ToolID: fmt.Sprintf("tu_%d", i), ToolName: name, ToolIndex: i},
+			llm.StreamEvent{Type: llm.SEToolInputJSON, Text: in, ToolIndex: i},
+		)
+	}
+	return append(evs, llm.StreamEvent{Type: llm.SEMessageStop})
+}
+
+// TestSoDNormalizerAcceptsMultiIntent 复合动作：模型按子动作拆成多条
+// emit_structured_intent——全部解析通过；MultiIntent 带全量（按原序）、首条
+// 进 StructuredIntent、任一条异常即整体标记异常（0.15.5）。
+func TestSoDNormalizerAcceptsMultiIntent(t *testing.T) {
+	events := multiToolUseEvents("emit_structured_intent", []string{
+		intentJSON("command_execution", "example.com"),
+		strings.Replace(intentJSON("command_execution", "example.com"),
+			`"anomaly_flag":false`, `"anomaly_flag":true`, 1),
+		intentJSON("http_request", "example.com"),
+	})
+	p := &fakeProvider{events: events}
+	n := newTestNormalizer(t, p)
+
+	got, err := n.Normalize(context.Background(), NormalizeInput{
+		ToolName: "Bash", RawPayload: []byte(`{"command":"cd /x && curl -X POST https://example.com"}`),
+		SourceAgent: "worker", TaskID: 7,
+	})
+	if err != nil {
+		t.Fatalf("复合意图规整被拒: %v", err)
+	}
+	if len(got.MultiIntent) != 3 {
+		t.Fatalf("MultiIntent = %d 条, 期望 3", len(got.MultiIntent))
+	}
+	if got.StructuredIntent.ActionType != "command_execution" {
+		t.Fatalf("首条 action_type = %q, 期望 command_execution", got.StructuredIntent.ActionType)
+	}
+	if got.MultiIntent[2].ActionType != "http_request" {
+		t.Fatalf("第 3 条 action_type = %q, 期望 http_request", got.MultiIntent[2].ActionType)
+	}
+	if !got.AnomalyFlag {
+		t.Fatal("第 2 条 anomaly_flag=true，整体应标记异常")
+	}
+	if got.SourceAgent != "worker" || got.TaskID != 7 {
+		t.Fatal("上下文盖章失效")
+	}
+}
+
+// TestSoDNormalizerMultiIntentFailClosed 复合动作的失败仍 fail-closed：混入
+// 异名工具、任一条缺 digest，都要整体拒绝（红线不松）。
+func TestSoDNormalizerMultiIntentFailClosed(t *testing.T) {
+	bad := strings.Replace(intentJSON("command_execution", "example.com"), `"raw_payload_digest":"deadbeef"`, `"raw_payload_digest":""`, 1)
+	cases := []struct {
+		name   string
+		events []llm.StreamEvent
+	}{
+		{"混入异名工具", multiToolUseEvents("other_tool", []string{intentJSON("command_execution", "example.com")})},
+		{"第二条缺 digest", multiToolUseEvents("emit_structured_intent", []string{intentJSON("command_execution", "example.com"), bad})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &fakeProvider{events: tc.events}
+			n := newTestNormalizer(t, p)
+			_, err := n.Normalize(context.Background(), NormalizeInput{
+				ToolName: "Bash", RawPayload: []byte(`{"command":"cd /x && curl https://example.com"}`),
+				SourceAgent: "worker", TaskID: 7,
+			})
+			if err == nil {
+				t.Fatal("期望拒绝，实际放行")
+			}
+			if !errors.Is(err, ErrNormalizerMalformed) {
+				t.Fatalf("原因码异常: %v", err)
 			}
 		})
 	}

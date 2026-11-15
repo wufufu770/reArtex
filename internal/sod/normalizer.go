@@ -272,15 +272,54 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 	if len(uses) == 0 {
 		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型没有调用 %s 工具", ErrNormalizerMalformed, n.schema.Name)
 	}
-	if len(uses) > 1 {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用了 %d 个工具，契约要求恰好一个 %s", ErrNormalizerMalformed, len(uses), n.schema.Name)
-	}
-	if uses[0].Name != n.schema.Name {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用了 %s，契约要求 %s", ErrNormalizerMalformed, uses[0].Name, n.schema.Name)
+	for _, u := range uses {
+		if u.Name != n.schema.Name {
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 模型调用了 %s，契约要求 %s", ErrNormalizerMalformed, u.Name, n.schema.Name)
+		}
 	}
 
+	// 0.15.5：接受 1..N 条 emit_structured_intent——复合动作（`cd && pwd && ls`
+	// 这类）被模型按子动作拆成多条是**正确语义**（实测 MiniMax-M3.1-Flash 的
+	// 自然行为，语义保留、原序排列），此前按「恰好一个」拒绝 ⇒ 规整器全量
+	// malformed ⇒ 一切 Bash 动作被 SoD 阻断。每条都独立过同套校验；闸门对
+	// N 条逐条裁决（chain.go），全部放行才放行原始动作——红线不松。
+	parsed := make([]normalizerToolOutput, 0, len(uses))
+	for i, u := range uses {
+		raw, err := n.parseIntentUse(u.Input, in.RawPayload)
+		if err != nil {
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 第 %d/%d 条工具入参不合规: %v", ErrNormalizerMalformed, i+1, len(uses), err)
+		}
+		parsed = append(parsed, raw)
+	}
+	if len(parsed) > 1 {
+		log.Printf("[sod] 复合动作拆成 %d 条结构化意图，闸门将逐条裁决", len(parsed))
+	}
+	out := NormalizerResult{
+		StructuredIntent: parsed[0].StructuredIntent,
+		AnomalyFlag:      false,
+		AnomalyReason:    "",
+	}
+	for _, p := range parsed {
+		if p.AnomalyFlag && !out.AnomalyFlag {
+			out.AnomalyFlag = true
+			out.AnomalyReason = p.AnomalyReason
+		}
+		if len(parsed) > 1 {
+			out.MultiIntent = append(out.MultiIntent, p.StructuredIntent)
+		}
+	}
+
+	// source_agent / task_id 由规整器自己盖上：模型说的不算数（它可能复述错，
+	// 也可能被原始动作里的文本诱导）。它们用于缓存键与审计归属。
+	out.SourceAgent = in.SourceAgent
+	out.TaskID = in.TaskID
+	return out, acc, nil
+}
+
+// parseIntentUse 解码并校验一条 emit_structured_intent 工具入参（0.15.5 从
+// 单意图内联逻辑抽出；校验集合与失败语义逐字不变——单意图路径行为不变）。
+func (n *Normalizer) parseIntentUse(input json.RawMessage, rawPayload []byte) (normalizerToolOutput, error) {
 	var raw normalizerToolOutput
-	input := uses[0].Input
 	if err := json.Unmarshal(input, &raw); err != nil {
 		// v0.11.3 容错（与蒸馏容错同思路）：模型最常见的 malformed 错法是把
 		// bool/数字写成字符串（实测 MiniMax："has_background":"false" ⇒ 严格
@@ -289,49 +328,100 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 		// 矫正后仍失败才拒绝。
 		loosened, changed := loosenAgainstSchema(input, n.schema.InputSchema)
 		if !changed {
-			return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err)
+			// schema 缺嵌套 properties 时的兜底矫正（0.15.5 实测：tools 表的
+			// shell_features 行只有 {type:object, description}——schema 引导
+			// 走不进嵌套，"has_background":"false" 这类字符串布尔永远修不了）。
+			// 只在本兜底生效：字符串 "true"/"false"→bool、纯整数串→number。
+			loosened, changed = loosenScalarsSchemaFree(input)
+		}
+		if !changed {
+			return normalizerToolOutput{}, fmt.Errorf("工具入参不是合法 JSON: %v", err)
 		}
 		if err2 := json.Unmarshal(loosened, &raw); err2 != nil {
-			return NormalizerResult{}, acc, fmt.Errorf("%w: 工具入参不是合法 JSON: %v", ErrNormalizerMalformed, err2)
+			return normalizerToolOutput{}, fmt.Errorf("工具入参不是合法 JSON: %v", err2)
 		}
 		log.Printf("[sod] 规整输入标量矫正生效：模型把 bool/数字写成了字符串，已自动转型")
 	}
-	out := NormalizerResult{
-		StructuredIntent: raw.StructuredIntent,
-		AnomalyFlag:      raw.AnomalyFlag,
-		AnomalyReason:    raw.AnomalyReason,
-	}
-	if out.StructuredIntent.ActionType == "" {
+	if raw.StructuredIntent.ActionType == "" {
 		// ⚠️ 这一条同时覆盖两种失败：① JSON 里没有 structured_intent；
 		// ② 有 structured_intent 但没有 action_type。
 		// 另外③「入参不是合法 JSON」也会落到这里：llm.Accumulator 会把非法
 		// JSON 兜底成 {}（见 third_party/norma/llm/accumulate.go 的 Message），
 		// 于是反序列化成功但字段全空 —— 结果一样是「不合规」，一样拒绝。
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 输出缺少 structured_intent / action_type", ErrNormalizerMalformed)
+		return normalizerToolOutput{}, errors.New("输出缺少 structured_intent / action_type")
 	}
-	if out.StructuredIntent.RawPayloadDigest == "" {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 输出缺少 raw_payload_digest", ErrNormalizerMalformed)
+	if raw.StructuredIntent.RawPayloadDigest == "" {
+		return normalizerToolOutput{}, errors.New("输出缺少 raw_payload_digest")
 	}
-	if out.StructuredIntent.ActionType == actionTypeUnparseable {
+	if raw.StructuredIntent.ActionType == actionTypeUnparseable {
 		// 原始动作根本解析不出来 ⇒ 没有可信的结构化意图 ⇒ 拒绝。
 		// 提示词原文（agent/prompts/intent-normalizer.md:103-106）要求「交给
 		// policy gate 决定」，但闸门的裁决对 unparseable 同样是拒绝 ⇒ 落在
 		// 这里不会改变结局，只是把原因码落在更准确的一侧（输出不合规，
 		// 而不是「越界」）。
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 原始动作无法解析（action_type=unparseable）", ErrNormalizerMalformed)
+		return normalizerToolOutput{}, errors.New("原始动作无法解析（action_type=unparseable）")
 	}
-	if !knownActionTypes[out.StructuredIntent.ActionType] {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 未知的 action_type=%q", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
+	if !knownActionTypes[raw.StructuredIntent.ActionType] {
+		return normalizerToolOutput{}, fmt.Errorf("未知的 action_type=%q", raw.StructuredIntent.ActionType)
 	}
-	if requiresTarget(out.StructuredIntent.ActionType, in.RawPayload) && out.StructuredIntent.TargetHint == "" {
-		return NormalizerResult{}, acc, fmt.Errorf("%w: 动作类型 %s 需要目标线索，但输出里没有 target_hint", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
+	if requiresTarget(raw.StructuredIntent.ActionType, rawPayload) && raw.StructuredIntent.TargetHint == "" {
+		return normalizerToolOutput{}, fmt.Errorf("动作类型 %s 需要目标线索，但输出里没有 target_hint", raw.StructuredIntent.ActionType)
 	}
+	return raw, nil
+}
 
-	// source_agent / task_id 由规整器自己盖上：模型说的不算数（它可能复述错，
-	// 也可能被原始动作里的文本诱导）。它们用于缓存键与审计归属。
-	out.SourceAgent = in.SourceAgent
-	out.TaskID = in.TaskID
-	return out, acc, nil
+// loosenScalarsSchemaFree 是 schema 缺嵌套 properties 时的兜底矫正（0.15.5）：
+// 递归把字符串 "true"/"false" coerce 成 bool、纯整数串 coerce 成 number。
+// 只在 schema 引导的矫正无效时调用——有 schema 信息时以 schema 为准，避免把
+// 合法的字符串值误转。只服务于「解码还是失败」这条已濒临拒绝的路径上。
+func loosenScalarsSchemaFree(raw json.RawMessage) (json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw, false
+	}
+	changed := false
+	var walk func(x any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case map[string]any:
+			for k, vv := range t {
+				t[k] = walk(vv)
+			}
+			return t
+		case []any:
+			for i, vv := range t {
+				t[i] = walk(vv)
+			}
+			return t
+		case string:
+			switch strings.ToLower(strings.TrimSpace(t)) {
+			case "true":
+				changed = true
+				return true
+			case "false":
+				changed = true
+				return false
+			}
+			if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+				changed = true
+				return json.Number(strconv.FormatInt(n, 10))
+			}
+			return t
+		default:
+			return x
+		}
+	}
+	out := walk(v)
+	if !changed {
+		return raw, false
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return raw, false
+	}
+	return b, true
 }
 
 // normalizerToolOutput 是**模型工具入参**的解码目标。

@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.5] - 2026-11-16
+
+### 修复（真 LLM 靶场实战暴露的四层阻断——平台首次真实任务全链测试）
+布置真实任务（授权测试靶场 授权靶场，MiniMax-M3.1-Flash）后依次暴露并修复：
+- **① 意图规整器契约与模型天然行为冲突（最高优先级阻断）**：模型对复合命令（`cd && pwd && ls`）按子动作拆成 N 条 `emit_structured_intent`——语义正确、提示词「失败处理」段也写着「输出**多个** structured_intent」，但宿主代码要求「恰好一个」⇒ 全部 malformed ⇒ 一切 Bash 被 SoD 拒绝（3 分钟失败 #1→#20，worker 全瘫）。修复：接受 1..N 条（NormalizerResult.MultiIntent），每条独立过同套校验，**闸门逐条裁决、全部放行才放行原始动作**（SoD 不变式不松）；混入异名工具/任一条校验失败照旧 fail-closed（单测 TestSoDNormalizerAcceptsMultiIntent / MultiIntentFailClosed）。
+- **② 标量矫正对嵌套字段失效**：tools 表 schema 的 shell_features 行只有 `{type:object, description}` 无 properties——schema 引导矫正走不进嵌套，`"has_background":"false"` 永远修不了。修复：schema 引导无效时的 schema-free 兜底矫正（loosenScalarsSchemaFree，仅在该濒临拒绝的路径上生效）。
+- **③ 任务工作区前缀硬编码 `/app/data/tasks`（部署可移植性 bug）**：本机部署 data_dir=<data_dir> ⇒ B5 本地任务目录豁免永不命中 ⇒ 本地文件分析（grep/排序/读改写）全量被「无可判定目标」out_of_scope 拒绝（107 次）。修复：taskDirBase 包级变量 + SetTaskDirPrefix（main.go 启动注入 <data_dir>/tasks），classifier 同源函数一并统一；Write/Edit 文件工具落任务目录内同样豁免（FileToolLocalWrite，写文件动作本身不触网，反向守卫不适用）；复合动作的本地子段（无 target_hint）scope 按构造通过（compound_local_segment，理由进审计）——目标段照常逐条裁决。
+- **④ report_finding 不在任务内写清单**：发现清单是任务自己的账本，与 record_fact 同性质；实测 LFI/上传证据被标「evidence 里嵌了 shell 命令」→ needs_review → 复核拒 ⇒ 平台核心产出物丢失。修复：入 taskInternalWriteTools（熔断/额度/tier2 照跑），钉住测试同步更新。
+- **⑤ 规整器提示词领域校准**：anomaly_flag 判定对象=「绕过审查的企图与任务无关的破坏」，不是授权目标上的攻击载荷（注入/编码/穿越是渗透任务的正常内容）——过度标记会把一切正常工作送进复核队列。文件与活库提示词同步升级 v3（DB 首插生效，PUT /api/agents/intent_normalizer/prompt 推送）。
+- **实机验证**：修复期间真流量裁决 approve 613+ 条、复合动作逐条裁决日志坐实（拆 2/3/4/5 条均有）、本地豁免后 out_of_scope 归零；worker 在配额耗尽前产出真实验证过的漏洞证据（未授权任意文件读取 /etc/shadow + 未授权文件上传，PoC 带 /safe 对照组）。测试环境问题另记：playwright-mcp 二进制缺失（浏览器工具 2min 冷却循环）、MiniMax Token Plan 配额耗尽（429，任务停摆——外部资源限制）。
+- 对齐检查：无新端点；行为面=SOD 多意图裁决/本地豁免扩展（审计标记 multi_intent/bypass_reason 可回放）。
+
+
+
 ## [0.15.4] - 2026-11-15
 
 ### 改进（方法论全量可编 + 配置写穿运行时；业务建模页 UI 风格对齐全站主题）

@@ -393,9 +393,10 @@ func hasEgressIndicator(text string) bool {
 	return networkIndicatorRe.MatchString(text)
 }
 
-// taskDirPrefix 返回任务工作区前缀。
+// taskDirPrefix 返回任务工作区前缀（根经 SetTaskDirPrefix 注入，0.15.5——
+// 硬编码 /app/data/tasks 在裸机部署下全部失配，见 chain.go taskDirBase）。
 func taskDirPrefix(taskID int64) string {
-	return "/app/data/tasks/" + strconv.FormatInt(taskID, 10)
+	return taskDirBase + "/" + strconv.FormatInt(taskID, 10)
 }
 
 // extractCommandField 抽命令字段；抽不到退回全文（宁多判不漏判）。

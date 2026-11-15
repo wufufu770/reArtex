@@ -20,6 +20,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/internal/procguard"
+	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
 )
@@ -129,6 +130,11 @@ func run() int {
 		log.Fatalf("open stores: %v", err)
 	}
 	defer mgr.Close()
+
+	// 任务工作区前缀注入（0.15.5）：SoD 的「本地任务目录豁免」按
+	// <data_dir>/tasks 判定——不注入就用容器默认 /app/data/tasks，裸机部署
+	// 的本地文件操作会被当无目标动作全量拒绝（实测 授权测试靶场 靶场任务）。
+	sod.SetTaskDirPrefix(filepath.Join(*dataDir, "tasks"))
 
 	// Surviving this long means a freshly swapped-in build actually works, so drop
 	// the upgrade marker and stop counting attempts. Until it fires, every boot
