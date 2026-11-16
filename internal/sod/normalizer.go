@@ -285,7 +285,7 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 	// N 条逐条裁决（chain.go），全部放行才放行原始动作——红线不松。
 	parsed := make([]normalizerToolOutput, 0, len(uses))
 	for i, u := range uses {
-		raw, err := n.parseIntentUse(u.Input, in.RawPayload)
+		raw, err := n.parseIntentUse(u.Input)
 		if err != nil {
 			return NormalizerResult{}, acc, fmt.Errorf("%w: 第 %d/%d 条工具入参不合规: %v", ErrNormalizerMalformed, i+1, len(uses), err)
 		}
@@ -308,6 +308,22 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 			out.MultiIntent = append(out.MultiIntent, p.StructuredIntent)
 		}
 	}
+	// requiresTarget 改为集合语义（0.15.5 实战修正）：复合命令里本地子段
+	// （`cd dir`/`grep file`）没有 target_hint 是**正确输出**——只要任一段
+	// 提取到了目标，规则的目的（载荷里的目标不得漏提取）就已达成；逐段强制
+	// 会把「payload 含 URL + 首段是本地命令」的正常拆分错杀成 malformed。
+	if requiresTarget(out.StructuredIntent.ActionType, in.RawPayload) {
+		hasTarget := out.StructuredIntent.TargetHint != ""
+		for _, si := range out.MultiIntent {
+			if si.TargetHint != "" {
+				hasTarget = true
+				break
+			}
+		}
+		if !hasTarget {
+			return NormalizerResult{}, acc, fmt.Errorf("%w: 动作类型 %s 需要目标线索，但输出里没有 target_hint", ErrNormalizerMalformed, out.StructuredIntent.ActionType)
+		}
+	}
 
 	// source_agent / task_id 由规整器自己盖上：模型说的不算数（它可能复述错，
 	// 也可能被原始动作里的文本诱导）。它们用于缓存键与审计归属。
@@ -317,8 +333,8 @@ func (n *Normalizer) normalizeInner(ctx context.Context, in NormalizeInput) (Nor
 }
 
 // parseIntentUse 解码并校验一条 emit_structured_intent 工具入参（0.15.5 从
-// 单意图内联逻辑抽出；校验集合与失败语义逐字不变——单意图路径行为不变）。
-func (n *Normalizer) parseIntentUse(input json.RawMessage, rawPayload []byte) (normalizerToolOutput, error) {
+// 单意图内联逻辑抽出；requiresTarget 不在此处——它已上移为多意图集合语义）。
+func (n *Normalizer) parseIntentUse(input json.RawMessage) (normalizerToolOutput, error) {
 	var raw normalizerToolOutput
 	if err := json.Unmarshal(input, &raw); err != nil {
 		// v0.11.3 容错（与蒸馏容错同思路）：模型最常见的 malformed 错法是把
@@ -363,9 +379,6 @@ func (n *Normalizer) parseIntentUse(input json.RawMessage, rawPayload []byte) (n
 	}
 	if !knownActionTypes[raw.StructuredIntent.ActionType] {
 		return normalizerToolOutput{}, fmt.Errorf("未知的 action_type=%q", raw.StructuredIntent.ActionType)
-	}
-	if requiresTarget(raw.StructuredIntent.ActionType, rawPayload) && raw.StructuredIntent.TargetHint == "" {
-		return normalizerToolOutput{}, fmt.Errorf("动作类型 %s 需要目标线索，但输出里没有 target_hint", raw.StructuredIntent.ActionType)
 	}
 	return raw, nil
 }

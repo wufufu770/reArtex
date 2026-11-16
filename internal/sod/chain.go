@@ -536,16 +536,19 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	// （needs_review 同样按拒绝收口：复合动作里有一段需要对抗复核，
 	// 放行整段等于让未复核的部分溜过去）。
 	if len(normalized.MultiIntent) > 1 {
+		// 复合动作：载荷里没有任何网络指示符 ⇒ 整条命令无法出网，子段的
+		// target_hint 只能是幻觉/本地残留——scope 全段按构造通过（记
+		// compound_local_segment，理由进审计）；其余四道检查照跑。有网络
+		// 指示符的复合动作：目标段逐条对 scope 裁决，无目标段按本地子段通过。
+		compoundNetwork := networkIndicatorRe.Match(call.payload)
 		for i := range normalized.MultiIntent {
 			sub := normalized
 			sub.StructuredIntent = normalized.MultiIntent[i]
 			sub.MultiIntent = nil
-			// 复合动作的本地子段（无 target_hint，如 `cd dir && curl host && grep
-			// file` 里的 grep/cd）：目标段已逐条对 scope 裁决，本地段无法被拿来
-			// 出网——scope 按构造通过（记 compound_local_segment），其余四道检查
-			// 照跑。有目标的子段照常逐条对 scope 裁决。
+			// 本地子段（无 target_hint，如 `cd dir && curl host && grep file`
+			// 里的 grep/cd）：无法被拿来出网——scope 按构造通过。
 			pass := ""
-			if sub.StructuredIntent.TargetHint == "" {
+			if sub.StructuredIntent.TargetHint == "" || !compoundNetwork {
 				pass = "compound_local_segment"
 			}
 			if subOut := c.evaluate(ctx, call, sub, degradeOn, pass); subOut.Verdict != sodpolicy.VerdictApprove {
@@ -555,7 +558,16 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 			}
 		}
 	}
-	out := c.evaluate(ctx, call, normalized, degradeOn, "")
+	scopePass := ""
+	// 单意图 Bash：无目标线索且载荷无网络指示符 ⇒ 纯本地命令（无法出网），
+	// scope 按构造通过（no_egress_local）——否则一切本地分析命令被「无可判定
+	// 目标」拒绝（实测 授权测试靶场 任务的 grep/tshark/排序全被拦）。其余四道
+	// 检查照跑，审计理由如实记录。
+	if call.toolName == "Bash" && normalized.StructuredIntent.TargetHint == "" &&
+		len(normalized.MultiIntent) == 0 && !networkIndicatorRe.Match(call.payload) {
+		scopePass = "no_egress_local"
+	}
+	out := c.evaluate(ctx, call, normalized, degradeOn, scopePass)
 	if mode == sodpolicy.MergedGateShadow {
 		// 影子对照（§11-G1）：新链只记差异，最终动作仍由旧链给出。
 		c.shadowCompare(call, out)

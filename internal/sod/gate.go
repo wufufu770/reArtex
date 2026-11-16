@@ -3,6 +3,7 @@ package sod
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
@@ -210,7 +211,10 @@ func (g *Gate) Evaluate(ctx context.Context, in GateInput) GateOutput {
 		if !ok {
 			out.Verdict = sodpolicy.VerdictDeny
 			out.ReasonCode = sodpolicy.ReasonOutOfScope
-			out.Note = "目标不在本任务的授权范围内"
+			// 拒绝理由带上被拒目标（0.15.5 观测修复：此前永远只说「不在范围」，
+			// 排障时无从知道 worker 到底想打哪个 host——实测靶场任务里
+			// URL 形态/解析 IP/幻觉域名全都「无声」被拒，escalation 无法定性）。
+			out.Note = fmt.Sprintf("目标 %q 不在本任务的授权范围内", in.Normalized.StructuredIntent.TargetHint)
 			return out
 		}
 		out.Checks["scope_check"] = "pass"

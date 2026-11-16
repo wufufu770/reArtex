@@ -179,6 +179,9 @@ var NotGatedTools = []string{
 	"get_worker_trace", "get_worker_output", "search_all_worker_traces",
 	"node_detail", "expand_digest", "list_goals", "recall_memory",
 	"list_companies",
+	// SearchExtraTools（0.15.5）：工具目录检索——平台只读，无外部目标；实测
+	// 被当「无可判定目标」out_of_scope 拒绝，worker 连可用的工具都查不了。
+	"SearchExtraTools",
 	// 平台结构化记账（B1）：写侧目标固定在任务图/回执表，不触宿主 FS、不出网。
 	"record_fact", "record_progress", "list_progress_receipts",
 }

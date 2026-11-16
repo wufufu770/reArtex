@@ -34,6 +34,7 @@ type sideQuestionState struct {
 	commands     sync.Mutex // short admission / clear operations only, never inference
 	pending      map[string]sidequestion.Snapshot
 	latest       map[string]sidequestion.Snapshot
+	fails        map[string]int // checkpoint 持久化失败计数（毒丸判定用，0.15.5）
 	seen         map[string][2]int64
 	runs         map[string]sideRun
 	done         chan struct{}
@@ -51,7 +52,7 @@ func bindSideProvider(p llm.Provider, cfg agent.Config, id int64, name string) l
 }
 
 func (s *Server) initSideQuestions() {
-	s.side = &sideQuestionState{pending: map[string]sidequestion.Snapshot{}, latest: map[string]sidequestion.Snapshot{}, seen: map[string][2]int64{}, runs: map[string]sideRun{}, done: make(chan struct{})}
+	s.side = &sideQuestionState{pending: map[string]sidequestion.Snapshot{}, latest: map[string]sidequestion.Snapshot{}, fails: map[string]int{}, seen: map[string][2]int64{}, runs: map[string]sideRun{}, done: make(chan struct{})}
 	if n, err := strconv.Atoi(os.Getenv("ARTEX_BTW_MAX_OUTPUT_TOKENS")); err == nil && n >= 256 && n <= 32768 {
 		s.side.outputTokens = n
 	}
@@ -109,14 +110,41 @@ func (s *Server) flushSideSnapshots() {
 			if cur, ok := s.side.latest[key]; ok && cur.RunID == snap.RunID && cur.Version == snap.Version {
 				delete(s.side.latest, key)
 			}
+		} else if sidePersistPermanent(err) || s.side.fails[key] >= sidePersistMaxRetries {
+			// 毒丸出队（0.15.5 实战）：约束/外键类错误对同一快照是**永久性**的
+			// （父组合非法/父行已删）——重试不可能成功，只会每 tick 刷屏并拖住
+			// flush 循环（实测 授权测试靶场 任务删除后每秒数条无限重试）。侧问
+			// 交换行（side_question_requests）有独立持久化，丢 checkpoint 不丢
+			// 已落库内容；出队时把 key 与父 id 打进日志（此前零上下文排不动）。
+			delete(s.side.pending, key)
+			delete(s.side.fails, key)
+			log.Printf("[btw] checkpoint 丢弃毒丸快照 key=%s parent={conv:%d task:%d exp:%d intent:%d run:%d v%d}: %v",
+				key, snap.Parent.ConversationID, snap.Parent.TaskID, snap.Parent.ExplorationID,
+				snap.Parent.IntentID, snap.RunID, snap.Version, err)
 		} else if newer, ok := s.side.pending[key]; !ok || newer.RunID < snap.RunID || newer.RunID == snap.RunID && newer.Version < snap.Version {
+			s.side.fails[key]++
 			s.side.pending[key] = snap
 		}
 		s.side.mu.Unlock()
 		if err != nil && !errors.Is(err, db.ErrSideParentGone) {
-			log.Printf("[btw] checkpoint persistence: %v", err)
+			log.Printf("[btw] checkpoint persistence: key=%s err=%v", key, err)
 		}
 	}
+}
+
+// sidePersistMaxRetries 是非永久错误的容忍上限（超过按毒丸出队）。
+const sidePersistMaxRetries = 10
+
+// sidePersistPermanent 判定持久化错误是否为永久性（约束/外键——同一快照重试
+// 不可能成功）。字符串匹配避开在 server 包引入 pgconn 驱动依赖。
+func sidePersistPermanent(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "23514") || // check_violation
+		strings.Contains(msg, "23503") || // foreign_key_violation
+		strings.Contains(msg, "23505") // unique_violation（同键冲突且无法自愈的形态）
 }
 
 func (s *Server) sideSnapshot(ctx context.Context, p sidequestion.Parent) (*sidequestion.Snapshot, error) {
@@ -244,6 +272,14 @@ func (s *Server) sideParent(w http.ResponseWriter, r *http.Request, kind string)
 	}
 	if pt == nil || s.engine.IsDeleting(t.ID) {
 		writeErr(w, 409, "任务已归档或正在删除")
+		return p, false
+	}
+	// 0.15.5 防御：exp 缺失（<=0）的父组合会被 side_question_sessions_check
+	// 拒绝（第二臂要求 task+exploration 同时非空）——那条快照会变成毒丸在
+	// flush 循环里无限重试。这里直接拒绝开会话（可重试的 5xx），而不是造出
+	// 一条永远存不进去的 checkpoint。
+	if t.ExpID <= 0 {
+		writeErr(w, 503, "任务尚未建立探索上下文，旁路暂不可用（请稍后重试）")
 		return p, false
 	}
 	p.TaskID, p.ExplorationID = id, t.ExpID
