@@ -60,9 +60,12 @@ func (s *Server) bizTaskGraphHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "task id 非法")
 		return
 	}
+	// 公司绑定存在 task_scope（kind='company'，insertTaskCompanies 写入）——
+	// tasks.company_id 列恒空（0.15.5 实测：读它永远拿 0 ⇒ 位置参数错位后
+	// company_id 比上了 limit 值，图接口静默返回空）。
 	var companyID int64
-	if err := pg.QueryRow(`SELECT COALESCE(company_id,0) FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&companyID); err != nil {
-		writeErr(w, 404, "task 不存在")
+	if err := pg.QueryRow(`SELECT COALESCE(MIN(company_id),0) FROM task_scope WHERE task_id=$1 AND kind='company'`, taskID).Scan(&companyID); err != nil {
+		writeErr(w, 500, err.Error())
 		return
 	}
 	g, err := pg.ListBizGraphScoped(taskID, companyID, r.URL.Query().Get("layer"), "", 2000)

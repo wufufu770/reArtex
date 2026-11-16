@@ -390,15 +390,41 @@ func (d *DB) ListBizGraphScoped(taskID, companyID int64, layer, nodeType string,
 	if limit <= 0 {
 		limit = 1000
 	}
-	fragment, err := d.Assets().ScopeFragmentFor(taskID)
-	if err != nil {
-		return nil, err
+	// 范围 fragment 三态（0.15.5）：taskID>0=任务范围；无任务但显式给了
+	// company ⇒ 公司范围（页面级公司视图——company_id 本身就是授权上下文，
+	// 不再误入平台 fail-closed 空集导致公司页恒空）；两者皆无 ⇒ 平台范围
+	// （fail-closed 空集，纪律不变）。
+	var fragment ScopeFragment
+	switch {
+	case taskID > 0:
+		f, err := d.Assets().ScopeFragmentFor(taskID)
+		if err != nil {
+			return nil, err
+		}
+		fragment = f
+	case companyID > 0:
+		fragment = ScopeFragment{
+			CTE:       `target AS (SELECT id FROM assets WHERE company_id=$1)`,
+			Args:      []any{companyID},
+			Predicate: "id IN (SELECT id FROM target)",
+		}
+	default:
+		f, err := d.Assets().ScopeFragmentFor(0)
+		if err != nil {
+			return nil, err
+		}
+		fragment = f
 	}
+	// company 过滤按需追加（0.15.5 修位置参数错位：companyID<=0 时旧代码仍
+	// 引用 companyPos，占位符指到 limit 实参上 ⇒ company_id=2000 ⇒ 恒 0 行）。
+	// companyID<=0 时不加 company 谓词——可见性已由范围 CTE 收口（taskID<=0
+	// 的平台范围本身 fail-closed 为空），不需要这层冗余过滤。
 	args := append([]any{}, fragment.Args...)
+	companyPos := 0
 	if companyID > 0 {
 		args = append(args, companyID)
+		companyPos = len(args)
 	}
-	companyPos := len(args)
 	if layer != "" {
 		args = append(args, layer)
 	}
@@ -414,9 +440,11 @@ func (d *DB) ListBizGraphScoped(taskID, companyID int64, layer, nodeType string,
 SELECT id, company_id, COALESCE(task_id,0), layer, node_type, name, raw_name, description,
        props, confidence, source, COALESCE(superseded_by,0), created_at, updated_at
 FROM biz_nodes
-WHERE company_id = $` + strconv.Itoa(companyPos) + `
-  AND superseded_by IS NULL
+WHERE superseded_by IS NULL
   AND ` + bizScopedVisibility
+	if companyPos > 0 {
+		q += ` AND company_id = $` + strconv.Itoa(companyPos)
+	}
 	if layer != "" {
 		q += ` AND layer = $` + strconv.Itoa(layerPos)
 	}
