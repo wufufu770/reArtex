@@ -97,3 +97,22 @@ func TestLoosenNoChangeOnCleanInput(t *testing.T) {
 		t.Fatal("非法 JSON 应原样返回")
 	}
 }
+
+// 0.15.8 实测补充：MiniMax 在 arguments 数组里混入数字元素（["-c", 30]）⇒
+// 严格 []string 反序列化炸。schema 声明为 string 的位置把数字/布尔 coerce 成
+// 字符串；无 schema 位置（c:42）绝不触碰。
+func TestLoosenFixesNumericArrayElements(t *testing.T) {
+	in := json.RawMessage(`{"structured_intent":{"action_type":"command_execution","executable":"timeout","arguments":["30","curl",30,"-m",true],"target_hint":"x.example.com","shell_features":{}},"anomaly_flag":false}`)
+	out, changed := loosenAgainstSchema(in, miniInputSchema())
+	if !changed {
+		t.Fatal("数字数组元素应触发矫正")
+	}
+	var raw normalizerToolOutput
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("矫正后应可反序列化: %v", err)
+	}
+	args := raw.StructuredIntent.Arguments
+	if len(args) != 5 || args[0] != "30" || args[2] != "30" || args[4] != "true" {
+		t.Fatalf("数组元素应全部转为字符串: %+v", args)
+	}
+}

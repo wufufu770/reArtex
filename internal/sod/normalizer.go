@@ -541,6 +541,24 @@ func loosenAgainstSchema(raw json.RawMessage, inputSchema map[string]any) (json.
 	walk = func(x any, node map[string]any) any {
 		typ, _ := node["type"].(string)
 		switch typ {
+		case "string":
+			// 0.15.8 实测补充：MiniMax 在 arguments 数组里混入数字元素
+			// （["-c", 30]）——严格 []string 反序列化炸。schema 声明为 string
+			// 的位置把数字/布尔叶子 coerce 成字符串（与 boolean/number 分支
+			// 对称；启发式依然不碰无 schema 位置，string 数组里的真字符串
+			// 元素与含数字的 summary 文本不受影响）。
+			switch v := x.(type) {
+			case json.Number:
+				changed = true
+				return string(v)
+			case bool:
+				changed = true
+				if v {
+					return "true"
+				}
+				return "false"
+			}
+			return x
 		case "boolean":
 			if str, isStr := x.(string); isStr {
 				switch strings.ToLower(strings.TrimSpace(str)) {

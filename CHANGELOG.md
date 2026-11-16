@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.9] - 2026-11-17
+
+### 修复（靶场持续运行暴露）+ 发现涨至 20 条
+- **arguments 数组混入数字元素**：MiniMax 偶发把 ["-c", 30] 这类数字叶子混进 string 数组 ⇒ 严格 []string 反序列化炸 ⇒ normalizer_malformed。修=loosenAgainstSchema 补 "string" 分支（schema 声明为 string 的位置把数字/布尔叶子 coerce 成字符串——与 boolean/number 分支对称；无 schema 位置依旧绝不触碰，TestLoosenFixesNumericArrayElements 钉住）。实机：此前 23:45-00:32 三批任务 10/8 的 grep/ls 复合命令被此错法拒掉。
+- **发现 15→20**（高危 8/中危 8/低危 2/信息 2）：新增 **IDOR 水平越权**（/logic/idor/horizontal/getUserInfo?username=X 任意用户密码泄露，实测 admin/test 均回显明文口令——高危）、**会话劫持**（/druid/websession.json 未鉴权导出 1000 条活跃 Tomcat 会话——高危）、**stored XSS 链**（上传 .html/.svg 落地可回读）、**access_control_bypass**（XFF 变体）、信息级（/api/init.json 全站 51 条路由树泄露等）。流量证据绑定已生效：#19/#20 各绑 4 条录制交换，累计录制 822 条。
+- **已知限制（记录不动刀）**：本机 fake-ip DNS（198.18.0.0/15）下代理按解析后 IP 判出网范围，非标端口（如 :9090）的域名目标会被保守拒绝——80/443 主链路不受影响（688+ 条已录）；如需测非标端口可显式加 ip/cidr 范围行。
+- 对齐检查：无新端点。
+
 ## [0.15.8] - 2026-11-16
 
 ### 修复（遗留清单三件 + 靶场第三轮实测又抓两条阻断）
