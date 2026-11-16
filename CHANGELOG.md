@@ -5,6 +5,31 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.8] - 2026-11-16
+
+### 修复（遗留清单三件 + 靶场第三轮实测又抓两条阻断）
+- **流量证据链打通（遗留①）**：录制代理与 worker 出网注入的基础设施本就完整（proxyEnv 注入 HTTP_PROXY+任务身份令牌 → egress 归属+范围校验 → 录制），只是 `traffic_capture` 开关默认关。运行时打开（PUT /api/settings，不入仓库）后实测：经代理的请求即被录制（GET robots.txt 302 入账）；此后 worker 的 HTTP 动作自动带任务归属，发现可绑流量证据。
+- **对抗复核积压清理（遗留②）**：24h TTL 过期闸本就存在且在工作（18 条已 dismissed）；补 `sod_review_ttl_hours` 设置（小时，默认 24、下限 1）让运维按积压承受度调——db 新增 GetInt 助手，调度器每轮读。
+- **bizmodeler 会话消息（遗留③自证解决）**：之前"0 条消息"是配额死亡期 turn 无产出；真实跑通后 conversation_activities 749 条可读，messages API 无缺陷。
+- **复合动作整段复核推翻子段裁决（新抓，阻断级）**：子段循环逐条通过后，整段复核仍对 StructuredIntent（=首段，常为本地段）跑 scope → 「无可判定目标」把已通过的复合动作整个推翻；叠加模式缓存复用放大成批误拒（干净单 curl 被缓存里三段复合结果拖死）。修=①整段复核跳过 scope（compound_evaluated，子段已逐条裁决，其余检查照跑）②多意图结果只落精确缓存键不落模式键（子意图拆分与具体命令结构强相关，跨载荷复用必然错位）。回归测试 TestSoDGateCompoundEvaluatedScopePass 钉住。实机：探针 worker 的 curl（范围内 授权测试靶场）此前被拒，修复后放行可期。
+- 对齐检查：无新端点；新设置键 sod_review_ttl_hours 为行为面。
+
+## [0.15.7] - 2026-11-16
+
+### 修复（业务建模图读侧双 bug——bizmodeler 实际已建 64 节点/96 边/27 差异，API 恒空）
+- **bizTaskGraphHandler 读错列**：读 tasks.company_id（恒 0——公司绑定实际存于 task_scope kind=company 行）⇒ companyID=0 传入。
+- **ListBizGraphScoped 位置参数错位**：companyID<=0 时 companyPos 仍被引用，占位符指到 limit 实参 ⇒ company_id=2000 恒 0 行。
+- 修=handler 从 task_scope 取公司绑定 + company 过滤按需追加 + 范围 fragment 三态（任务范围/公司范围/平台 fail-closed）——无任务上下文的公司视图不再误入平台空集；显式 company_id 即授权上下文，无上下文依旧 fail-closed 纪律不变。实机：task10 64/96/14 open diffs、公司级 64/96 可读，页面渲染完整业务图（截图目验）。
+
+## [0.15.6] - 2026-11-16
+
+### 修复（靶场第二轮实测暴露）+ 冒烟脚本口径同步
+- **btw 侧问 checkpoint 毒丸无限重试**（每秒数条刷屏）：约束/外键类永久错误+超限重试即出队，丢弃时打 key+父 id（此前零上下文）；sideParent 在 ExpID≤0 时拒绝开会话（父组合注定违反 side_question_sessions_check）。
+- **requiresTarget 改集合语义**：复合命令本地子段无 target_hint 是正确输出，任一段带目标即满足——逐段强制错杀「payload 含 URL+首段本地命令」的正常拆分。
+- **Bash 无网络指示符时 scope 按构造通过**（单意图 no_egress_local/复合 compound_local_segment 全段）：纯本地命令（grep/tshark/排序）被「无可判定目标」拒绝的实测堵点；其余检查照跑。
+- **SearchExtraTools 入 NotGatedTools**（平台只读检索）+ **越界拒绝理由带上被拒目标**（此前「无声被拒」无法定性）。
+- **e2e 冒烟脚本 legacy 期望同步 0.15.1 语义**（pianfeng 无斜杠 200、edge-exploration 308→pianfeng）——此前沿用 0.14.9 旧口径，CI 一跑必红。实跑 45 页全过。
+
 ## [0.15.5] - 2026-11-16
 
 ### 修复（真 LLM 靶场实战暴露的四层阻断——平台首次真实任务全链测试）

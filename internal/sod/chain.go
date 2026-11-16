@@ -559,12 +559,18 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		}
 	}
 	scopePass := ""
-	// 单意图 Bash：无目标线索且载荷无网络指示符 ⇒ 纯本地命令（无法出网），
-	// scope 按构造通过（no_egress_local）——否则一切本地分析命令被「无可判定
-	// 目标」拒绝（实测 授权测试靶场 任务的 grep/tshark/排序全被拦）。其余四道
-	// 检查照跑，审计理由如实记录。
-	if call.toolName == "Bash" && normalized.StructuredIntent.TargetHint == "" &&
-		len(normalized.MultiIntent) == 0 && !networkIndicatorRe.Match(call.payload) {
+	if len(normalized.MultiIntent) > 1 {
+		// 复合动作：scope 已在上面的子段循环里逐条裁决完毕——整段复核若再跑
+		// scope，会拿 StructuredIntent（=首段，常为本地段，无目标）判出
+		// 「无可判定目标」，把已通过的复合动作整个推翻（0.15.5 实测：模式
+		// 缓存复用 + 本缺陷 ⇒ 干净的单 curl 被拒）。这里跳过 scope、其余检查
+		// 照跑；理由如实进审计。
+		scopePass = "compound_evaluated"
+	} else if call.toolName == "Bash" && normalized.StructuredIntent.TargetHint == "" &&
+		!networkIndicatorRe.Match(call.payload) {
+		// 单意图 Bash：无目标线索且载荷无网络指示符 ⇒ 纯本地命令（无法出网），
+		// scope 按构造通过（no_egress_local）——否则一切本地分析命令被「无可
+		// 判定目标」拒绝（实测 授权测试靶场 任务的 grep/tshark/排序全被拦）。
 		scopePass = "no_egress_local"
 	}
 	out := c.evaluate(ctx, call, normalized, degradeOn, scopePass)
@@ -774,7 +780,11 @@ func (c *Chain) normalize(ctx context.Context, call chainCall) (NormalizerResult
 	c.deps.Cache.Put(key, normalized)
 	// R2：规整成功 ⇒ 精确键与模式键同落（不同载荷、同 host/方法 ⇒ 下次直接
 	// 模式命中，再省一次模型调用）。
-	if hasPattern {
+	// ⚠️ 多意图结果【只落精确键】（0.15.5 实测）：子意图拆分与具体命令的段落
+	// 结构强相关——把它落进 host+method 模式键，会让之后形态完全不同的单命令
+	// 载荷复用出「N 段全无目标」的复合结构，成批误拒（干净单 curl 被缓存里
+	// 的三段复合结果拖死）。
+	if hasPattern && len(normalized.MultiIntent) <= 1 {
 		c.deps.Cache.Put(patternKey, normalized)
 	}
 	return normalized, false, false, nil

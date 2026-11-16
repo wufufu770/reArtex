@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
@@ -200,6 +201,12 @@ func (g *Gate) Evaluate(ctx context.Context, in GateInput) GateOutput {
 		out.ReasonCode = sodpolicy.ReasonOutOfScope
 		out.Note = "本次动作没有可判定的目标线索，无法确认其在授权范围内"
 		return out
+	case strings.HasPrefix(in.Normalized.StructuredIntent.TargetHint, "/"):
+		// 路径形 target_hint（0.15.5 实测：模型把文件路径当「目标」填进来）：
+		// 主机名永不以 / 开头——这是本地 FS 引用，不是网络目标。出网边界由
+		// 载荷级的 networkIndicatorRe + 快路径 host 提取把守（那才是权威），
+		// 这里把路径误判成 host 只会成批误拒本地分析命令。按构造通过。
+		out.Checks["scope_check"] = "pass(local_path_target)"
 	default:
 		ok, err := deps.scopeHostInScope(in.TaskID, in.Normalized.StructuredIntent.TargetHint)
 		if err != nil {

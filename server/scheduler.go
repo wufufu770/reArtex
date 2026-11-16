@@ -193,13 +193,19 @@ func (sc *Scheduler) sweepStaleReviews() {
 		return
 	}
 	_ = sc.pg.SetSchedState(schedKeyLastRevSweep, strconv.FormatInt(now, 10))
-	n, err := sc.pg.DismissStaleAdversarialReviews(24 * time.Hour)
+	// TTL 可配（settings.sod_review_ttl_hours，小时；默认 24，下限 1）——运维按
+	// 积压承受度调（0.15.5 靶场实测一天积 120 条 pending）。扫描间隔仍为 1h。
+	ttlHours := sc.pg.GetInt(settingSodReviewTtlHours, 24)
+	if ttlHours < 1 {
+		ttlHours = 1
+	}
+	n, err := sc.pg.DismissStaleAdversarialReviews(time.Duration(ttlHours) * time.Hour)
 	if err != nil {
 		log.Printf("[scheduler] needs_review 过期结案失败: %v", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("[scheduler] needs_review 过期闸：自动结案 %d 条挂起超 24h 的复核项", n)
+		log.Printf("[scheduler] needs_review 过期闸：自动结案 %d 条挂起超 %dh 的复核项", n, ttlHours)
 	}
 }
 

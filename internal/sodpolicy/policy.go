@@ -182,6 +182,9 @@ var NotGatedTools = []string{
 	// SearchExtraTools（0.15.5）：工具目录检索——平台只读，无外部目标；实测
 	// 被当「无可判定目标」out_of_scope 拒绝，worker 连可用的工具都查不了。
 	"SearchExtraTools",
+	// 流量证据读侧（0.15.5 实测 traffic_get 被同样拒）：录制交换/证据快照的
+	// 查看器——按 id 取平台自有数据，无外部目标。写侧/绑定类不在本清单。
+	"traffic_get", "traffic_search", "traffic_blob",
 	// 平台结构化记账（B1）：写侧目标固定在任务图/回执表，不触宿主 FS、不出网。
 	"record_fact", "record_progress", "list_progress_receipts",
 }

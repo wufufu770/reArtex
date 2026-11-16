@@ -253,6 +253,7 @@ type Manager struct {
 const (
 	settingTrafficCapture      = "traffic_capture"
 	settingAgentTrafficBinding = "agent_traffic_binding"
+	settingSodReviewTtlHours   = "sod_review_ttl_hours" // needs_review 过期闸 TTL（小时，默认 24）
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
 	settingBraveKey            = "brave_search_api_key"

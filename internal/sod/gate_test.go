@@ -362,6 +362,38 @@ func TestSoDGateLocalTaskDirScope(t *testing.T) {
 	}
 }
 
+// TestSoDGateCompoundEvaluatedScopePass 钉住 0.15.5 复合动作整段复核缺陷：子段
+// 循环逐条裁决通过后，整段复核若再跑 scope，会拿首段（本地段，无目标）判出
+// 「无可判定目标」推翻已通过的复合动作（实测模式缓存复用放大成批误拒）。
+// 链侧以 ScopePassReason=compound_evaluated 跳过整段 scope——本测试钉住闸门
+// 对该理由的放行语义。
+func TestSoDGateCompoundEvaluatedScopePass(t *testing.T) {
+	stub := gateStubAllowAll()
+	g := &Gate{deps: stub}
+	in := GateInput{
+		ToolName:    "Bash",
+		SourceAgent: "worker",
+		TaskID:      42,
+		Normalized: NormalizerResult{
+			// 首段=本地段（无目标）——整段复核的旧缺陷正是死在这里。
+			StructuredIntent: StructuredIntent{ActionType: "command_execution"},
+			MultiIntent: []StructuredIntent{
+				{ActionType: "command_execution"},
+				{ActionType: "command_execution", TargetHint: "授权测试靶场"},
+			},
+		},
+		ScopePassReason: "compound_evaluated",
+	}
+	out := g.Evaluate(context.Background(), in)
+	if out.Verdict != sodpolicy.VerdictApprove {
+		t.Fatalf("复合动作整段复核（子段已逐条裁决）应放行，verdict=%q reason=%q note=%q",
+			out.Verdict, out.ReasonCode, out.Note)
+	}
+	if out.Checks["scope_check"] != "pass(compound_evaluated)" {
+		t.Fatalf("scope_check=%q，want pass(compound_evaluated)", out.Checks["scope_check"])
+	}
+}
+
 // TestBashLocalTaskDirClassifier 钉住 B5 的路径抽取与出界判定。
 func TestBashLocalTaskDirClassifier(t *testing.T) {
 	ok := []string{
