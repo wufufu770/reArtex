@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.11] - 2026-11-17
+
+### 修复（跨模型过拟合审计——按用户裁定全面调研"换其他模型还会不会出这些问题"）
+- **审计范围**：全部 14 处 llm.CompletionRequest 构造点 + provider 映射层（anthropic/openai/responses）+ llmpool 失败分类 + thinking 能力注册表 + SoD 契约语义。结论：请求形状已全部由 profile 配置驱动（ThinkingType/ReasoningEffort/Stream/MaxTokensField/ContextWindowK），代码层无模型名特化分支；MiniMax 实测暴露的六类问题（思考开关 400/禁思考空响应/标量字符串/数字数组元素/多意图拆分/配额 429 语义）对应的修复全部是**契约放宽或配置驱动**，对其他模型无副作用。
+- **修 ①openai 格式 temperature 自动省略（reasoning 族兼容）**：o1/o3/gpt-5 族拒绝 temperature 参数（只认默认值）——判据用 profile 已有的 MaxTokensField==max_completion_tokens（正是这族模型的配置信号），该分支下不再透传 temperature；常规模型行为不回归，无模型名硬编码。normalizer/裁判/策略学习的 temp=0 在 Anthropic 与常规 OpenAI 模型上继续生效。
+- **修 ②llmpool 硬熔断按类别给准确指引**：OnHardTrip 增加 kind 实参（auth/quota/missing）——此前 429 配额耗尽也喊「鉴权失效请轮换 Key」，误导运维方向；现在 quota→「请充值/等待重置」、missing→「核对模型名/base_url」、auth→「轮换 Key」。多厂商配额 regex（MiniMax/OpenAI/Anthropic 形态）已在位，匹配不到保守回退瞬态。
+- **审计留档（不改动的裁决）**：①SoD 规整器无 ToolChoice 强制——倾向散文回答的模型会 fail-closed（malformed）而非误放行，属设计取舍，未来可加 ToolChoice 支持；②thinking 能力注册表是设计好的三层能力发现（注册表+探测+手动兜底，未收录模型回退保守全集），非过拟合；③标量矫正/数字元素矫正只在解码失败路径触发，对输出规范类型的模型零影响；④多意图契约 1..N 对单意图模型同样成立；⑤中文提示词全主流模型可用。
+- 验证：go build 全绿；llmpool/norma-llm/compaction 测试全过（norma llm 有一个环境性 pre-existing 失败 TestDoStreamHonorsConfiguredRetries，干净树同样失败，与本批无关）。
+- 对齐检查：无新端点。
+
 ## [0.15.10] - 2026-11-17
 
 ### 修复（发现涨至 28 条含 3 critical + 压缩链 thinking 硬编码全面清除）

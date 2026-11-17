@@ -49,9 +49,11 @@ type Pool struct {
 	members []*Member // in chain order (active first, then priority DESC)
 	health  *Registry
 	rr      atomic.Uint64 // rotates the starting point within an equal-priority group
-	// OnHardTrip 是硬熔断（401/403 等 key 级失效）的宿主回调（v5.3 G-B）：
-	// 宿主据此群播报「key 失效已切换，请轮换」。nil = 只留日志。
-	OnHardTrip func(memberName, errMsg string)
+	// OnHardTrip 是硬熔断（key 失效/配额耗尽/配置缺失）的宿主回调（v5.3 G-B）：
+	// 宿主据此群播报处置指引。kind 是失败类别（HardKindAuth/Quota/Missing），
+	// 宿主按类别给准确措辞——0.15.9 修复：此前一律说「鉴权失效请轮换 Key」，
+	// 429 配额耗尽也这么喊，误导运维。nil = 只留日志。
+	OnHardTrip func(memberName, errMsg, kind string)
 	// OnFailover 是每次成员切换的宿主回调（v5.3 G-E 可观测：切换原因/
 	// 从谁到谁，全部留痕+播报）。nil = 只留日志。
 	OnFailover func(fromName, toName, reason string)
@@ -114,7 +116,7 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 			if p.health.Trip(m.ID, trimErr(failed), hard) {
 				log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(failed))
 				if hard && p.OnHardTrip != nil {
-					p.OnHardTrip(m.Name+"/"+m.Model, trimErr(failed))
+					p.OnHardTrip(m.Name+"/"+m.Model, trimErr(failed), hardKind(failed))
 				}
 			}
 			if i+1 < len(order) {
@@ -154,15 +156,15 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 			p.health.Pass(m.ID)
 			return llm.Message{}, "", llm.Usage{}, err
 		}
-		lastErr = err
-		hard := isHardFailure(err)
-		if p.health.Trip(m.ID, trimErr(err), hard) {
-			log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
-			if hard && p.OnHardTrip != nil {
-				p.OnHardTrip(m.Name+"/"+m.Model, trimErr(err))
+			lastErr = err
+			hard := isHardFailure(err)
+			if p.health.Trip(m.ID, trimErr(err), hard) {
+				log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
+				if hard && p.OnHardTrip != nil {
+					p.OnHardTrip(m.Name+"/"+m.Model, trimErr(err), hardKind(err))
+				}
 			}
-		}
-		if i+1 < len(order) {
+			if i+1 < len(order) {
 			n := order[i+1]
 			log.Printf("[llmpool] LLM 故障转移：%q(%s) → %q(%s)，原因：%s",
 				m.Name, m.Model, n.Name, n.Model, trimErr(err))
@@ -280,6 +282,29 @@ func isHardFailure(err error) bool {
 		return isQuotaExhausted(err)
 	}
 	return false
+}
+
+// HardTrip 失败类别（OnHardTrip 的 kind 实参）：宿主据此给准确处置指引。
+const (
+	HardKindAuth    = "auth"    // 401/403 key 无效
+	HardKindQuota   = "quota"   // 402 / 429 配额耗尽（区别于瞬时限流）
+	HardKindMissing = "missing" // 404 模型/端点不存在
+)
+
+func hardKind(err error) string {
+	switch statusOf(err) {
+	case 401, 403:
+		return HardKindAuth
+	case 402:
+		return HardKindQuota
+	case 404:
+		return HardKindMissing
+	case 429:
+		if isQuotaExhausted(err) {
+			return HardKindQuota
+		}
+	}
+	return ""
 }
 
 // quotaRe 匹配「配额/套餐耗尽」语义的响应体（区别于瞬时限流 rate limit）。

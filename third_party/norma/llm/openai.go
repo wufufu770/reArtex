@@ -266,11 +266,17 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 	msgs = sanitizeOpenAIMessages(msgs, thinking)
 
 	body := oaReq{
-		Model:       p.cfg.Model,
-		Messages:    msgs,
-		Temperature: req.Temperature,
-		Stop:        req.Stop,
-		Stream:      stream,
+		Model:    p.cfg.Model,
+		Messages: msgs,
+		Stop:     req.Stop,
+		Stream:   stream,
+		// Temperature 不在此处无条件透传：reasoning 族（o1/o3/gpt-5 等）拒绝
+		// temperature 参数（只认默认值），发出去直接 400。判据用 profile 已有
+		// 的 MaxTokensField==max_completion_tokens（正是这族模型的配置信号），
+		// 不做模型名硬编码——常规模型仍按请求透传，行为不回归。
+	}
+	if p.cfg.MaxTokensField != MaxTokensFieldCompletion {
+		body.Temperature = req.Temperature
 	}
 	// The output cap goes into exactly one key. Reasoning models accept only
 	// "max_completion_tokens"; everything else still takes "max_tokens", which

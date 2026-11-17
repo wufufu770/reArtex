@@ -133,8 +133,18 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 		_ = s.m.pg.InsertLLMRecord(&db.LLMRecord{Worker: "governance", Model: fromName, Status: "ok",
 			RawResponse: fmt.Sprintf(`{"event":"failover","from":%q,"to":%q,"reason":%q}`, fromName, toName, reason)})
 	}
-	pool.OnHardTrip = func(memberName, errMsg string) {
-		msg := fmt.Sprintf("【LLM 配置故障】%s 鉴权失效（%s）——已切换备用配置；请轮换该配置的 API Key", memberName, errMsg)
+	pool.OnHardTrip = func(memberName, errMsg, kind string) {
+		// 按失败类别给准确处置指引（0.15.9 审计修复：此前一律「鉴权失效请轮换
+		// Key」，429 配额耗尽也这么喊，误导运维方向）。
+		var msg string
+		switch kind {
+		case llmpool.HardKindQuota:
+			msg = fmt.Sprintf("【LLM 配置故障】%s 配额耗尽（%s）——已切换备用配置；请充值/等待配额重置，或调整该配置", memberName, errMsg)
+		case llmpool.HardKindMissing:
+			msg = fmt.Sprintf("【LLM 配置故障】%s 模型或端点不存在（%s）——已切换备用配置；请核对该配置的模型名/base_url", memberName, errMsg)
+		default:
+			msg = fmt.Sprintf("【LLM 配置故障】%s 鉴权失效（%s）——已切换备用配置；请轮换该配置的 API Key", memberName, errMsg)
+		}
 		log.Printf("[llmpool] %s", msg)
 		if s.m == nil || s.m.pg == nil {
 			return
