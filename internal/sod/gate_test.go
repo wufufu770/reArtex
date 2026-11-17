@@ -379,7 +379,7 @@ func TestSoDGateCompoundEvaluatedScopePass(t *testing.T) {
 			StructuredIntent: StructuredIntent{ActionType: "command_execution"},
 			MultiIntent: []StructuredIntent{
 				{ActionType: "command_execution"},
-				{ActionType: "command_execution", TargetHint: "授权测试靶场"},
+				{ActionType: "command_execution", TargetHint: "target.example.com"},
 			},
 		},
 		ScopePassReason: "compound_evaluated",
