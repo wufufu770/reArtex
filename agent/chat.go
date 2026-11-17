@@ -181,7 +181,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// 触发词闸门（EDGE E6，合并施工）：确定性检测「用户明确提出偏锋探索」。
 	// 注入走【本轮】（拼进传给 runner 的消息），不拼死进 system——chat 是常驻
 	// 会话（transcript 跨轮复用），system 前缀直接关系 KV 缓存（W3 记忆块为
-	// 此改走 SystemReminderFunc，同一纪律）。硬命中额外把 edge 工具前置到工具
+	// 此改走本轮通道，同一纪律）。硬命中额外把 edge 工具前置到工具
 	// 集头部（模型先看见先想起）；软命中只注入建议，不前置（宁漏勿误）。
 	if hit := edge.Scan(message); hit != nil {
 		if hit.Hard {
@@ -231,13 +231,15 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}
-	// W3（方案 v10 §6）：chat 是常驻会话（transcript 跨轮复用）⇒ 记忆块不拼进
-	// system（易变内容会损伤前缀缓存），改走 SystemReminderFunc 每轮现取现注；
-	// 无记忆/句柄未接线时返回空串（不塞空段）。全仓库无其他 lane 设置该钩子
-	// （grep 过 SystemReminderFunc），此处为首个使用者，不存在覆盖冲突。
+	// W3（方案 v10 §6）+ 0.15.12 修订：chat 是常驻会话（transcript 跨轮复用）。
+	// 记忆块原先走 SystemReminderFunc——那条通道在 harness 里是【每轮前插为
+	// messages[0]】，记忆一变整个会话前缀从第 0 字节发散、缓存全失（命中率
+	// 的真实损耗源）。改拼进【本轮输入尾部】（与上方 edge 触发词同通道）：
+	// 历史轮次字节稳定、前缀缓存保得住，只有本轮增量进上下文；块随本轮消息
+	// 留档，回放可见。无记忆/句柄未接线时 MemoryPromptBlock 返回空串（不塞空段）。
 	if c.memoryDB != nil {
-		opts.SystemReminderFunc = func() string {
-			return MemoryPromptBlock(c.memoryDB, memoryScopeOfChatSession(sessionID))
+		if mb := MemoryPromptBlock(c.memoryDB, memoryScopeOfChatSession(sessionID)); mb != "" {
+			message += "\n\n" + mb
 		}
 	}
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：会话成员各自的 thinking_effort

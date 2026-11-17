@@ -123,6 +123,15 @@ type Config struct {
 	// Ignored by the Anthropic and Responses formats, which name the field
 	// themselves ("max_tokens" / "max_output_tokens").
 	MaxTokensField string
+	// CacheMessages (Anthropic format only) adds a cache_control breakpoint on
+	// the LAST message of every request — Anthropic's incremental caching
+	// pattern: as the conversation grows, each turn re-covers everything the
+	// previous turn cached plus one append, so reads dominate writes. Default
+	// false: system-prefix caching (DynamicBoundary) stays universal, while
+	// message-tail breakpoints only pay off on providers that honor explicit
+	// breakpoints (real Anthropic; strict emulation gateways). Providers with
+	// implicit prefix caching (e.g. MiniMax) ignore the field harmlessly.
+	CacheMessages bool
 
 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
 }

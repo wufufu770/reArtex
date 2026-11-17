@@ -7,12 +7,15 @@
 //   · 后端配置写穿运行时注册表：启停/优先级/本体改动立即进入轮换与判定
 //     （0.15.3 前只改展示，轮换读不到——这是"功能是虚的"的最后一处根因）；
 //   · 方法论行可点开看完整内容；轮换优先级就地自动保存；运行记录展示真实
-//     数据并可跳任务详情（0.15.3 既定）。
+//     数据并可跳任务详情（0.15.3 既定）；
+//   · 0.15.12：方法论改卡片网格、运行记录加滚动容器——条目增多不再把页面
+//     拉长，滚轮上下滑与其他 reArtex 列表页一致。
 // 视觉纪律延续：无标语/引导文字；文字只作为数据出现。
 
 import * as React from "react";
 
 import Link from "next/link";
+
 import { ChevronDownIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
@@ -133,7 +136,7 @@ export default function PianfengPage() {
   const [nf, setNf] = React.useState<MethDraft>(EMPTY_DRAFT);
 
   const load = React.useCallback(() => {
-    Promise.all([api.edgeMethodologies().catch(() => null), api.edgeTasks().catch(() => null)]).then(
+    void Promise.all([api.edgeMethodologies().catch(() => null), api.edgeTasks().catch(() => null)]).then(
       ([ms, ts]) => {
         setMeths((ms?.methodologies ?? []) as MethRow[]);
         setTasks(ts?.tasks ?? []);
@@ -370,7 +373,8 @@ export default function PianfengPage() {
               {tasks.length}
             </Badge>
           </div>
-          <div className="space-y-1.5">
+          {/* 0.15.12：滚动容器——运行记录增多不再把页面拉长（滚轮上下滑） */}
+          <div className="max-h-[36vh] space-y-1.5 overflow-y-auto pr-1">
             {tasks.map((t) => {
               const st = TASK_STATUS[t.status] ?? { label: t.status, cls: "" };
               const stopHistory = Object.entries(t.stop_stats ?? {})
@@ -476,39 +480,56 @@ export default function PianfengPage() {
           </div>
         )}
 
-        <div className="space-y-1.5">
-          {meths.map((m) => {
-            const open = expanded === m.id;
-            return (
-              <div key={m.id} className={`rounded-md border ${open ? "bg-muted/30" : ""}`}>
-                {/* 行：点开看完整内容；右侧为快捷操作（优先级/启停/删） */}
+        {/* 0.15.12：卡片网格 + 滚动容器——条目增多不再把页面拉长（滚轮上下滑） */}
+        <div className="max-h-[60vh] overflow-y-auto pr-1">
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {meths.map((m) => {
+              const open = expanded === m.id;
+              return (
                 <div
-                  className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-2 py-1.5"
-                  onClick={() => openRow(m)}
+                  key={m.id}
+                  className={`flex flex-col gap-1.5 rounded-lg border p-2.5 ${open ? "bg-muted/30" : ""}`}
                 >
-                  <ChevronDownIcon
-                    className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
-                  />
-                  <span className={`size-2 shrink-0 rounded-full ${GRADE_DOT[m.evidence_grade] ?? "bg-slate-400"}`} />
-                  <span className="font-medium text-sm">{m.name}</span>
-                  <span className="text-[10px] text-muted-foreground">T{m.tier}</span>
-                  {m.criterion && (
-                    <span className="text-[10px] text-muted-foreground">
-                      {(CRIT_NAME as Record<string, string>)[m.criterion.kind] ?? m.criterion.kind}
-                      {m.criterion.bounds?.[0] ? `≤${m.criterion.bounds[0].limit}` : ""}
+                  {/* 头部：点开看完整内容 + 编辑（真 button——a11y：静态 div 挂 onClick 被 lint 拒） */}
+                  <button
+                    type="button"
+                    className="flex cursor-pointer select-none items-center gap-1.5 bg-transparent text-left"
+                    onClick={() => openRow(m)}
+                  >
+                    <ChevronDownIcon
+                      className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+                    />
+                    <span className={`size-2 shrink-0 rounded-full ${GRADE_DOT[m.evidence_grade] ?? "bg-slate-400"}`} />
+                    <span className="min-w-0 flex-1 truncate font-medium text-sm" title={m.name}>
+                      {m.name}
                     </span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">T{m.tier}</span>
+                    {!m.enabled && (
+                      <Badge variant="outline" className="shrink-0 text-[10px]">
+                        停用
+                      </Badge>
+                    )}
+                  </button>
+                  {/* meta：判据/上限 + 标签 */}
+                  <div className="flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
+                    {m.tier === 3 && <span>隐喻·无判据</span>}
+                    {m.criterion && (
+                      <span>
+                        {(CRIT_NAME as Record<string, string>)[m.criterion.kind] ?? m.criterion.kind}
+                        {m.criterion.bounds?.[0] ? `≤${m.criterion.bounds[0].limit}` : ""}
+                      </span>
+                    )}
+                    {(m.heuristic_tags ?? []).slice(0, 3).map((tag) => (
+                      <span key={tag}>#{tag}</span>
+                    ))}
+                  </div>
+                  {m.summary && (
+                    <p className="line-clamp-2 text-[11px] text-muted-foreground" title={m.summary}>
+                      {m.summary}
+                    </p>
                   )}
-                  {(m.heuristic_tags ?? []).slice(0, 3).map((tag) => (
-                    <span key={tag} className="text-[10px] text-muted-foreground">
-                      #{tag}
-                    </span>
-                  ))}
-                  {!m.enabled && (
-                    <Badge variant="outline" className="text-[10px]">
-                      停用
-                    </Badge>
-                  )}
-                  <div className="ml-auto flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                  {/* 底部快捷操作（优先级/启停/删）。与头按钮是兄弟节点，无需 stopPropagation */}
+                  <div className="mt-auto flex items-center gap-1.5">
                     <input
                       className="h-6 w-12 rounded border bg-background px-1 text-center text-[10px]"
                       defaultValue={m.priority}
@@ -532,106 +553,113 @@ export default function PianfengPage() {
                       </Button>
                     )}
                   </div>
-                </div>
 
-                {/* 展开：完整内容 + 编辑区 */}
-                {open && (
-                  <div className="border-t px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-                    <p className="text-sm">{m.summary || "—"}</p>
-                    <div className="mt-1.5 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
-                      <span>{TIER_NAME[m.tier] ?? `T${m.tier}`}</span>
-                      <span>{GRADE_NAME[m.evidence_grade] ?? m.evidence_grade}证据</span>
-                      <span>轮换优先级 {m.priority}（大者优先）</span>
-                    </div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">
-                      {m.tier === 3
-                        ? "隐喻条目：不设机器判据，仅作视角注入"
-                        : `完成判据：${(CRIT_NAME as Record<string, string>)[m.criterion?.kind ?? ""] ?? "—"}${
-                            m.criterion?.bounds?.[0] ? ` ≤ ${m.criterion.bounds[0].limit}` : ""
-                          }`}
-                    </div>
-                    {(m.heuristic_tags ?? []).length > 0 && (
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {(m.heuristic_tags ?? []).map((tag) => (
-                          <Badge key={tag} variant="outline" className="text-[10px]">
-                            #{tag}
-                          </Badge>
-                        ))}
+                  {/* 展开：完整内容 + 编辑区 */}
+                  {open && (
+                    <div className="border-t pt-2.5">
+                      <p className="text-sm">{m.summary || "—"}</p>
+                      <div className="mt-1.5 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
+                        <span>{TIER_NAME[m.tier] ?? `T${m.tier}`}</span>
+                        <span>{GRADE_NAME[m.evidence_grade] ?? m.evidence_grade}证据</span>
+                        <span>轮换优先级 {m.priority}（大者优先）</span>
                       </div>
-                    )}
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        {m.tier === 3
+                          ? "隐喻条目：不设机器判据，仅作视角注入"
+                          : `完成判据：${(CRIT_NAME as Record<string, string>)[m.criterion?.kind ?? ""] ?? "—"}${
+                              m.criterion?.bounds?.[0] ? ` ≤ ${m.criterion.bounds[0].limit}` : ""
+                            }`}
+                      </div>
+                      {(m.heuristic_tags ?? []).length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {(m.heuristic_tags ?? []).map((tag) => (
+                            <Badge key={tag} variant="outline" className="text-[10px]">
+                              #{tag}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
 
-                    {draft && (
-                      <div className="mt-2.5 space-y-1.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Input
-                            className="h-7 w-40 text-xs"
-                            placeholder="名称"
-                            value={draft.name}
-                            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                          />
-                          {tierSelect(draft.tier, (v) => setDraft({ ...draft, tier: v, grade: gradeOnTier(v, draft.grade) }))}
-                          {gradeSelect(draft.grade, (v) => setDraft({ ...draft, grade: v as MethDraft["grade"] }))}
-                          {Number(draft.tier) !== 3 &&
-                            kindSelect(draft.kind, (v) => setDraft({ ...draft, kind: v as MethDraft["kind"] }))}
-                          {Number(draft.tier) !== 3 && (
+                      {draft && (
+                        <div className="mt-2.5 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
                             <Input
-                              className="h-7 w-20 text-xs"
-                              placeholder="上限"
-                              value={draft.limit}
-                              onChange={(e) => setDraft({ ...draft, limit: e.target.value })}
+                              className="h-7 w-40 text-xs"
+                              placeholder="名称"
+                              value={draft.name}
+                              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                             />
-                          )}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Input
-                            className="h-7 min-w-40 flex-1 text-xs"
-                            placeholder="一句话说明"
-                            value={draft.summary}
-                            onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
-                          />
-                          <Input
-                            className="h-7 min-w-40 flex-1 text-xs"
-                            placeholder="启发标签，逗号分隔"
-                            value={draft.tags}
-                            onChange={(e) => setDraft({ ...draft, tags: e.target.value })}
-                          />
-                          <Input
-                            className="h-7 w-16 text-center text-xs"
-                            title="轮换优先级：大者优先"
-                            value={draft.priority}
-                            onChange={(e) => setDraft({ ...draft, priority: e.target.value })}
-                          />
-                          <Button size="sm" className="h-7 text-xs" onClick={() => saveDraft(m)}>
-                            保存
-                          </Button>
-                          {m.source === "builtin-override" && (
-                            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => removeOrRestore(m)}>
-                              恢复默认
-                            </Button>
-                          )}
-                          {m.source === "custom" && !m.enabled && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-destructive text-xs"
-                              onClick={() => removeOrRestore(m)}
-                            >
-                              删除
-                            </Button>
-                          )}
-                        </div>
-                        {m.source === "builtin" && (
-                          <div className="text-[11px] text-muted-foreground">
-                            保存后将存为覆盖配置，可随时恢复默认。
+                            {tierSelect(draft.tier, (v) =>
+                              setDraft({ ...draft, tier: v, grade: gradeOnTier(v, draft.grade) }),
+                            )}
+                            {gradeSelect(draft.grade, (v) => setDraft({ ...draft, grade: v as MethDraft["grade"] }))}
+                            {Number(draft.tier) !== 3 &&
+                              kindSelect(draft.kind, (v) => setDraft({ ...draft, kind: v as MethDraft["kind"] }))}
+                            {Number(draft.tier) !== 3 && (
+                              <Input
+                                className="h-7 w-20 text-xs"
+                                placeholder="上限"
+                                value={draft.limit}
+                                onChange={(e) => setDraft({ ...draft, limit: e.target.value })}
+                              />
+                            )}
                           </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Input
+                              className="h-7 min-w-40 flex-1 text-xs"
+                              placeholder="一句话说明"
+                              value={draft.summary}
+                              onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
+                            />
+                            <Input
+                              className="h-7 min-w-40 flex-1 text-xs"
+                              placeholder="启发标签，逗号分隔"
+                              value={draft.tags}
+                              onChange={(e) => setDraft({ ...draft, tags: e.target.value })}
+                            />
+                            <Input
+                              className="h-7 w-16 text-center text-xs"
+                              title="轮换优先级：大者优先"
+                              value={draft.priority}
+                              onChange={(e) => setDraft({ ...draft, priority: e.target.value })}
+                            />
+                            <Button size="sm" className="h-7 text-xs" onClick={() => saveDraft(m)}>
+                              保存
+                            </Button>
+                            {m.source === "builtin-override" && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={() => removeOrRestore(m)}
+                              >
+                                恢复默认
+                              </Button>
+                            )}
+                            {m.source === "custom" && !m.enabled && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-destructive text-xs"
+                                onClick={() => removeOrRestore(m)}
+                              >
+                                删除
+                              </Button>
+                            )}
+                          </div>
+                          {m.source === "builtin" && (
+                            <div className="text-[11px] text-muted-foreground">
+                              保存后将存为覆盖配置，可随时恢复默认。
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>

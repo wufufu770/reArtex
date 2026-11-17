@@ -30,9 +30,23 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 		return
 	}
 	// P5 传承图：新任务规划前检索 accepted 经验注入任务书（≤12K、top-5；
-	// 匹配=goal 文本重叠，创建时点无指纹可查——如实口径）。无命中不注入。
+	// 匹配=goal 文本重叠 + 资产 KV 指纹重叠。0.15.12 修活：真实注入路径此前
+	// seedKVs 恒传 nil——指纹强信号通道（host/url 重叠，MatchExperiences 里
+	// 键 1.5/值 3 分）是死的，只剩 goal 文本重叠，换个说法就匹配不到。现从
+	// 任务书解析 host/url 喂进匹配器；无命中不注入。
 	if s.m.pg != nil {
-		if block := s.legacyInjectionBlock(seedText, nil, func() int64 {
+		seedKVs := map[string]any{}
+		if scheme, host, port, ok := parseTarget(seedText); ok && host != "" {
+			seedKVs["host"] = host
+			if scheme == "http" || scheme == "https" {
+				u := scheme + "://" + host
+				if !(scheme == "https" && port == 443) && !(scheme == "http" && port == 80) {
+					u += fmt.Sprintf(":%d", port)
+				}
+				seedKVs["url"] = u
+			}
+		}
+		if block := s.legacyInjectionBlock(seedText, seedKVs, func() int64 {
 			id, _ := strconv.ParseInt(t.ID, 10, 64)
 			return id
 		}()); block != "" {

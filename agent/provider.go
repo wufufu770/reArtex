@@ -82,6 +82,11 @@ type Config struct {
 	// 空 = 不发送。值由 transcript.WithSessionID 挂在请求 context 上,由 RoundTripper
 	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
 	SessionHeaderKey string
+	// CacheMessages(0.15.12,Anthropic 格式专属):在每条请求的【最后一条消息】上
+	// 追加 cache_control 断点——Anthropic 官方增量缓存模式(system 前缀断点之外
+	// 的第二档)。默认 false:对真 Anthropic/显式断点网关受益,对隐式前缀缓存上游
+	// (如 MiniMax)无害。server 侧经 settings 键 cache_messages 配置。
+	CacheMessages bool
 	// Retry 是该配置解析后的重试参数(profile 覆盖 → 全局策略 → 内置默认,由
 	// server 侧解析)。三层的含义见 RetryConfig;零值 = 完全沿用内置默认。
 	Retry RetryConfig
@@ -333,6 +338,8 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
 	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。
 	lc.MaxTokensField = c.MaxTokensField
+	// 消息尾缓存断点开关(0.15.12)原样透传:provider 侧只在 anthropic 格式生效。
+	lc.CacheMessages = c.CacheMessages
 	// 重试参数与 SDK 同语义(次数 0=默认/负=关闭,间隔 0=指数退避/>0=固定),原样透传。
 	lc.MaxRetries = c.Retry.ConnectAttempts
 	lc.RetryInterval = c.Retry.ConnectInterval

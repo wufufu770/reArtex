@@ -327,6 +327,19 @@ export default function LLMRecordsPage() {
         </div>
       )}
 
+      {/* 0.15.12：分 worker 命中率——「哪里在漏」从猜测变成可见（口径同全局：cache_read/input） */}
+      {stats && stats.by_worker.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {stats.by_worker.map((w) => (
+            <Badge key={w.worker} variant="outline" className="gap-1.5 text-[11px]">
+              <span className="font-mono">{w.worker || "—"}</span>
+              <span className="tabular-nums">{(w.cache_hit_rate * 100).toFixed(1)}%</span>
+              <span className="text-muted-foreground">{w.calls} 次</span>
+            </Badge>
+          ))}
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative max-w-sm flex-1">

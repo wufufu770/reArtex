@@ -49,6 +49,17 @@ func (s *Server) applyProfileRetry(cfg *agent.Config, p *db.LLMProfile) {
 	cfg.Retry = resolveRetry(p.Retry, s.retryPolicy())
 }
 
+// applyCacheMessages 把「消息尾缓存断点」开关（settings 键 cache_messages，默认关）
+// 推进 provider 配置（0.15.12）。Anthropic 官方增量缓存模式——对真 Anthropic /
+// 显式断点网关受益，对隐式前缀缓存上游（MiniMax）无害；默认关以保守。
+// 与 applyProfileRetry 同位调用：三条 profile→cfg 装配路径都过这里。
+func (s *Server) applyCacheMessages(cfg *agent.Config) {
+	if s.m == nil || s.m.pg == nil {
+		return
+	}
+	cfg.CacheMessages = s.m.pg.GetBool(settingCacheMessages, false)
+}
+
 // 熔断(轮询冷却)的默认值,与 llmpool 内置的一致 —— 这里只在「用户配了值」时才覆盖。
 // 意图重跑的默认值见 engine.go 的 modelErrorRetries / modelErrorRetryBackoff。
 

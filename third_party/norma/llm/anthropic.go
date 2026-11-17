@@ -86,7 +86,35 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	if effort != "" {
 		body.OutputConfig = &anthropicOutputConfig{Effort: effort}
 	}
+	// Config.CacheMessages（0.15.12）：消息尾 cache_control 断点——Anthropic 官方
+	// 增量缓存模式（system 前缀断点之外的第二档）。默认关；对隐式前缀缓存的上游
+	// （如 MiniMax）该字段无害（缓存键照常按前缀命中）。
+	if p.cfg.CacheMessages {
+		body.Messages = withTailCacheBreakpoint(body.Messages)
+	}
 	return json.Marshal(body)
+}
+
+// withTailCacheBreakpoint returns the messages with a cache_control breakpoint
+// on the LAST content block of the LAST message. Copy-on-write: the caller's
+// conversation state is never mutated (same discipline as stripThoughtSignatures)
+// — the breakpoint belongs to THIS wire request only. Empty history or an empty
+// final content array returns the input unchanged; there is nothing to mark.
+func withTailCacheBreakpoint(msgs []Message) []Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	n := len(msgs)
+	if len(msgs[n-1].Content) == 0 {
+		return msgs
+	}
+	out := make([]Message, n)
+	copy(out, msgs)
+	blocks := make([]ContentBlock, len(msgs[n-1].Content))
+	copy(blocks, msgs[n-1].Content)
+	blocks[len(blocks)-1].CacheControl = map[string]any{"type": "ephemeral"}
+	out[n-1] = Message{Role: msgs[n-1].Role, Content: blocks}
+	return out
 }
 
 // buildAnthropicSystem splits the system prompt at DynamicBoundary, placing a

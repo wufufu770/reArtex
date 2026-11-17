@@ -78,6 +78,13 @@ type ContentBlock struct {
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   []ContentBlock `json:"content,omitempty"`
 	IsError   bool           `json:"is_error,omitempty"`
+
+	// CacheControl carries an Anthropic prompt-cache breakpoint
+	// ({"type":"ephemeral"}) on THIS content block. It is set only by the
+	// Anthropic provider itself (Config.CacheMessages) on a copy of the wire
+	// request — callers leave it nil, so it never reaches any other wire and
+	// never lands in persisted transcripts. See anthropic.go buildBody.
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
 // TextBlock builds a text content block.

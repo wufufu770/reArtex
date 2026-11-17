@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.12] - 2026-11-18
+
+### 功能（四项：建模图布局排序 / 偏锋卡片化 / 缓存命中率 / 跨任务参考复用）
+
+- **① 业务建模布局排序**：语义图此前只有 d3-force 一种力导向，节点一多互相缠绕看不清结构。新增四档一键切换——力导向（默认）/层次排序（antv-dagre，rankdir=TB）/网格排序/径向排序（后两档按 node_type 等级序再按名称排，同类聚拢、排序口径稳定），工具栏另有「一键重排」按钮把手动拖乱的图归位。静态布局下拖拽改用 drag-element（力导向仍 drag-element-force）。切换走重建图路径（同主题切换既有机制），数据由 applyData 通道自动灌回。
+- **② 偏锋探索卡片化 + 滚动容器**：方法论从手风琴行改为响应式卡片网格（md 两列 / xl 三列，档位圆点+名称+档级+判据+标签+摘要两行截断+底部快捷操作），点卡片展开完整内容与编辑（一次一条不变）；方法论区 max-h-[60vh]、运行记录区 max-h-[36vh] 滚动容器——条目增多不再把页面拉长，滚轮上下滑与其他 reArtex 列表一致。发起区与全部 PUT/DELETE/轮询逻辑不动。
+- **③ 缓存命中率（95%→更高）**：a) **分 worker 命中率可观测**——/api/llm/records/stats 的 by_worker 增加 input_tokens/cache_read/cache_hit_rate（口径同全局：cache_read/input），LLM 录制页按 worker 渲染命中率徽标，「哪里在漏」从猜测变成可见；b) **chat 记忆块改道**——原走 SystemReminderFunc，在 harness 里每轮前插为 messages[0]，记忆一变整个会话前缀从第 0 字节发散、缓存全失；改拼进本轮输入尾部（与 edge 触发词同通道），历史轮次字节稳定；c) **MCP 工具确定性排序**——ListMCP 无序查询序 + tools/list 枚举序会让装配重建/冷却恢复后工具数组换位、请求前缀发散；server 按 ID 序遍历、工具按 (server,tool) 序收敛，全量与缓存重建两条路径同序；d) **消息尾缓存断点（默认关）**——norma llm Config.CacheMessages + agent.Config 透传 + settings 键 `cache_messages`，开启时最后一条消息追加 cache_control:ephemeral（Anthropic 官方增量缓存模式；对 MiniMax 隐式前缀缓存无害）。结构性 miss（planner 每轮新会话的态势输入、一次性小调用）是真实新 token 不可消除，现实目标 ~97-98%。
+- **④ 跨任务同目标参考复用（仅参考、不做主线）**：P5 传承图（终局蒸馏→评审→accepted→新任务注入）已存在，本批修两个缺口+扩一个通道：a) **修活指纹匹配**——launchTask 真实注入路径 seedKVs 此前恒传 nil，资产指纹强信号通道（host/url 重叠）是死的；现从任务书 parseTarget 解析 host/url 喂进匹配器，且蒸馏契约要求 fingerprint 必须带 host（取自材料不得编造），同目标不同措辞的任务经资产 KV 即可匹配到历史经验；b) **planner 同目标参考段**——situationAppendProvider 新增②段：db.SiblingTaskDigests（同公司范围兄弟任务 ≤5 个，goal/状态/发现数/最新发现摘要 ≤3 条×120 字，预算 ≤8K），框架纪律写死在块内（仅供参照/不做主线/不得据此直接提交发现/历史结论可能过时）；settings 键 `cross_task_reference`（默认开）；c) **评审瓶颈缓解（默认关）**——settings 键 `legacy_auto_accept`：蒸馏产物中 fingerprint_summary（事实性目标画像）直接 accepted 入池，experience/pitfall 仍走 /legacy 人工评审。
+- 测试：norma-llm 三条新用例（尾断点 copy-on-write/空历史透传/开关两态请求体）；db TestSiblingTaskDigests（同公司可见/异公司排除/自身排除/方向无关/无公司空集）；db/agent/server 全量回归通过；前端 tsc 过。
+- 对齐检查：无新端点（stats 扩展字段与 settings 键为既有面）。
+
+
 ## [0.15.11] - 2026-11-17
 
 ### 修复（跨模型过拟合审计——按用户裁定全面调研"换其他模型还会不会出这些问题"）

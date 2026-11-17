@@ -470,6 +470,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
+	s.applyCacheMessages(&cfg)
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -649,6 +650,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
+	s.applyCacheMessages(&cfg)
 	if cfg.APIKey == "" {
 		return cfg, false
 	}
@@ -865,6 +867,7 @@ func (s *Server) providerForProfileBareURL(id int64, baseURL string) (llm.Provid
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
+	s.applyCacheMessages(&cfg)
 	if cfg.APIKey == "" {
 		return nil, agent.Config{}, false
 	}

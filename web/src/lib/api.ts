@@ -1988,7 +1988,15 @@ export const api = {
       cache_hit_rate: number;
       latency_p50_ms: number;
       latency_p95_ms: number;
-      by_worker: { worker: string; calls: number; p50_ms: number; p95_ms: number }[];
+      by_worker: {
+        worker: string;
+        calls: number;
+        p50_ms: number;
+        p95_ms: number;
+        input_tokens: number;
+        cache_read: number;
+        cache_hit_rate: number;
+      }[];
     }>(`/llm/records/stats`),
   llmTasks: () => get<{ tasks: LLMTask[] }>(`/llm/records/tasks`),
   llmRecordsDeleteTask: (task: string) => del<{ deleted: number }>(`/llm/records?task=${encodeURIComponent(task)}`),

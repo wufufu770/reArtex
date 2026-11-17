@@ -167,13 +167,20 @@ func (s *Server) distillLegacySync(t *Task, taskID int64) error {
 		if summary == "" {
 			continue
 		}
+		state := "draft"
+		// legacy_auto_accept（0.15.12，默认关）：fingerprint_summary 是事实性目标
+		// 画像（不含打法结论，误注入风险低），开启时直接 accepted 入池——缓解
+		// 人工评审瓶颈；experience/pitfall 仍走 /legacy 页人工评审。
+		if kind == "fingerprint_summary" && s.m.pg.GetBool(settingLegacyAutoAccept, false) {
+			state = "accepted"
+		}
 		node := &db.LegacyNode{
 			Kind:         kind,
 			Title:        truncateStrRunes(strings.TrimSpace(it.Title), 120),
 			Summary:      summary,
 			Detail:       it.Detail,
 			Fingerprint:  it.Fingerprint,
-			State:        "draft",
+			State:        state,
 			SourceTaskID: &srcTask,
 			SourceTask:   t.ID,
 			// CreatedAt 由库默认；Reviewed 留空
@@ -192,8 +199,8 @@ func (s *Server) distillLegacySync(t *Task, taskID int64) error {
 // legacyDistillPrompt 是终局蒸馏的生成契约（产出 JSON 数组）。
 func legacyDistillPrompt(goal, material string) string {
 	return "【任务经验归档】本渗透任务已完成。请把这次任务里【值得跨任务传承的经验】蒸馏成 JSON 数组输出（不要输出任何其他文字）。每条形状：\n" +
-		`{"kind":"experience|pitfall|fingerprint_summary","title":"≤60字标题","summary":"≤2000字正文：做法/弯路/结论","detail":"可选扩展","fingerprint":{"目标类型":"web","技术栈":"nginx","漏洞类别":"sql injection"}}` + "\n" +
-		"分类：experience=有效打法与结论；pitfall=走过的弯路（别人别再踩）；fingerprint_summary=目标结构画像。指纹 key 限字母数字._-，值必须是短标量。\n" +
+		`{"kind":"experience|pitfall|fingerprint_summary","title":"≤60字标题","summary":"≤2000字正文：做法/弯路/结论","detail":"可选扩展","fingerprint":{"host":"<主目标主机/域名/IP>","目标类型":"web","技术栈":"nginx","漏洞类别":"sql injection"}}` + "\n" +
+		"分类：experience=有效打法与结论；pitfall=走过的弯路（别人别再踩）；fingerprint_summary=目标结构画像。指纹必须带 host（本任务主目标的主机名/域名/IP，只能取自下方材料，不得编造）；其余 key 限字母数字._-，值必须是短标量。\n" +
 		"只蒸馏【有证据支撑】的内容（下方材料），禁止脑补；2-4 条为宜，没有值得传承的就输出 []。\n\n材料：\n" + material
 }
 

@@ -71,15 +71,25 @@ FROM llm_records WHERE latency_ms > 0`).Scan(&p50, &p95)
 	rows, err := pg.Query(`
 SELECT COALESCE(worker,''), count(*),
        COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms),0),
-       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms),0)
+       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms),0),
+       COALESCE(sum(input_tokens),0), COALESCE(sum(cache_read),0)
 FROM llm_records WHERE latency_ms > 0 GROUP BY 1 ORDER BY 2 DESC LIMIT 12`)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var w string
-			var n, a, b int64
-			if rows.Scan(&w, &n, &a, &b) == nil {
-				byWorker = append(byWorker, map[string]any{"worker": w, "calls": n, "p50_ms": a, "p95_ms": b})
+			var n, a, b, inTok, rdTok int64
+			if rows.Scan(&w, &n, &a, &b, &inTok, &rdTok) == nil {
+				// 0.15.12：分 worker 命中率——「哪里在漏」从猜测变成可见（口径同
+				// 全局：input 已含缓存，命中率 = cache_read / input）。
+				hit := 0.0
+				if inTok > 0 {
+					hit = float64(rdTok) / float64(inTok)
+				}
+				byWorker = append(byWorker, map[string]any{
+					"worker": w, "calls": n, "p50_ms": a, "p95_ms": b,
+					"input_tokens": inTok, "cache_read": rdTok, "cache_hit_rate": hit,
+				})
 			}
 		}
 	}

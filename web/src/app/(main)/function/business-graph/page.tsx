@@ -6,12 +6,14 @@
 // 资源）、状态机视图（状态与 transitions）。双层图谱按「切换 + diff 高亮」呈现，
 // design/behavior 不叠加显示以避免视觉噪声；diff 用 severity 色高亮在当前层上。
 // 图形手法沿用 coverage-graph-tab（lucide 图标白描边 data URI 作 iconSrc）。
+// 布局（0.15.12）：力导向/层次/网格/径向四档一键切换 + 一键重排——节点一多
+// 纯力导向互相缠绕，按类型排序的静态布局让结构可读。
 
 import * as React from "react";
 
 import Link from "next/link";
 
-import type { Graph as G6Graph } from "@antv/g6";
+import type { Graph as G6Graph, LayoutOptions } from "@antv/g6";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -91,6 +93,57 @@ function severityHexFor(sev: string): string {
 type LayerFilter = "all" | "design" | "behavior";
 type ViewMode = "semantic" | "permission" | "state";
 
+// 布局（0.15.12）：节点一多，纯力导向互相缠绕看不清结构——四种一键切换。
+// grid/radial 用 sortBy 让同类节点聚拢、类内按名称排，排序口径稳定（不随数据
+// 序漂移）；hier 用 dagre 层次铺开拓扑层级。力导向仍默认（关系密度直观）。
+type GraphLayoutName = "force" | "hier" | "grid" | "radial";
+
+const TYPE_ORDER: BizNodeType[] = [
+  "biz_entity",
+  "biz_action",
+  "biz_state",
+  "biz_role",
+  "biz_trust",
+  "biz_dataflow",
+  "biz_external",
+];
+
+// sortBy 比较器：返回 "类型序:名称" 字符串——同类型相邻、类内按名称。
+// G6 的 grid/radial 都接受 (node)=>string 形式的 sortBy。
+const layoutSortKey = (d: unknown): string => {
+  const n = (d as { bizNode?: BizGraphNode }).bizNode;
+  const rank = n ? TYPE_ORDER.indexOf(n.node_type) : -1;
+  return `${rank < 0 ? TYPE_ORDER.length : rank}:${n?.name ?? ""}`;
+};
+
+const LAYOUT_PRESETS: Record<GraphLayoutName, { label: string; layout: LayoutOptions; behaviors: string[] }> = {
+  force: {
+    label: "力导向",
+    layout: {
+      type: "d3-force",
+      collide: { radius: 40 },
+      link: { distance: 90 },
+      manyBody: { strength: -180 },
+    },
+    behaviors: ["drag-element-force", "drag-canvas", "zoom-canvas"],
+  },
+  hier: {
+    label: "层次排序",
+    layout: { type: "antv-dagre", rankdir: "TB", nodesep: 28, ranksep: 55 },
+    behaviors: ["drag-element", "drag-canvas", "zoom-canvas"],
+  },
+  grid: {
+    label: "网格排序",
+    layout: { type: "grid", sortBy: layoutSortKey, padding: 40 },
+    behaviors: ["drag-element", "drag-canvas", "zoom-canvas"],
+  },
+  radial: {
+    label: "径向排序",
+    layout: { type: "radial", sortBy: layoutSortKey, unitRadius: 110 },
+    behaviors: ["drag-element", "drag-canvas", "zoom-canvas"],
+  },
+};
+
 // 权限视图：角色 + grants/owns/invokes/validates 相关子图。
 // 状态机视图：状态节点 + transitions/requires_state 边及两端动作。
 const VIEW_KEEP_EDGE: Record<ViewMode, (rel: string) => boolean> = {
@@ -115,6 +168,8 @@ export function BusinessGraphPage() {
   const [companyId, setCompanyId] = React.useState<number>(0);
   const [layer, setLayer] = React.useState<LayerFilter>("all");
   const [view, setView] = React.useState<ViewMode>("semantic");
+  // 布局档位（0.15.12）：切换即按该布局重排（重建图路径，同主题切换）。
+  const [layout, setLayout] = React.useState<GraphLayoutName>("force");
   const [showDiffOnly, setShowDiffOnly] = React.useState(false);
   const [nodes, setNodes] = React.useState<BizGraphNode[]>([]);
   const [edges, setEdges] = React.useState<
@@ -278,11 +333,12 @@ export function BusinessGraphPage() {
           },
     [dark],
   );
-  // applyData 走 ref：建图 effect 只依赖 canvas（主题），数据灌入始终用最新闭包
-  // ——数据变化不重建整图（重建由上方 applyData effect 独立负责）。
+  // applyData 走 ref：建图 effect 只依赖 canvas（主题）与 layout（布局档），
+  // 数据灌入始终用最新闭包——数据变化不重建整图（重建由上方 applyData effect
+  // 独立负责）。
   const applyDataRef = React.useRef(applyData);
   applyDataRef.current = applyData;
-  // graphEpoch 是刻意的重试代（引擎加载失败后 +1 触发重建），不参与闭包。
+  // graphEpoch 是刻意的重试代（引擎加载失败或「一键重排」后 +1 触发重建），不参与闭包。
   // biome-ignore lint/correctness/useExhaustiveDependencies: 重试代语义见上。
   React.useEffect(() => {
     let destroyed = false;
@@ -328,13 +384,8 @@ export function BusinessGraphPage() {
             labelPadding: (d: unknown) => (d as { labelPadding?: number[] }).labelPadding,
           },
         },
-        layout: {
-          type: "d3-force",
-          collide: { radius: 40 },
-          link: { distance: 90 },
-          manyBody: { strength: -180 },
-        },
-        behaviors: ["drag-element-force", "drag-canvas", "zoom-canvas"],
+        layout: LAYOUT_PRESETS[layout].layout,
+        behaviors: LAYOUT_PRESETS[layout].behaviors,
       });
       graph.on("node:click", (evt: unknown) => {
         const id = (evt as { target?: { id?: string } }).target?.id;
@@ -362,7 +413,7 @@ export function BusinessGraphPage() {
       graph?.destroy();
       graphRef.current = null;
     };
-  }, [canvas, graphEpoch]);
+  }, [canvas, graphEpoch, layout]);
 
   const selectedDiffs = React.useMemo(
     () =>
@@ -424,6 +475,28 @@ export function BusinessGraphPage() {
             </TabsTrigger>
           </TabsList>
         </Tabs>
+        {/* 0.15.12 布局档位：切换即重排；一键重排把手动拖乱的图按当前布局归位 */}
+        <select
+          className="h-8 rounded-md border bg-background px-2 text-sm"
+          value={layout}
+          title="布局：切换即按该布局重排全部节点"
+          onChange={(e) => setLayout(e.target.value as GraphLayoutName)}
+        >
+          {(Object.keys(LAYOUT_PRESETS) as GraphLayoutName[]).map((k) => (
+            <option key={k} value={k}>
+              {LAYOUT_PRESETS[k].label}
+            </option>
+          ))}
+        </select>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 text-xs"
+          title="按当前布局重新排列（撤销手动拖动）"
+          onClick={() => setGraphEpoch((k) => k + 1)}
+        >
+          一键重排
+        </Button>
         <Button
           variant={showDiffOnly ? "default" : "outline"}
           size="sm"

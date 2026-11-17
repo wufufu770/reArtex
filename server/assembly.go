@@ -249,10 +249,14 @@ func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Contex
 		cacheable = false
 		all = nil
 	}
+	// 0.15.12 前缀缓存纪律：按 ID 排序再遍历。ListMCP 无 ORDER BY ⇒ server 的
+	// 枚举序随查询计划漂移，工具数组跟着漂移 ⇒ 请求前缀发散、缓存全失。
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
 	art.mcpSig = mcpSignature(all)
 
 	var closers []io.Closer
 	serverTools := map[string][]string{} // server name → its tool names
+	toolServer := map[string]string{}    // tool name → server name（mcpTools 确定性排序用）
 	var allNames, globalNames []string
 	globalSet := map[string]bool{}
 	{
@@ -300,6 +304,7 @@ func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Contex
 				art.mcpTools = append(art.mcpTools, t)
 				allNames = append(allNames, t.Name())
 				serverTools[m.Name] = append(serverTools[m.Name], t.Name())
+				toolServer[t.Name()] = m.Name
 				if directVisible && !skillGated {
 					// directly visible and not gated → available from session start
 					globalNames = append(globalNames, t.Name())
@@ -309,11 +314,19 @@ func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Contex
 			}
 		}
 	}
-	art.serverTools = serverTools
-	art.allNames = allNames
-	art.globalNames = globalNames
-	art.globalSet = globalSet
-	return agent.AssemblyBuild{Value: art, Closers: closers, Cacheable: cacheable}, nil
+		// 0.15.12 前缀缓存纪律：mcpTools 收敛成确定性序（server ID 序遍历 + 工具名
+		// 序收尾）。此前工具序是各 server tools/list 的枚举序——重连/冷却恢复后同一
+		// server 的工具数组可能换位，工具定义区逐字节漂移 ⇒ 请求前缀发散、缓存全失。
+		// rebuild() 逐字拷贝本数组，两条装配路径（全量/缓存重建）从此同序。
+		sort.SliceStable(art.mcpTools, func(i, j int) bool {
+			return toolServer[art.mcpTools[i].Name()]+"/"+art.mcpTools[i].Name() <
+				toolServer[art.mcpTools[j].Name()]+"/"+art.mcpTools[j].Name()
+		})
+		art.serverTools = serverTools
+		art.allNames = allNames
+		art.globalNames = globalNames
+		art.globalSet = globalSet
+		return agent.AssemblyBuild{Value: art, Closers: closers, Cacheable: cacheable}, nil
 }
 
 // rebuild 用缓存产物重建本 run 的轻包装（G1）：新 UnlockSet / OnInvoke / Skill 工具 /

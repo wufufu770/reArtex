@@ -254,6 +254,15 @@ const (
 	settingTrafficCapture      = "traffic_capture"
 	settingAgentTrafficBinding = "agent_traffic_binding"
 	settingSodReviewTtlHours   = "sod_review_ttl_hours" // needs_review 过期闸 TTL（小时，默认 24）
+	// settingCacheMessages（0.15.12）：消息尾 cache_control 断点开关（Anthropic 格式
+	// 专属，默认关）。放 settings 而非 profile 列——免迁移，三条装配路径一处生效。
+	settingCacheMessages = "cache_messages"
+	// settingCrossTaskReference（0.15.12）：同目标参考段开关（默认开）。注入的是
+	// 兄弟任务的既往探索摘要（仅供参照、不做主线）；0 = 整体关闭。
+	settingCrossTaskReference = "cross_task_reference"
+	// settingLegacyAutoAccept（0.15.12，默认关）：蒸馏产物中 fingerprint_summary
+	// （事实性目标画像）直接 accepted 入池，缓解 /legacy 人工评审瓶颈。
+	settingLegacyAutoAccept = "legacy_auto_accept"
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
 	settingBraveKey            = "brave_search_api_key"
