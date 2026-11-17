@@ -164,7 +164,7 @@ jobs:
   # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend
   # job 的 web-dist）与真实 PG（service；应用起库即跑迁移）。
   e2e-smoke:
-    needs: [frontend, test]
+    needs: [frontend, go-test]
     runs-on: ubuntu-latest
     services:
       postgres:
