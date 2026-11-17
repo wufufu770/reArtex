@@ -7,6 +7,7 @@ permissions:
   contents: write # 创建 Release 需要
   packages: write # 推 ghcr.io 镜像需要
   id-token: write # attest-build-provenance 签名需要 OIDC 令牌（0.15.11 补：E11 上线首跑实抓漏配）
+  attestations: write # 签名后的 attestation 落库需要（同上补）
 
 jobs:
   # ⓪ 安全门：编译 + vet + 全量测试（复用 ci.yml）
