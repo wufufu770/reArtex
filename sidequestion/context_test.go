@@ -14,6 +14,13 @@ import (
 	"github.com/Autumn-27/norma/llm"
 )
 
+// isSummaryCall 判别压缩摘要调用（0.15.9 起摘要请求不再带 Thinking:"disabled"
+// ——「必须 adaptive thinking」的模型 400，见 context.go）——改按系统提示词
+// 区分：摘要走 summaryInstruction，回答走快照自带 system。
+func isSummaryCall(r llm.CompletionRequest) bool {
+	return len(r.System) > 0 && r.System[0] == summaryInstruction
+}
+
 func replayFixture(history []Exchange, memory *Memory) Replay {
 	return Replay{Memory: *memory, Load: func(_ context.Context, after int64) ([]Exchange, error) {
 		var page []Exchange
@@ -112,7 +119,7 @@ func TestSideLongExchangeAndSnapshotCompactionAreBounded(t *testing.T) {
 			calls, answers := 0, 0
 			var final llm.CompletionRequest
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-				if r.Thinking == "disabled" {
+				if isSummaryCall(r) {
 					calls++
 					if len(r.Tools) != 0 || EstimateInputTokens(r)+r.MaxTokens > 32000 || !utf8.ValidString(r.Messages[0].Text()) {
 						t.Fatal("unsafe summary request")
@@ -161,7 +168,7 @@ func TestSideOverflowRecoveryOnceAndFailureUsage(t *testing.T) {
 		t.Run(fmt.Sprint(twice), func(t *testing.T) {
 			answers, summaries := 0, 0
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-				if r.Thinking == "disabled" {
+				if isSummaryCall(r) {
 					summaries++
 					return assistant("summary"), "end_turn", llm.Usage{InputTokens: 3}, nil
 				}
@@ -210,7 +217,7 @@ func TestSideSummaryCancellationAndFailureDoNotAdvanceMemory(t *testing.T) {
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 				calls++
 				usage := llm.Usage{InputTokens: 9}
-				if r.Thinking != "disabled" {
+				if !isSummaryCall(r) {
 					t.Fatal("failed summary continued to answer")
 				}
 				switch mode {
@@ -251,7 +258,7 @@ func TestSideSummaryCallCapAndStaticBudget(t *testing.T) {
 	calls := 0
 	p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
-		if r.Thinking != "disabled" {
+		if !isSummaryCall(r) {
 			t.Fatal("oversized request answered")
 		}
 		return assistant("bounded summary"), "end_turn", llm.Usage{OutputTokens: 1}, nil
@@ -280,7 +287,7 @@ func TestSideTwentyLongRepliesRespectSmallWindow(t *testing.T) {
 		if EstimateInputTokens(req)+req.MaxTokens > 32000 {
 			t.Fatal("request exceeds small model window")
 		}
-		if req.Thinking == "disabled" {
+		if isSummaryCall(req) {
 			calls++
 			return assistant("historical objectives and evidence"), "end_turn", llm.Usage{}, nil
 		}
@@ -296,7 +303,7 @@ func TestSideTwentyLongRepliesRespectSmallWindow(t *testing.T) {
 func TestSideOverflowWithoutReductionDoesNotRepeatAnswer(t *testing.T) {
 	answers, summaries := 0, 0
 	p := fakeProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-		if req.Thinking == "disabled" {
+		if isSummaryCall(req) {
 			summaries++
 			return assistant(strings.Repeat("longer summary ", 100)), "end_turn", llm.Usage{InputTokens: 3}, nil
 		}

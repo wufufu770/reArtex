@@ -186,8 +186,10 @@ func TestProviderSummarizerReplaysRealMessages(t *testing.T) {
 		t.Fatalf("calls=%d, want 1", len(p.reqs))
 	}
 	req := p.reqs[0]
-	if req.Thinking != "disabled" {
-		t.Fatalf("thinking=%q, want disabled", req.Thinking)
+	// 0.15.9（reArtex）：摘要请求不再携带 Thinking:"disabled"（「必须 adaptive
+	// thinking」的模型 400）——改为断言该字段未发送。
+	if req.Thinking != "" {
+		t.Fatalf("thinking=%q, want unset (empty)", req.Thinking)
 	}
 	if req.MaxTokens != 8000 { // min(20000, 8000)
 		t.Fatalf("maxTokens=%d, want 8000", req.MaxTokens)

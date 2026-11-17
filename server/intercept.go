@@ -80,7 +80,9 @@ func streamCollectText(ctx context.Context, prov llm.Provider, system, user stri
 		Messages:    []llm.Message{llm.UserText(user)},
 		MaxTokens:   1024,
 		Temperature: &temp,
-		Thinking:    "disabled",
+		// 0.15.9：不硬编码 Thinking:"disabled"——同 cold_digest.compress，
+		// 「必须 adaptive thinking」的模型（MiniMax-M3.1-Flash）直接 400 ⇒
+		// 对抗复核裁判整条瘫。不带该字段走网关默认。
 	}
 	var sb strings.Builder
 	for ev, err := range prov.Stream(ctx, req) {

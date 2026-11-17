@@ -5,6 +5,13 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.10] - 2026-11-17
+
+### 修复（发现涨至 28 条含 3 critical + 压缩链 thinking 硬编码全面清除）
+- **发现 20→28**（高 10/中 9/低 2/信息 4）：新增 **RCE（critical）**——/command/vul1、/command/vul2 已认证命令执行实证；**SSRF（high）**——/ssrf/vul?url= 服务端按攻击者 URL 发起请求；**验证码绕过（high）**——/loginProcess URL 编码路径变体绕过图形验证码；**支付金额篡改（critical×2）**——由业务建模双层差异链自动产出（design 层声明"支付金额完整性边界"→behavior 层实测缺失→差异转发现，建模→发现全链闭环的首次实战验证）。
+- **压缩链 thinking 硬编码清除（4 处）**：cold_digest.compress / norma compaction summarizer（[compaction] 日志实锤——上下文压缩整条瘫、会话越滚越肥）/ server/intercept 裁判 / sidequestion 摘要——「必须 adaptive thinking」的模型（MiniMax-M3.1-Flash）对 thinking.type="disabled" 直接 400 invalid params。全部改为不发送该字段走网关默认；sidequestion 测试判别器从 r.Thinking 改按系统提示词区分摘要/回答调用（isSummaryCall 助手）。
+- 对齐检查：无新端点。
+
 ## [0.15.9] - 2026-11-17
 
 ### 修复（靶场持续运行暴露）+ 发现涨至 20 条

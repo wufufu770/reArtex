@@ -603,12 +603,17 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
 // runs on; thinking disabled (a pure summarization step).
+//
+// 0.15.9：不再硬编码 Thinking:"disabled"——MiniMax-M3.1-Flash 这类「必须
+// adaptive thinking」的模型直接 400（invalid params, thinking.type="disabled"
+// is not allowed）⇒ 压缩反复失败、上下文块永远压不动（实测靶场任务 exp=8/10
+// 连续多块失败）。省下的那点输出 token 远抵不过压缩瘫痪。不带该字段 ⇒ 网关
+// 按模型默认行为走（MiniMax=思考开；不支持该字段的模型不受影响）。
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	req := llm.CompletionRequest{
 		System:    []string{compressionSystemPrompt},
 		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
 		MaxTokens: 1500,
-		Thinking:  "disabled",
 	}
 	msg, _, _, err := c.prov.Complete(ctx, req)
 	if err != nil {

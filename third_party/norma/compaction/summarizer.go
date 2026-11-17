@@ -65,7 +65,9 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 		System:    []string{summarySystemPrompt},
 		Messages:  reqMsgs,
 		MaxTokens: maxOut,
-		Thinking:  "disabled",
+		// 0.15.9（reArtex）：不硬编码 Thinking:"disabled"——「必须 adaptive
+		// thinking」的模型（实测 MiniMax-M3.1-Flash）直接 400 invalid params
+		// ⇒ 上下文压缩整条瘫、会话越滚越肥直到不可用。不带该字段走网关默认。
 	}
 	var lastErr error
 	for range maxStreamingRetries {
