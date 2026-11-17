@@ -110,6 +110,12 @@ jobs:
         working-directory: web
       - run: npm run build:static
         working-directory: web
+      - name: 上传前端静态产物（e2e-smoke 消费）
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/out
+          retention-days: 1
       - name: lint（仅相对基线改动的文件）
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
