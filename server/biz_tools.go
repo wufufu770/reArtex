@@ -64,29 +64,6 @@ func (s *Server) seedBizTools() {
 	agent.InvalidateAssembly()
 }
 
-// bizCtxFromTaskID 从工具入参取 company_id 与 task_id（写入路径双必填）。
-type bizCtx struct {
-	CompanyID int64
-	TaskID    int64
-}
-
-func parseBizCtx(in json.RawMessage) (*bizCtx, error) {
-	var a struct {
-		CompanyID int64 `json:"company_id"`
-		TaskID    int64 `json:"task_id"`
-	}
-	if err := json.Unmarshal(in, &a); err != nil {
-		return nil, err
-	}
-	if a.CompanyID <= 0 {
-		return nil, fmt.Errorf("company_id 为必填（业务节点按公司归属）")
-	}
-	if a.TaskID <= 0 {
-		return nil, fmt.Errorf("task_id 为必填：业务图写入必须有任务上下文（没有授权边就不落笔，与探索图锚点同一 fail-closed 语义）")
-	}
-	return &bizCtx{CompanyID: a.CompanyID, TaskID: a.TaskID}, nil
-}
-
 // toolReadBizGraph 按公司/层/类型读业务图（调用者范围过滤在 db 层）。
 func (s *Server) toolReadBizGraph() actool.CoreTool {
 	return roTool("read_biz_graph",

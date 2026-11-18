@@ -280,14 +280,7 @@ func (s *Server) edgeMethodologyImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "applied": applied, "rejected": rejected})
 }
 
-// edgeMustName / edgeMustAll 取内置条目字段（isBuiltin 已确认时调用）。
-func edgeMustName(id string) string {
-	if m, ok := edge.Get(id); ok {
-		return m.Name
-	}
-	return ""
-}
-
+// edgeMustAll 取内置条目字段（isBuiltin 已确认时调用）。
 func edgeMustAll(id string) (name string, tier int, grade, summary string, crit *edge.CompletionCriterion, tags []string) {
 	m, ok := edge.Get(id)
 	if !ok {

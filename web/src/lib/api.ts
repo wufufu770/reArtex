@@ -43,7 +43,6 @@ import type {
   CoverageAssetRefs,
   CoverageGap,
   CoverageGraphData,
-  DailyTokenBucket,
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
@@ -94,8 +93,6 @@ import type {
   NotificationDelivery,
   NotificationFilter,
   NotificationMeta,
-  PromptVar,
-  PromptVersion,
   ReportCandidate,
   ReportFull,
   ReportMeta,
@@ -347,7 +344,6 @@ export const api = {
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
-  updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
   createTaskCategory: (name: string) => post<TaskCategory>("/task-categories", { name }),
@@ -439,7 +435,6 @@ export const api = {
     post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/${intentId}/rerun`),
   // 批量重跑本任务全部 blocked 意图（一次网络/LLM 断连导致多条 blocked 时一键全部重试）。
   rerunBlocked: (taskId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/rerun-blocked`),
-  setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
@@ -937,7 +932,6 @@ export const api = {
       sessions: arr(r.sessions),
       total: r.total,
     })),
-  tokenDaily: (days = 30) => get<DailyTokenBucket[]>(`/tokens/daily?days=${days}`).then(arr),
   conversationTokens: () =>
     get<ConvTokenSummary[]>("/tokens/conversations")
       .then(arr)
@@ -1222,8 +1216,6 @@ export const api = {
     get<{ pass: boolean; missing_gates: string[]; note: string }>(`/legacy/nodes/${id}/gates`),
   // 删除一条经验（draft/retired；accepted 后端 409）。操作者身份走 query（后端审计留人）。
   deleteLegacyNode: (id: number) => del<{ ok: boolean }>(`/legacy/nodes/${id}?operator=${encodeURIComponent("sir")}`),
-  runMetrics: (taskId: number) => get<Record<string, unknown>>(`/metrics/run?task_id=${taskId}`),
-
   // ---- 任务大厅（群聊）----
   // 发布任务（POST /api/task-hall/tasks）：一次调用建任务 + 声明范围 + 建大厅 +
   // 可选开额度，返回 task_id 与 group_id。一个任务至多一个大厅（重复发布 409）。
@@ -1255,10 +1247,6 @@ export const api = {
   postTaskHallMessage: (id: number, input: { to_agent?: string; body: string; kind?: string; intent_id?: number }) =>
     post<TaskHallMessage>(`/task-hall/groups/${id}/messages`, input),
   // 群内工具禁列表：出现的 key 就是被禁用的（表里没有 enabled 列 ⇒ 只能收紧）。
-  taskHallDisabledTools: (id: number) =>
-    get<{ disabled_tools: Record<string, boolean> | null }>(`/task-hall/groups/${id}/disabled-tools`).then(
-      (r) => r.disabled_tools ?? {},
-    ),
   disableTaskHallTool: (id: number, toolKey: string) =>
     post<{ ok: boolean; disabled_tools: Record<string, boolean> }>(`/task-hall/groups/${id}/disabled-tools`, {
       tool_key: toolKey,
@@ -1497,30 +1485,6 @@ export const api = {
   auditChain: () => get<AuditChainVerification>("/audit/chain"),
 
   // ---- LLM ----
-  getLLM: () =>
-    get<{
-      configured: boolean;
-      provider: string;
-      model: string;
-      base_url: string;
-      proxy?: string;
-      key_set: boolean;
-      rate_per_second?: number;
-      rate_per_minute?: number;
-      context_window_k?: number;
-      thinking_type?: string;
-      reasoning_effort?: string;
-    }>("/llm"),
-  setLLM: (
-    provider: string,
-    model: string,
-    base_url: string,
-    api_key: string,
-    rate_per_second = 0,
-    rate_per_minute = 0,
-    proxy = "",
-    context_window_k = 0,
-  ) => post("/llm", { provider, model, base_url, proxy, api_key, rate_per_second, rate_per_minute, context_window_k }),
   testLLM: (
     provider: string,
     model: string,
@@ -1617,23 +1581,17 @@ export const api = {
   agents: () => get<{ agents: Agent[] }>("/agents").then((r) => arr(r.agents)),
   getAgent: (key: string) => get<AgentDetail>(`/agents/${key}`),
   createAgent: (key: string, name: string, description = "") => post<Agent>("/agents", { key, name, description }),
-  updateAgent: (key: string, name: string, description = "") =>
-    patch<{ ok: boolean }>(`/agents/${key}`, { name, description }),
   deleteAgent: (key: string) => del<{ deleted: string }>(`/agents/${key}`),
 
   // ---- conversations (chat page) ----
   conversations: () => get<{ conversations: Conversation[] }>("/conversations").then((r) => arr(r.conversations)),
   createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
     post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
-  updateConversation: (id: number, input: { title?: string; pinned?: boolean }) =>
-    patch<Conversation>(`/conversations/${id}`, input),
   renameConversation: (id: number, title: string) => patch<Conversation>(`/conversations/${id}`, { title }),
   pinConversation: (id: number, pinned: boolean) => patch<Conversation>(`/conversations/${id}`, { pinned }),
   updateConversationProfile: (id: number, llm_profile_id: number | null) =>
     patch<{ ok: boolean }>(`/conversations/${id}/profile`, { llm_profile_id }),
   deleteConversation: (id: number) => del<{ deleted: number }>(`/conversations/${id}`),
-  deleteConversations: (ids: number[]) =>
-    post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
   // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
   conversationMessages: (id: number, since = 0) =>
     get<{ items: Activity[]; cursor: number; running: boolean }>(`/conversations/${id}/messages?since=${since}`).then(
@@ -1688,10 +1646,6 @@ export const api = {
   sessionPresence: (id: number) =>
     get<{ presence: SessionMember[] }>(`/sessions/${id}/presence`).then((r) => arr(r.presence)),
   // 反查：某个工件关联了哪些会话（工件 → 会话方向）。
-  sessionsForAttachment: (attachment_type: string, identity_key: string) =>
-    get<{ sessions: Session[] }>(
-      `/sessions/attachments/${encodeURIComponent(attachment_type)}/${encodeURIComponent(identity_key)}/sessions`,
-    ).then((r) => arr(r.sessions)),
 
   saveAgentPrompt: (key: string, template: string, note = "") =>
     put<{ version: number }>(`/agents/${key}/prompt`, { template, note }),
@@ -1732,13 +1686,8 @@ export const api = {
       thinking_effort?: string; // ""=跟随绑定 profile 默认；"enabled"/"disabled"=开关；其余=effort 档位
     },
   ) => put<{ ok: boolean }>(`/agents/${key}/config`, patch),
-  agentPromptVersions: (key: string) =>
-    get<{ versions: PromptVersion[] }>(`/agents/${key}/prompts`).then((r) => arr(r.versions)),
-  agentVariables: (key: string) =>
-    get<{ variables: PromptVar[] }>(`/agents/${key}/variables`).then((r) => arr(r.variables)),
   previewAgentPrompt: (key: string, template: string, sample?: Record<string, string>) =>
     post<{ rendered: string; error?: string }>(`/agents/${key}/prompt/preview`, { template, sample }),
-  getAgentVisibility: (key: string) => get<{ mcp: number[]; skill: string[] }>(`/agents/${key}/visibility`),
   setAgentVisibility: (key: string, mcp: number[], skill: string[]) =>
     put<{ ok: boolean }>(`/agents/${key}/visibility`, { mcp, skill }),
 
@@ -1828,7 +1777,7 @@ export const api = {
     meta: { mcps?: string[]; description?: string; license?: string; compatibility?: string },
   ) => put<{ ok: boolean }>(`/skills/${name}/meta`, meta),
   createSkillDir: (skill: string, path: string) => post<{ dir: string }>(`/skills/${skill}/dirs`, { path }),
-  skillFiles: (name: string) => get<{ files: string[] }>(`/skills/${name}/files`).then((r) => r.files),
+
   readSkillFile: (name: string, file: string) =>
     get<{ content: string; file: string }>(`/skills/${name}/files/${file}`).then((r) => r.content),
   writeSkillFile: (name: string, file: string, content: string) =>

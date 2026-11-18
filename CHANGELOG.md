@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.15] - 2026-11-18
+
+### 清理（全量审查 P3——纯删减零行为变更，双重铁证才删）
+
+- **删除原则**：只删「deadcode 可达性分析不达 + 全仓含测试 grep 零引用」双重确认的条目；引用计数 >0、注释声明保留（deleteTaskFiles 测试契约 / isSodDegradableTool 测试+将来加白 / registerSensitiveResultTool 扩展点 / guardTaskScope* 大厅通道）、排期承诺（前端 edgeMethodologyImport、assetImportFile 方法保留待 UI 接线）的一律不动。
+- **Go 侧删除（~90 行）**：db/nkey.go 旧层级编码键簇 8 函数（IPKey/PortKey/SiteKey/ServiceKey/ParameterKey/TechKey/SplitURL/NormalizeParamName/itoa——图存储迁 BIGSERIAL 主键后的遗留，保留可达的 DomainKey/RootDomain/TemplatePath/defaultPort）；enrich.isBlank；sod/normalizer.loosenScalarStrings（被 loosenScalarsSchemaFree 取代后的遗留）；server/biz_tools parseBizCtx+bizCtx 类型；edge_methodology_api.edgeMustName（edgeMustAll 在用）。
+- **前端删除（~50 行）**：15 个零引用 api 方法（getLLM/setLLM——被 llmProfiles 家族替代；setActive/updateAgent/updateTask/updateConversation/deleteConversations——UI 走专一/批量路径；tokenDaily/runMetrics/skillFiles/sessionsForAttachment/taskHallDisabledTools/getAgentVisibility/agentPromptVersions/agentVariables——只读面无 UI）+ 3 个孤儿类型导入。**保留** edgeMethodologyImport/assetImportFile（盘点排期承诺）。
+- 验证：go build/vet 全绿；tsc + biome + build:static 过；db/agent/server 全量回归绿；e2e 45 路由冒烟过。
+- 其余 deadcode 报告项（~40 条）逐条裁决为有意保留或测试专用，留档不动。
+
+
 ## [0.15.14] - 2026-11-18
 
 ### 功能（全量审查 P1+P2 落地：手动蒸馏入口 / 确定性回执接线 / 单价表暴露）
