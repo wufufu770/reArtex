@@ -31,6 +31,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -89,6 +90,29 @@ export default function LegacyPage() {
   const [override, setOverride] = React.useState<{ node: LegacyNode; missing: string[] } | null>(null);
   const [overrideReason, setOverrideReason] = React.useState("");
   const [accepting, setAccepting] = React.useState(false);
+  // 手动蒸馏（0.15.14）：蒸馏失败重试 / 旧终态任务补蒸馏的人工入口。
+  const [distillTask, setDistillTask] = React.useState("");
+  const [distilling, setDistilling] = React.useState(false);
+
+  async function distill() {
+    const id = distillTask.trim();
+    if (!/^\d+$/.test(id)) {
+      toast.error("请输入终态任务的数字 id");
+      return;
+    }
+    setDistilling(true);
+    try {
+      await api.legacyDistill(id);
+      toast.success(`任务 #${id} 蒸馏已触发（后台异步执行，稍后刷新查看）`);
+      setDistillTask("");
+      // 蒸馏是异步的：延迟刷新一次，给落库留时间。
+      setTimeout(() => void load(), 3000);
+    } catch (e) {
+      toast.error(`蒸馏触发失败：${(e as Error).message}`);
+    } finally {
+      setDistilling(false);
+    }
+  }
 
   const load = React.useCallback(async () => {
     try {
@@ -200,15 +224,38 @@ export default function LegacyPage() {
             跨任务经验：任务终局自动蒸馏出草稿，经你评审进入注入池——后续同族任务规划时自动携带。
           </p>
         </div>
-        <Tabs value={state} onValueChange={setState}>
-          <TabsList>
-            {STATE_TABS.map((tab) => (
-              <TabsTrigger key={tab.value} value={tab.value}>
-                {tab.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
+        <div className="flex flex-col items-end gap-2">
+          <Tabs value={state} onValueChange={setState}>
+            <TabsList>
+              {STATE_TABS.map((tab) => (
+                <TabsTrigger key={tab.value} value={tab.value}>
+                  {tab.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+          {/* 手动蒸馏：终态任务号 → 后台异步蒸馏出草稿（失败重试/旧任务补蒸） */}
+          <div className="flex items-center gap-1.5">
+            <Input
+              className="h-7 w-40 text-xs"
+              placeholder="终态任务号，手动蒸馏"
+              value={distillTask}
+              onChange={(e) => setDistillTask(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void distill();
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={distilling}
+              onClick={() => void distill()}
+            >
+              {distilling ? "触发中…" : "蒸馏"}
+            </Button>
+          </div>
+        </div>
       </div>
 
       <Card>

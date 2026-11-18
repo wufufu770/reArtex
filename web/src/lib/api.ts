@@ -1161,6 +1161,9 @@ export const api = {
   setRolePolicy: (llm_role_policy: string) => put<{ ok: boolean }>("/settings", { llm_role_policy }),
   legacyNodes: (state = "") =>
     get<{ nodes: LegacyNode[] | null }>(`/legacy/nodes${state ? `?state=${state}` : ""}`).then((r) => arr(r.nodes)),
+  // 手动触发终局蒸馏（0.15.14）：蒸馏失败可重试 / 旧终态任务补蒸馏。后端 202
+  // 异步执行（一次性可重入口在服务端按任务去重）；终态校验由后端做（409）。
+  legacyDistill: (taskId: number | string) => post<{ ok: boolean; task_id: string }>(`/legacy/distill/${taskId}`),
   // F3 人工复核改判：对一条 deny/needs_review 裁决发放 call-precision 放行凭据。
   // Tier3 高危工具后端 409 拒绝；同工具改判 ≥3 次响应带 suggest_trust_rule。
   sodDecisionReview: (id: number, body: { scope: "once" | "task"; reason?: string; operator?: string }) =>
@@ -1977,6 +1980,24 @@ export const api = {
   },
   llmRecordDetail: (id: number) => get<LLMRecordDetail>(`/llm/records/${id}`),
   // M3（方案 v10 §6 二期）：缓存命中率 + 分位延迟聚合（llm_records 派生）。
+  // 模型单价表（0.15.14 暴露）：用量核算基准（每百万 token 单价，可运维编辑）。
+  profilePrices: () =>
+    get<{
+      prices: {
+        profile_name: string;
+        currency: string;
+        per_m_input: number;
+        per_m_output: number;
+        per_m_cache_read: number;
+      }[];
+    }>("/metrics/prices").then((r) => r.prices ?? []),
+  saveProfilePrice: (p: {
+    profile_name: string;
+    currency: string;
+    per_m_input: number;
+    per_m_output: number;
+    per_m_cache_read: number;
+  }) => put<{ ok: boolean }>("/metrics/prices", p),
   llmStats: () =>
     get<{
       total_calls: number;

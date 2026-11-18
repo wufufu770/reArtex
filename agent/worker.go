@@ -658,6 +658,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if needHandoff {
 		w.generateHandoff(ctx, s, intent, emitWrap, err)
 	}
+	// 确定性运行收尾回执（progress_receipt §设计）：WriteCounts 是确定性事实，
+	// 不依赖模型自述——压缩后模型看不到自己写过什么，这条回执在库里可回读。
+	// 空计数不落（函数自带 guard，空回执只会污染轨迹）。0.15.14 接线：此前
+	// 该函数写好了却从未被运行循环调用（全量审查实锤的悬空点）。
+	recordRunProgressReceipt(ts, name, intent.ID, tsx.Writes())
 	return reason, tsx.Writes(), err
 }
 

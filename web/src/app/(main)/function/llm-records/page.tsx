@@ -13,6 +13,7 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   AlertDialog,
@@ -127,6 +128,10 @@ export default function LLMRecordsPage() {
   const [loading, setLoading] = React.useState(false);
   // M3（方案 v10 §6 二期）：缓存命中率与分位延迟聚合。
   const [stats, setStats] = React.useState<Awaited<ReturnType<typeof api.llmStats>> | null>(null);
+  // 模型单价表（0.15.14 暴露）：行内编辑草稿（key=profile_name），保存逐行 PUT。
+  const [prices, setPrices] = React.useState<Awaited<ReturnType<typeof api.profilePrices>>>([]);
+  const [priceDraft, setPriceDraft] = React.useState<Record<string, string[]>>({});
+  const [priceSaving, setPriceSaving] = React.useState<string | null>(null);
 
   // Recording on/off toggle (settings.llm_record; default off). When off the
   // backend records nothing.
@@ -202,6 +207,14 @@ export default function LLMRecordsPage() {
       })
       .catch(() => {
         /* 统计失败不打扰主列表 */
+      });
+    api
+      .profilePrices()
+      .then((p) => {
+        if (alive) setPrices(p);
+      })
+      .catch(() => {
+        /* 单价表失败不打扰主列表 */
       });
     return () => {
       alive = false;
@@ -338,6 +351,98 @@ export default function LLMRecordsPage() {
             </Badge>
           ))}
         </div>
+      )}
+
+      {/* 0.15.14：模型单价表——用量核算基准（每百万 token 单价），行内编辑保存 */}
+      {prices.length > 0 && (
+        <Card className="gap-2 p-3">
+          <div className="flex items-center gap-2">
+            <p className="font-medium text-sm">模型单价（每百万 token）</p>
+            <Badge variant="outline" className="text-[10px]">
+              用量核算基准，可编辑
+            </Badge>
+          </div>
+          <div className="space-y-1">
+            {prices.map((p) => {
+              const draft = priceDraft[p.profile_name] ?? [
+                p.currency,
+                String(p.per_m_input),
+                String(p.per_m_output),
+                String(p.per_m_cache_read),
+              ];
+              const dirty = priceDraft[p.profile_name] !== undefined;
+              const set = (i: number, v: string) =>
+                setPriceDraft((prev) => {
+                  const cur = prev[p.profile_name] ?? draft;
+                  const next = [...cur];
+                  next[i] = v;
+                  return { ...prev, [p.profile_name]: next };
+                });
+              const save = async () => {
+                const [currency, inP, outP, cacheP] = priceDraft[p.profile_name] ?? draft;
+                const nums = [Number(inP), Number(outP), Number(cacheP)];
+                if (nums.some((n) => !Number.isFinite(n) || n < 0)) {
+                  toast.error("单价必须是非负数字");
+                  return;
+                }
+                setPriceSaving(p.profile_name);
+                try {
+                  await api.saveProfilePrice({
+                    profile_name: p.profile_name,
+                    currency: currency.trim() || "CNY",
+                    per_m_input: nums[0],
+                    per_m_output: nums[1],
+                    per_m_cache_read: nums[2],
+                  });
+                  const fresh = await api.profilePrices();
+                  setPrices(fresh);
+                  setPriceDraft((prev) => {
+                    const next = { ...prev };
+                    delete next[p.profile_name];
+                    return next;
+                  });
+                  toast.success(`${p.profile_name} 单价已保存`);
+                } catch (e) {
+                  toast.error(`保存失败：${(e as Error).message}`);
+                } finally {
+                  setPriceSaving(null);
+                }
+              };
+              const cell = "h-6 w-20 px-1 text-center text-[11px]";
+              return (
+                <div key={p.profile_name} className="flex flex-wrap items-center gap-1.5 rounded-md border px-2 py-1">
+                  <span className="min-w-28 truncate font-mono text-[11px]" title={p.profile_name}>
+                    {p.profile_name}
+                  </span>
+                  <Input
+                    className={cn(cell, "w-16")}
+                    value={draft[0]}
+                    onChange={(e) => set(0, e.target.value)}
+                    title="币种"
+                  />
+                  <Input className={cell} value={draft[1]} onChange={(e) => set(1, e.target.value)} title="输入单价" />
+                  <Input className={cell} value={draft[2]} onChange={(e) => set(2, e.target.value)} title="输出单价" />
+                  <Input
+                    className={cell}
+                    value={draft[3]}
+                    onChange={(e) => set(3, e.target.value)}
+                    title="缓存读单价"
+                  />
+                  {dirty && (
+                    <Button
+                      size="sm"
+                      className="h-6 text-[10px]"
+                      disabled={priceSaving === p.profile_name}
+                      onClick={() => void save()}
+                    >
+                      {priceSaving === p.profile_name ? "保存中…" : "保存"}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
       )}
 
       {/* Toolbar */}
