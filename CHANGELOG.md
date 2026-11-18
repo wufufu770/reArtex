@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.13] - 2026-11-18
+
+### 修复（外部审查核实后落地四项——zombie run / guard 覆盖缺口 / MCP 握手挂死 / thinking 覆盖雷）
+
+- **① 偏锋人工停止修 zombie run（实锤）**：`POST /api/edge/tasks/{id}/stop` 此前只把 edge_runs 行翻成 cancelled，底层任务原样在跑——worker 继续领意图烧 token。现在联动正常任务控制链暂停任务（取消在飞运行 + paused 落库，与人工暂停同一条链；任务已终态/已暂停时幂等无关只记日志）。顺带硬化：请求体 MaxBytesReader 64KB、goal/description 修剪空白、错误分类（无 open run=404 经 `db.ErrNoOpenEdgeRun` 哨兵判定，不再靠错误文案字符串匹配；后端错误=500 不裸泄 err.Error()）。
+- **② planner/mainagent 补挂 guard hook（SoD 覆盖边界文档自认的「最大已知缺口」）**：此前 `opts.Hooks` 只挂 chat 与 worker——这两个 lane 都带 Bash/Write，其工具调用全部绕过基线预检/短路表/拦截规则/审计链。现在 planner（engine 的 wireStrategyContext 统一装配 + 终局轮同款）与 mainagent（task_llm 构造点按任务注入）均经 SetGuardProvider 挂上任务 guard；拦截名单外的工具在 IsToolEnabled 门即刻放行，不给 planner 的 DB 写工具加判官延迟。**SoD 链仍只挂 worker**（保持文档边界：链的 scope 判定依赖任务范围，planner 的 DB 写工具过链只会平添规整器延迟；chat 的 task_id=0 场景链会 fail-closed 全拒，不能开）。
+- **③ MCP 握手挂死修复（实锤）**：a) `NewSSE` 的流 ctx 此前裸 context.Background()——卡死的 server（重启中的容器/半开 TCP）会把 GET /sse、端点公告、initialize 全部无限挂死，agent 装配路径不返回就永远进不了 mcpFailTTL 失败冷却，worker 领取队列被堵死。现在握手 30s 看门狗 + 调用方 ctx 取消转发（仅握手期，成功后解除——流本体独立于调用方 ctx 是刻意的：连接跨 run 复用），initialize 单独 30s 预算；看门狗与握手完成竞态时以 streamCtx.Err() 复核按失败处理。b) stdio 传输的 initialize 同加 30s 预算（此前只靠通常无 deadline 的调用方 ctx）。c) `newHTTPClient` 改 clone `http.DefaultTransport`——裸 `&http.Transport{}` 丢失 TLS 握手超时/空闲连接回收/ExpectContinue 超时（拨号超时由 netguard guardedDialer 已有，10s）。
+- **④ agent/thinking.go 三修（部分属实，雷潜而未爆）**：① 返回值 "" 的字段不再覆盖——旧实现无条件赋值，解析器返回全空时会把调用方预设的 Thinking/ReasoningEffort 清掉，与「"" = 不覆盖」契约矛盾（现网调用方未预设故未实际发生，属潜在雷）；② opts == nil 直接返回；③ 裸全局可变函数变量 `ThinkingOverride` 换 `atomic.Pointer`（SetThinkingOverride 原子注入——装配重入路径不再有数据竞态）。
+- **审查误判留档（不改）**：`get_finding_traffic` 并非缺 seed（走 seedFindingTrafficTools 专属通道，tools 表有行有绑定）；「MCP 在 SoD 链外」对工具调用而言不成立（PreToolUse 对所有 CoreTool 生效，UnwrapDeferredName 专门处理延迟 MCP）——「MCP server 子进程/http 传输不在链内」是文档留档的 by-design 边界；normalizer 无 ToolChoice 为 0.15.11 已留档取舍；TestDoStreamHonorsConfiguredRetries 为环境性已知项。
+- 测试：mcphttp 三条新用例（卡死 server 握手看门狗/调用方取消中止握手/Transport clone 语义保留）；agent thinking 两条（全空不清预设/nil 安全）；db 集成测试补 StopOpenEdgeRun 哨兵断言；全量构建+vet 过。
+- 对齐检查：无新端点（stop 语义增强属于既有路由）。
+
+
 ## [0.15.12] - 2026-11-18
 
 ### 功能（四项：建模图布局排序 / 偏锋卡片化 / 缓存命中率 / 跨任务参考复用）

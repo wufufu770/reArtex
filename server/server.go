@@ -287,7 +287,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Wire DB-stored agent-level thinking effort overrides (方案 v9.2 批次 B).
 		// ''（NULL）= 跟随绑定 profile 的默认 ⇒ 返回全空 ⇒ 请求逐字节不变；
 		// enabled/disabled 是 switch 形态（强制思考开关），其余是 effort 档位。
-		agent.ThinkingOverride = func(key string) (string, string) {
+		// 0.15.13：经 SetThinkingOverride 原子注入（装配重入不再有数据竞态）。
+		agent.SetThinkingOverride(func(key string) (string, string) {
 			a, err := m.pg.GetAgentByKey(key)
 			if err != nil || a == nil {
 				return "", ""
@@ -300,7 +301,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			default:
 				return "", a.ThinkingEffort
 			}
-		}
+		})
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值

@@ -49,13 +49,24 @@ var egressPolicy = netguard.Policy{
 	LoopbackEscapeEnv: "ARTEX_MCP_EGRESS_ALLOW_LOOPBACK",
 }
 
+// handshakeTimeout 是 MCP 连接握手（拨号/GET /sse/端点公告/initialize）的预算。
+// 超过即中止连接——装配路径拿到的是错误而非挂死（mcpFailTTL 冷却只在返回错误
+// 后生效，卡死不返回就永远轮不到冷却，worker 领取队列会被堵死——外部审查实锤）。
+// 包级变量而非 const：测试把预算调短以验证看门狗（真实语义不变）。
+var handshakeTimeout = 30 * time.Second
+
 // newHTTPClient 造一个受 netguard 保护的 HTTP 客户端。
 //
 // timeout=0 表示长连接（SSE 流）。insecure=true 时保留跳过证书校验：MCP 服务端
 // 普遍用自签证书，收紧 TLS 是另一件独立的事，不在这里夹带 —— 顺手改了会让大批
 // 现役 MCP 直接连不上，那不是本改动该造成的故障。
+//
+// 0.15.13：clone DefaultTransport 而不是从零建——裸 &http.Transport{} 没有
+// TLS 握手超时/空闲连接回收/ExpectContinue 超时（拨号超时由 netguard 的
+// guardedDialer 补，10s）。Clone 后 netguard.Transport 会再覆写 DialContext，
+// 其余默认值全部保留。
 func newHTTPClient(timeout time.Duration, insecure bool) *http.Client {
-	base := &http.Transport{}
+	base := http.DefaultTransport.(*http.Transport).Clone()
 	if insecure {
 		base.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 刻意保留：MCP 自签证书是常态
 	}
@@ -156,7 +167,10 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 		http:     hc,
 		protocol: protocolVersion,
 	}
-	if err := c.initialize(ctx); err != nil {
+	// initialize 在握手预算内（此前只有 120s Client.Timeout 兜底，规整为同一预算）。
+	initCtx, initCancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer initCancel()
+	if err := c.initialize(initCtx); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -165,6 +179,13 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 // NewSSE connects to the legacy MCP SSE transport: a long-lived GET /sse
 // announces a per-session POST /message endpoint, while JSON-RPC responses are
 // delivered asynchronously as SSE message events.
+//
+// 0.15.13 握手纪律：流本体刻意独立于调用方 ctx（连接跨 run 复用——装配请求结束
+// 连接必须存活），但【握手】双重有界：30s 看门狗 + 调用方 ctx 取消转发（仅握手
+// 期生效）。此前裸 context.Background() 意味着卡死的 server（重启中的容器、半开
+// TCP）会把 GET /sse / 端点公告 / initialize 全部挂死，装配路径不返回就永远进
+// 不了失败冷却。握手成功后解除转发与看门狗——若看门狗恰在完成瞬间触发，用
+// streamCtx.Err() 复核并按失败处理（连接丢弃可重试，好过交付一条将死的流）。
 func NewSSE(ctx context.Context, server, sseURL string, headers map[string]string, insecure bool) (*Client, error) {
 	cleanHeaders, err := normalizeHeaders(headers)
 	if err != nil {
@@ -172,9 +193,18 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	}
 	hc := newHTTPClient(0, insecure) // the SSE stream is intentionally long-lived.
 	streamCtx, cancel := context.WithCancel(context.Background())
+	stopRelay := context.AfterFunc(ctx, cancel) // 仅握手期：调用方取消 → 中止握手
+	timer := time.AfterFunc(handshakeTimeout, cancel)
+	handshakeOK := false
+	defer func() {
+		stopRelay()
+		timer.Stop()
+		if !handshakeOK {
+			cancel()
+		}
+	}()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
@@ -183,20 +213,21 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	}
 	resp, err := doRequest(hc, req)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		cancel()
 		return nil, fmt.Errorf("mcp sse http %d: %s", resp.StatusCode, readSnippet(resp.Body))
 	}
 	reader := bufio.NewReader(resp.Body)
 	endpoint, err := readSSEEndpoint(reader, sseURL)
 	if err != nil {
 		resp.Body.Close()
-		cancel()
 		return nil, err
+	}
+	if serr := streamCtx.Err(); serr != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("mcp sse 握手超时或被取消: %w", serr)
 	}
 	c := &Client{
 		server:       server,
@@ -213,10 +244,15 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		protocol:     legacySSEProtocolVersion,
 	}
 	go c.readLegacySSE(reader)
-	if err := c.initialize(ctx); err != nil {
+	// initialize 也在握手预算内（legacy 路径的响应经 SSE 流异步送达，
+	// legacyRoundTrip 只认 ctx.Done——没有预算就会无限等）。
+	initCtx, initCancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer initCancel()
+	if err := c.initialize(initCtx); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
+	handshakeOK = true
 	return c, nil
 }
 

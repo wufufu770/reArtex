@@ -7,6 +7,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -34,6 +35,11 @@ type MainAgent struct {
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	// guardProvider 是「按任务号取 guard hook」的回调（0.15.13 宿主侧装配）。
+	// 主 agent 的工具调用此前连 guard hook 都不过——基线预检/短路表/拦截规则/
+	// 审计链只盖 worker 与 chat，是 SoD 覆盖边界文档留档的最大缺口。nil = 不挂。
+	// SoD 链仍只挂 worker（见文档边界）。
+	guardProvider func(taskID int64) harness.HookRunner
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -50,6 +56,13 @@ func (m *MainAgent) nonStreaming() bool { return m.nonStreamingFn != nil && m.no
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
 func (m *MainAgent) SetMaxTokens(fn func() int) { m.maxTokensFn = fn }
+
+// SetGuardProvider 注入「按任务号取 guard hook」回调（0.15.13：基线预检/短路表/
+// 拦截规则/审计链此前只盖 worker 与 chat——主 agent 带 Bash/Write 却全部绕过，
+// 见 docs/SoD链覆盖边界.md 的已知缺口表）。nil = 不挂。
+func (m *MainAgent) SetGuardProvider(fn func(taskID int64) harness.HookRunner) {
+	m.guardProvider = fn
+}
 
 func (m *MainAgent) maxTokens() int {
 	if m.maxTokensFn == nil {
@@ -186,6 +199,14 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
 	applyThinkingOverride(&opts, "mainagent")
+	// 0.15.13：挂 guard hook（宿主注入，按任务号取任务 guard）。基线预检/短路表/
+	// 拦截规则/审计链从本轮起对主 agent 的工具调用生效（它带 Bash/Write——此前
+	// 全部绕过）；拦截名单外的工具在 IsToolEnabled 门即刻放行。SoD 链仍只挂 worker。
+	if m.guardProvider != nil {
+		if h := m.guardProvider(taskID); h != nil {
+			opts.Hooks = h
+		}
+	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx
 		// Segment 0 keeps the legacy "exp%d-main" name so existing transcripts still

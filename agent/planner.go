@@ -10,6 +10,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -53,6 +54,13 @@ type Planner struct {
 	// nil = 不注入。
 	strategyContext  func(taskID int64) string
 	situationAppend  func(taskID int64) string
+
+	// guardProvider 是「按任务号取 guard hook」的回调（0.15.13 宿主侧装配）。
+	// planner 的工具调用此前连 guard hook 都不过——基线预检/短路表/拦截规则/
+	// 审计链只盖 worker 与 chat，是 SoD 覆盖边界文档留档的最大缺口。nil = 不挂
+	// （离线/测试场景）。SoD 链仍只挂 worker（链的 scope 判定依赖任务范围，
+	// planner 的 DB 写工具过链只会平添规整器延迟，见文档边界）。
+	guardProvider func(taskID int64) harness.HookRunner
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
@@ -60,6 +68,13 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetGuardProvider 注入「按任务号取 guard hook」回调（0.15.13：基线预检/短路表/
+// 拦截规则/审计链此前只盖 worker 与 chat——planner 的工具调用全部绕过，见
+// docs/SoD链覆盖边界.md 的已知缺口表）。nil = 不挂。
+func (p *Planner) SetGuardProvider(fn func(taskID int64) harness.HookRunner) {
+	p.guardProvider = fn
+}
 
 // SetCompactor wires the cold-node compactor (cold-digest §7). Called each
 // planner wake-up to advance the round counter, maintain cold stamps, and
@@ -546,6 +561,14 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
 	applyThinkingOverride(&opts, "planner")
+	// 0.15.13：挂 guard hook（宿主注入，按任务号取任务 guard）。基线预检/短路表/
+	// 拦截规则/审计链从本轮起对 planner 的工具调用生效；拦截名单外的工具在
+	// IsToolEnabled 门即刻放行，不给 DB 写工具加判官延迟。SoD 链仍只挂 worker。
+	if p.guardProvider != nil {
+		if h := p.guardProvider(taskID); h != nil {
+			opts.Hooks = h
+		}
+	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
 		opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())

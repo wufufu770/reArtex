@@ -281,6 +281,9 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 		}
 		planner, _ = e.snapshotFor(t)
 	}
+	// 终局轮同样要 wire（LoadOrStore 幂等）——0.15.13 起 planner 的 guard hook
+	// 经同一入口装配，终局轮的工具调用也要过基线预检/短路表。
+	e.wireStrategyContext(planner)
 	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
 	fctx := e.clockCtx(ctx, t, true)
 	if !e.beginTaskOperation(t.ID) {

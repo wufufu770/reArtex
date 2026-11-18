@@ -1084,6 +1084,23 @@ func (e *Engine) wireStrategyContext(pl *agent.Planner) {
 	// 业务建模摘要段 + 偏锋判据段（合并施工 G-19）：同一 LoadOrStore 守卫下
 	// 装第二个回调——两段共用一个注入口（situational 尾部），每轮现取。
 	pl.SetSituationAppendProvider(e.situationAppendProvider)
+	// 0.15.13：planner 补挂 guard hook——基线预检/短路表/拦截规则/审计链此前
+	// 只盖 worker 与 chat（SoD 覆盖边界文档留档的最大缺口）。同一 LoadOrStore
+	// 守卫下装第三个回调；SoD 链仍只挂 worker。
+	pl.SetGuardProvider(e.taskGuardHooks)
+}
+
+// taskGuardHooks 是 SetGuardProvider 的实现：按任务号取任务 guard 的 hook
+// registry。任务不在册/无 guard（离线测试场景）返回 nil = 不挂。
+func (e *Engine) taskGuardHooks(taskID int64) harness.HookRunner {
+	if e == nil || e.m == nil || taskID <= 0 {
+		return nil
+	}
+	t, ok := e.m.Task(strconv.FormatInt(taskID, 10))
+	if !ok || t == nil || t.Guard == nil {
+		return nil
+	}
+	return t.Guard.Hooks()
 }
 
 // attributeSubTaskOutcome 给这个任务跑一轮子任务级归因，并把结论路由成待裁决的提议。

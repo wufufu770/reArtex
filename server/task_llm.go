@@ -15,6 +15,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
 )
@@ -715,6 +716,12 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
+	// 0.15.13：主 agent 补挂任务 guard hook——基线预检/短路表/拦截规则/审计链
+	// 此前只盖 worker 与 chat，主 agent 带 Bash/Write 却全部绕过（SoD 覆盖边界
+	// 文档留档的最大缺口）。SoD 链仍只挂 worker。
+	if t.Guard != nil {
+		main.SetGuardProvider(func(int64) harness.HookRunner { return t.Guard.Hooks() })
+	}
 	// P4 fact 三态：mainagent lane 是复核槽位（异层——facts 由 worker 产出，复核
 	// 决不落在产出者手里）。转移本体是 db.SetFactState 的确定性层。
 	if store := t.Store; store != nil {

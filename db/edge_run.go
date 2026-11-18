@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	_ "embed"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -280,8 +281,12 @@ func (d *DB) TaskEdgeFields(taskID int64) (edgeMode bool, methodologyID string, 
 	return edgeMode, methodologyID, true
 }
 
+// ErrNoOpenEdgeRun 标记「任务没有进行中的偏锋运行」（0.15.13：调用方按
+// errors.Is 区分语义性 404 与后端错误，不再靠错误文案字符串匹配）。
+var ErrNoOpenEdgeRun = errors.New("no open edge run")
+
 // StopOpenEdgeRun 人工停止任务的 open 运行（stop_reason=cancelled，0.15.2
-// 偏锋页交互面）。无 open 行返回错误。返回收尾的 run id。
+// 偏锋页交互面）。无 open 行返回 ErrNoOpenEdgeRun 包装错误。返回收尾的 run id。
 func (d *DB) StopOpenEdgeRun(taskID int64, reason string) (int64, error) {
 	if err := d.ensureEdgeSchema(); err != nil {
 		return 0, err
@@ -292,7 +297,7 @@ UPDATE edge_runs SET stop_reason=$2, stop_detail=jsonb_build_object('reason','�
 WHERE id = (SELECT id FROM edge_runs WHERE task_id=$1 AND stop_reason='' ORDER BY id DESC LIMIT 1)
 RETURNING id`, taskID, reason).Scan(&runID)
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("任务 #%d 无进行中的偏锋运行", taskID)
+		return 0, fmt.Errorf("任务 #%d 无进行中的偏锋运行: %w", taskID, ErrNoOpenEdgeRun)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("stop open run: %w", err)

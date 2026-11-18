@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/Autumn-27/norma/tool/privdrop"
 )
@@ -60,7 +61,12 @@ func NewStdioClient(ctx context.Context, server, command string, env map[string]
 		conn:   newConn(stdout, stdin),
 		closer: &stdioCloser{cmd: cmd, stdin: stdin},
 	}
-	if err := c.initialize(ctx); err != nil {
+	// 握手预算（0.15.13）：卡死的 MCP 子进程（半启动/卡在初始化）此前会把装配
+	// 路径无限挂死——调用方 ctx 通常无 deadline，而 mcpFailTTL 冷却只在返回错误
+	// 后生效。30s 内 initialize 没完成即按失败收掉子进程。
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := c.initialize(initCtx); err != nil {
 		c.Close()
 		return nil, err
 	}

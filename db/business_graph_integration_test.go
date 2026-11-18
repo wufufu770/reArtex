@@ -15,6 +15,7 @@ package db
 //   8. chat_visible 列：seedBuiltins 后 edge_exec 为 false、其余内置为 true。
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -207,6 +208,16 @@ func TestBizEdgeIntegration(t *testing.T) {
 	run2, _ := d.StartEdgeRun(tid, "stpa-uca")
 	if err := d.ConcludeEdgeRun(run2, StopReasonStalled, map[string]any{"rounds": 4}); err != nil {
 		t.Fatalf("stalled 收尾: %v", err)
+	}
+	// 0.15.13：StopOpenEdgeRun 哨兵错误——无 open run 时 errors.Is 可判（调用方
+	// 据此回 404，不再靠错误文案字符串匹配）；有 open 行时正常翻 cancelled。
+	run3, _ := d.StartEdgeRun(tid, "pre-mortem")
+	stopped, err := d.StopOpenEdgeRun(tid, "cancelled")
+	if err != nil || stopped != run3 {
+		t.Fatalf("人工停止应返回 run id %d，got %d (err=%v)", run3, stopped, err)
+	}
+	if _, err := d.StopOpenEdgeRun(tid, "cancelled"); !errors.Is(err, ErrNoOpenEdgeRun) {
+		t.Fatalf("无 open run 应报 ErrNoOpenEdgeRun，got %v", err)
 	}
 	// cells 的 attempts 与 exploration_nodes.attempts 互不干扰（同名语义隔离）。
 	var expAttempts int
