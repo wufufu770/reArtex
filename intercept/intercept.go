@@ -142,6 +142,20 @@ type Interceptor struct {
 	enabledTools map[string]bool // nil means not loaded yet
 	pending      *pendingManager
 	reviewer     Reviewer // nil = LLM fallback judge not wired
+	// askListener 在 ask pending 行落库后异步触发（0.15.19 外部通道广播挂点，
+	// 例：飞书桥把审批推到手机）。nil = 不广播。回调自行兜底：不得阻塞、不得
+	// panic（拦截主链不为增值面买单）。
+	askListener func(pendingID int64, convID int64, taskID, agentName, toolName string, input []byte, reason string)
+}
+
+// SetAskListener 注册 ask pending 广播回调（0.15.19 外部通道；nil=卸载）。回调
+// 在独立 goroutine 里跑：本方法只存指针。
+func (i *Interceptor) SetAskListener(
+	fn func(pendingID int64, convID int64, taskID, agentName, toolName string, input []byte, reason string),
+) {
+	i.mu.Lock()
+	i.askListener = fn
+	i.mu.Unlock()
 }
 
 // SetReviewer installs the LLM fallback judge callback. Passing nil disables it.
@@ -757,6 +771,13 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, pendingAgentName(agentName, sodKey), toolName, input, dec.Message, audit)
 	if err != nil {
 		return false
+	}
+	// 外部通道广播挂点（0.15.19 飞书桥）：pending 行已落库即推，异步 best-effort
+	// ——回调兜底不阻塞主链（等待人工裁决的 goroutine 自己会等，广播晚到无害）。
+	if i.askListener != nil {
+		listener := i.askListener
+		agentName := pendingAgentName(agentName, sodKey)
+		go listener(pendingID, convID, taskID, agentName, toolName, input, dec.Message)
 	}
 	// 人工审批也是判定动作，进审计链（放行/拒绝/超时都在这张 pending 行上）。
 	i.appendAuditEvent(ctx, dec, toolName, input, "ask")

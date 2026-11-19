@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.19] - 2026-11-20
+
+### 功能（批次 D-①：飞书通道——审批广播 + 远程指令，零公网依赖）
+
+外部实现工具包 phase3 channel-bridge 的本仓映射（按真实 REST 契约适配，非移植）：
+
+- **① 出向广播钩子**：`intercept.Interceptor.SetAskListener`——ask pending 行落库后异步触发（best-effort，广播是增值面：桥挂了审批页照常裁决，worker 等待不受影响）。`server/feishu_bridge.go`：广播客户端（settings 键 `feishu_bridge_url`/`feishu_bridge_secret`，空=通道关闭；URL 强制 http(s) scheme 防误配 SSRF；输入预览截 1KB；5s 超时只记日志）。启动接线 `wireFeishuBridge`。
+- **② feishu-bridge/ 独立服务**（不进 Go 单体）：飞书 WebSocket 长连接收指令（**零回调 URL**——长连接模式，内网部署无需公网面）+ 回环监听的审批广播端点（X-Bridge-Secret 鉴权，唯一监听面）。能力：`/status` `/start`（含 0.15.17 档位入参）`/pause` `/resume` `/approve` `/deny` `/help`；审批卡推 allowlist 私聊，裁决走文本命令+首响锁（多渠道并发只接受第一响，平台侧 ErrAlreadyDecided 409 双保险）。
+- **③ 与工具包原型的契约差异全适配**：resolve→`/api/intercept/pending/{id}/decide`（allowed/denied）；tasks `target`→`description`+`goal`+档位；edge stop→`control/batch`（普通任务）；交互按钮→文本命令（按钮回调需公网面，v1 不开）。
+- **④ 安全边界**：凭据（飞书 app_id/secret、平台 JWT、allowlist）只在桥环境变量——不进 reArtex 进程/库/日志；reArtex 侧仅桥 URL+共享口令两个 settings 键（运维 SQL 通道）；allowlist 宁漏勿误（空=拒收所有指令，审批卡仍投递）；决策面零新增权限面（既有 decide 入口，审计链不变）。`feishu-bridge/README.md` 含飞书应用创建步骤（长连接订阅+权限）与运行手册；`docs/飞书通道.md` 记录架构/契约差异/安全边界。
+- 测试：`TestFeishuBridgeListener`（未配置静默/广播载荷+口令/非法 scheme 拒绝）；桥 Python 编译过+首响锁逻辑验证；敏感扫描干净；无 Go 行为面变更外的新端点（广播钩子为拦截层内部挂点）。
+- 配置说明：桥为可选组件——不部署、不配置 URL 时平台行为与 0.15.18 逐字节一致。
+
+
 ## [0.15.18] - 2026-11-20
 
 ### 功能（批次 C：RSI 修改标准门禁——观察模式上线）
