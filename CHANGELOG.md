@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.18] - 2026-11-20
+
+### 功能（批次 C：RSI 修改标准门禁——观察模式上线）
+
+外部实现工具包 phase4 治理面的本仓化（标准文档重写 + 门禁脚本适配；**不引入外部记忆库**）：
+
+- **① docs/RSI修改标准.md**：Tier0/1/2 分层路径权限矩阵按当前文件树核定（工具包清单逐文件实测——26 个 Tier0 单文件全部存在；补充 internal/sod、internal/sodpolicy、agent/toolpolicy.go 本仓独有面；patches/ 实存目录照锁）。职责分离四角色表 + 记忆库裁决（**不引入 mcp-memory/pgvector 三表**——传承图+经验权重卡+strategies+memory 已是单一体系，RSI 经验沉淀走平台内链路，避免双记忆库分裂）+ 演化门前置条件留档。
+- **② scripts/rsi_guard.py**（适配版，~200 行）：Tier0 硬锁 / Tier1-Tier2 越层 / 膨胀帽（SKILL.md ≤300 行、prompts 相对基线 ≤+15% 增幅）/ 脱敏门（硬编码 IPv4——TEST-NET 除外——与 secret 形状）/ [EVO-YYYYMMDD-NNN] 溯源（可选）。**观察模式默认**（只打印基线报告、退出码恒 0），`--enforce` 切强制（启用 RSI 时的切换开关）；支持 --staged（pre-commit 场景）与 --base <ref>（CI 区间场景）。本文件与标准文档互为 Tier0 自保护清单成员。
+- **③ CI 接线**：secret-scan job 追加「RSI 修改标准门禁（观察模式）」步——跑 `--base ${{ github.event.before }}`（首推空基线自动跳过），输出分层基线报告进 CI 日志，不阻断。
+- **④ 预置的切换路径**：未来 RSI 实体落地时，pre-commit/CI 把命令加 `--enforce --tier 1` 即完成观察→强制切换，脚本语义零改动。
+- 验证：脚本三形态实测（观察=报告+exit 0 且批次 B 的 Tier2 文件被正确分类进基线；强制=exit 1；staged 空集=干净）；CI yaml 解析过。本批无 Go/前端代码变更，全量回归沿用 0.15.17 绿基线。
+- 对齐检查：无新端点（治理面为脚本+文档+CI 步）。
+
+
 ## [0.15.17] - 2026-11-20
 
 ### 功能（批次 B：任务执行档位——难度×模式矩阵 / 中途切档 / 自动缩放）

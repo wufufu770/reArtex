@@ -165,6 +165,12 @@ jobs:
           fetch-depth: 0
       - name: 扫描敏感信息（整棵树 + 全部历史）
         run: bash scripts/scan-sensitive.sh all
+      # RSI 治理门禁（0.15.18 批次 C）：观察模式——只打印分层基线报告，不阻断。
+      # 当前变更由人主导，门禁先跑出基线；启用 RSI 时脚本加 --enforce 切强制
+      # （标准见 docs/RSI修改标准.md）。event.before 为空/零值（首推）时跳过。
+      - name: RSI 修改标准门禁（观察模式）
+        if: github.event.before != '' && github.event.before != '0000000000000000000000000000000000000000'
+        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --tier 1
 
   # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
   # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend
