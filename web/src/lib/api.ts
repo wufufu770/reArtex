@@ -328,6 +328,8 @@ export const api = {
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
     interceptRules?: AssetInterceptRuleInput[];
+    difficulty?: string; // 执行档位（0.15.17）：auto=文本启发式判定
+    mode?: string;
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -342,6 +344,8 @@ export const api = {
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
+      difficulty: input.difficulty ?? "", // auto=后端文本启发式判定
+      mode: input.mode ?? "",
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),

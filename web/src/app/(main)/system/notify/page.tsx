@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { BellIcon, PlusIcon, SendIcon, Trash2Icon } from "lucide-react";
+import { BellIcon, PlusIcon, RadioIcon, SendIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +16,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { NotificationChannel, NotificationFilter, NotificationMeta } from "@/lib/types";
+import type { NotificationChannel, NotificationFilter, NotificationMeta, Settings } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 import {
   CHANNEL_FIELDS,
@@ -51,6 +52,13 @@ export default function NotifyPage() {
   const [baseURL, setBaseURL] = React.useState("");
   const [digestMin, setDigestMin] = React.useState("");
 
+  // 外部通道（0.15.19/20 批次 D）：飞书桥 + 企微广播的出向目标（settings KV）。
+  const [settings, setSettings] = React.useState<Settings | null>(null);
+  const [bridgeURL, setBridgeURL] = React.useState("");
+  const [bridgeSecret, setBridgeSecret] = React.useState("");
+  const [wecomHook, setWecomHook] = React.useState("");
+  const [extSaving, setExtSaving] = React.useState(false);
+
   const load = React.useCallback(() => {
     api
       .notifyMeta()
@@ -66,10 +74,39 @@ export default function NotifyPage() {
       .notifyChannels()
       .then(setChannels)
       .catch((e) => toast.error("读取渠道列表失败：" + (e as Error).message));
+    api
+      .settings()
+      .then((s) => {
+        setSettings(s);
+        setBridgeURL(s.feishu_bridge_url ?? "");
+        setBridgeSecret("");
+        setWecomHook("");
+      })
+      .catch(() => {
+        /* settings 与推送页主功能正交，失败静默 */
+      });
   }, []);
   React.useEffect(() => {
     load();
   }, [load]);
+
+  // 外部通道保存：secret/webhook 掩码语义——输入留空=保持原值，填了=更新；
+  // URL 清空=关闭该目标。
+  async function saveExternalChannels() {
+    setExtSaving(true);
+    try {
+      const patch: Partial<Settings> = { feishu_bridge_url: bridgeURL.trim() };
+      if (bridgeSecret.trim()) patch.feishu_bridge_secret = bridgeSecret.trim();
+      if (wecomHook.trim()) patch.wecom_webhook_url = wecomHook.trim();
+      await api.setSettings(patch);
+      toast.success("外部通道配置已保存（每条广播现取，即时生效）");
+      load();
+    } catch (e) {
+      toast.error("保存失败：" + (e as Error).message);
+    } finally {
+      setExtSaving(false);
+    }
+  }
 
   function setF(patch: Partial<ChannelForm>) {
     setForm((f) => ({ ...f, ...patch }));
@@ -210,6 +247,18 @@ export default function NotifyPage() {
     }
   }
 
+  async function quickTest(ch: NotificationChannel) {
+    setTesting(true);
+    try {
+      const r = await api.notifyTestChannel(ch.id);
+      toast.success(`「${ch.name}」测试消息已发出（${r.latency_ms} ms），请到群里确认`);
+    } catch (e) {
+      toast.error("测试失败：" + (e as Error).message, { duration: 12000 });
+    } finally {
+      setTesting(false);
+    }
+  }
+
   async function removeChannel(ch: NotificationChannel) {
     try {
       await api.notifyDeleteChannel(ch.id);
@@ -339,6 +388,58 @@ export default function NotifyPage() {
         </CardContent>
       </Card>
 
+      {/* 外部通道（0.15.19/20 批次 D）：审批广播出向目标——ask pending 落库后
+          同一次事件扇出两目标（互不影响）；裁决统一回审批页/飞书命令。 */}
+      <Card className="gap-3">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <RadioIcon className="size-4 text-primary" /> 外部通道（审批广播）
+            <span className="text-muted-foreground text-xs font-normal">
+              ask 落库后自动推送审批要素；裁决统一回审批页。详见 docs/外部通道.md
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="n-feishu-url">飞书桥接收端点</Label>
+            <Input
+              id="n-feishu-url"
+              placeholder="http://127.0.0.1:8791/internal/approval"
+              value={bridgeURL}
+              onChange={(e) => setBridgeURL(e.target.value)}
+            />
+            <Input
+              id="n-feishu-secret"
+              type="password"
+              placeholder={settings?.feishu_bridge_set ? "共享口令已配置（留空保持）" : "共享口令（与桥侧 BRIDGE_SHARED_SECRET 同值）"}
+              value={bridgeSecret}
+              onChange={(e) => setBridgeSecret(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              桥以飞书 WS 长连接运行（feishu-bridge/，零公网面）；审批卡推 allowlist 私聊，人在飞书 /approve 裁决。
+            </p>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="n-wecom-hook">企微群机器人 Webhook</Label>
+            <Input
+              id="n-wecom-hook"
+              type="password"
+              placeholder={settings?.wecom_webhook_set ? "Webhook 已配置（留空保持）" : "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"}
+              value={wecomHook}
+              onChange={(e) => setWecomHook(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              审批卡推企微群（markdown）；webhook 无入向面——裁决在审批页或飞书通道完成。
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <Button onClick={saveExternalChannels} disabled={extSaving}>
+              {extSaving ? "保存中…" : "保存外部通道"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       <Tabs value={tab} onValueChange={(v) => setTab(v as "channels" | "deliveries")} className="flex flex-col gap-4">
         <TabsList>
           <TabsTrigger value="channels">渠道</TabsTrigger>
@@ -371,6 +472,20 @@ export default function NotifyPage() {
                         身上，而不是套一层 div：套 div 会造出一个「看起来可交互但没有
                         角色」的静态元素，既触发 a11y 告警，语义上也说不通。 */}
                     <div className="ml-auto flex items-center gap-2">
+                      {/* 快捷测试：免进编辑弹窗，卡片上直接发一条测试消息 */}
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label="发送测试消息"
+                        title="发送测试消息"
+                        disabled={testing}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void quickTest(ch);
+                        }}
+                      >
+                        <SendIcon className="text-muted-foreground" />
+                      </Button>
                       <Switch
                         checked={ch.enabled}
                         onCheckedChange={() => toggleEnabled(ch)}

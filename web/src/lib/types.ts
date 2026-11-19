@@ -952,6 +952,12 @@ export interface Settings {
   notify_enabled?: boolean; // 推送总开关，默认开；用于维护期一键止血
   notify_public_base_url?: string; // 漏洞详情回链的外部访问地址；空=消息不带回链
   notify_digest_interval_min?: number; // 汇总模式周期（分钟），默认 30
+  // ---- 外部通道（0.15.19/20 批次 D：飞书桥/企微广播，详见 docs/外部通道.md）----
+  feishu_bridge_url?: string; // 飞书桥广播接收端点（明文回显）；空=通道关闭
+  feishu_bridge_secret?: string; // write-only：共享口令（回显走 feishu_bridge_set 布尔位）
+  feishu_bridge_set?: boolean; // 共享口令已配置
+  wecom_webhook_set?: boolean; // 企微群机器人 webhook 已配置（webhook 本身即凭据，永不回显）
+  wecom_webhook_url?: string; // write-only：企微群机器人 webhook
 }
 
 // ---- 出网治理状态（GET /api/settings/egress-governance）----

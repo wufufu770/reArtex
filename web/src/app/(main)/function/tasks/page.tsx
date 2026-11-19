@@ -3087,6 +3087,8 @@ function CreateTaskSheet({
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  const [execDifficulty, setExecDifficulty] = React.useState("auto"); // 执行档位难度(0.15.17);auto=后端按任务书判定
+  const [execMode, setExecMode] = React.useState("auto"); // 执行档位模式;auto=后端按任务书判定
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
@@ -3155,6 +3157,8 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        difficulty: execDifficulty,
+        mode: execMode,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3171,6 +3175,8 @@ function CreateTaskSheet({
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setExecDifficulty("auto");
+      setExecMode("auto");
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
@@ -3351,6 +3357,38 @@ function CreateTaskSheet({
                     onChange={(e) => setTimeoutMin(e.target.value)}
                   />
                   <p className="text-muted-foreground text-xs">到点触发优雅收尾，任务进入 timeout 终态。</p>
+                </div>
+                {/* 执行档位（0.15.17 对齐补缺）：难度收紧资源帽、模式定请求级推理强度；
+                    创建后可在任务总览页「执行档位」卡中途切换。 */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="grid gap-2">
+                    <Label htmlFor="exec-difficulty">执行难度</Label>
+                    <select
+                      id="exec-difficulty"
+                      className="h-8 rounded-md border bg-background px-2 text-sm"
+                      value={execDifficulty}
+                      onChange={(e) => setExecDifficulty(e.target.value)}
+                    >
+                      <option value="auto">自动（按任务书判定）</option>
+                      <option value="simple">轻量（256K 窗口帽）</option>
+                      <option value="medium">标准</option>
+                      <option value="hard">困难（强度 ≥ 中）</option>
+                    </select>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="exec-mode">执行模式</Label>
+                    <select
+                      id="exec-mode"
+                      className="h-8 rounded-md border bg-background px-2 text-sm"
+                      value={execMode}
+                      onChange={(e) => setExecMode(e.target.value)}
+                    >
+                      <option value="auto">自动（按任务书判定）</option>
+                      <option value="fast">轻快（低强度）</option>
+                      <option value="balanced">均衡（中强度）</option>
+                      <option value="super_heavy">重火力（高强度+熔断预算）</option>
+                    </select>
+                  </div>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="heartbeat-min">planner 心跳（分钟）</Label>

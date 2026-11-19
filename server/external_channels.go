@@ -22,11 +22,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 const (
@@ -154,6 +157,16 @@ func (s *Server) postExternal(url, secret string, body []byte, label string, pen
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Printf("[channels] %s 广播被拒 pending=%d: http %d", label, pendingID, resp.StatusCode)
 	}
+}
+
+// putExternalChannelURL 是 settings PUT 面的 URL 归一（http(s) 强制 + 去尾斜杠；
+// 空串=显式关闭该目标）。供 server.go 的 settings 处理器与广播面共用同一校验。
+func putExternalChannelURL(pg *db.DB, key, raw string) error {
+	u := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(raw), "/"))
+	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return fmt.Errorf("%s 需以 http:// 或 https:// 开头（或留空关闭）", key)
+	}
+	return pg.SetSetting(key, u)
 }
 
 // wireExternalChannels 装配广播钩子（server 启动时调用一次）。task_id 只作展示

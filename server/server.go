@@ -391,7 +391,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
-	s.wireExternalChannels() // 0.15.19/20 外部通道:ask pending 落库后扇出（飞书桥/企微群）
+	s.wireExternalChannels()  // 0.15.19/20 外部通道:ask pending 落库后扇出（飞书桥/企微群）
 	return s
 }
 
@@ -959,8 +959,8 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
-	s.registerTaskSteerRoutes(mux)          // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
-	s.registerExecutionProfileRoutes(mux)   // 0.15.17：执行档位（GET/PATCH execution-profile）
+	s.registerTaskSteerRoutes(mux)        // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
+	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。
@@ -3832,6 +3832,11 @@ func (s *Server) settingsPayload() map[string]any {
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
 		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
 		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
+		// 外部通道（0.15.19/20）：桥 URL 明文回显（内部端点非凭据）；secret/webhook
+		// 本身即凭据——只回「已配置」布尔位，永不回显值（与 brave_key_set 同口径）。
+		"feishu_bridge_url": s.settingValue(settingFeishuBridgeURL),
+		"feishu_bridge_set": s.settingValue(settingFeishuBridgeSecret) != "",
+		"wecom_webhook_set": s.settingValue(settingWeComWebhookURL) != "",
 		// B4 降级档总开关（方案 v3）：默认关=规整器不可用一律 fail-closed 拒绝；
 		// 开启后连续 5 次不可用进入降级（Tier1/2 确定性放行、Tier3 照拒、审计带
 		// degraded 标记），任一次规整成功自动退出。链每轮现读（热改即刻生效）。
@@ -3911,6 +3916,11 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
+		// 外部通道（0.15.19/20 批次 D）：飞书桥与企微广播的出向目标。空串=通道关闭；
+		// secret/webhook 只写不读（回显走 *-set 布尔位）。每条广播现读，热改即刻生效。
+		FeishuBridgeURL    *string `json:"feishu_bridge_url"`
+		FeishuBridgeSecret *string `json:"feishu_bridge_secret"`
+		WeComWebhookURL    *string `json:"wecom_webhook_url"`
 		// B4 降级档总开关（方案 v3 缺陷 B4）。默认关；链每轮现读，热改即刻生效。
 		SodDegradeEnabled *bool `json:"sod_degrade_enabled"`
 	}
@@ -3947,6 +3957,27 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.SodDegradeEnabled != nil {
 		if err := s.m.pg.SetBool(settingSodDegradeEnabled, *req.SodDegradeEnabled); err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	// 外部通道出向目标（0.15.19/20）：与 notify 全局项同款即时生效（每条广播现读）。
+	// URL 统一 http(s) 校验（同回链地址的口径）；secret/webhook 非空才写——UI 用
+	// 掩码语义（留空=保持原值），清空走显式置空串。
+	if req.FeishuBridgeURL != nil {
+		if err := putExternalChannelURL(s.m.pg, settingFeishuBridgeURL, *req.FeishuBridgeURL); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	if req.FeishuBridgeSecret != nil {
+		if err := s.m.pg.SetSetting(settingFeishuBridgeSecret, strings.TrimSpace(*req.FeishuBridgeSecret)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.WeComWebhookURL != nil {
+		if err := putExternalChannelURL(s.m.pg, settingWeComWebhookURL, *req.WeComWebhookURL); err != nil {
+			writeErr(w, 400, err.Error())
 			return
 		}
 	}
