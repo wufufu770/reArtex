@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.20] - 2026-11-20
+
+### 功能（批次 D-②：企业微信审批广播 + 邮箱任务通道——外部通道面补全）
+
+- **① 企微审批广播（出向）**：广播监听器泛化为多目标扇出（`server/external_channels.go`，原 feishu_bridge.go 重构）——ask pending 落库后同一次事件扇出飞书桥（JSON 要素）与企微群机器人（markdown 卡，`wecom_webhook_url` settings 键，4096 字节限制内收紧渲染），各目标独立开关、独立失败互不影响；URL 强制 http(s)；裁决统一回审批页/飞书命令（webhook 无入向面，企微卡只展示）。共享口令仅飞书桥需要（企微 webhook 地址本身即凭据，与 notify/wecom.go 同口径）。
+- **② 邮箱任务通道**（`email-intake/` 独立侧车）：IMAP 轮询（标准库 imaplib/email，零额外依赖）→ allowlist（发件人/整域，**宁漏勿误**：空集拒绝启动）→ 直建任务（主题+正文要点 ≤300 字符，来源标注在任务描述）→ 可选经飞书桥 `/internal/notice` 推创建通知。已知 UID 落本地状态文件防重复处理；轮询异常不退出。信任语义与飞书 `/start` 同层（allowlist=可信操作者）。`REARTEX_API_TOKEN` 只存在于侧车环境变量。
+- **③ 飞书桥补 /internal/notice**：通用文本通知端点（共享口令鉴权、推 allowlist 私聊）——邮箱通道等侧车共用的通知入口。
+- **④ notify 系统零代码面（重要澄清）**：平台 notify 子系统**早已原生支持** feishu/wecom/email/dingtalk/telegram/webhook 渠道（群机器人出向通知）——任务/发现等通知在设置页建渠道即可，本批交互通道与它互补不重叠。
+- 文档：docs/飞书通道.md → **docs/外部通道.md**（通道总览矩阵 + 契约差异 + 安全边界 + 改动清单）；两个侧车 README 各自完整运行手册。
+- 测试：`TestExternalChannelsListener` 重写（双目标扇出/载荷与口令/非法 scheme 只拒对应目标）+ 桥与 intake Python 编译与逻辑验证（首响锁/allowlist/goal 构建）；敏感扫描干净。
+- 对齐检查：无新端点（企微为 settings 键出向；notice 为桥内部面）。可选组件——不配置时平台行为与 0.15.19 逐字节一致。
+
+
 ## [0.15.19] - 2026-11-20
 
 ### 功能（批次 D-①：飞书通道——审批广播 + 远程指令，零公网依赖）

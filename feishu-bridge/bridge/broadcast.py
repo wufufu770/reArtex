@@ -36,4 +36,16 @@ def create_app(
         adapter.send_approval_card(payload)
         return {"ok": True, "delivered_to": len(cfg.feishu_allowed_open_ids)}
 
+    @app.post("/internal/notice")
+    def internal_notice(payload: dict, x_bridge_secret: str = Header(default="")) -> dict:
+        """通用文本通知（0.15.20 邮箱通道等侧车共用）：推给 allowlist 私聊。"""
+        if cfg.bridge_shared_secret and x_bridge_secret != cfg.bridge_shared_secret:
+            raise HTTPException(status_code=403, detail="共享口令不符")
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text 不能为空")
+        for open_id in cfg.feishu_allowed_open_ids:
+            adapter.send_text(open_id, text)
+        return {"ok": True, "delivered_to": len(cfg.feishu_allowed_open_ids)}
+
     return app
