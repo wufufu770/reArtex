@@ -99,6 +99,14 @@ const killSettlePrompt = "【收尾通知】本次执行即将终止。请立即
 // mistaken for a steering message (and vice versa).
 const steerPayloadKind = "steer"
 
+// 投递模式（0.15.16）：steer=PreToolUse 边界（下一个动作不执行、立即改道），
+// follow_up=Stop 收场边界（本轮自然结束时注入）。落库副本带 mode，重放按
+// 各自通道回队。
+const (
+	steerModeSteer    = "steer"
+	steerModeFollowUp = "follow_up"
+)
+
 // steerScanLimit bounds how many hint nodes one steering read walks. Hints are
 // few (the planner itself reads 50), so the bound keeps a pathological graph
 // from turning a single delivery into an unbounded scan.
@@ -209,8 +217,9 @@ type Engine struct {
 	// steerBox queues planner course-corrections for a running work (keyed by intent
 	// id). The worker's PreToolUse hook drains it before its next tool call and hands
 	// the message to the model (blocking that call) so it re-plans — no kill needed.
-	steerMu  sync.Mutex
-	steerBox map[int64][]string
+	steerMu     sync.Mutex
+	steerBox    map[int64][]string
+	followUpBox map[int64][]string // 0.15.16：排队档——run 自然收场边界注入（Stop 钩子）
 
 	// killSettleGrace is the grace a killed work gets to land its conclusions
 	// before it is torn down. Defaults to KillSettleGrace; tests shorten it.
@@ -519,7 +528,7 @@ func (e *Engine) touch(taskID string) { e.lastAct.Store(taskID, time.Now().Unix(
 func NewEngine(m *Manager) *Engine {
 	e := &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
 		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
-		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
+		work: map[int64]*workExecution{}, steerBox: map[int64][]string{}, followUpBox: map[int64][]string{},
 		runtimes: map[string]*taskRuntime{}, killSettleGrace: KillSettleGrace}
 	// 群组闸门的默认实现装在 manager 侧（manager.go）：判据（群成员能不能用、组内
 	// 上限、额度状态）都是 server 侧的数据层口径，engine 不查群组表。装配区
@@ -735,6 +744,67 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 	return msg, true
 }
 
+// FollowUpWork queues a message for a running work (0.15.16 排队档): it is
+// delivered at the run's natural stop boundary — the Stop hook injects it only
+// when the model would otherwise finish, so the current work continues untouched.
+// 与 SteerWork 同一套校验与持久化（防崩副本 + 容量闸），只是投递时机不同。
+func (e *Engine) FollowUpWork(intentID int64, msg string) error {
+	if strings.TrimSpace(msg) == "" {
+		return fmt.Errorf("排队消息不能为空")
+	}
+	if n := len([]rune(msg)); n > steerMsgMaxRunes {
+		return fmt.Errorf("排队消息过长（%d 字符，上限 %d）", n, steerMsgMaxRunes)
+	}
+	e.workMu.Lock()
+	run := e.work[intentID]
+	e.workMu.Unlock()
+	if run == nil {
+		return fmt.Errorf("意图 %d 当前没有运行中的 work（可能已结束或未被领取）", intentID)
+	}
+	e.steerMu.Lock()
+	if len(e.followUpBox[intentID]) >= steerQueueMax {
+		e.steerMu.Unlock()
+		return fmt.Errorf("意图 %d 的排队消息已满（上限 %d 条）", intentID, steerQueueMax)
+	}
+	e.steerMu.Unlock()
+	// 先落库再入队（与 SteerWork 同序：崩溃窗口内消息不丢）。
+	if err := e.persistSteerMode(run.task, intentID, msg, steerModeFollowUp); err != nil {
+		log.Printf("[steer] intent #%d 排队消息落库失败（本次仍会投递）: %v", intentID, err)
+	}
+	if err := e.enqueueFollowUp(intentID, msg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// enqueueFollowUp appends a follow-up message to the in-memory queue of intentID.
+func (e *Engine) enqueueFollowUp(intentID int64, msg string) error {
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	if len(e.followUpBox[intentID]) >= steerQueueMax {
+		return steerQueueFullErr(intentID)
+	}
+	e.followUpBox[intentID] = append(e.followUpBox[intentID], msg)
+	return nil
+}
+
+// drainFollowUp pops the oldest queued follow-up message for intentID (FIFO), if any.
+func (e *Engine) drainFollowUp(intentID int64) (string, bool) {
+	e.steerMu.Lock()
+	defer e.steerMu.Unlock()
+	q := e.followUpBox[intentID]
+	if len(q) == 0 {
+		return "", false
+	}
+	msg := q[0]
+	if len(q) == 1 {
+		delete(e.followUpBox, intentID)
+	} else {
+		e.followUpBox[intentID] = q[1:]
+	}
+	return msg, true
+}
+
 // persistSteer stores a steering message durably so it survives a crash and
 // is picked up by the next round of the targeted work.
 //
@@ -742,13 +812,20 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 // payload 带 kind='steer' 与 intent_id，用来把「纠偏」与「人挂的战略提示」分开；
 // state='active' = 还没交付，交付后置 'consumed'。
 func (e *Engine) persistSteer(t *Task, intentID int64, msg string) error {
+	return e.persistSteerMode(t, intentID, msg, steerModeSteer)
+}
+
+// persistSteerMode is persistSteer with a delivery-mode tag (0.15.16：steer=
+// PreToolUse 边界 / follow_up=Stop 收场边界)。旧节点没有 mode 字段 ⇒ 读侧按
+// steerModeSteer 兜底（向后兼容）。
+func (e *Engine) persistSteerMode(t *Task, intentID int64, msg, mode string) error {
 	if t == nil || t.Store == nil {
 		return fmt.Errorf("没有任务上下文，纠偏消息无法落库")
 	}
 	if n := len([]rune(msg)); n > steerMsgMaxRunes {
 		return fmt.Errorf("纠偏消息过长（%d 字符，上限 %d）", n, steerMsgMaxRunes)
 	}
-	pending, err := e.LoadPendingSteers(t, intentID)
+	pending, err := e.LoadPendingSteerMsgs(t, intentID)
 	if err != nil {
 		return err
 	}
@@ -761,6 +838,7 @@ func (e *Engine) persistSteer(t *Task, intentID int64, msg string) error {
 		"text":      msg,
 		"intent_id": intentID,
 		"kind":      steerPayloadKind,
+		"mode":      mode,
 	}
 	_, err = t.Store.AddNode(db.KindHint, payload, 0, "active", steerPayloadKind, nil)
 	return err
@@ -769,6 +847,28 @@ func (e *Engine) persistSteer(t *Task, intentID int64, msg string) error {
 // LoadPendingSteers reads the durable steering messages for a work, oldest
 // first (the worker consumes them in the order they were written).
 func (e *Engine) LoadPendingSteers(t *Task, intentID int64) ([]string, error) {
+	msgs, err := e.LoadPendingSteerMsgs(t, intentID)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range msgs {
+		if m.mode == steerModeSteer {
+			out = append(out, m.text)
+		}
+	}
+	return out, nil
+}
+
+// pendingSteerMsg is one durable steering/follow-up message with its delivery mode.
+type pendingSteerMsg struct {
+	text string
+	mode string
+}
+
+// LoadPendingSteerMsgs reads the durable steering/follow-up messages for a work,
+// oldest first (the worker consumes them in the order they were written).
+func (e *Engine) LoadPendingSteerMsgs(t *Task, intentID int64) ([]pendingSteerMsg, error) {
 	if t == nil || t.Store == nil {
 		return nil, fmt.Errorf("没有任务上下文，纠偏消息无法读取")
 	}
@@ -776,13 +876,13 @@ func (e *Engine) LoadPendingSteers(t *Task, intentID int64) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	var out []pendingSteerMsg
 	for _, n := range nodes {
-		text, ok := steerPayloadOf(n, intentID)
+		text, mode, ok := steerPayloadOf(n, intentID)
 		if !ok {
 			continue
 		}
-		out = append(out, text)
+		out = append(out, pendingSteerMsg{text: text, mode: mode})
 	}
 	// ListByKind 是「新→旧」，投递要「先来先到」⇒ 反转成旧→新。
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -791,27 +891,32 @@ func (e *Engine) LoadPendingSteers(t *Task, intentID int64) ([]string, error) {
 	return out, nil
 }
 
-// steerPayloadOf extracts the steering text of a hint node, if it is an
-// undelivered steering message for intentID.
-func steerPayloadOf(n *db.Node, intentID int64) (string, bool) {
+// steerPayloadOf extracts the steering text and delivery mode of a hint node,
+// if it is an undelivered steering/follow-up message for intentID. Nodes written
+// before 0.15.16 carry no mode field ⇒ steerModeSteer（向后兼容）.
+func steerPayloadOf(n *db.Node, intentID int64) (text, mode string, ok bool) {
 	if n == nil || n.State != "active" || len(n.Payload) == 0 {
-		return "", false
+		return "", "", false
 	}
 	var p map[string]any
 	if err := json.Unmarshal(n.Payload, &p); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if k, _ := p["kind"].(string); k != steerPayloadKind {
-		return "", false
+		return "", "", false
 	}
 	if id, _ := p["intent_id"].(float64); int64(id) != intentID {
-		return "", false
+		return "", "", false
 	}
-	text, _ := p["text"].(string)
+	text, _ = p["text"].(string)
 	if text == "" {
-		return "", false
+		return "", "", false
 	}
-	return text, true
+	mode, _ = p["mode"].(string)
+	if mode != steerModeFollowUp {
+		mode = steerModeSteer
+	}
+	return text, mode, true
 }
 
 // consumeSteer marks the durable copy of a delivered steering message consumed,
@@ -826,7 +931,7 @@ func (e *Engine) consumeSteer(t *Task, intentID int64, msg string) error {
 	}
 	var target *db.Node
 	for _, n := range nodes { // 新→旧 ⇒ 最后命中的是最旧的一条
-		text, ok := steerPayloadOf(n, intentID)
+		text, _, ok := steerPayloadOf(n, intentID)
 		if !ok || text != msg {
 			continue
 		}
@@ -841,14 +946,20 @@ func (e *Engine) consumeSteer(t *Task, intentID int64, msg string) error {
 // replayPendingSteers re-queues the steering messages that outlived their work
 // (crash or detach), so the next run of that intent picks them up.
 func (e *Engine) replayPendingSteers(t *Task, intentID int64) {
-	pending, err := e.LoadPendingSteers(t, intentID)
+	pending, err := e.LoadPendingSteerMsgs(t, intentID)
 	if err != nil {
 		log.Printf("[steer] task %s 读取待投递纠偏失败: %v", t.ID, err)
 		return
 	}
-	for _, msg := range pending {
-		if err := e.enqueueSteer(intentID, msg); err != nil {
-			log.Printf("[steer] task %s 意图 #%d 补投纠偏失败: %v", t.ID, intentID, err)
+	for _, m := range pending {
+		var enqueueErr error
+		if m.mode == steerModeFollowUp {
+			enqueueErr = e.enqueueFollowUp(intentID, m.text)
+		} else {
+			enqueueErr = e.enqueueSteer(intentID, m.text)
+		}
+		if enqueueErr != nil {
+			log.Printf("[steer] task %s 意图 #%d 补投纠偏失败: %v", t.ID, intentID, enqueueErr)
 			return
 		}
 	}
@@ -862,6 +973,9 @@ func (e *Engine) replayPendingSteers(t *Task, intentID int64) {
 type steerHooks struct {
 	inner harness.HookRunner
 	drain func() (string, bool)
+	// drainFollowUp 是 0.15.16 排队档的消费口：Stop 钩子（run 自然收场边界）
+	// 取走并注入。nil = 不挂（旧构造点兼容）。
+	drainFollowUp func() (string, bool)
 	// nudges 是本条意图已注入的空转续跑次数，上限 limit。指针:harness 持有的是
 	// steerHooks 的值拷贝，计数必须共享同一份。
 	nudges *atomic.Int64
@@ -923,14 +1037,23 @@ func steerDeliveryText(msg string) string {
 		"\n（这是对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）"
 }
 
+// followUpDeliveryText 包装一条收场边界注入的排队消息（0.15.16）：本轮工作已
+// 完成、正要收场时才生效——用户在 run 进行中排队进来、不想打断当前节奏的指令。
+func followUpDeliveryText(msg string) string {
+	return "【排队指令】" + msg +
+		"\n（这是你此前收到的排队消息，在本次工作自然收场的边界投递。若指令隐含新的工作，请继续执行；否则在结论里回应它。）"
+}
+
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
 	if h.inner != nil {
 		h.inner.PostToolUse(ctx, name, input, result, isErr)
 	}
 }
 
-// Stop 在 guard 原有语义之上补一层「空转回合」续跑:模型只输出了思考、既没给正文
-// 也没调工具时，harness 会把它当成自然结束并以空 summary 收场(query.go 的
+// Stop 在 guard 原有语义之上补两层注入：① 0.15.16 排队档（follow_up）——run
+// 将自然收场时若队列非空，阻止收场并把排队消息注入（本轮工作完全不受影响，
+// 消息只在「本来要停」的边界生效）；② 「空转回合」续跑:模型只输出了思考、既没
+// 给正文也没调工具时，harness 会把它当成自然结束并以空 summary 收场(query.go 的
 // ReasonCompleted + asst.Text())，一条本来还没做完的意图就这样断在半路。此时注入
 // 一条续跑指令，让模型带着已有思考接着走。
 func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []string, string) {
@@ -943,8 +1066,30 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 		prevent, blocking, msg = h.inner.Stop(ctx, messages)
 	}
 	// inner 已经决定硬停、或已经要注入自己的续跑消息 → 尊重它，不再叠加。
+	if prevent || len(blocking) > 0 {
+		return prevent, blocking, msg
+	}
+	// 0.15.16 排队档：收场边界注入（在空转判定之前——只要有排队消息就续跑，
+	// 与「上一轮是否空转」无关）。一次取空整队合并注入，避免逐条占轮次。
+	if h.drainFollowUp != nil {
+		var queued []string
+		for {
+			m, ok := h.drainFollowUp()
+			if !ok {
+				break
+			}
+			queued = append(queued, followUpDeliveryText(m))
+			if len(queued) >= steerQueueMax {
+				break
+			}
+		}
+		if len(queued) > 0 {
+			log.Printf("[work %s] 收场边界注入 %d 条排队消息", h.label, len(queued))
+			return false, queued, ""
+		}
+	}
 	// limit<=0 = 用户把「空响应重试次数」配成了 -1，即显式关掉这层。
-	if prevent || len(blocking) > 0 || h.nudges == nil || h.limit <= 0 || !isThinkingOnlyTurn(messages) {
+	if h.nudges == nil || h.limit <= 0 || !isThinkingOnlyTurn(messages) {
 		return prevent, blocking, msg
 	}
 	n := h.nudges.Add(1)
@@ -1936,6 +2081,16 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 				// 交付过的那条落库副本标为已消费：否则下次执行会再投一遍。
 				if err := e.consumeSteer(t, iid, msg); err != nil {
 					log.Printf("[steer] task %s 意图 #%d 标记纠偏已消费失败: %v", t.ID, iid, err)
+				}
+			}
+			return msg, ok
+		},
+		// 0.15.16 排队档：Stop 边界消费（交付后同样标已消费，防重投）。
+		drainFollowUp: func() (string, bool) {
+			msg, ok := e.drainFollowUp(iid)
+			if ok {
+				if err := e.consumeSteer(t, iid, msg); err != nil {
+					log.Printf("[steer] task %s 意图 #%d 标记排队消息已消费失败: %v", t.ID, iid, err)
 				}
 			}
 			return msg, ok

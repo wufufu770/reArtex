@@ -25,6 +25,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 	s.RegisterTaskHallRoutes(mux)
 	s.RegisterTaskHallQuotaRoutes(mux)
 	RegisterEgressGovernanceRoutes(mux)
+	s.registerTaskSteerRoutes(mux) // 0.15.16 三档干预
 
 	cases := []struct {
 		method, path string
@@ -33,6 +34,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 		{"POST", "/api/task-hall/tasks"},
 		{"GET", "/api/task-hall/groups/1/quota"},
 		{"GET", "/api/settings/egress-governance"},
+		{"POST", "/api/tasks/1/steer"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)

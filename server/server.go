@@ -958,6 +958,7 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
+	s.registerTaskSteerRoutes(mux) // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。

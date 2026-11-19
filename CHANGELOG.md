@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.16] - 2026-11-19
+
+### 功能（批次 A：任务级三档消息投递 + 保缓存硬打断——外部实现工具包 phase2 的本仓映射）
+
+- **语义映射裁决（适配而非移植）**：工具包的 SessionMessageQueue/CancelActiveTurn 不移植——本仓干预基建更完善（按 intent 落库防崩副本 + 容量闸 + 消费标记 + KillWork 宽限取消 + 暂停→续跑链），三档全部映射到既有验证过的路径，**零 norma/harness 改动**。
+- **① 软纠偏（steer，默认档）**：既有 SteerWork→PreToolUse 通道（下一个计划动作不执行、实时指令注入）。norma hooks 的 PostToolUse 无注入面，但 PreToolUse 时刻 = 上一个工具完成后、下一个动作执行前——语义等价工具包的 steer_soft。
+- **② 硬打断（barge_in，新档）**：`bargeInWork` 一步完成「ControlWork 暂停（取消在飞 LLM 流/非关键工具，有界等待收场）→ runDetachedIntent 同 session 自动续跑并注入消息」——把 UI 原有「暂停→发消息」两步自动化。历史 append-only 安全性由 norma cleanResumed 丢弃悬空 tool_use 保证（= 工具包合成 tool_result 的本仓等价物），前缀缓存不破。
+- **③ 排队（follow_up，新档）**：`FollowUpWork` → 独立 followUpBox → `steerHooks.Stop` 在 run 自然收场边界取空整队合并注入（【排队指令】包装）——本轮工作完全不受影响，消息只在「本来要停」的边界生效；独立于空转续跑配额。落库副本带 mode 字段（旧节点无 mode 按 steer 兜底，向后兼容），重放按各自通道回队。
+- **REST**：`POST /api/tasks/{id}/steer` {intent_id, message, mode: steer(默认)|barge_in|follow_up}，公共校验 + 逐档既有 409 语义；route_wiring_test 补行。
+- **UI**：任务详情 worker 会话输入区（运行态）新增档位 chips（软纠偏/硬打断/排队，硬打断选中时红色警示「将立即中断当前执行」）+ 常规消息发送按钮——运行中的意图免暂停直达干预；暂停态原有「直接继续/发消息续跑」链不变。
+- 测试：新增 4 用例（follow_up 落库形状与双通道隔离+重放路由 / Stop 边界注入+inner 硬停优先+空转回归 / barge_in 暂停→续跑组合链含意图状态断言 / REST 校验矩阵经真实 mux）；既有 steer/kill/空转回归全绿。
+- 对齐检查：无新端点面变化（/api/tasks/{id}/steer 为新增 1 条路由，wiring 测试钉住）。
+
+
 ## [0.15.15] - 2026-11-18
 
 ### 清理（全量审查 P3——纯删减零行为变更，双重铁证才删）

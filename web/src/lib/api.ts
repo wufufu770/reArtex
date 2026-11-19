@@ -429,6 +429,14 @@ export const api = {
       accepted: true;
       request_id: string;
     }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId }),
+  // 三档干预（0.15.16）：运行中的意图免暂停直达。steer=下一个动作前改道（默认）；
+  // barge_in=立即打断当前执行并自动续跑；follow_up=本轮收尾时注入，不打断节奏。
+  taskSteer: (taskId: string, intentId: string, message: string, mode: "steer" | "barge_in" | "follow_up") =>
+    post<{ ok: boolean; task_id: string; intent_id: number; mode: string }>(`/tasks/${taskId}/steer`, {
+      intent_id: Number(intentId),
+      message,
+      mode,
+    }),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

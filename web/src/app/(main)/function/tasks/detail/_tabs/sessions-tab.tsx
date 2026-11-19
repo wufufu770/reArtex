@@ -543,6 +543,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
+  // 0.15.16 三档干预档位：运行中的 worker 消息按此投递（暂停态走原续跑链，不受影响）。
+  const [workerSteerMode, setWorkerSteerMode] = React.useState<"steer" | "barge_in" | "follow_up">("steer");
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
@@ -1531,11 +1533,35 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const intentId = active.intent_id;
     const message = workerMessage.trim();
     if (side.handleCommand(message, () => setWorkerMessage(""))) return;
-    if (!intentId || active.inherited || active.status !== "paused" || workerMessageSending || !message) return;
+    if (!intentId || active.inherited || workerMessageSending || !message) return;
     if (workerMessageCharCount(message) > MAX_WORKER_MESSAGE_CHARS) {
       toast.error(`消息不能超过 ${MAX_WORKER_MESSAGE_CHARS} 个字符`);
       return;
     }
+    // 0.15.16 三档干预：运行中的意图免暂停直达（steer=下一动作前改道 / barge_in=
+    // 立即打断并自动续跑 / follow_up=本轮收尾时注入）；暂停态仍走原发消息续跑链。
+    if (active.status === "running") {
+      setWorkerMessageSending(true);
+      api
+        .taskSteer(taskId, intentId, message, workerSteerMode)
+        .then(() => {
+          setWorkerMessage("");
+          setWorkerMessageRequestId("");
+          if (workerSteerMode === "barge_in") {
+            toast.success(`已打断 Worker #${intentId}，消息已注入并自动续跑`);
+          } else if (workerSteerMode === "follow_up") {
+            toast.success(`已排队：本轮收尾时投递给 Worker #${intentId}`);
+          } else {
+            toast.success(`软纠偏已送达 Worker #${intentId}：下一个动作前生效`);
+          }
+        })
+        .catch((error) => {
+          toast.error(`发送失败：${(error as Error).message || "请稍后重试"}`);
+        })
+        .finally(() => setWorkerMessageSending(false));
+      return;
+    }
+    if (active.status !== "paused") return;
     const requestId = workerMessageRequestId || newWorkerMessageRequestID();
     if (!workerMessageRequestId) setWorkerMessageRequestId(requestId);
     setWorkerMessageSending(true);
@@ -2021,6 +2047,39 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               !active.inherited &&
               (active.status === "running" || active.status === "paused") ? (
               <div className="border-t p-3">
+                {/* 0.15.16 三档干预档位：仅运行态显示（暂停态走暂停→发消息→续跑链） */}
+                {active.status === "running" && (
+                  <div className="mb-1.5 flex items-center gap-1.5">
+                    {(
+                      [
+                        { v: "steer", label: "软纠偏", hint: "下一个动作执行前改道，不打断当前工具" },
+                        { v: "barge_in", label: "硬打断", hint: "立即中断当前执行，消息注入后自动续跑" },
+                        { v: "follow_up", label: "排队", hint: "不打断节奏，本轮收尾时投递" },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.v}
+                        type="button"
+                        title={opt.hint}
+                        onClick={() => setWorkerSteerMode(opt.v)}
+                        className={cn(
+                          "rounded-full border px-2 py-0.5 text-[10px] transition-colors",
+                          workerSteerMode === opt.v
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "text-muted-foreground hover:text-foreground",
+                          opt.v === "barge_in" &&
+                            workerSteerMode === opt.v &&
+                            "border-destructive/60 bg-destructive/10 text-destructive",
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                    {workerSteerMode === "barge_in" && (
+                      <span className="text-[10px] text-destructive">将立即中断当前执行</span>
+                    )}
+                  </div>
+                )}
                 <InputGroup className="min-h-9 has-disabled:opacity-100">
                   <MentionTextarea
                     inputGroup
@@ -2053,6 +2112,25 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     {active.status === "running" && isBtwCommand(workerMessage) && (
                       <InputGroupButton size="icon-xs" onClick={sendWorkerChat} aria-label="发送旁路问题">
                         <ArrowUpIcon />
+                      </InputGroupButton>
+                    )}
+                    {/* 0.15.16：运行态的常规消息发送（按上方档位投递，免暂停直达） */}
+                    {active.status === "running" && !isBtwCommand(workerMessage) && workerMessage.trim() && (
+                      <InputGroupButton
+                        size="xs"
+                        variant={workerSteerMode === "barge_in" ? "destructive" : "ghost"}
+                        onClick={sendWorkerChat}
+                        disabled={workerMessageSending}
+                        title={
+                          workerSteerMode === "barge_in"
+                            ? "硬打断：立即中断并自动续跑"
+                            : workerSteerMode === "follow_up"
+                              ? "排队：本轮收尾时投递"
+                              : "软纠偏：下一个动作前生效"
+                        }
+                        aria-label="发送干预消息"
+                      >
+                        {workerMessageSending ? <Spinner /> : "发送"}
                       </InputGroupButton>
                     )}
                     {active.status === "running" ? (
