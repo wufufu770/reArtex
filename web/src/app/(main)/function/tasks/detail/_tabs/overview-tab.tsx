@@ -9,6 +9,7 @@ import {
   CheckIcon,
   ClockIcon,
   CoinsIcon,
+  GaugeIcon,
   ListChecksIcon,
   PencilIcon,
   PlusIcon,
@@ -19,13 +20,16 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
+import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import type {
@@ -40,6 +44,7 @@ import type {
   TaskNode,
   TaskScopeRow,
 } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 // 紧凑格式化 token 数（12345 → 12.3k，2000000 → 2M）。
 function fmtTokens(n: number): string {
@@ -450,6 +455,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
         </CardContent>
       </Card>
+      {/* 执行档位（0.15.17）：难度×模式，只调请求级推理强度与资源帽——切档即时生效且缓存安全 */}
+      <ExecutionProfileCard taskId={taskId} />
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
           删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
       <Card>
@@ -1328,6 +1335,103 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
             暂无任务级规则。「拦截」命中即禁止测试；「允许」为白名单——配置后本任务只允许命中允许规则的资产（未配置则不启用白名单）。
           </p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ExecutionProfileCard（0.15.17）：执行档位查看与切换。难度收紧资源帽
+// （Simple 256K 窗口），模式定请求级推理强度（fast=低/balanced=中/super_heavy=高
+// + 800K 熔断预算信号）；切档只动请求级参数——system 与 tools 不动，缓存安全。
+function ExecutionProfileCard({ taskId }: { taskId: string }) {
+  const [profile, setProfile] = React.useState<{
+    difficulty: string;
+    mode: string;
+    reasoning_effort: string;
+    context_window_cap_k: number;
+    hard_token_budget: number;
+  } | null>(null);
+  const [autoScaling, setAutoScaling] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    api
+      .executionProfile(taskId)
+      .then((r) => {
+        setProfile(r.profile);
+        setAutoScaling(r.auto_scaling);
+      })
+      .catch(() => setLoaded(true))
+      .finally(() => setLoaded(true));
+  }, [taskId]);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  const switchTo = (patch: { difficulty?: string; mode?: string }) => {
+    setSaving(true);
+    api
+      .patchExecutionProfile(taskId, patch)
+      .then(() => {
+        load(); // 重新拉全量档位（帽/预算由后端解析，局部合并会漏字段）
+        toast.success("执行档位已切换（即时生效，上下文与工具面不变）");
+      })
+      .catch((e) => toast.error(`切换失败：${(e as Error).message}`))
+      .finally(() => setSaving(false));
+  };
+
+  const DIFF_LABEL: Record<string, string> = { auto: "自动", simple: "轻量", medium: "标准", hard: "困难" };
+  const MODE_LABEL: Record<string, string> = { auto: "自动", fast: "轻快", balanced: "均衡", super_heavy: "重火力" };
+  const modeOptions = ["auto", "fast", "balanced", "super_heavy"] as const;
+
+  if (loaded && !profile) return null; // 端点不可用（旧后端）时整卡隐去
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <GaugeIcon className="size-4 text-primary" /> 执行档位
+          <span className="text-muted-foreground text-xs font-normal">
+            只调请求级推理强度与资源帽，上下文与工具面不变
+            {autoScaling && "；自动缩放已开启（按轮信号升降档）"}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground text-xs">难度</span>
+        <span className="rounded-md border px-2 py-0.5 text-xs">
+          {DIFF_LABEL[profile?.difficulty ?? "medium"] ?? profile?.difficulty}
+        </span>
+        {profile?.context_window_cap_k ? (
+          <Badge variant="outline" className="text-[10px]">
+            窗口帽 {profile.context_window_cap_k}K
+          </Badge>
+        ) : null}
+        {profile?.hard_token_budget ? (
+          <Badge variant="outline" className="text-[10px]">
+            熔断预算 {(profile.hard_token_budget / 1000).toFixed(0)}K tokens
+          </Badge>
+        ) : null}
+        <span className="ml-2 text-muted-foreground text-xs">模式</span>
+        {modeOptions.map((m) => (
+          <button
+            key={m}
+            type="button"
+            disabled={saving || !profile}
+            onClick={() => switchTo({ mode: m })}
+            className={cn(
+              "rounded-full border px-2.5 py-0.5 text-xs transition-colors disabled:opacity-50",
+              profile?.mode === m
+                ? "border-primary bg-primary/10 text-primary"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {MODE_LABEL[m] ?? m}
+          </button>
+        ))}
+        {saving && <Spinner className="size-3.5" />}
       </CardContent>
     </Card>
   );

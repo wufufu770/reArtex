@@ -437,6 +437,25 @@ export const api = {
       message,
       mode,
     }),
+  // 执行档位（0.15.17）：难度×模式矩阵，只调请求级推理强度与资源帽（缓存安全，
+  // system/tools 不动）。difficulty/mode 传 auto 按任务书文本自动判定。
+  executionProfile: (taskId: string) =>
+    get<{
+      profile: {
+        difficulty: string;
+        mode: string;
+        reasoning_effort: string;
+        context_window_cap_k: number;
+        hard_token_budget: number;
+      };
+      auto_scaling: boolean;
+      options: { difficulties: string[]; modes: string[] };
+    }>(`/tasks/${taskId}/execution-profile`),
+  patchExecutionProfile: (taskId: string, body: { difficulty?: string; mode?: string }) =>
+    patch<{ ok: boolean; task_id: string; profile: { difficulty: string; mode: string; reasoning_effort: string } }>(
+      `/tasks/${taskId}/execution-profile`,
+      body,
+    ),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

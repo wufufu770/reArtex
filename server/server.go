@@ -958,7 +958,8 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
-	s.registerTaskSteerRoutes(mux) // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
+	s.registerTaskSteerRoutes(mux)          // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
+	s.registerExecutionProfileRoutes(mux)   // 0.15.17：执行档位（GET/PATCH execution-profile）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。
@@ -1906,6 +1907,10 @@ type createTaskReq struct {
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
+	// 执行档位（0.15.17）：auto(默认,文本启发式判定)/simple/medium/hard ×
+	// auto(默认)/fast/balanced/super_heavy。省略 = 默认档（medium/balanced）。
+	Difficulty string `json:"difficulty,omitempty"`
+	Mode       string `json:"mode,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1977,6 +1982,13 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
+	// 执行档位（0.15.17）：创建时点定档（auto=文本启发式）；切档走 PATCH 面。
+	if req.Difficulty != "" || req.Mode != "" {
+		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		d, m := agent.AssessAutoProfile(req.Goal, req.Description, 0, 0,
+			agent.TaskDifficulty(req.Difficulty), agent.ExecutionMode(req.Mode))
+		s.engine.SetExecutionProfile(taskIDInt, agent.ResolveExecutionProfile(d, m))
+	}
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)

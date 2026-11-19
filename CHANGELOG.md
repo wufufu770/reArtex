@@ -5,6 +5,23 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.17] - 2026-11-20
+
+### 功能（批次 B：任务执行档位——难度×模式矩阵 / 中途切档 / 自动缩放）
+
+外部实现工具包 phase2 的本仓映射（适配而非移植；import 路径与既有请求级覆盖通道融合）：
+
+- **① 档位矩阵**（`agent/execution_profile.go`）：难度 Simple/Medium/Hard × 模式 Fast/Balanced/SuperHeavy。模式定请求级推理强度（fast=low / balanced=medium / super_heavy=high）+ SuperHeavy 800K token 熔断预算；难度定资源帽（Simple 256K 压缩窗口帽）与强度下限（hard ≥ medium）。非法值整体回落默认（medium/balanced）——档位是运营旋钮，坏输入不炸任务。
+- **② 生效纪律（与 0.15.12 缓存纪律同一条线）**：切档【只动请求级参数】——ReasoningEffort 是请求顶层参数不进前缀哈希（切档零缓存代价）；压缩窗口帽走每轮现取的 resolver（worker/planner/mainagent 三 lane 经 ClampCompactionWindow 钳制，帽低于压缩下限不钳）。system 提示词与 tools 数组零改动——工具包「Tool Masking over Tool Removal」的缓存结论在本仓由架构直接满足。
+- **③ 优先级**：请求级 effort 链 = DB agents.thinking_effort（非空才覆盖）> 任务执行档位 > profile 默认。档位不改变任何 lane 的 LLM profile 身份（归属由 agents.llm_profile_id 绑定裁定）——工具包 LockedSupervisorRoles 的「监督角色不得自选模型」在本仓天然成立。
+- **④ 中途切档**：`GET/PATCH /api/tasks/{id}/execution-profile`（PATCH difficulty/mode 可传 auto=按任务书文本启发式判定）；注册表进程内即时生效 + settings KV（`exec_profile:<taskID>`）跨重启水合；切档落一条 system 活动供 UI/轨迹可见。createTask 新增 difficulty/mode 可选入参（auto 判定在建任务时点定档）。
+- **⑤ 自动缩放**（settings 键 `auto_scaling`，默认 off——零开销直到显式开启）：planner 轮界评估（agent.AutoScaler）：高危发现/连续失败升档（3 轮冷却滞回防抖），SuperHeavy 预算 70% 降档；变更更新档位 + 落 system 活动。信号取任务 token 总量（ExplorationStore.TokenTotal 现成）与 high/critical 发现存在性。
+- **UI**：任务详情总览页「执行档位」卡——当前难度/模式/窗口帽/熔断预算展示 + 四模式一键切换（重新拉全量档位）；端点不可用（旧后端）时整卡隐去。
+- **明确不采纳**（与路线图一致）：wakebus（引擎已是 Notify+debounce 事件驱动）、artex_headless_run（demo 骨架）、ParallelHypotheses/组聊/建模开关字段（既有任务级配置已覆盖）。
+- 测试：agent 6 用例（矩阵解析/auto 判定/effort 优先级/窗口帽钳制/缩放冷却与双向/注册表并发）+ server REST 1 用例（默认档/切档/跨 Engine 水合/auto 判定/非法回落/坏 JSON）全绿。
+- 对齐检查：新增 2 条路由（GET/PATCH execution-profile），wiring 测试钉住；createTask 请求体扩展可选字段。
+
+
 ## [0.15.16] - 2026-11-19
 
 ### 功能（批次 A：任务级三档消息投递 + 保缓存硬打断——外部实现工具包 phase2 的本仓映射）

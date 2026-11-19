@@ -221,6 +221,10 @@ type Engine struct {
 	steerBox    map[int64][]string
 	followUpBox map[int64][]string // 0.15.16：排队档——run 自然收场边界注入（Stop 钩子）
 
+	// taskAutoScalers 是 0.15.17 执行档位的 per-task 自动缩放器（settings 门控，
+	// 默认 off；开启后 planner 轮界评估升降档）。
+	taskAutoScalers sync.Map // taskID(int64) -> *agent.AutoScaler
+
 	// killSettleGrace is the grace a killed work gets to land its conclusions
 	// before it is torn down. Defaults to KillSettleGrace; tests shorten it.
 	killSettleGrace time.Duration
@@ -775,6 +779,100 @@ func (e *Engine) FollowUpWork(intentID int64, msg string) error {
 		return err
 	}
 	return nil
+}
+
+// ---------- 执行档位（0.15.17）：注册表 + settings KV 持久化 + 自动缩放 ----------
+
+// execProfileSettingPrefix 是档位持久化的 settings 键前缀（exec_profile:<taskID>，
+// 值=JSON）。注册表进程内即时生效；跨重启经这里水合。
+const execProfileSettingPrefix = "exec_profile:"
+
+// SetExecutionProfile 持久化 + 注册任务档位（PATCH 面与 AutoScaler 共用）。
+func (e *Engine) SetExecutionProfile(taskID int64, p agent.TaskExecutionProfile) {
+	agent.SetExecutionProfile(taskID, p)
+	if e.m == nil || e.m.pg == nil {
+		return
+	}
+	if b, err := json.Marshal(p); err == nil {
+		if err := e.m.pg.SetSetting(fmt.Sprintf("%s%d", execProfileSettingPrefix, taskID), string(b)); err != nil {
+			log.Printf("[profile] task %d 档位持久化失败（本次仍即时生效）: %v", taskID, err)
+		}
+	}
+}
+
+// ExecutionProfileFor 读任务档位：注册表 miss → settings 水合（跨重启恢复）。
+func (e *Engine) ExecutionProfileFor(taskID int64) (agent.TaskExecutionProfile, bool) {
+	if p, ok := agent.ExecutionProfileFor(taskID); ok {
+		return p, true
+	}
+	if e.m == nil || e.m.pg == nil {
+		return agent.TaskExecutionProfile{}, false
+	}
+	v, ok, _ := e.m.pg.GetSetting(fmt.Sprintf("%s%d", execProfileSettingPrefix, taskID))
+	if !ok || v == "" {
+		return agent.TaskExecutionProfile{}, false
+	}
+	var p agent.TaskExecutionProfile
+	if err := json.Unmarshal([]byte(v), &p); err != nil || p.Difficulty == "" || p.Mode == "" {
+		return agent.TaskExecutionProfile{}, false
+	}
+	agent.SetExecutionProfile(taskID, p)
+	return p, true
+}
+
+// maybeAutoScale 在 planner 轮界评估自动升降档（settings 键 auto_scaling 门控，
+// 默认 off——零开销直到显式开启）。信号：任务 token 总量（熔断预算压力）+
+// 高危发现（升档）。变更即更新档位并落一条 system 活动（UI/轨迹可见，不进 prompt）。
+func (e *Engine) maybeAutoScale(t *Task, taskIDInt int64, round int) {
+	if e.m == nil || e.m.pg == nil || !e.m.pg.GetBool(settingAutoScaling, false) {
+		return
+	}
+	p, ok := e.ExecutionProfileFor(taskIDInt)
+	if !ok {
+		p = agent.ResolveExecutionProfile(agent.DefaultDifficulty, agent.DefaultMode)
+		agent.SetExecutionProfile(taskIDInt, p)
+	}
+	scaler := e.autoScalerFor(taskIDInt)
+	var tokens int64
+	if t.Store != nil {
+		if usage, err := t.Store.TokenTotal(); err == nil {
+			tokens = int64(usage.InputTokens + usage.OutputTokens)
+		}
+	}
+	critical := e.hasCriticalFinding(t)
+	dec := scaler.EvaluateTurn(p, agent.TurnSignals{
+		TurnIndex: round, TokensUsed: tokens, CriticalSignalFound: critical,
+	})
+	if dec.Changed {
+		e.SetExecutionProfile(taskIDInt, dec.NewProfile)
+		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: dec.Notice})
+	}
+}
+
+// autoScalerFor 取（或建）任务级自动缩放器。
+func (e *Engine) autoScalerFor(taskID int64) *agent.AutoScaler {
+	if v, ok := e.taskAutoScalers.Load(taskID); ok {
+		if s, ok2 := v.(*agent.AutoScaler); ok2 {
+			return s
+		}
+	}
+	s := agent.NewAutoScaler(0)
+	e.taskAutoScalers.Store(taskID, s)
+	return s
+}
+
+// hasCriticalFinding 报告本任务是否登记过 high/critical 发现（升档信号；
+// 查询失败按 false——自动缩放是增值面，不因读失败打断规划轮）。
+func (e *Engine) hasCriticalFinding(t *Task) bool {
+	if t == nil || t.Store == nil || e.m == nil || e.m.pg == nil {
+		return false
+	}
+	var n int
+	err := e.m.pg.QueryRow(`
+SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='finding' AND state NOT IN ('dismissed','deleted')
+  AND payload->>'severity' IN ('high','critical')`, t.ExpID).Scan(&n)
+	return err == nil && n > 0
 }
 
 // enqueueFollowUp appends a follow-up message to the in-memory queue of intentID.
@@ -1882,6 +1980,8 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		// 执行档位自动缩放（0.15.17）：planner 轮界评估，settings 门控默认 off。
+		e.maybeAutoScale(t, taskIDInt, e.nextPlannerRound(t.ID))
 		// C4 收尾评估轮的结算基线：本轮之前图上意图总数。
 		intentsBefore, _ := t.Store.CountIntents()
 		e.BeginLLMCall(t.ID)

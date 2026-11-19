@@ -567,6 +567,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if mb := memoryBlockForToolSet(tsx, taskID); mb != "" {
 		opts.AppendSystemPrompt = append(opts.AppendSystemPrompt, mb)
 	}
+	// 执行档位推理强度（0.15.17，请求级覆盖；DB 覆盖在其后非空才压过）。
+	ApplyExecutionProfileEffort(&opts, taskID)
 	// agent 级思考档位覆盖（方案 v9.2 批次 B）：agents.thinking_effort 非空时
 	// 随每次请求生效（""=跟随 profile 默认，请求与今天逐字节一致）。
 	applyThinkingOverride(&opts, "worker")

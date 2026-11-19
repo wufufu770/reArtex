@@ -263,6 +263,9 @@ const (
 	// settingLegacyAutoAccept（0.15.12，默认关）：蒸馏产物中 fingerprint_summary
 	// （事实性目标画像）直接 accepted 入池，缓解 /legacy 人工评审瓶颈。
 	settingLegacyAutoAccept = "legacy_auto_accept"
+	// settingAutoScaling（0.15.17，默认关）：执行档位自动升降缩放（planner 轮界
+	// 评估：高危发现/连续失败升档，熔断预算 70% 降档；3 轮冷却滞回）。
+	settingAutoScaling = "auto_scaling"
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
 	settingBraveKey            = "brave_search_api_key"

@@ -687,21 +687,25 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	workerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker"}
 	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	window := workerRuntime.CompactionWindow()
+	// 执行档位窗口帽（0.15.17）：resolver 每轮现取——Simple 难度 256K 帽即时生效，
+	// 切档不改 system/tools（缓存纪律）。
+	taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+	profileWindow := func(base int) int { return agent.ClampCompactionWindow(taskIDInt, base) }
+	window := profileWindow(workerRuntime.CompactionWindow())
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	wk.SetFindingRecorder(s.evidenceStore())
-	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
+	wk.SetCompactionWindowResolver(func() int { return profileWindow(workerRuntime.CompactionWindow()) })
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	wk.SetWebSearch(s.webSearchFor("worker"))
-	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
+	wk.SetConstraintInject(s.constraintInjectWorker)          // 操作约束注入 worker(可配置,默认开)
 	wk.SetCategoryDiscipline(s.workerCategoryDisciplineOf(t)) // 任务类别纪律段(资产收集类追加,每轮读)
-	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, profileWindow(plannerRuntime.CompactionWindow()), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
-	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
+	pl.SetCompactionWindowResolver(func() int { return profileWindow(plannerRuntime.CompactionWindow()) })
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
@@ -729,7 +733,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 			return store.SetFactState(factID, state, reason, reviewer)
 		})
 	}
-	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
+	main.SetCompactionWindowResolver(func() int { return profileWindow(mainRuntime.CompactionWindow()) })
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
