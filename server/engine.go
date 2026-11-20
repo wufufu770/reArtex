@@ -257,11 +257,12 @@ type Engine struct {
 	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
 	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
 
-	// resolve returns a task's dedicated planner/worker (wired by the server as the
-	// authoritative task-router). nil,nil means this task is deliberately unavailable
-	// (for example an exhausted failover chain) — there is no global-pair fallback.
-	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
-	resolveAuthoritative bool
+	// resolvePtr 持有任务路由解析器（server 侧 Set*Resolver 注入）。0.15.21 竞态
+	// 修复：restoreTaskRuntimes 会在 New() 期间就拉起 planner/worker goroutine 并发
+	// 读解析器，而 Set*Resolver（测试换桩/运行时重装）可能在其后发生——裸字段读写
+	// 是数据竞态（-race 实锤）。原子指针让「注入晚于读」从时序约定变成结构保证。
+	// nil,nil 语义：该任务刻意不可用（例如 failover 链耗尽）——无全局对兜底。
+	resolvePtr atomic.Pointer[agentResolver]
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
@@ -1550,19 +1551,25 @@ func (e *Engine) appendActivity(t *Task, r db.Activity) (int64, error) {
 // Ready() / the llm_configured indicator). Called once at startup.
 func (e *Engine) SetReadiness(fn func() bool) { e.readiness = fn }
 
+// agentResolver 是解析器与其权威标志的原子快照（0.15.21 竞态修复：注入可能
+// 晚于任务 goroutine 的首次读取，见 resolvePtr 注释）。
+type agentResolver struct {
+	fn            func(t *Task) (*agent.Planner, *agent.Worker)
+	authoritative bool
+}
+
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
-// Called once at startup before any task loop runs, so no lock is needed on reads.
+// 原子注入：任何时刻 Store 都与并发读安全（旧「启动前接线无需锁」的时序约定作废
+// ——restoreTaskRuntimes 在 New() 里就会拉起读取方）。
 func (e *Engine) SetAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
-	e.resolve = fn
-	e.resolveAuthoritative = false
+	e.resolvePtr.Store(&agentResolver{fn: fn})
 }
 
 // SetAuthoritativeAgentResolver installs a resolver whose nil result must not
 // fall through to the global provider. Task-level failover chains use this so a
 // fully exhausted chain cannot silently bypass its configured boundary.
 func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
-	e.resolve = fn
-	e.resolveAuthoritative = true
+	e.resolvePtr.Store(&agentResolver{fn: fn, authoritative: true})
 }
 
 // SetGroupConcurrencyLimit installs the per-group concurrency cap lookup.
@@ -1586,11 +1593,13 @@ func (e *Engine) SetGroupDispatcherClaimable(fn func(taskID int64, worker string
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
 func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
-	if e.resolve != nil {
-		p, w := e.resolve(t)
-		if (p != nil && w != nil) || e.resolveAuthoritative {
-			return p, w
-		}
+	rs := e.resolvePtr.Load()
+	if rs == nil || rs.fn == nil {
+		return nil, nil
+	}
+	p, w := rs.fn(t)
+	if (p != nil && w != nil) || rs.authoritative {
+		return p, w
 	}
 	return nil, nil
 }

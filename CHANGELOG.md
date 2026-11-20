@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.22] - 2026-11-20
+
+### 修复（全量 debug 轮：-race 实锤数据竞态 + 门禁面错误清零）
+
+- **① 数据竞态修复（-race 实锤，snapshotFor 读 e.resolve vs Set*Resolver 写）**：`restoreTaskRuntimes` 在 `New()` 期间就拉起 planner/worker goroutine 并发读任务路由解析器，而 `SetAgentResolver`/`SetAuthoritativeAgentResolver`（测试换桩/运行时重装）可能在其后发生——裸字段读写是数据竞态（此前靠「启动前接线」的时序约定兜着，-race 全量跑才暴露）。修复：`resolvePtr atomic.Pointer[agentResolver]` 原子注入（fn + authoritative 标志打包快照），「注入晚于读」从时序约定变成结构保证。复跑：server 全量 `-race` 0 DATA RACE。
+- **② 门禁面错误清零**：消息推送页等 8 个近期改动文件 biome 错误（useTemplate + 排序类）自动修复——错误级清零，剩 13 条既有 warning 不拦门。
+- **③ debug 方法论留档**：server 包「并行多包测试 FAIL」两度为 debug 方法自扰（-race 批次未结束时并发启动同包测试 → 同名派生测试库 DDL 死锁/半套 schema）——干净序列复跑 0 FAIL（560s）确证非代码缺陷。**测试纪律：同库测试不得并发跑两份**。
+- **④ norma vendored 树测试留档（不修，Tier0 硬锁目录）**：noa 2 条 + noaadapter 5 条规格测试为 vendored 入库时（b2fe80d）即存在的预存失败，此前从未在本仓全量跑过——与本仓代码零关联（v0.15.11 起 norma 仅 llm/mcp/stdio 4 文件因 0.15.13/19 改动），CI 主模块测试不含 norma，发布门不受影响。已知失败清单：llm TestDoStreamHonorsConfiguredRetries（环境性）、noa TestAdaptiveGrowthTracksTheWindow/TestSuppressionReleaseFitsInsideTheWindow、noaadapter 5 条 bounded 系。
+- 验证：go vet 全绿；server 全量 -race 0 竞态 + 常规全绿（547s）；agent/intercept/mcphttp/guard -race 全绿；norma 其余包全绿；前端 tsc/test:mentions/build:static 过；e2e 45 路由冒烟过（0.15.22 实测）。
+
+
 ## [0.15.21] - 2026-11-20
 
 ### 功能（消息推送页优化 + 前后端对齐补缺——外部通道 UI 化 + 建任务档位）

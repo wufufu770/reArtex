@@ -411,7 +411,11 @@ export default function NotifyPage() {
             <Input
               id="n-feishu-secret"
               type="password"
-              placeholder={settings?.feishu_bridge_set ? "共享口令已配置（留空保持）" : "共享口令（与桥侧 BRIDGE_SHARED_SECRET 同值）"}
+              placeholder={
+                settings?.feishu_bridge_set
+                  ? "共享口令已配置（留空保持）"
+                  : "共享口令（与桥侧 BRIDGE_SHARED_SECRET 同值）"
+              }
               value={bridgeSecret}
               onChange={(e) => setBridgeSecret(e.target.value)}
             />
@@ -424,7 +428,11 @@ export default function NotifyPage() {
             <Input
               id="n-wecom-hook"
               type="password"
-              placeholder={settings?.wecom_webhook_set ? "Webhook 已配置（留空保持）" : "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"}
+              placeholder={
+                settings?.wecom_webhook_set
+                  ? "Webhook 已配置（留空保持）"
+                  : "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"
+              }
               value={wecomHook}
               onChange={(e) => setWecomHook(e.target.value)}
             />
