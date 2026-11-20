@@ -1829,6 +1829,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 </span>
               )}
               <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-muted-foreground text-xs max-sm:w-full max-sm:flex-wrap">
+                {/* Todo 悬浮框：全会话类型统一入口（0.15.23）。数据源是本会话活动流里
+                最近一次 TodoWrite 调用（capture 落库 detail 全 JSON），worker 会话同样
+                有效——之前只挂在非 worker 会话的输入区旁，Worker 执行会话看不到。 */}
+                <TodoPopover
+                  seq={latestTodoSeq}
+                  fetchDetail={(seq) => api.activityDetail(seq, taskId).then((r) => r.detail ?? "")}
+                />
                 {tokenTotal.any && (
                   <Tooltip>
                     {/* 手机端用短标签（入/缓/出）：长标签会把这一行撑成两行，进一步压缩记录区。 */}
@@ -2185,14 +2192,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   </InputGroupAddon>
                 </InputGroup>
               </div>
-            ) : (
-              <div className="flex items-center border-t px-4 py-2">
-                <TodoPopover
-                  seq={latestTodoSeq}
-                  fetchDetail={(seq) => api.activityDetail(seq, taskId).then((r) => r.detail ?? "")}
-                />
-              </div>
-            )}
+            ) : null}
+            {/* 非 worker 输入区 / 已收尾 worker 的 Todo 入口已统一移到会话标题栏（0.15.23） */}
           </div>
         </SideQuestionWorkspace>
         <AlertDialog

@@ -12,6 +12,14 @@ import { cn } from "@/lib/utils";
 // (detail is lazy), so on open it fetches the detail of the most-recent TodoWrite
 // call — by seq — and parses its {todos:[…]} JSON. Purely client-side; the caller
 // supplies the seq + a detail fetcher (conversation or exploration endpoint).
+//
+// 0.15.23：mounted in the session header for ALL session kinds (worker included,
+// which previously had no entry at all), refreshes while open every few seconds
+// so a running worker's progress stays live, and degrades to an explanatory
+// panel instead of a dead disabled button when the session never called
+// TodoWrite.
+const TODO_REFRESH_MS = 5000;
+
 export function TodoPopover({
   seq,
   fetchDetail,
@@ -25,7 +33,10 @@ export function TodoPopover({
   const [err, setErr] = React.useState("");
 
   const load = React.useCallback(async () => {
-    if (seq == null) return;
+    if (seq == null) {
+      setTodos(null);
+      return;
+    }
     setLoading(true);
     setErr("");
     try {
@@ -41,32 +52,43 @@ export function TodoPopover({
     }
   }, [seq, fetchDetail]);
 
-  // refetch on each open — todos change as the run progresses.
+  // refetch on each open — todos change as the run progresses — and keep
+  // refreshing while open so a live run's list stays current without manual
+  // reopen. Closed ⇒ timer torn down.
   React.useEffect(() => {
-    if (open) void load();
+    if (!open) return;
+    void load();
+    const t = setInterval(() => void load(), TODO_REFRESH_MS);
+    return () => clearInterval(t);
   }, [open, load]);
 
-  const disabled = seq == null;
+  const done = (todos ?? []).filter((t) => t.status === "completed").length;
   const MARK: Record<string, string> = { pending: "☐", in_progress: "▶", completed: "✔" };
   return (
-    <Popover open={open} onOpenChange={disabled ? undefined : setOpen}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          disabled={disabled}
-          title={disabled ? "本会话暂无 Todo" : "查看最近 Todo"}
-          className="text-muted-foreground/70 hover:text-primary flex items-center gap-0.5 text-xs disabled:pointer-events-none disabled:opacity-40"
+          title={seq == null ? "本会话还没有 TodoWrite 记录" : "查看最近 Todo"}
+          className="flex items-center gap-0.5 text-xs opacity-70 transition-colors hover:text-primary hover:opacity-100"
         >
           <ListTodo className="size-3" />
           Todo
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="max-h-80 w-80 overflow-auto p-2">
-        <p className="text-muted-foreground px-1 pb-1 text-[11px] font-medium">
-          最近 Todo{loading ? " · 加载中…" : ""}
+        <p className="px-1 pb-1 font-medium text-[11px] text-muted-foreground">
+          最近 Todo
+          {seq != null && todos && !loading && ` · ${done}/${todos.length} 完成`}
+          {loading ? " · 加载中…" : ""}
         </p>
-        {err && <p className="text-destructive px-1 text-xs">{err}</p>}
-        {todos && todos.length === 0 && !loading && <p className="text-muted-foreground px-1 text-xs">（空）</p>}
+        {seq == null && !loading && (
+          <p className="px-1 text-muted-foreground text-xs">
+            该会话没有用 TodoWrite 记录过进度（会话内的待办清单由 agent 自行记录）。
+          </p>
+        )}
+        {err && <p className="px-1 text-destructive text-xs">{err}</p>}
+        {todos && todos.length === 0 && !loading && <p className="px-1 text-muted-foreground text-xs">（空）</p>}
         <ul className="space-y-0.5">
           {(todos ?? []).map((t, i) => (
             <li
