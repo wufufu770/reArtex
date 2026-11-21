@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.25] - 2026-11-21
+
+### 功能（finding_gate 启发式预检——注定被打回的上报不再占用复核带宽）
+
+- **① report_finding 落库前确定性预检**（`agent/finding_gate.go` 新文件，XIB-Artex finding_gate.go 的本仓化）：三条保守规则——R1 证据空白（TrimSpace 空）；R2 summary 结论自否（「不是(一个)漏洞/误报/不成立/false positive…」）；R3 summary 自认未验证（「未验证/未触发/无 PoC/待验证/存疑…」）。命中即当场拒绝（与 severity 归一化同一形态：当场拒 + 告知改道 `record_fact` 标 inferred），违规上报不再落 pending 占探索图节点与复核带宽。正则/词表挂源码常量（同 shortcircuit 纪律：不进 DB/settings 热改面）。
+- **② 判定面刻意收窄（误伤最低裁决）**：R2/R3 只查 **summary**（结论陈述），不查 evidence——证据文本引用上下文（复测记录、目标回复「不存在漏洞」等）出现这些词是正常的；只查 summary 同样能拦住「注入面存在（未验证）」这类自认候选。
+- **③ 两条 XIB 原版规则不移植（留档裁决）**：「缺 HTTP 交互标记即拒」——本仓明文支持 TCP 等非 HTTP 漏洞省略流量绑定，会误伤合法 TCP 类上报；「decompiled 字面拦截」——小程序渗透的 wxapkg 反编译产物凭据泄露是合法上报场景（key 泄露本身是洞）。
+- **④ 接线钉死**：addFinding 的 Run 在 severity 校验后调用 `CheckFindingGate(a.Summary, a.Evidence)`；既有合约测试 fixture 补 evidence 适配（fixture 是原子性合约测试，输入本就该过预检）。
+- 测试：finding_gate 单测 4 条（空证据/自否/合法零误伤含 TCP+反编译场景/接线钉死）；agent 全量回归绿（83s）；db 全量绿。
+
+
+
 ## [0.15.24] - 2026-11-21
 
 ### 修复（自治计划 Phase 0 细项复核轮：1 缺口补齐 + 2 条无缺口留档）
@@ -14,7 +26,7 @@
 - **③ dial-stage SSRF：已完备，零改动（复核留档）**：`netguard.dialControl`（Control 回调=最终建连地址时刻校验）+ DNS 重绑定覆盖（校验时解析到公网、连接时解析到内网）+ `ResolveOnceDialContext`（解析一次拿 IP 建连，重连不重解析）——XIB-Artex 的 dial-stage 防护在本仓已全部等价存在。
 - 验证：intercept 包测试全绿（含新 4 条）+ go vet 过。
 
-
+## [0.15.23] - 2026-11-20
 
 ### 功能（会话 Todo 悬浮框统一入口——Worker 执行会话可见）
 
@@ -22,6 +34,8 @@
 - **② TodoPopover 增强**：无 TodoWrite 记录的会话从「灰死按钮」改为可点开的说明面板（「该会话没有用 TodoWrite 记录过进度」）；打开期间每 5s 轻量轮询（worker 在跑时进度实时可见，关闭即停）；头部加 `完成 N/M` 进度统计。
 - **背景澄清（对应「planner 启用的 worker 是不是预设 agent」之问）**：任务引擎的 worker 不是从预设 agent 列表里挑的——`Engine.Run` 按 worker 池数量（settings `workers`，默认 3）起 `work#1..#N` 个同构执行循环，全部用同一份可编辑的通用 worker 提示词（agent_prompts key=worker）+ 各自领到的意图上下文。会话顶部那排 chips（Auto/渗透测试/资产收集等）是聊天会话成员（会话型 agent），其中 reporter（报告撰写）/retester（漏洞复测）/intent_normalizer（意图规整）等特种 agent 按事件（report_finding/复测/意图规整阶段）自动参与任务流程，与 work#N 是两套角色。
 - 验证：tsc 过；biome 0 errors；build:static 过；e2e 路由冒烟过。
+
+## [0.15.22] - 2026-11-20
 
 ### 修复（全量 debug 轮：-race 实锤数据竞态 + 门禁面错误清零）
 

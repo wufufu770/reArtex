@@ -1760,6 +1760,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if !db.ValidSeverity(a.Severity) {
 			return actool.Errorf("severity 必须是 critical|high|medium|low|info 之一（收到 " + a.Severity + "）。评级基准：可验证 RCE/敏感数据外泄=critical；可验证越权/注入=high；有前置条件利用=medium；需交互=low；纯信息泄露/无凭据暴露/版本指纹/侦察线索/未证实候选面=info。拿不准降一档。"), nil
 		}
+		// finding_gate（XIB-Artex 移植本仓化，0.15.25）：落库前确定性预检——空证据/
+		// 结论自否/自认未验证的上报当场拒绝并给改写方向，不再落 pending 占复核带宽。
+		// 与 severity 校验同一形态（当场拒 + 告知改道 record_fact）。
+		if err := CheckFindingGate(a.Summary, a.Evidence); err != nil {
+			return actool.Errorf("report_finding 预检拒绝：" + err.Error() +
+				"。未触发/未验证的线索请改用 record_fact 落为事实（标 inferred）交规划者，独立复现拿到证据后再上报。"), nil
+		}
 		if t.ts == nil {
 			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
 		}
