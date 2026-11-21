@@ -194,6 +194,16 @@ type Chain struct {
 	// ⇒ deny 又加速熔断 ⇒ 正常工具被整只拉黑（v0.11.0 E2E 实证的恶性循环）。
 	// 治理拒绝只审计、不计熔断；真正执行了且执行层出错才计数。
 	recentDenied sync.Map // map[string]time.Time
+	// credCircuit 是凭据级熔断状态（0.15.44 #6）：tool → *credCircuitState。
+	// 进程内存态——重启清零 = 冷却后重新探测一次，方向正确，不需落库。
+	credCircuit sync.Map
+}
+
+// credCircuitState 是单工具的凭据熔断计数（连续 401/403 → 开路 30 分钟）。
+type credCircuitState struct {
+	mu       sync.Mutex
+	count    int
+	openedAt time.Time
 }
 
 // noteDeniedByName 标记「这次调用被链拒绝了」（2 分钟窗口，足够覆盖 SDK 回调）。
@@ -202,6 +212,64 @@ func (c *Chain) noteDeniedByName(tool, payloadDigest string) {
 		return
 	}
 	c.recentDenied.Store(tool+"|"+payloadDigest, time.Now().Add(2*time.Minute))
+}
+
+// credAuthFailRe 匹配工具结果里的 401/403 鉴权失败形态（HTTP 状态行 / SDK
+// 错误串 / 响应体的鉴权失败字样）。宽松匹配是有意的：凭据熔断只挡「连撞墙」，
+// 误报的代价只是提前一次熔断，漏报的代价是整场任务空转。
+var credAuthFailRe = regexp.MustCompile(`(?i)\b(?:status\s*40[13]|HTTP[ /]?40[13]|401\s+Unauthorized|403\s+Forbidden|Unauthorized|Forbidden)`)
+
+// noteCredentialOutcome 在 PostToolUse 记凭据面结果（0.15.44 #6）：
+// 命中 401/403 形态计数 +1，非命中（且非执行层错误）清零——一次正常响应说明
+// 凭据可能已恢复。执行层错误（isErr）归工具健康熔断（RecordToolCallOutcome），
+// 不进凭据面。
+func (c *Chain) noteCredentialOutcome(tool string, result []byte, isErr bool) {
+	v, ok := c.credCircuit.Load(tool)
+	if !ok {
+		v, _ = c.credCircuit.LoadOrStore(tool, &credCircuitState{})
+	}
+	s, ok2 := v.(*credCircuitState)
+	if !ok2 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if isErr || !credAuthFailRe.Match(result) {
+		if !isErr {
+			s.count = 0
+		}
+		return
+	}
+	s.count++
+	if s.count >= sodpolicy.CredentialFailThreshold && s.openedAt.IsZero() {
+		s.openedAt = time.Now()
+		log.Printf("[sod] 凭据熔断：%s 连续 %d 次 401/403，开路 %s（连撞只会浪费预算并污染目标日志）",
+			tool, s.count, sodpolicy.CredentialOpenWindow)
+	}
+}
+
+// credentialCircuitOpen 报告该工具的凭据熔断是否在开路中（过期自动折算关闭）。
+func (c *Chain) credentialCircuitOpen(tool string) bool {
+	v, ok := c.credCircuit.Load(tool)
+	if !ok {
+		return false
+	}
+	s, ok2 := v.(*credCircuitState)
+	if !ok2 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openedAt.IsZero() {
+		return false
+	}
+	if time.Since(s.openedAt) >= sodpolicy.CredentialOpenWindow {
+		// 冷却结束：折算关闭并清零——半开由下一次真实响应定生死。
+		s.openedAt = time.Time{}
+		s.count = 0
+		return false
+	}
+	return true
 }
 
 // deniedRecently 报告这次调用是否刚被链拒绝（是 ⇒ 不喂熔断）。
@@ -401,6 +469,29 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 			"范围摘要不可用，按失败关闭处理")
 	}
 	call.scopeDigest = scopeDigest
+
+	// ⑤.0 credential circuit（0.15.44 #6）：凭据级熔断——同一工具连续 2 次收到
+	// 401/403 形态响应 ⇒ 开路 30 分钟。凭据失效不是「工具坏了」（工具健康熔断
+	// 5×/300s 管那类），而是本次测试的实况信号——但连续撞墙只会浪费预算并污染
+	// 目标日志；确定性闸拦下，worker 拿到明确 reason_code 可转报人工换凭据。
+	if c.credentialCircuitOpen(name) {
+		rec := &DecisionRecord{
+			TaskID:         call.taskID,
+			ConversationID: call.conversationID,
+			SourceAgent:    call.sourceAgent,
+			ToolName:       name,
+			Verdict:        sodpolicy.VerdictDeny,
+			ReasonCode:     sodpolicy.ReasonCredentialCircuitOpen,
+			Note:           "该工具连续返回 401/403（凭据失效），凭据熔断 30 分钟中——请人工确认/更换凭据后再试",
+			PayloadDigest:  call.payloadDigest,
+			PayloadPreview: RedactPreview(payload, sodpolicy.PayloadPreviewMaxBytes),
+			Checks:         map[string]string{"credential_circuit": "open"},
+			LatencyMs:      int(time.Since(call.started) / time.Millisecond),
+		}
+		c.record(ctx, rec)
+		c.noteDeniedByName(name, call.payloadDigest)
+		return true, blockMessage(rec), nil
+	}
 
 	// ⑤.5 人工复核改判放行（方案 v3 缺陷 F3）：sod_manual_overrides 里的凭据
 	// 四元组 (tool, task, agent, payload_digest) 全等命中且未过期 ⇒ 跳过规整与
@@ -686,14 +777,17 @@ func (c *Chain) finalize(ctx context.Context, call chainCall, out GateOutput, no
 	}
 }
 
-// PostToolUse 记工具成败（喂熔断计数），并转发给 inner。
+// PostToolUse 记工具成败（喂熔断计数）+ 凭据面结果（0.15.44 #6），并转发给 inner。
 func (c *Chain) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
 	if c.deps.DB != nil && GatedTool(name) {
 		// 治理拒绝（本次调用根本没执行）不喂熔断：只有真执行了的失败才计数。
 		if c.deniedRecently(name, input) {
 			c.recentDenied.Delete(name + "|" + CanonicalDigest(input))
-		} else if err := c.deps.DB.RecordToolCallOutcome(name, isErr); err != nil {
-			log.Printf("[sod] 记录工具调用结果失败: tool=%s err=%v", name, err)
+		} else {
+			c.noteCredentialOutcome(name, result, isErr)
+			if err := c.deps.DB.RecordToolCallOutcome(name, isErr); err != nil {
+				log.Printf("[sod] 记录工具调用结果失败: tool=%s err=%v", name, err)
+			}
 		}
 	}
 	if c.inner != nil {

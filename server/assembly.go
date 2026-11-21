@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -314,19 +317,19 @@ func buildAgentAssembly(pg *db.DB, skillDir, agentKey string, ctx context.Contex
 			}
 		}
 	}
-		// 0.15.12 前缀缓存纪律：mcpTools 收敛成确定性序（server ID 序遍历 + 工具名
-		// 序收尾）。此前工具序是各 server tools/list 的枚举序——重连/冷却恢复后同一
-		// server 的工具数组可能换位，工具定义区逐字节漂移 ⇒ 请求前缀发散、缓存全失。
-		// rebuild() 逐字拷贝本数组，两条装配路径（全量/缓存重建）从此同序。
-		sort.SliceStable(art.mcpTools, func(i, j int) bool {
-			return toolServer[art.mcpTools[i].Name()]+"/"+art.mcpTools[i].Name() <
-				toolServer[art.mcpTools[j].Name()]+"/"+art.mcpTools[j].Name()
-		})
-		art.serverTools = serverTools
-		art.allNames = allNames
-		art.globalNames = globalNames
-		art.globalSet = globalSet
-		return agent.AssemblyBuild{Value: art, Closers: closers, Cacheable: cacheable}, nil
+	// 0.15.12 前缀缓存纪律：mcpTools 收敛成确定性序（server ID 序遍历 + 工具名
+	// 序收尾）。此前工具序是各 server tools/list 的枚举序——重连/冷却恢复后同一
+	// server 的工具数组可能换位，工具定义区逐字节漂移 ⇒ 请求前缀发散、缓存全失。
+	// rebuild() 逐字拷贝本数组，两条装配路径（全量/缓存重建）从此同序。
+	sort.SliceStable(art.mcpTools, func(i, j int) bool {
+		return toolServer[art.mcpTools[i].Name()]+"/"+art.mcpTools[i].Name() <
+			toolServer[art.mcpTools[j].Name()]+"/"+art.mcpTools[j].Name()
+	})
+	art.serverTools = serverTools
+	art.allNames = allNames
+	art.globalNames = globalNames
+	art.globalSet = globalSet
+	return agent.AssemblyBuild{Value: art, Closers: closers, Cacheable: cacheable}, nil
 }
 
 // rebuild 用缓存产物重建本 run 的轻包装（G1）：新 UnlockSet / OnInvoke / Skill 工具 /
@@ -555,6 +558,20 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 				out = append(out, resolve(inst, row))
 			}
 		}
+		// 0.15.44 #12 会话单循环硬锁：ctx 带发起会话 id 且该会话开启 single_loop
+		// ⇒ 确定性剥 spawn_task——工具面上直接不可见 = 物理不可调用（比提示词
+		// 纪律强一档）。升级走 propose_task_escalation 提议（人工批准才建任务）。
+		// 只对 chat lane 生效（SessionID 非空且无任务身份——任务运行面本就无会话锁）。
+		if runInfo.SessionID != "" && runInfo.TaskID == 0 && singleLoopSessionLocked(pg, runInfo.SessionID) {
+			filtered := out[:0:0]
+			for _, t := range out {
+				if t.Name() == "spawn_task" {
+					continue
+				}
+				filtered = append(filtered, t)
+			}
+			out = filtered
+		}
 		// shell hints: user-defined kind="shell" tools are not callable — they are
 		// environment declarations that tell the model which command-line tools are
 		// installed. Collect the ones bound to this agent and append to Bash's description.
@@ -651,4 +668,33 @@ var lastGoodToolRows atomic.Value
 var degradedToolAllow = map[string]bool{
 	"Bash": true, "Read": true, "Write": true, "Edit": true,
 	"MultiEdit": true, "LS": true, "Glob": true, "Grep": true,
+}
+
+// singleLoopSessionLocked 查发起会话是否开了单循环硬锁（0.15.44 #12）。
+// SessionID 是 chat 会话 id（"conv-<n>" 或纯数字）；解析失败/会话不存在/查询
+// 出错一律 false（读侧不收紧——锁失败要偏向「不锁」，与 engagement 读侧纪律
+// 相反是刻意的：这是能力剥离不是安全放行，误锁比漏锁更伤可用性）。
+// 结果缓存 30s：ToolResolve 每 chat turn 调一次，同会话回表太频。
+var singleLoopCache sync.Map // convID(int64) -> cachedSingleLoop{val, at}
+
+type cachedSingleLoop struct {
+	val bool
+	at  time.Time
+}
+
+const singleLoopCacheTTL = 30 * time.Second
+
+func singleLoopSessionLocked(pg *db.DB, sessionID string) bool {
+	convID, err := strconv.ParseInt(strings.TrimPrefix(sessionID, "conv-"), 10, 64)
+	if err != nil || convID <= 0 {
+		return false
+	}
+	if v, ok := singleLoopCache.Load(convID); ok {
+		if c, ok2 := v.(cachedSingleLoop); ok2 && time.Since(c.at) < singleLoopCacheTTL {
+			return c.val
+		}
+	}
+	val := pg.ConversationSingleLoop(convID)
+	singleLoopCache.Store(convID, cachedSingleLoop{val: val, at: time.Now()})
+	return val
 }

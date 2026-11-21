@@ -71,6 +71,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolListTasks(),
 		s.toolListLLMProfiles(),
 		s.toolSpawnTask(),
+		s.toolProposeTaskEscalation(), // 0.15.44 #12：升级提议（只提议不执行）
 		s.toolPauseTask(),
 		s.toolGetTaskGraph(),
 		s.toolListTaskFindings(),
@@ -244,6 +245,110 @@ func (s *Server) toolListLLMProfiles() actool.CoreTool {
 		})
 }
 
+// spawnArgs 是 spawn_task 工具与「升级提议批准」共用的建任务参数集（0.15.44 #12）。
+type spawnArgs struct {
+	Description          string          `json:"description"`
+	Goal                 string          `json:"goal"`
+	Category             string          `json:"category"`
+	ParentRef            string          `json:"parent_ref"`
+	SourceTaskIDs        []string        `json:"source_task_ids"`
+	LLMProfileID         json.RawMessage `json:"llm_profile_id"`
+	TimeoutSeconds       int             `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int             `json:"plan_heartbeat_seconds"`
+	SeedFirstIntent      bool            `json:"seed_first_intent"`
+}
+
+// spawnTaskCore 是建任务的确定性核心（spawn_task 工具与升级提议批准共用——
+// 提议批准走同一套校验/建任务/绑会话/launch，零平行实现）。
+func (s *Server) spawnTaskCore(ctx context.Context, a spawnArgs) (*Task, error) {
+	if strings.TrimSpace(a.Description) == "" {
+		a.Description = "未命名任务"
+	}
+	if strings.TrimSpace(a.Goal) == "" {
+		return nil, fmt.Errorf("goal 为必填")
+	}
+	// 类别按名字解析（模型记得住「资产收集」，记不住库里的 id）：nkey 口径
+	// （空白折叠+小写）。不存在 ⇒ 明确报错，静默降级成未分类会让「资产收集」
+	// 任务的收集纪律悄悄失效。
+	var categoryID *int64
+	if name := strings.TrimSpace(a.Category); name != "" {
+		category, err := s.m.pg.TaskCategoryByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("查任务类别失败: %w", err)
+		}
+		if category == nil {
+			return nil, fmt.Errorf("任务类别 %q 不存在（可用：资产收集/渗透测试/漏洞验证）", name)
+		}
+		categoryID = &category.ID
+	}
+	if a.TimeoutSeconds < 0 {
+		a.TimeoutSeconds = 0
+	}
+	// 只读继承来源任务：数量上限 + 每个 id 有效/去重/存在，校验规则与 HTTP 建任务一致。
+	if len(a.SourceTaskIDs) > db.MaxTaskSourceCount {
+		return nil, fmt.Errorf("关联任务最多选择 %d 个", db.MaxTaskSourceCount)
+	}
+	sourceIDs := make([]int64, 0, len(a.SourceTaskIDs))
+	seenSources := map[int64]bool{}
+	for _, raw := range a.SourceTaskIDs {
+		id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || id <= 0 || seenSources[id] {
+			return nil, fmt.Errorf("关联任务 id 无效或重复")
+		}
+		if _, ok := s.m.Task(strconv.FormatInt(id, 10)); !ok {
+			return nil, fmt.Errorf("关联任务 #%d 不存在", id)
+		}
+		seenSources[id] = true
+		sourceIDs = append(sourceIDs, id)
+	}
+	// LLM profile resolution: explicit id > inherit parent's pin > active(nil).
+	var pin *int64
+	if id := parseProfileID(a.LLMProfileID); id > 0 {
+		if _, ok := s.loadProfileConfig(id); !ok {
+			return nil, fmt.Errorf("LLM 配置 #%d 不存在或未设置 API Key", id)
+		}
+		pin = &id
+	} else if a.ParentRef != "" {
+		if pt, ok := s.m.Task(a.ParentRef); ok {
+			pin = pt.LLMProfileID
+		}
+	}
+	var llmIDs []int64
+	if pin != nil {
+		llmIDs = []int64{*pin}
+	}
+	t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
+		CategoryID:           categoryID,
+		SourceTaskIDs:        sourceIDs,
+		LLMProfileIDs:        llmIDs,
+		TimeoutSeconds:       a.TimeoutSeconds,
+		PlanHeartbeatSeconds: a.PlanHeartbeatSeconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if a.ParentRef != "" {
+		t.ParentRef = a.ParentRef
+		if id, e := strconv.ParseInt(t.ID, 10, 64); e == nil {
+			_ = s.m.PG().SetParentRef(id, a.ParentRef)
+		}
+	}
+	// 会话里的 spawn_task：把新任务绑回发起会话（总控/群聊的进展播报路由）。
+	// 只认 chat 形态的调用（RunInfo.SessionID="conv-<id>" 且无任务身份）——
+	// 任务引擎内部的编排 spawn（worker 间派生）没有会话上下文，跳过。
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	if taskID > 0 {
+		if sessID, convID := s.bindSpawnedTaskToSession(ctx, taskID); sessID > 0 {
+			s.announceSpawnedTask(sessID, taskID, convID, a.Description, a.Goal)
+		}
+	}
+	// 共享的建后流程,与 HTTP 建任务(server.go createTask)复用同一段 launchTask:
+	// seed + 后台可见地做目标分解(第0轮/LLM步骤/逐条goal) + engine.Run。
+	// seed_first_intent 默认 false(标准先规划再执行);简单任务可开启直接下发一 work 测试。
+	s.launchTask(t, a.Description+" "+a.Goal, a.SeedFirstIntent)
+	return t, nil
+}
+
 func (s *Server) toolSpawnTask() actool.CoreTool {
 	return wrTool("spawn_task",
 		"新建一个子任务并启动探索引擎，返回 task_id。用于把一件事(如一道题/一个目标)派成独立任务。parent_ref 可选：填当前编排关联的父任务 id 做父子关联。category 可选：任务类别名(资产收集/渗透测试/漏洞验证，见 list_task_categories 不存在则报错)；类别决定引擎给 worker 注入的纪律段——资产收集类任务的 worker 被结构性禁止利用类动作。",
@@ -259,9 +364,44 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：对于简单任务可开启，创建时直接下发一条种子意图(内容=描述+目标)让 worker 免等首轮 planner 直接开跑测试；默认 false(走标准先规划再执行)。"},
 		}, "description", "goal"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			var a spawnArgs
+			_ = json.Unmarshal(in, &a)
+			t, err := s.spawnTaskCore(ctx, a)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("task created: %s", t.ID)), nil
+		})
+}
+
+// toolProposeTaskEscalation 是升级提议工具（0.15.44 #12，单循环硬锁的替代
+// 出口）：**只提议不执行**——写一张 pending 提议（任务页升级提议卡人工裁决），
+// 不建任务、不碰引擎。SoD 口径：LLM 只提议，确定性代码（人工批准 →
+// spawnTaskCore）才建任务。
+func (s *Server) toolProposeTaskEscalation() actool.CoreTool {
+	return wrTool("propose_task_escalation",
+		"把一件事提议升级为独立任务（只提交提议，不执行；人工在任务页「升级提议」卡批准后才真正建任务）。用于：你想派任务但当前会话/角色没有 spawn 权限，或事情需要人工确认投入时。参数与 spawn_task 一致，全部存档进提议。",
+		objSchema(map[string]any{
+			"description": strParam("提议的任务描述(简短标题)"),
+			"goal":        strParam("提议的任务目标"),
+			"rationale":   strParam("为什么需要升级成独立任务（给人工看的裁决依据）"),
+			"task_ref":    strParam("可选：提议挂靠的当前任务 id"),
+			"category":    strParam("可选：任务类别名（同 spawn_task）"),
+			"parent_ref":  strParam("可选：父任务 id"),
+			"source_task_ids": map[string]any{
+				"type": "array", "items": map[string]any{"type": "string"},
+				"description": "可选：只读继承的来源任务 id 列表（同 spawn_task）",
+			},
+			"timeout_seconds":        map[string]any{"type": "integer", "description": "可选：任务级超时(秒)"},
+			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳间隔(秒)"},
+			"seed_first_intent":      map[string]any{"type": "boolean", "description": "可选：创建即下发种子意图"},
+		}, "description", "goal"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Description          string          `json:"description"`
 				Goal                 string          `json:"goal"`
+				Rationale            string          `json:"rationale"`
+				TaskRef              string          `json:"task_ref"`
 				Category             string          `json:"category"`
 				ParentRef            string          `json:"parent_ref"`
 				SourceTaskIDs        []string        `json:"source_task_ids"`
@@ -272,91 +412,35 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			}
 			_ = json.Unmarshal(in, &a)
 			if strings.TrimSpace(a.Description) == "" {
-				a.Description = "未命名任务"
+				return actool.Errorf("description 为必填"), nil
 			}
 			if strings.TrimSpace(a.Goal) == "" {
 				return actool.Errorf("goal 为必填"), nil
 			}
-			// 类别按名字解析（模型记得住「资产收集」，记不住库里的 id）：nkey 口径
-			// （空白折叠+小写）。不存在 ⇒ 明确报错，静默降级成未分类会让「资产收集」
-			// 任务的收集纪律悄悄失效。
-			var categoryID *int64
-			if name := strings.TrimSpace(a.Category); name != "" {
-				category, err := s.m.pg.TaskCategoryByName(name)
-				if err != nil {
-					return actool.Errorf("查任务类别失败: " + err.Error()), nil
-				}
-				if category == nil {
-					return actool.Errorf(fmt.Sprintf("任务类别 %q 不存在（可用：资产收集/渗透测试/漏洞验证）", name)), nil
-				}
-				categoryID = &category.ID
-			}
-			if a.TimeoutSeconds < 0 {
-				a.TimeoutSeconds = 0
-			}
-			// 只读继承来源任务：数量上限 + 每个 id 有效/去重/存在，校验规则与 HTTP 建任务一致。
-			if len(a.SourceTaskIDs) > db.MaxTaskSourceCount {
-				return actool.Errorf(fmt.Sprintf("关联任务最多选择 %d 个", db.MaxTaskSourceCount)), nil
-			}
-			sourceIDs := make([]int64, 0, len(a.SourceTaskIDs))
-			seenSources := map[int64]bool{}
-			for _, raw := range a.SourceTaskIDs {
-				id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-				if err != nil || id <= 0 || seenSources[id] {
-					return actool.Errorf("关联任务 id 无效或重复"), nil
-				}
-				if _, ok := s.m.Task(strconv.FormatInt(id, 10)); !ok {
-					return actool.Errorf(fmt.Sprintf("关联任务 #%d 不存在", id)), nil
-				}
-				seenSources[id] = true
-				sourceIDs = append(sourceIDs, id)
-			}
-			// LLM profile resolution: explicit id > inherit parent's pin > active(nil).
-			var pin *int64
-			if id := parseProfileID(a.LLMProfileID); id > 0 {
-				if _, ok := s.loadProfileConfig(id); !ok {
-					return actool.Errorf(fmt.Sprintf("LLM 配置 #%d 不存在或未设置 API Key", id)), nil
-				}
-				pin = &id
-			} else if a.ParentRef != "" {
-				if pt, ok := s.m.Task(a.ParentRef); ok {
-					pin = pt.LLMProfileID
-				}
-			}
-			var llmIDs []int64
-			if pin != nil {
-				llmIDs = []int64{*pin}
-			}
-			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
-				CategoryID:           categoryID,
-				SourceTaskIDs:        sourceIDs,
-				LLMProfileIDs:        llmIDs,
-				TimeoutSeconds:       a.TimeoutSeconds,
-				PlanHeartbeatSeconds: a.PlanHeartbeatSeconds,
+			// payload 存原始 spawn 参数（批准时确定性重放同一套 spawnTaskCore）。
+			payload, _ := json.Marshal(map[string]any{
+				"description":            a.Description,
+				"goal":                   a.Goal,
+				"category":               a.Category,
+				"parent_ref":             a.ParentRef,
+				"source_task_ids":        a.SourceTaskIDs,
+				"llm_profile_id":         a.LLMProfileID,
+				"timeout_seconds":        a.TimeoutSeconds,
+				"plan_heartbeat_seconds": a.PlanHeartbeatSeconds,
+				"seed_first_intent":      a.SeedFirstIntent,
 			})
+			ri := agent.RunInfoFrom(ctx)
+			ak := agent.AgentKeyFrom(ctx)
+			convID, _ := strconv.ParseInt(strings.TrimPrefix(ri.SessionID, "conv-"), 10, 64)
+			id, err := s.m.pg.CreateTaskEscalationProposal(
+				convID, ak, strings.TrimSpace(a.TaskRef),
+				a.Description, a.Goal, a.Rationale, ak, payload)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			if a.ParentRef != "" {
-				t.ParentRef = a.ParentRef
-				if id, e := strconv.ParseInt(t.ID, 10, 64); e == nil {
-					_ = s.m.PG().SetParentRef(id, a.ParentRef)
-				}
-			}
-			// 会话里的 spawn_task：把新任务绑回发起会话（总控/群聊的进展播报路由）。
-			// 只认 chat 形态的调用（RunInfo.SessionID="conv-<id>" 且无任务身份）——
-			// 任务引擎内部的编排 spawn（worker 间派生）没有会话上下文，跳过。
-			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-			if taskID > 0 {
-				if sessID, convID := s.bindSpawnedTaskToSession(ctx, taskID); sessID > 0 {
-					s.announceSpawnedTask(sessID, taskID, convID, a.Description, a.Goal)
-				}
-			}
-			// 共享的建后流程,与 HTTP 建任务(server.go createTask)复用同一段 launchTask:
-			// seed + 后台可见地做目标分解(第0轮/LLM步骤/逐条goal) + engine.Run。
-			// seed_first_intent 默认 false(标准先规划再执行);简单任务可开启直接下发一 work 测试。
-			s.launchTask(t, a.Description+" "+a.Goal, a.SeedFirstIntent)
-			return actool.Text(fmt.Sprintf("task created: %s", t.ID)), nil
+			s.govRecord(a.TaskRef, "propose_task_escalation",
+				fmt.Sprintf("升级提议 #%d 已提交（%s → 人工批准后才建任务）", id, trimGov(a.Description)))
+			return actool.Text(fmt.Sprintf("escalation proposal #%d submitted (pending human approval)", id)), nil
 		})
 }
 
@@ -546,13 +630,31 @@ func (s *Server) seedOrchestrationTools() {
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 	// 业务建模 × 偏锋探索（合并施工）：工具播种 + agent 注册。都在 tools 表
 	// seed 之后做——AdvisoryAgentToolPolicies 的 Allow 补绑对已注册行立即生效。
-	s.seedBizTools()         // 业务图八工具播种（默认绑 bizmodeler）
-	s.seedBizModelerAgent()  // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
-	s.seedEdgeTools()        // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
-	s.syncEdgeRegistry()     // 方法论配置写穿运行时注册表（0.15.4：启停/优先级/本体覆盖+自定义，轮换读到合并态）
-	s.seedMpTools()          // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
-	s.seedArbiterTools()     // 意图仲裁工具播种（0.14.1，绑 arbiter）
-	s.ensureMpArtifactsDir() // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）
+	s.seedBizTools()               // 业务图八工具播种（默认绑 bizmodeler）
+	s.seedBizModelerAgent()        // 「业务建模」自定义 agent（触发器默认关，UI 逐项开）
+	s.seedEdgeTools()              // 偏锋八工具播种（绑定矩阵）+ edge_exec 运行策略
+	s.syncEdgeRegistry()           // 方法论配置写穿运行时注册表（0.15.4：启停/优先级/本体覆盖+自定义，轮换读到合并态）
+	s.seedMpTools()                // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
+	s.seedArbiterTools()           // 意图仲裁工具播种（0.14.1，绑 arbiter）
+	s.ensureMpArtifactsDir()       // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）
+	s.seedTaskEscalationBindings() // 升级提议工具补绑 auto/mainagent（0.15.44，一次性）
+}
+
+// seedTaskEscalationBindings（0.15.44 #12，一次性迁移）：propose_task_escalation
+// 补绑 auto/mainagent。新库由 SeedTool 首插默认绑 ["auto"]，老库需要补绑；
+// mainagent 无 spawn_task——升级提议卡正是它（与被锁会话）的确定性出口。
+func (s *Server) seedTaskEscalationBindings() {
+	const flag = "task_escalation_bindings_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	for _, ak := range []string{"auto", "mainagent"} {
+		if err := s.m.pg.AddAgentToToolBinding(ak, []string{"propose_task_escalation"}); err != nil {
+			log.Printf("[escalation] propose_task_escalation 补绑 %s 失败: %v", ak, err)
+			return // 出错不落 flag，下次启动重试
+		}
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
 }
 
 // seedReconDefaultBindings gives the recon (资产收集) agent its spawn_task binding

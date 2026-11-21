@@ -10,6 +10,8 @@
 // （agent → db，db 不能 → agent），编译不过。
 package sodpolicy
 
+import "time"
+
 // 裁决三态 —— 闸门只能产出这三种结果。
 //
 // 为什么没有第四种「先放行、事后再说」：approve 就是放行；needs_review 是
@@ -43,6 +45,9 @@ const (
 	ReasonOutOfScope = "out_of_scope"
 	// ReasonToolCircuitOpen 目标工具处于 open 熔断（工具不可用）。
 	ReasonToolCircuitOpen = "tool_circuit_open"
+	// ReasonCredentialCircuitOpen 凭据级熔断开路中（同一工具连续 401/403，
+	// 0.15.44 #6）——正常裁决 deny，不是链级故障（不进 vetoSystemFailureReasons）。
+	ReasonCredentialCircuitOpen = "credential_circuit_open"
 	// ReasonQuotaExhausted 群组额度处于 draining / parked。
 	ReasonQuotaExhausted = "quota_exhausted"
 	// ReasonTier2Inconsistent 关联 finding 的重放证据为空或资产归属不一致。
@@ -126,6 +131,16 @@ const (
 	// 300 秒（5 分钟）：覆盖一次「修好再试」的典型间隔，同时不至于让一个坏掉
 	// 的工具在整场任务里永久不可用。
 	CircuitOpenDurationSeconds = 300
+
+	// CredentialFailThreshold 是凭据熔断阈值（0.15.44 #6）：同一工具连续收到
+	// 401/403 形态响应的次数。2 次：一次可能是目标站点的正常鉴权墙（401 是
+	// 渗透测试的常见读数），连续 2 次同工具撞墙 ⇒ 凭据/授权面大概率失效。
+	CredentialFailThreshold = 2
+
+	// CredentialOpenWindow 是凭据熔断的开路时长（30 分钟）：凭据修复是人工
+	// 动作（换 token/加授权），30 分钟足够人工介入；期间该工具的调用被确定性
+	// 拦下，不再浪费预算并污染目标日志。
+	CredentialOpenWindow = 30 * time.Minute
 
 	// TokenTTLSeconds 是一次性执行凭证的寿命（秒）。
 	//

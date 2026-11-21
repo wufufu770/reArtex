@@ -363,9 +363,13 @@ func TestSoDE2EInnerBlocksBeforeGating(t *testing.T) {
 // 行为那一腿在 e2e_privilege_linux_test.go：同一个二进制在另一个特权上下文
 // （user namespace ⇒ 容器内 uid=0）里裁决一次，两次结论必须一致。
 func TestSoDChainDecisionPathIgnoresProcessPrivilege(t *testing.T) {
+	// "Credential" 禁词精确为 "SysProcAttr.Credential"（0.15.44）：裸词会误伤
+	// HTTP 凭据熔断（credential_circuit_open——401/403 连撞墙的确定性闸，与
+	// 进程特权无关）；真正要禁的反模式是 syscall.SysProcAttr 的降权结构体。
+	// 行为腿（e2e_privilege_linux_test.go 的双特权上下文一致性）不变。
 	forbidden := []string{
 		"Getuid", "Getgid", "Geteuid", "Getegid",
-		"SysProcAttr", "Credential", "setuid", "Setuid",
+		"SysProcAttr", "SysProcAttr.Credential", "setuid", "Setuid",
 	}
 	for _, name := range []string{
 		"chain.go", "gate.go", "normalizer.go", "token.go", "digest.go",

@@ -1194,6 +1194,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/runs", s.systemRunsList)
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.pgRenameConversation)
+	s.registerSingleLoopRoutes(mux)   // 0.15.44 #12 会话单循环硬锁
+	s.registerTaskEscalationRoutes(mux) // 0.15.44 #12 升级提议（list + decide）
 	mux.HandleFunc("PATCH /api/conversations/{id}/profile", s.pgUpdateConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.pgDeleteConversation)
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)

@@ -752,8 +752,26 @@ export interface Conversation {
   llm_profile_id?: number;
   pinned?: boolean;
   pinned_at?: string | null;
+  /** 'on' = 单循环硬锁（本会话不可直接建任务，升级走提议卡）；'off' = 原样 */
+  single_loop?: string;
   created_at: string;
   updated_at: string;
+}
+
+// TaskEscalationProposal 是升级提议（LLM 只提议不执行；人工批准才建任务）。
+export interface TaskEscalationProposal {
+  id: number;
+  session_id?: number;
+  agent_key?: string;
+  task_ref?: string;
+  title: string;
+  goal: string;
+  rationale?: string;
+  status: "pending" | "approved" | "rejected" | "converted";
+  proposed_by?: string;
+  created_at: string;
+  decided_at?: string | null;
+  task_id?: string | null;
 }
 
 // ---- Backend logs (/logs page) ----

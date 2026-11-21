@@ -21,6 +21,8 @@ import {
   ArrowDownIcon,
   ArrowUpDownIcon,
   ArrowUpIcon,
+  ArrowUpRightIcon,
+  CheckIcon,
   ChevronRightIcon,
   EyeIcon,
   FolderInputIcon,
@@ -62,7 +64,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
@@ -132,6 +134,7 @@ import type {
   TaskArchive,
   TaskArchiveState,
   TaskCategory,
+  TaskEscalationProposal,
   TaskStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -305,6 +308,7 @@ function compareTasks(left: Task, right: Task, field: TaskSortField, direction: 
 export default function TasksPage() {
   const [activeTab, setActiveTab] = React.useState("current");
   const [tasks, setTasks] = React.useState<Task[]>([]);
+  const [escalations, setEscalations] = React.useState<TaskEscalationProposal[]>([]);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [categoriesLoaded, setCategoriesLoaded] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -466,7 +470,39 @@ export default function TasksPage() {
       .catch(() => {
         // Polling is best-effort; the next interval retries automatically.
       });
+    // 升级提议（0.15.44 #12）：pending 列表随轮询刷新——agent 提议后人工在
+    // 这里批准/驳回（批准 = 后端确定性建任务）。
+    api
+      .taskEscalations("pending")
+      .then(setEscalations)
+      .catch(() => {
+        /* 与任务轮询同口径 best-effort */
+      });
   }, []);
+
+  // decideEscalation 批准/驳回一张提议；批准成功带任务号。
+  const [decidingId, setDecidingId] = React.useState<number | null>(null);
+  const decideEscalation = React.useCallback(
+    async (id: number, action: "approve" | "reject") => {
+      setDecidingId(id);
+      try {
+        const r = await api.taskEscalationDecide(id, action);
+        if (action === "approve" && r.task_id) {
+          toast.success(`已批准并建任务 #${r.task_id}`);
+        } else {
+          toast.success(action === "approve" ? "已批准" : "已驳回");
+        }
+        setEscalations((prev) => prev.filter((p) => p.id !== id));
+        load();
+      } catch (e) {
+        toast.error(`裁决失败：${(e as Error).message}`);
+        load();
+      } finally {
+        setDecidingId(null);
+      }
+    },
+    [load],
+  );
 
   const loadCategories = React.useCallback(() => {
     api
@@ -779,6 +815,65 @@ export default function TasksPage() {
 
   return (
     <>
+      {/* 升级提议卡组（0.15.44 #12）：agent 只提议不执行——人工批准才建任务。
+          pending 为空时整块不渲染（零打扰）。 */}
+      {escalations.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ArrowUpRightIcon className="size-4 text-primary" /> 升级提议
+              <span className="text-muted-foreground text-xs font-normal">
+                agent 提议升级为独立任务（不执行）；批准后端才建任务
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {escalations.map((p) => (
+              <div key={p.id} className="flex flex-col gap-2 rounded-md border px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="secondary">提议 #{p.id}</Badge>
+                  {p.agent_key && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {p.agent_key}
+                    </Badge>
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-medium" title={p.title}>
+                    {p.title}
+                  </span>
+                  <span className="text-muted-foreground text-xs">
+                    {new Date(p.created_at).toLocaleString("zh-CN")}
+                  </span>
+                </div>
+                <p className="text-muted-foreground line-clamp-2 text-xs" title={p.goal}>
+                  目标：{p.goal}
+                </p>
+                {p.rationale && (
+                  <p className="text-muted-foreground line-clamp-2 text-xs" title={p.rationale}>
+                    理由：{p.rationale}
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => void decideEscalation(p.id, "approve")}
+                    disabled={decidingId === p.id}
+                  >
+                    <CheckIcon data-icon="inline-start" /> 批准建任务
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void decideEscalation(p.id, "reject")}
+                    disabled={decidingId === p.id}
+                  >
+                    <XIcon /> 驳回
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
       {/* 出网治理状态：放在任务列表之前，两个 tab 下都可见——它是平台级事实，
           不是某个任务的属性。 */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">

@@ -5,6 +5,39 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.44] - 2026-11-22
+
+### 功能（#12 single_loop 硬锁 + 升级提议卡 + #6 两小项——vNext 用户裁决三项落地）
+
+- **① #12 会话单循环硬锁（按推荐落法：会话粒度 opt-in，不砍既有能力）**：
+  conversations.single_loop 列（幂等迁移）+ POST /api/conversations/{id}/
+  single-loop 开关 + 对话页会话菜单项。开 = ToolResolve 确定性剥 spawn_task
+  （工具面物理不可见 = 比提示词纪律强一档；30s 缓存）；既有会话（recon 派
+  任务等设计能力）零影响，锁是逐会话开关。
+- **② #12 propose_task_escalation 升级提议卡（LLM 只提议，人工批准才建）**：
+  task_escalation_proposals 表（pending→approved/rejected，CAS 防重复裁决）；
+  工具只写提议**不执行**（绑 auto/mainagent，一次性补绑迁移）——mainagent
+  此前无 spawn 面，提议卡正是它与被锁会话的确定性出口；批准端点用提议
+  payload 重放 spawnTaskCore（与 spawn_task 工具共用同一套校验/建任务/绑
+  会话/launch——零平行实现）；任务页「升级提议」卡组（pending 时渲染，
+  批准建任务/驳回）。SoD 口径全程成立：提议不建任务，批准动作是人工。
+- **③ #6 凭据熔断（C-T1 真增量）**：SoD 链 PostToolUse 记凭据面——同一工具
+  连续 2 次 401/403 形态响应（宽松正则：HTTP 状态行/SDK 错误串/鉴权失败字样）
+  → 开路 30 分钟（进程内存态，重启清零=重新探测）。PreToolUse ⑤.0 位 deny
+  （reason=credential_circuit_open，落账本；正常裁决 deny——有意不进
+  vetoSystemFailureReasons 链级故障集）；非命中响应清零（一次正常读数说明
+  凭据可能已恢复）；执行层错误归工具健康熔断不进凭据面。守卫测试禁词
+  "Credential" 精确为 "SysProcAttr.Credential"（裁决不依赖进程特权的意图
+  不变，行为腿测试不动——裸词误伤 HTTP 凭据面语境）。
+- **④ #6 thinking_fallback（C-T1 真增量）**：llmpool Complete/Stream 双挂点
+  ——400 且请求带 thinking/reasoning 参数 → 剥参本成员重放一次（安全窗口内
+  零输出已发；后续 failover 成员同样用剥参请求）；无参可剥 → 400 原样上抛
+  （不重放不熔断，与既有 400 语义一致）。回拨依赖裁决：参数是宿主加的，
+  网关不支持时剥离重放是宿主权责（norma 零改动，不碰 patch 链）。
+- 验证：llmpool 3 新测试 + sod 4 状态机测试 + server 3 全链测试（锁开关/
+  物理剥工具/提议驳回+批准建任务）+ wiring 全绿；tsc/biome(2.5.1)/全包回归
+  见提交。#3 基线录制按用户指令【不做】——等手动启动。
+
 ## [0.15.43] - 2026-11-21
 
 ### 功能（vNext #8 收尾：导出 9 格式齐 + 报告中心标签化 + 多任务合并 + 脱敏诊断包）

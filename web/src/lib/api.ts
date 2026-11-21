@@ -25,6 +25,7 @@ import type {
   AmberMemoryItem,
   ArchiveBatchItem,
   Asset,
+  TaskEscalationProposal,
   AssetInterceptRule,
   AssetInterceptRuleInput,
   Audit,
@@ -1667,6 +1668,17 @@ export const api = {
   createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
     post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
   renameConversation: (id: number, title: string) => patch<Conversation>(`/conversations/${id}`, { title }),
+  // 单循环硬锁（0.15.44 #12）：开=本会话工具面剥 spawn_task（不可直接建任务）；
+  // 升级走 propose_task_escalation 提议卡（人工批准才建任务）。
+  conversationSingleLoop: (id: number, on: boolean) =>
+    post<{ ok: boolean; single_loop: boolean; message: string }>(`/conversations/${id}/single-loop`, { on }),
+  // 升级提议（任务页卡组）。
+  taskEscalations: (status?: string) =>
+    get<{ proposals: TaskEscalationProposal[]; count: number }>(
+      `/task-escalations${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ).then((r) => r.proposals ?? []),
+  taskEscalationDecide: (id: number, action: "approve" | "reject") =>
+    post<{ ok: boolean; status: string; task_id?: string }>(`/task-escalations/${id}/decide`, { action }),
   pinConversation: (id: number, pinned: boolean) => patch<Conversation>(`/conversations/${id}`, { pinned }),
   updateConversationProfile: (id: number, llm_profile_id: number | null) =>
     patch<{ ok: boolean }>(`/conversations/${id}/profile`, { llm_profile_id }),

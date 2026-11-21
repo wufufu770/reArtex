@@ -485,6 +485,13 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureMiniprogramSchema(); err != nil {
 			return fmt.Errorf("apply miniprogram schema: %w", err)
 		}
+		// 会话单循环硬锁 + 升级提议（0.15.44 #12，db/schema_selfloop.sql）：
+		// conversations.single_loop 列 + task_escalation_proposals 表。启动期
+		// 建好——ListConversations 的 convCols 已含该列，懒执行会让首个会话
+		// 列表请求报 42703（列不存在）。
+		if err := schemaDB.EnsureSelfLoopSchema(); err != nil {
+			return fmt.Errorf("apply selfloop schema: %w", err)
+		}
 		// 意图冲突仲裁的 DDL：intent_conflicts 一表（db/schema_intent2.sql）。
 		// 同上——冲突登记发生在意图派生钩子（确定性层），懒执行会撞 42P01。
 		if err := schemaDB.EnsureIntent2Schema(); err != nil {

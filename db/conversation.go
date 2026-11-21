@@ -59,6 +59,7 @@ type Conversation struct {
 	LLMModel     string     `json:"llm_model"` // E1：会话级模型选择；空=profile 默认
 	Pinned       bool       `json:"pinned"`
 	PinnedAt     *time.Time `json:"pinned_at,omitempty"`
+	SingleLoop   string     `json:"single_loop"` // 0.15.44 #12：'on'=单循环硬锁（剥 spawn_task）；'off'
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
@@ -69,12 +70,12 @@ type ConversationPatch struct {
 	Pinned *bool
 }
 
-const convCols = `id, agent_key, title, llm_profile_id, COALESCE(llm_model,''), pinned_at, created_at, updated_at`
+const convCols = `id, agent_key, title, llm_profile_id, COALESCE(llm_model,''), pinned_at, created_at, updated_at, COALESCE(single_loop,'off')`
 
 func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 	var c Conversation
 	var pinnedAt sql.NullTime
-	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &c.LLMModel, &pinnedAt, &c.CreatedAt, &c.UpdatedAt)
+	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &c.LLMModel, &pinnedAt, &c.CreatedAt, &c.UpdatedAt, &c.SingleLoop)
 	if pinnedAt.Valid {
 		c.Pinned = true
 		c.PinnedAt = &pinnedAt.Time

@@ -9,6 +9,8 @@ import {
   ChevronRightIcon,
   ListChecksIcon,
   Loader2Icon,
+  LockIcon,
+  LockOpenIcon,
   MoreHorizontalIcon,
   PaperclipIcon,
   PencilIcon,
@@ -922,6 +924,7 @@ const ConversationItem = React.memo(function ConversationItem({
   onCommitRename,
   onCancelRename,
   onTogglePinned,
+  onToggleSingleLoop,
   onDelete,
 }: {
   conv: Conversation;
@@ -936,6 +939,7 @@ const ConversationItem = React.memo(function ConversationItem({
   onCommitRename: (id: number, title: string) => void;
   onCancelRename: () => void;
   onTogglePinned: (conversation: Conversation) => void;
+  onToggleSingleLoop?: (conversation: Conversation) => void;
   onDelete: (id: number) => void;
 }) {
   const [deleteOpen, setDeleteOpen] = React.useState(false);
@@ -1034,6 +1038,13 @@ const ConversationItem = React.memo(function ConversationItem({
               {pinned ? <PinOffIcon /> : <PinIcon />}
               {pinned ? "取消置顶" : "置顶"}
             </DropdownMenuItem>
+            {/* 单循环硬锁（0.15.44 #12）：本会话工具面剥 spawn_task；升级走提议卡 */}
+            {onToggleSingleLoop && (
+              <DropdownMenuItem onSelect={() => onToggleSingleLoop(conv)}>
+                {conv.single_loop === "on" ? <LockOpenIcon /> : <LockIcon />}
+                {conv.single_loop === "on" ? "解除单循环硬锁" : "单循环硬锁（禁直接建任务）"}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuGroup>
@@ -1418,6 +1429,22 @@ export default function ChatPage() {
     [reloadConvs],
   );
 
+  // 单循环硬锁（0.15.44 #12）：开 = 本会话工具面剥 spawn_task（物理不可建任务）；
+  // agent 要建任务只能走 propose_task_escalation 提议卡（人工批准才建）。
+  const toggleSingleLoop = React.useCallback(
+    async (conversation: Conversation) => {
+      const on = conversation.single_loop !== "on";
+      try {
+        const r = await api.conversationSingleLoop(conversation.id, on);
+        toast.success(r.message ?? (on ? "已开启单循环硬锁" : "已解除单循环硬锁"));
+        void reloadConvs();
+      } catch (e) {
+        toast.error(`单循环硬锁切换失败：${(e as Error).message}`);
+      }
+    },
+    [reloadConvs],
+  );
+
   const startRename = React.useCallback((c: Conversation) => {
     setRenamingConvId(c.id);
     setRenameConvText(c.title || "");
@@ -1669,6 +1696,7 @@ export default function ChatPage() {
                                     onCommitRename={(id, title) => void commitRename(id, title)}
                                     onCancelRename={cancelRename}
                                     onTogglePinned={(conversation) => void togglePinned(conversation)}
+                                    onToggleSingleLoop={(conversation) => void toggleSingleLoop(conversation)}
                                     onDelete={(id) => void del(id)}
                                   />
                                 ))}
@@ -1691,6 +1719,7 @@ export default function ChatPage() {
                               onCommitRename={(id, title) => void commitRename(id, title)}
                               onCancelRename={cancelRename}
                               onTogglePinned={(conversation) => void togglePinned(conversation)}
+                              onToggleSingleLoop={(conversation) => void toggleSingleLoop(conversation)}
                               onDelete={(id) => void del(id)}
                             />
                           )))}

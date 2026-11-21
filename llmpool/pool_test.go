@@ -19,6 +19,14 @@ type fakeProv struct {
 	calls  int
 	events [][]llm.StreamEvent // events emitted before the error, per call
 	errs   []error             // error to end each call with (nil = clean finish)
+	// reqLog 可选：记录每次调用收到的请求（thinking_fallback 等改写请求的行为测试用）。
+	reqLog *[]llm.CompletionRequest
+}
+
+func (f *fakeProv) logReq(req llm.CompletionRequest) {
+	if f.reqLog != nil {
+		*f.reqLog = append(*f.reqLog, req)
+	}
 }
 
 // at returns script entry n, repeating the last one once the script runs out, so
@@ -38,6 +46,7 @@ func at[T any](s []T, n int) (T, bool) {
 func (f *fakeProv) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	n := f.calls
 	f.calls++
+	f.logReq(req)
 	return func(yield func(llm.StreamEvent, error) bool) {
 		if evs, ok := at(f.events, n); ok {
 			for _, e := range evs {

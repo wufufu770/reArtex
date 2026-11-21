@@ -25,11 +25,13 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 	s.RegisterTaskHallRoutes(mux)
 	s.RegisterTaskHallQuotaRoutes(mux)
 	RegisterEgressGovernanceRoutes(mux)
-	s.registerTaskSteerRoutes(mux)          // 0.15.16 三档干预
-	s.registerTaskDrainRoutes(mux)          // 0.15.42 人工软截止面
-	s.registerExecutionProfileRoutes(mux)   // 0.15.17 执行档位
-	s.registerSelfEvolveRoutes(mux)         // 0.15.41 自进化可见面
-	s.registerDiagnosticsRoutes(mux)        // 0.15.43 脱敏诊断包
+	s.registerTaskSteerRoutes(mux)        // 0.15.16 三档干预
+	s.registerTaskDrainRoutes(mux)        // 0.15.42 人工软截止面
+	s.registerExecutionProfileRoutes(mux) // 0.15.17 执行档位
+	s.registerSelfEvolveRoutes(mux)       // 0.15.41 自进化可见面
+	s.registerDiagnosticsRoutes(mux)      // 0.15.43 脱敏诊断包
+	s.registerSingleLoopRoutes(mux)       // 0.15.44 会话单循环硬锁
+	s.registerTaskEscalationRoutes(mux)   // 0.15.44 升级提议
 
 	cases := []struct {
 		method, path string
@@ -49,6 +51,9 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 		{"GET", "/api/self-evolve/veto/exports"},
 		{"GET", "/api/self-evolve/veto/exports/1"},
 		{"GET", "/api/diagnostics/bundle"},
+		{"GET", "/api/task-escalations"},             // 0.15.44 升级提议
+		{"POST", "/api/task-escalations/1/decide"},   // 0.15.44 提议裁决
+		{"POST", "/api/conversations/1/single-loop"}, // 0.15.44 会话单循环硬锁
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)

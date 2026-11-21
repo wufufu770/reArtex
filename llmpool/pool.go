@@ -94,18 +94,50 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 		for i, m := range order {
 			emitted := false
 			var failed error
-			for ev, err := range m.Prov.Stream(ctx, req) {
-				if err != nil && !emitted && shouldFailover(ctx, err) {
-					failed = err
-					break // safe window: nothing reached the caller yet
+			// thinking_fallback（0.15.44 #6）：400 且请求带 thinking/reasoning 参数
+			// → 剥离后在本成员上重放一次（安全窗口内零输出已发）。参数是宿主加的，
+			// 网关不支持时剥离重放是宿主权责；重放仍 400 则原样上抛（不 trip health，
+			// 与既有 400 语义一致）。
+			for attempt := 0; attempt < 2; attempt++ {
+				var retried, terminalTripped bool
+				var terminal error
+			streamLoop:
+				for ev, err := range m.Prov.Stream(ctx, req) {
+					if err != nil && !emitted {
+						if !retried && attempt == 0 && statusOf(err) == 400 {
+							if stripped, ok := stripThinkingParams(req); ok {
+								req = stripped
+								retried = true
+								log.Printf("[llmpool] thinking_fallback：%s 400（疑似 thinking 参数不兼容），剥离 thinking/effort 参数重放一次", m.Model)
+								break streamLoop
+							}
+						}
+						if shouldFailover(ctx, err) {
+							failed = err
+						} else {
+							terminal = err
+							terminalTripped = true
+						}
+						break streamLoop
+					}
+					emitted = true
+					if !yield(ev, err) {
+						return // caller stopped consuming (cancel / early exit)
+					}
+					if err != nil {
+						return // terminal error already handed to the caller
+					}
 				}
-				emitted = true
-				if !yield(ev, err) {
-					return // caller stopped consuming (cancel / early exit)
+				if retried {
+					continue // attempt 2：以剥参请求重放本成员
 				}
-				if err != nil {
-					return // terminal error already handed to the caller
+				if terminalTripped {
+					// 非 failover 终止（400 无参可剥 / ctx 取消等）：原样交给调用方。
+					p.health.Pass(m.ID)
+					yield(llm.StreamEvent{}, terminal)
+					return
 				}
+				break
 			}
 			if failed == nil {
 				p.health.Pass(m.ID) // completed (or failed in a non-failover way)
@@ -146,6 +178,15 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 	var lastErr error
 	for i, m := range order {
 		msg, sr, usage, err := m.Prov.Complete(ctx, req)
+		// thinking_fallback（0.15.44 #6）：400 且请求带 thinking/reasoning 参数
+		// → 剥离重放一次（后续 failover 成员同样使用剥参请求）。
+		if err != nil && statusOf(err) == 400 {
+			if stripped, ok := stripThinkingParams(req); ok {
+				log.Printf("[llmpool] thinking_fallback：%s 400（疑似 thinking 参数不兼容），剥离 thinking/effort 参数重放一次", m.Model)
+				req = stripped
+				msg, sr, usage, err = m.Prov.Complete(ctx, req)
+			}
+		}
 		if err == nil {
 			p.health.Pass(m.ID)
 			return msg, sr, usage, nil
@@ -156,15 +197,15 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 			p.health.Pass(m.ID)
 			return llm.Message{}, "", llm.Usage{}, err
 		}
-			lastErr = err
-			hard := isHardFailure(err)
-			if p.health.Trip(m.ID, trimErr(err), hard) {
-				log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
-				if hard && p.OnHardTrip != nil {
-					p.OnHardTrip(m.Name+"/"+m.Model, trimErr(err), hardKind(err))
-				}
+		lastErr = err
+		hard := isHardFailure(err)
+		if p.health.Trip(m.ID, trimErr(err), hard) {
+			log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
+			if hard && p.OnHardTrip != nil {
+				p.OnHardTrip(m.Name+"/"+m.Model, trimErr(err), hardKind(err))
 			}
-			if i+1 < len(order) {
+		}
+		if i+1 < len(order) {
 			n := order[i+1]
 			log.Printf("[llmpool] LLM 故障转移：%q(%s) → %q(%s)，原因：%s",
 				m.Name, m.Model, n.Name, n.Model, trimErr(err))
@@ -237,6 +278,18 @@ func statusOf(err error) int {
 	}
 	code, _ := strconv.Atoi(m[1])
 	return code
+}
+
+// stripThinkingParams 返回剥离 thinking/reasoning 参数后的请求副本（0.15.44
+// #6 thinking_fallback）。第二返回值 false = 请求本就不带这两个参数（无可剥离）。
+func stripThinkingParams(req llm.CompletionRequest) (llm.CompletionRequest, bool) {
+	if req.Thinking == "" && req.ReasoningEffort == "" {
+		return req, false
+	}
+	r2 := req
+	r2.Thinking = ""
+	r2.ReasoningEffort = ""
+	return r2, true
 }
 
 // shouldFailover reports whether err justifies trying the next profile.
