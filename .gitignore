@@ -79,3 +79,5 @@ core.*
 
 # 运行时日志
 artex.log
+veto_eval.egg-info/
+.venv/

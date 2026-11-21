@@ -1,4 +1,0 @@
-[console_scripts]
-veto = veto.eval_core:main
-veto-mcp = veto.mcp_server:main
-veto-server = veto.server:main
