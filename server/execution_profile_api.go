@@ -100,7 +100,12 @@ func (s *Server) executionProfilePatch(w http.ResponseWriter, r *http.Request) {
 	diff, mode = agent.AssessAutoProfile(t.Goal, t.Description, 0, 0, diff, mode)
 	// 显式非法值在 Resolve 里回落默认（档位是运营旋钮，坏输入不炸任务）。
 	p := agent.ResolveExecutionProfile(diff, mode)
-	s.engine.SetExecutionProfile(taskIDInt, p)
+	// 算力档只在请求真带了 difficulty/mode 时才写入与播报——只切授权面的
+	// 请求不应重置既有档位，更不该播一条误导性的「执行档位切换」。
+	profileChanged := req.Difficulty != nil || req.Mode != nil
+	if profileChanged {
+		s.engine.SetExecutionProfile(taskIDInt, p)
+	}
 	// 任务授权面（0.15.26）：独立于算力档，只传了 engagement 时算力档保持不变。
 	// 非法值 400（授权面坏值不静默回落，与 createTask 同口径）。
 	engagementChanged := ""
@@ -123,9 +128,11 @@ func (s *Server) executionProfilePatch(w http.ResponseWriter, r *http.Request) {
 			Summary: "任务授权面切换：" + engagementLabel(normalized) +
 				"（合并闸自动放行出口按档收紧；审计与审批页可查每次确认）"})
 	}
-	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-		Summary: "执行档位切换：难度=" + string(p.Difficulty) + " 模式=" + string(p.Mode) +
-			"（推理强度 " + effortLabel(p.ReasoningEffort) + "；只调请求级参数，上下文与工具面不变）"})
+	if profileChanged {
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+			Summary: "执行档位切换：难度=" + string(p.Difficulty) + " 模式=" + string(p.Mode) +
+				"（推理强度 " + effortLabel(p.ReasoningEffort) + "；只调请求级参数，上下文与工具面不变）"})
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "task_id": t.ID, "profile": p, "engagement_profile": engagementChanged})
 }
 

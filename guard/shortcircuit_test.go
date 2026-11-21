@@ -68,6 +68,11 @@ func TestShortCircuitPlatformCredentialsDeny(t *testing.T) {
 		{"proc environ 变量展开", `{"command":"cat /proc/$$/environ"}`},
 		{"proc environ 字符类 glob", `{"command":"cat /proc/[0-9]*/environ"}`},
 		{"proc environ 文件名 glob", `{"command":"cat /proc/1/envi*on"}`},
+		// JSON 转义形态（0.15.31）：raw 无字面路径，归一化解码后必须命中——
+		// 转义不改变命令的执行语义（json.Unmarshal 后 shell 看到的就是 /app/jwt.key）。
+		{"JSON 一层转义", `{"command":"cat \u002fapp/jwt.key"}`},
+		{"JSON 双层转义", `{"command":"cat \\\\u002fapp/jwt.key"}`},
+		{"JSON 转义 proc environ", `{"command":"cat \u002fproc\u002fself\u002fenviron"}`},
 	}
 	for _, c := range deny {
 		dec := shortCircuit("Bash", []byte(c.in))

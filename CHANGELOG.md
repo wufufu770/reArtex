@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.31] - 2026-11-21
+
+### 修复（全量扫描轮：前后端对齐复检 + 2 个真问题修复）
+
+- **① guard 短路表凭据正则接归一化匹配（真缺口）**：G-02①-a 平台凭据 deny 此前只匹配原始字节——模型把路径藏在 JSON 转义里（{"command":"\u002fapp/jwt.key"}）时 raw 无字面路径即漏；normalizeToolInput 递归解码（0.15.24）提升为导出 NormalizeToolInput 后，shortCircuit 凭据匹配加归一化主体（raw + 解码文本双匹配，非 JSON 回落纯 raw 零行为差异）。单测补 3 条转义形态（一层/双层/proc 族转义）+ 零误伤面回归保持。
+- **② execution-profile PATCH 语义修复（顺带修掉 0.15.17 既有 bug）**：只传 engagement_profile 的请求此前会①无条件 SetExecutionProfile 把「未显式切档」写成「已切默认档」（破坏 ExecutionProfileFor 的 ok=false 语义与 AutoScaler 依据）②无条件播报「执行档位切换」误导活动流。修复：profileChanged（请求真带 difficulty/mode）才写入与播报；只切授权面时算力档零触碰。
+- **③ 前后端对齐复检**（383 条后端路由 × 前端全量调用双向匹配）：本批新增面（engagement 授权面 GET/PATCH/createTask、report.docx、exportFindingDocx）全部有映射；report.docx 实例实测路由注册（401=auth 拦截非 404）；前端无后端断链（提取噪声如模板串尾巴已人工核对）。
+- **④ 其余面复核留档**：技能部署面（build.sh:191 打包 skills/ → 运行实例 BaseDir/skills ✓）；TooltipProvider 根 layout 全局装配 ✓；engagementElevate 仅 enforce 态接线（shadow 旧链权威不收紧 ✓）；createTask 授权面写入在 launchTask 之前 ✓；docx/finding_gate/iLink 侧车无前后端对齐面。
+- 验证：guard/intercept/server 定向回归全绿；go vet 过。
+
 ## [0.15.30] - 2026-11-21
 
 ### 功能（审计专项技能 4 件——渐进披露的深钻手册落库）

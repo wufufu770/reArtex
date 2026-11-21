@@ -194,8 +194,14 @@ func shortCircuit(toolName string, input []byte) *intercept.Decision {
 			Message:  "新建技能文件不改变既有行为，按平台策略放行。",
 		}
 	}
-	// G-02①-a：平台凭据/进程环境 deny
-	if platformCredentialRe.Match(input) || platformCredentialLooseRe.Match(input) {
+	// G-02①-a：平台凭据/进程环境 deny。
+	// 匹配面 = 原始字节 + 归一化文本（0.15.31）：模型把路径藏在 JSON 转义里时
+	// （{"command":"\u002fapp/jwt.key"}）原始字节不含字面路径，凭据正则只对
+	// raw 匹配就漏——NormalizeToolInput 的递归解码把传输层转义解开后再匹配。
+	// 归一化失败（非 JSON）返回空串，保持纯 raw 匹配（零行为差异）。
+	normalized := intercept.NormalizeToolInput(input)
+	if platformCredentialRe.Match(input) || platformCredentialLooseRe.Match(input) ||
+		(normalized != "" && (platformCredentialRe.MatchString(normalized) || platformCredentialLooseRe.MatchString(normalized))) {
 		return &intercept.Decision{
 			Action:   "deny",
 			RuleName: "[代码常量] 平台凭据/进程环境",

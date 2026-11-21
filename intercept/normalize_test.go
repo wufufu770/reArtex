@@ -25,7 +25,7 @@ func TestNormalizeUnblocksUnicodeEscapeBypass(t *testing.T) {
 	if ruleMatches(r, "Bash", raw, "") {
 		t.Fatal("原始字节不应直接命中（它确实不含字符 r）")
 	}
-	norm := normalizeToolInput(raw)
+	norm := NormalizeToolInput(raw)
 	if norm == "" {
 		t.Fatal("合法 JSON 应产出规范化文本")
 	}
@@ -36,7 +36,7 @@ func TestNormalizeUnblocksUnicodeEscapeBypass(t *testing.T) {
 
 func TestNormalizeNonJSONPassthrough(t *testing.T) {
 	for _, in := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`["a"]`)} {
-		if got := normalizeToolInput(in); got != "" {
+		if got := NormalizeToolInput(in); got != "" {
 			t.Fatalf("输入 %q 应返回空串，得到 %q", in, got)
 		}
 	}
@@ -46,7 +46,7 @@ func TestNormalizeDoesNotMaskRawMatch(t *testing.T) {
 	// 正常明文输入两种形态都应命中，保证既有规则行为不变（零行为差异）。
 	r := reFor(t, `rm\s+-rf`)
 	raw := []byte(`{"command":"rm -rf /tmp"}`)
-	if !ruleMatches(r, "Bash", raw, normalizeToolInput(raw)) {
+	if !ruleMatches(r, "Bash", raw, NormalizeToolInput(raw)) {
 		t.Fatal("明文输入应保持命中")
 	}
 }
@@ -58,7 +58,7 @@ func TestNormalizeUnblocksDoubleEscapedBypass(t *testing.T) {
 	raw := []byte(`{"command":"\\\\u0072m -rf /tmp"}`)
 	r := reFor(t, `\brm\b.*-[a-z]*r[a-z]*f`)
 
-	norm := normalizeToolInput(raw)
+	norm := NormalizeToolInput(raw)
 	if strings.Contains(norm, `\u0072`) {
 		t.Fatalf("递归解码不应残留字面转义形态：%q", norm)
 	}
@@ -92,7 +92,7 @@ func TestDecodeValueWalksNestedStructures(t *testing.T) {
 	// args 数组里嵌套的转义命令串同样要被递归解开。meta 不在归一化字段白名单
 	// 内（fields），本就不参与匹配——断言只针对白名单字段。
 	input := []byte(`{"args":["\\\\u0063url http://x","ok"]}`)
-	norm := normalizeToolInput(input)
+	norm := NormalizeToolInput(input)
 	if !strings.Contains(norm, "curl http://x") {
 		t.Fatalf("嵌套结构内的转义应被递归解开：%q", norm)
 	}

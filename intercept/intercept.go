@@ -629,7 +629,7 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	if err != nil || len(rules) == 0 {
 		return Decision{}, false
 	}
-	normalized := normalizeToolInput(input)
+	normalized := NormalizeToolInput(input)
 	for _, r := range rules {
 		if ruleMatches(r, toolName, input, normalized) {
 			return matchRule(r.InterceptRule), true
@@ -670,10 +670,11 @@ func ruleMatches(r compiledRule, toolName string, input []byte, normalized strin
 	return false
 }
 
-// normalizeToolInput 对入参做 JSON 深解码。norma 流式路径原样透传入参、
+// NormalizeToolInput 对入参做 JSON 深解码（跨包可见：guard 短路表的凭据正则
+// 同样需要在解码后的文本上匹配，一层转义形态不再漏）。norma 流式路径原样透传入参、
 // 不解码不重序列化，故 {"command":"\u0072m -rf /tmp"} 的字节里不存在字符
 // 'r'，词表正则永不命中。返回空串表示非 JSON 对象，调用方应只匹配 raw。
-func normalizeToolInput(input []byte) string {
+func NormalizeToolInput(input []byte) string {
 	if len(input) == 0 || input[0] != '{' {
 		return ""
 	}
