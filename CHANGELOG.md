@@ -25,6 +25,23 @@
 - **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
 - 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
 
+## [0.15.28] - 2026-11-21
+
+### 功能（微信 iLink 任务通道——个人微信扫码接入，长轮询零公网依赖）
+
+- **① `wechat-ilink/` Python 侧车**（参照 email-intake 架构）：扫码登录（二维码
+  内容终端打印 + 轮询确认 → bot_token 持久化）→ `getupdates` 长轮询（35s hold，
+  游标持久化防重复）→ **allowlist user_id 信任边界**（与飞书 `/start`、邮箱通道
+  同层；空集拒绝启动，宁漏勿误）→ 命令面（`/tasks` 列任务 / `/create 描述|目标`
+  / `/help` / 裸文本直建任务 ≤300 字）→ 经飞书桥 `/internal/notice` 推创建通知（可选）。
+- **② 协议字段集中映射**：基于 2026-03 社区逆向文档（openclaw-weixin 1.0.2），
+  字段名全部集中在 `ilink.py` 的 `FIELD` 映射区——实测漂移时只改一处。README
+  留档腾讯条款风险（限制/拦截/终止权）与群聊权限限制（本侧车只接 1v1）。
+- **③ 零公网依赖**：长轮询拉模式（无回调 URL），与 email-intake 同架构；
+  reArtex 主程序零改动（复用 `/api/tasks`）。
+- 验证：py_compile 过；协议层冒烟（登录态 roundtrip/UIN 头/updates 解析容错）
+  + 命令层冒烟（/help//tasks 降级路径）；通道文档矩阵补 iLink 行。
+
 ## [0.15.27] - 2026-11-21
 
 ### 功能（Tier B LLM 裁决器——授权面收紧消化进 auditor 裁决岗，零新增 LLM 面）
