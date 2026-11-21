@@ -21,6 +21,8 @@ import type {
   Agent,
   AgentDetail,
   AgentTrigger,
+  AmberMemoryHit,
+  AmberMemoryItem,
   ArchiveBatchItem,
   Asset,
   AssetInterceptRule,
@@ -32,7 +34,6 @@ import type {
   BatchControlItem,
   BizDiffRow,
   BizGraphData,
-  BizLayerDiff,
   ChatAttachment,
   CommandRecord,
   Company,
@@ -97,6 +98,7 @@ import type {
   ReportFull,
   ReportMeta,
   RerateCandidate,
+  SelfEvolveStatus,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -154,6 +156,7 @@ import type {
   TrafficResp,
   UpdateCheck,
   UsageStats,
+  VetoExport,
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
@@ -1112,6 +1115,14 @@ export const api = {
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+
+  // ---- 自进化（RSI）可见面（0.15.41，只读：Amber 记忆库 + Veto 测评导出）----
+  selfEvolveStatus: () => get<SelfEvolveStatus>(`/self-evolve/status`),
+  amberItems: (limit = 50) => get<{ items: AmberMemoryItem[] }>(`/self-evolve/amber/items?limit=${limit}`),
+  amberQuarantine: () => get<{ scope: string; items: AmberMemoryItem[] }>(`/self-evolve/amber/quarantine`),
+  amberMemorySearch: (q: string, k = 10) =>
+    get<{ hits: AmberMemoryHit[] }>(`/self-evolve/amber/search?q=${encodeURIComponent(q)}&k=${k}`),
+  vetoExports: () => get<{ exports: VetoExport[] }>(`/self-evolve/veto/exports`),
   // 出网治理状态：未覆盖通道清单由后端给定，前端不复制也不兜底成空数组
   // （空数组 = 没有未覆盖通道，兜底会把「读不到」说成「都管住了」）。
   egressGovernance: () => get<EgressGovernanceState>(`/settings/egress-governance`),

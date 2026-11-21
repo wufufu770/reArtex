@@ -17,6 +17,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -133,6 +134,8 @@ func (s *Server) amberActiveCount(scope string) int {
 }
 
 // amberGet 是 GET 的公共形态（owner token 优先）。
+// 0.15.41 修复：原先单次 Body.Read 读 1MB——Read 可能短读（内核/分块边界），
+// 大响应会被静默截断；改 io.ReadAll + 2MB 上限。
 func (s *Server) amberGet(path string) ([]byte, int, error) {
 	req, _ := http.NewRequest(http.MethodGet, s.amberBaseURL()+path, nil)
 	if tok := s.amberOwnerToken(); tok != "" {
@@ -144,9 +147,11 @@ func (s *Server) amberGet(path string) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	buf := make([]byte, 1024*1024)
-	n, _ := resp.Body.Read(buf)
-	return buf[:n], resp.StatusCode, nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
 }
 
 // amberOwnerToken 读 owner 令牌（晋升裁决面；worker 令牌无 review 权限）。

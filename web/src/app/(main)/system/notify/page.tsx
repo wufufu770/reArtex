@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { BellIcon, DatabaseIcon, PlusIcon, RadioIcon, SendIcon, Trash2Icon } from "lucide-react";
+import { BellIcon, DatabaseIcon, ExternalLinkIcon, PlusIcon, RadioIcon, SendIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +17,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { NotificationChannel, NotificationFilter, NotificationMeta, Settings } from "@/lib/types";
-import { cn } from "@/lib/utils";
 
 import {
   CHANNEL_FIELDS,
@@ -501,10 +500,14 @@ export default function NotifyPage() {
               {settings?.amber_token_set ? "——已配置" : "——未配置（匿名只写隔离区）"}； amber-memory/ 目录含部署手册。
             </p>
           </div>
-          <div className="sm:col-span-2">
+          <div className="sm:col-span-2 flex items-center gap-3">
             <Button onClick={saveAmber} disabled={amberSaving}>
               {amberSaving ? "保存中…" : "保存记忆库配置"}
             </Button>
+            {/* 0.15.41：浏览记忆/看 curator 观察/启动指引收口到自进化面板 */}
+            <a className="text-primary inline-flex items-center gap-1 text-sm" href="/system/self-evolve">
+              <ExternalLinkIcon className="size-3.5" /> 打开自进化面板（记忆浏览 / 测评回执 / 启动指引）
+            </a>
           </div>
         </CardContent>
       </Card>

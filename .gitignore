@@ -81,3 +81,6 @@ core.*
 artex.log
 veto_eval.egg-info/
 .venv/
+
+# reartex-cve-mcp 本地构建产物（源码入库，二进制不入库）
+/reartex-cve-mcp/reartex-cve-mcp

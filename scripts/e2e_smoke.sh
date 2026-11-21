@@ -44,10 +44,11 @@ ROUTES=(
   /function/commands /function/llm-records /function/assets
   /function/business-graph /function/business-graph/diffs
   /function/miniprogram /function/sync /function/workspace
+  /function/peak-search
   /system/llm /system/agents /system/agents/detail /system/mcp /system/skills
   /system/tools /system/notify /system/intercept /system/intercept/assets
   /system/intercept/approvals /system/logs /system/reports /system/settings
-  /system/memory
+  /system/memory /system/self-evolve
 )
 FAIL=0
 for p in "${ROUTES[@]}"; do

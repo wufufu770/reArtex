@@ -56,6 +56,11 @@ func (s *Server) amberToken() string {
 // amberWrite 写一条记忆（agent 通道 → 隔离区；scope 按 reartex:<target_fp> 命名）。
 // best-effort：失败只记日志。body 先过脱敏面（平台凭据形态拒绝外带——与
 // evidence 脱敏同口径）。
+//
+// ⚠️ 0.15.41 通道修复：此前走 REST /api/memory/write + worker 令牌——但 Amber
+// 的 REST 面 worker 令牌一律 403（worker 只许 /mcp），auth 开启时写入全挂。
+// 改走 /mcp JSON-RPC memory_write（worker 令牌 → agent:worker → agent 通道，
+// Amber 侧强制隔离区——信任模型由通道绑定，调用方无法自称 human）。
 func (s *Server) amberWrite(scope, body, session string) (string, error) {
 	if !s.amberEnabled() {
 		return "", fmt.Errorf("amber 未启用")
@@ -63,9 +68,21 @@ func (s *Server) amberWrite(scope, body, session string) (string, error) {
 	if hit := sodpolicy.SensitiveHit([]byte(body)); hit != "" {
 		return "", fmt.Errorf("记忆正文命中敏感面（%s），拒绝外带", hit)
 	}
-	payload := map[string]any{"scope": scope, "body": body, "session": session}
-	buf, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodPost, s.amberBaseURL()+"/api/memory/write", bytes.NewReader(buf))
+	rpc := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "memory_write",
+			"arguments": map[string]any{
+				"scope":   scope,
+				"body":    body,
+				"session": session,
+			},
+		},
+	}
+	buf, _ := json.Marshal(rpc)
+	req, _ := http.NewRequest(http.MethodPost, s.amberBaseURL()+"/mcp", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	if tok := s.amberToken(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
@@ -76,38 +93,45 @@ func (s *Server) amberWrite(scope, body, session string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	// 结果形态：{"jsonrpc":"2.0","id":1,"result":{"item_id":"..."}} 或
+	// {"jsonrpc":"2.0","id":1,"error":{"code":..,"message":".."}}。
 	var out struct {
-		ItemID string `json:"item_id"`
+		Result struct {
+			ItemID string `json:"item_id"`
+		} `json:"result"`
+		Err *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if out.Err != nil {
+		return "", fmt.Errorf("amber write mcp 错误: %s", out.Err.Message)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("amber write HTTP %d", resp.StatusCode)
 	}
-	return out.ItemID, nil
+	return out.Result.ItemID, nil
 }
 
-// amberSearch 检索（read 面；worker 召回经 inject 面 V2）。
+// amberSearch 检索（read 面，owner 令牌走 REST——worker 令牌在 REST 面无读
+// 权限；worker 召回经 Amber 自身 inject 面 V2，不经此函数）。
 func (s *Server) amberSearch(q string, k int) ([]map[string]any, error) {
 	if !s.amberEnabled() {
 		return nil, fmt.Errorf("amber 未启用")
 	}
-	url := s.amberBaseURL() + "/api/memory/search?q=" + urlQueryEscape(q) + "&k=" + strconv.Itoa(k)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	if tok := s.amberToken(); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	body, status, err := s.amberGet("/api/memory/search?q=" + urlQueryEscape(q) + "&k=" + strconv.Itoa(k))
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("amber search HTTP %d", status)
+	}
 	var out struct {
 		Hits []map[string]any `json:"hits"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("amber search HTTP %d", resp.StatusCode)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
 	}
 	return out.Hits, nil
 }

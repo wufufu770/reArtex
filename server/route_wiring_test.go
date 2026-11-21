@@ -27,6 +27,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 	RegisterEgressGovernanceRoutes(mux)
 	s.registerTaskSteerRoutes(mux)          // 0.15.16 三档干预
 	s.registerExecutionProfileRoutes(mux)   // 0.15.17 执行档位
+	s.registerSelfEvolveRoutes(mux)         // 0.15.41 自进化可见面
 
 	cases := []struct {
 		method, path string
@@ -38,6 +39,12 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 		{"POST", "/api/tasks/1/steer"},
 		{"GET", "/api/tasks/1/execution-profile"},
 		{"PATCH", "/api/tasks/1/execution-profile"},
+		{"GET", "/api/self-evolve/status"},
+		{"GET", "/api/self-evolve/amber/items"},
+		{"GET", "/api/self-evolve/amber/quarantine"},
+		{"GET", "/api/self-evolve/amber/search?q=x"},
+		{"GET", "/api/self-evolve/veto/exports"},
+		{"GET", "/api/self-evolve/veto/exports/1"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)

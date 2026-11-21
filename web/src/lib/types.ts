@@ -967,6 +967,65 @@ export interface Settings {
   wecom_webhook_url?: string; // write-only：企微群机器人 webhook
 }
 
+// ---- 自进化（RSI）可见面（0.15.41，只读：Amber 记忆库 + Veto 测评导出）----
+
+// AmberMemoryItem 是 /api/memory/items 与隔离区列表的条目（Amber 侧字段）。
+export interface AmberMemoryItem {
+  id?: string;
+  item_id?: string; // 隔离区列表用 item_id
+  scope?: string;
+  state?: string;
+  created?: string;
+  expires?: string | null;
+  session?: string;
+  body?: string;
+}
+
+// AmberMemoryHit 是语义检索的命中（score 越高越相关）。
+export interface AmberMemoryHit {
+  id: string;
+  scope: string;
+  score: number;
+  text: string;
+}
+
+// VetoExport 是一个终态任务的 reartex_pentest_v1 response（六字段协议）。
+export interface VetoExport {
+  task_id: string;
+  response: {
+    confirmed_vuln_classes?: string[];
+    retest_confirmed_count?: number;
+    guard_violations?: number;
+    sod_chain_valid?: boolean;
+    tool_calls?: number;
+    total_tokens?: number;
+  };
+  exported_at?: string;
+}
+
+// SelfEvolveStatus 是总览端点的契约（探活/观察态均为 best-effort 字段）。
+export interface SelfEvolveStatus {
+  ok: boolean;
+  amber: {
+    enabled: boolean;
+    base_url: string;
+    owner_token_set: boolean;
+    worker_token_set: boolean;
+  };
+  amber_health: { ok: boolean; detail: string };
+  curator: {
+    last_run: number;
+    observation: {
+      observed_at?: string;
+      quarantine_total?: number;
+      propose_promote?: string[];
+      propose_review?: string[];
+      mode?: string;
+    } | null;
+  };
+  veto: { export_count: number; latest_task_ids: string[] };
+}
+
 // ---- 出网治理状态（GET /api/settings/egress-governance）----
 
 // EgressGovernanceState 是后端给的出网治理契约。

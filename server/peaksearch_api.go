@@ -1,6 +1,6 @@
 package server
 
-// Peak Search API（0.15.38，批次 I）：人工专属知识蒸馏面。
+// 尖峰探索（Peak Search）API（0.15.38，批次 I；0.15.41 更名）：人工专属知识蒸馏面。
 //
 // 人工专属纪律（C 方案 5.1 落地）：
 //   - 全部端点要求显式 UI 头 `X-Peak-Search-UI: 1`（缺失 → 403）——agent/侧车
@@ -62,7 +62,7 @@ func peakResetForTest() {
 // requirePeakUI 是 human-only 守卫。
 func requirePeakUI(w http.ResponseWriter, r *http.Request) bool {
 	if r.Header.Get(peakSearchUIHeader) != "1" {
-		writeErr(w, 403, "Peak Search 仅限人工界面（缺少 UI 标识头）")
+		writeErr(w, 403, "尖峰探索仅限人工界面（缺少 UI 标识头）")
 		return false
 	}
 	return true

@@ -5,6 +5,52 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.41] - 2026-11-21
+
+### 功能（RSI 可见化：自进化面板）+ 改名 + 集成 bug 修复 + 全量体检
+
+- **① 「自进化（RSI）」面板（新页面 /system/self-evolve）**：批次 E/J 的两个
+  外挂组件从黑盒变 UI 可查——Amber 外置永久记忆库（开关/地址/探活/令牌位 +
+  正式记忆/隔离区/语义检索三视图，**全部只读**——晋升仍走 curator 观察态与
+  人工，J3 前零自动落写）+ Veto agent 测评器（终态任务 reartex_pentest_v1
+  回执清单：六字段 + SoD 链有效徽章）+ curator 观察水位 + **从哪里启动**
+  指引卡（Amber 启动命令/环境变量、veto-eval 评分 CLI、J3 推迟裁决留档）。
+  后端 6 端点（/api/self-evolve/status|amber/items|quarantine|search|
+  veto/exports|exports/{taskID}），路由接线测试钉住。
+- **② 更名：Peak Search → 尖峰探索**（用户命名）：导航/页面标题/错误文案/
+  注释全改；协议标识有意保持稳定（API 路径 /api/peak-search、UI 守卫头
+  X-Peak-Search-UI、包名）——显示名与协议解耦，改名零风险。
+- **③ Amber 写入通道修复（真 bug，体检实锤）**：amberWrite 此前走 REST
+  /api/memory/write + worker 令牌——但 Amber REST 面 worker 令牌一律 403
+  （worker 只许 /mcp，权限矩阵硬保证），API 鉴权开启时经验写入全挂。改走
+  /mcp JSON-RPC memory_write（worker 令牌 → agent:worker → agent 通道，
+  隔离区语义由 Amber 侧通道绑定强制）；amberSearch 同理改 owner 令牌读。
+  契约单测钉死（/mcp + Bearer + memory_write 三断言）。
+- **④ amberGet 短读修复**：单次 Body.Read 可能短读静默截断大响应——改
+  io.ReadAll + 2MB 上限（curator/代理共用受益）。
+- **⑤ 前端 lint 环境漂移排查（体检查明：权威工具链本身是好的）**：本机
+  biome 报配置 schema 错——根因是本机 node_modules 被 pnpm 装过（biome
+  2.6.8 + 流浪的 web/pnpm-lock.yaml，未跟踪），而仓的权威锁是 npm
+  package-lock.json（biome 2.5.1，与提交的 biome.json schema 一致）。
+  处置：删除流浪 pnpm-lock.yaml（不进仓）、**回滚** biome.json 迁移试验、
+  以权威 2.5.1 复验（改动文件 0 错误 0 警告）。顺带修 2.5.1 也翻出的存量
+  问题：尖峰探索 RadioGroup label 无 htmlFor（a11y）+ 三个 pre-existing
+  unused import（peak-search 的 api / notify 的 cn / api.ts 的
+  BizLayerDiff）。
+- **⑥ 发现页导出全格式 500 修复（全量体检实锤的真 bug）**：
+  ListFindingsForExport 的 Scan 少了 EvidenceStatus/RootCauseKey 两列
+  （G1 给 findingSelectCols 加列时漏了这个 Scan——19 列 vs 17 目标，
+  sql: expected 19 destination arguments in Scan, not 17），发现页导出
+  （md-single/md-zip/csv/json/txt/sarif/html 全部格式）一律 500。补齐两列 +
+  findingSelectCols 全部消费点普化复查（scanFindings/GetFinding/本处，唯此一处）。
+- **⑦ e2e 冒烟路由清单补缺**：/function/peak-search 与 /system/self-evolve
+  入清单；reartex-cve-mcp 本地构建产物入 .gitignore。
+- 验证：go build/vet 全模块过；db/evidence/agent/sidequestion/traffic 等全绿；
+  server 包全量 588s 绿（⑤⑥修复后；曾以 540s 预算误判超时——单例最长 7.4s，
+  非挂死，纯预算问题）；死锁/通道契约用例 -race 过；tsc/biome/build:static 过；
+  e2e 冒烟 47 页全 200；实例级冒烟 health=0.15.41、/api/self-evolve/status 正确
+  走鉴权、尖峰探索与自进化页面 200。
+
 ## [0.15.40b] - 2026-11-21
 
 ### 功能（前后端对齐补缺 + Peak Search 交互增强）

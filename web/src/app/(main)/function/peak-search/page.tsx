@@ -11,9 +11,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
 
-// Peak Search（0.15.38）：人工专属知识蒸馏工作台。检索（URL/手动粘贴）→
+// 尖峰探索（Peak Search，0.15.38）：人工专属知识蒸馏工作台。检索（URL/手动粘贴）→
 // 蒸馏草稿 → 人工审批（批准才原子写 knowledge 库）。本页请求带专用 UI 头，
 // agent/侧车无此头一律 403（后端守卫）。
 
@@ -110,7 +109,7 @@ export default function PeakSearchPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <SearchIcon className="size-4 text-primary" /> Peak Search · 知识蒸馏
+            <SearchIcon className="size-4 text-primary" /> 尖峰探索 · 知识蒸馏
             <span className="text-muted-foreground text-xs font-normal">
               人工专属（agent 无权限）；批准才写入策略/传承库
             </span>
@@ -129,11 +128,11 @@ export default function PeakSearchPage() {
               onValueChange={(v) => setRepo(v as typeof repo)}
               className="flex items-center gap-3"
             >
-              <label className="flex items-center gap-1.5 text-sm">
-                <RadioGroupItem value="strategy" /> 策略库
+              <label htmlFor="peak-repo-strategy" className="flex items-center gap-1.5 text-sm">
+                <RadioGroupItem value="strategy" id="peak-repo-strategy" /> 策略库
               </label>
-              <label className="flex items-center gap-1.5 text-sm">
-                <RadioGroupItem value="legacy" /> 传承库
+              <label htmlFor="peak-repo-legacy" className="flex items-center gap-1.5 text-sm">
+                <RadioGroupItem value="legacy" id="peak-repo-legacy" /> 传承库
               </label>
             </RadioGroup>
             <Button onClick={search} disabled={searching || (!query.trim() && !text.trim())}>

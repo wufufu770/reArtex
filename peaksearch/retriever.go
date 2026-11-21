@@ -1,4 +1,4 @@
-// Package peaksearch：人工专属知识蒸馏器的检索链（0.15.38，批次 I）。
+// Package peaksearch：尖峰探索（人工专属知识蒸馏器）的检索链（0.15.38，批次 I）。
 //
 // 4 路径故障链（C 方案口径）：内置 WebFetch/WebSearch → 外部 MCP 提供者 →
 // 域名直取器 → 手动离线摄入。V1 落地路径 1 + 4（路径 2/3 框架位，provider
