@@ -3878,6 +3878,11 @@ func (s *Server) settingsPayload() map[string]any {
 		// 开启后连续 5 次不可用进入降级（Tier1/2 确定性放行、Tier3 照拒、审计带
 		// degraded 标记），任一次规整成功自动退出。链每轮现读（热改即刻生效）。
 		"sod_degrade_enabled": s.sodDegradeEnabled(),
+		// 外置记忆库（0.15.40，批次 J）：地址明文回显（内部端点非凭据）；
+		// 令牌只回「已配置」布尔位（AMBER_*_TOKEN 是环境变量面）。
+		"amber_enabled":   s.amberEnabled(),
+		"amber_base_url":  s.amberBaseURL(),
+		"amber_token_set": s.amberToken() != "" || osGetenv("AMBER_OWNER_TOKEN") != "",
 	}
 }
 
@@ -3960,6 +3965,11 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		WeComWebhookURL    *string `json:"wecom_webhook_url"`
 		// B4 降级档总开关（方案 v3 缺陷 B4）。默认关；链每轮现读，热改即刻生效。
 		SodDegradeEnabled *bool `json:"sod_degrade_enabled"`
+		// 外置记忆库（0.15.40，批次 J）：amber_enabled 总开关（默认关）+
+		// 服务地址。worker/owner 令牌是环境变量面（AMBER_*_TOKEN），永不回显
+		// 也不入 settings——只回 amber_token_set 布尔位。
+		AmberEnabled *bool   `json:"amber_enabled"`
+		AmberBaseURL *string `json:"amber_base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3994,6 +4004,20 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.SodDegradeEnabled != nil {
 		if err := s.m.pg.SetBool(settingSodDegradeEnabled, *req.SodDegradeEnabled); err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	// 外置记忆库（0.15.40，批次 J）：开关热改即刻生效（终态写入/curator 观察
+	// 每 run 现读）；地址 http(s) 校验复用外部通道同一函数。
+	if req.AmberEnabled != nil {
+		if err := s.m.pg.SetBool("amber_enabled", *req.AmberEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.AmberBaseURL != nil {
+		if err := putExternalChannelURL(s.m.pg, "amber_base_url", *req.AmberBaseURL); err != nil {
+			writeErr(w, 400, err.Error())
 			return
 		}
 	}

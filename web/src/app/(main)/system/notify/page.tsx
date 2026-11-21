@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { BellIcon, PlusIcon, RadioIcon, SendIcon, Trash2Icon } from "lucide-react";
+import { BellIcon, DatabaseIcon, PlusIcon, RadioIcon, SendIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +58,10 @@ export default function NotifyPage() {
   const [bridgeSecret, setBridgeSecret] = React.useState("");
   const [wecomHook, setWecomHook] = React.useState("");
   const [extSaving, setExtSaving] = React.useState(false);
+  // 外置记忆库（0.15.40 批次 J）：Amber 开关 + 地址（令牌是环境变量面）。
+  const [amberEnabled, setAmberEnabled] = React.useState(false);
+  const [amberURL, setAmberURL] = React.useState("");
+  const [amberSaving, setAmberSaving] = React.useState(false);
 
   const load = React.useCallback(() => {
     api
@@ -81,6 +85,8 @@ export default function NotifyPage() {
         setBridgeURL(s.feishu_bridge_url ?? "");
         setBridgeSecret("");
         setWecomHook("");
+        setAmberEnabled(s.amber_enabled ?? false);
+        setAmberURL(s.amber_base_url ?? "");
       })
       .catch(() => {
         /* settings 与推送页主功能正交，失败静默 */
@@ -105,6 +111,23 @@ export default function NotifyPage() {
       toast.error("保存失败：" + (e as Error).message);
     } finally {
       setExtSaving(false);
+    }
+  }
+
+  // 外置记忆库保存：地址 http(s) 校验在后端（putExternalChannelURL 同一函数）。
+  async function saveAmber() {
+    setAmberSaving(true);
+    try {
+      await api.setSettings({
+        amber_enabled: amberEnabled,
+        amber_base_url: amberURL.trim(),
+      });
+      toast.success("记忆库配置已保存（终态写入/curator 现取，即时生效）");
+      load();
+    } catch (e) {
+      toast.error("保存失败：" + (e as Error).message);
+    } finally {
+      setAmberSaving(false);
     }
   }
 
@@ -443,6 +466,44 @@ export default function NotifyPage() {
           <div className="sm:col-span-2">
             <Button onClick={saveExternalChannels} disabled={extSaving}>
               {extSaving ? "保存中…" : "保存外部通道"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 外置记忆库（0.15.40 批次 J）：Amber 可选组件——开关默认关，未部署时零行为变化 */}
+      <Card className="gap-3">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <DatabaseIcon className="size-4 text-primary" /> 外置记忆库（Amber）
+            <span className="text-muted-foreground text-xs font-normal">
+              任务终态经验摘要写入隔离区；晋升走 curator/人工，worker 无自证权限
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">
+          <div className="flex items-center gap-3">
+            <Switch id="n-amber-enabled" checked={amberEnabled} onCheckedChange={(v) => setAmberEnabled(v)} />
+            <Label htmlFor="n-amber-enabled" className="text-sm">
+              启用（服务须已在 {settings?.amber_base_url || "127.0.0.1:8002"} 部署）
+            </Label>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="n-amber-url">Amber 服务地址</Label>
+            <Input
+              id="n-amber-url"
+              placeholder="http://127.0.0.1:8002"
+              value={amberURL}
+              onChange={(e) => setAmberURL(e.target.value)}
+            />
+            <p className="text-muted-foreground text-xs">
+              角色令牌（AMBER_WORKER_TOKEN / AMBER_OWNER_TOKEN）是服务环境变量面
+              {settings?.amber_token_set ? "——已配置" : "——未配置（匿名只写隔离区）"}； amber-memory/ 目录含部署手册。
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <Button onClick={saveAmber} disabled={amberSaving}>
+              {amberSaving ? "保存中…" : "保存记忆库配置"}
             </Button>
           </div>
         </CardContent>

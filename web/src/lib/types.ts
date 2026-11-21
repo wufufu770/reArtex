@@ -958,6 +958,10 @@ export interface Settings {
   // ---- 外部通道（0.15.19/20 批次 D：飞书桥/企微广播，详见 docs/外部通道.md）----
   feishu_bridge_url?: string; // 飞书桥广播接收端点（明文回显）；空=通道关闭
   feishu_bridge_secret?: string; // write-only：共享口令（回显走 feishu_bridge_set 布尔位）
+  // ---- 外置记忆库（0.15.40 批次 J：Amber 可选组件）----
+  amber_enabled?: boolean; // 总开关默认关；未部署/关闭时零行为变化
+  amber_base_url?: string; // 服务地址（明文回显，loopback:8002 默认）
+  amber_token_set?: boolean; // 角色令牌是环境变量面（AMBER_*_TOKEN），只回布尔位
   feishu_bridge_set?: boolean; // 共享口令已配置
   wecom_webhook_set?: boolean; // 企微群机器人 webhook 已配置（webhook 本身即凭据，永不回显）
   wecom_webhook_url?: string; // write-only：企微群机器人 webhook

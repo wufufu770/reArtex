@@ -42,6 +42,10 @@ export default function PeakSearchPage() {
   const [repo, setRepo] = React.useState<"strategy" | "legacy">("strategy");
   const [searching, setSearching] = React.useState(false);
   const [proposals, setProposals] = React.useState<Proposal[]>([]);
+  // edit_approve（修改后批准）的编辑缓冲：单条展开，一份即可。
+  const [editing, setEditing] = React.useState<string | null>(null);
+  const [editTitle, setEditTitle] = React.useState("");
+  const [editBody, setEditBody] = React.useState("");
 
   const load = React.useCallback(async () => {
     try {
@@ -80,6 +84,21 @@ export default function PeakSearchPage() {
         body: JSON.stringify({ action }),
       });
       toast.success(action === "approve" ? "已批准并写入知识库" : "已丢弃");
+      await load();
+    } catch (e) {
+      toast.error(`裁决失败：${(e as Error).message}`);
+    }
+  };
+
+  // decideEdit：edit_approve——后端以提交的 title/body 覆盖草稿后原子写。
+  const decideEdit = async (id: string) => {
+    try {
+      await peakFetch(`/api/peak-search/proposals/${id}/decide`, {
+        method: "POST",
+        body: JSON.stringify({ action: "edit_approve", title: editTitle, body: editBody, repo }),
+      });
+      toast.success("修改已保存并写入知识库");
+      setEditing(null);
       await load();
     } catch (e) {
       toast.error(`裁决失败：${(e as Error).message}`);
@@ -130,31 +149,66 @@ export default function PeakSearchPage() {
         </CardContent>
       </Card>
 
-      {proposals.map((p) => (
-        <Card key={p.id}>
-          <CardHeader>
-            <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
-              <Badge variant="outline">{p.pathway}</Badge>
-              <Badge variant="outline">{p.draft.repo === "legacy" ? "传承库" : "策略库"}</Badge>
-              <span className="min-w-0 truncate font-medium">{p.draft.title}</span>
-              <span className="text-muted-foreground text-xs">{p.created_at}</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            <pre className="max-h-64 overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-              {p.draft.body}
-            </pre>
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={() => void decide(p.id, "approve")}>
-                <CheckIcon /> 批准并写入{p.draft.repo === "legacy" ? "传承库" : "策略库"}
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => void decide(p.id, "reject")}>
-                <XIcon /> 丢弃
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+      {proposals.map((p) => {
+        const editable = editing === p.id;
+        return (
+          <Card key={p.id}>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
+                <Badge variant="outline">{p.pathway}</Badge>
+                <Badge variant="outline">{p.draft.repo === "legacy" ? "传承库" : "策略库"}</Badge>
+                <span className="min-w-0 truncate font-medium">{p.draft.title}</span>
+                <span className="text-muted-foreground text-xs">{p.created_at}</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              {editable ? (
+                <>
+                  <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} placeholder="标题" />
+                  <Textarea
+                    className="min-h-40 font-mono"
+                    value={editBody}
+                    onChange={(e) => setEditBody(e.target.value)}
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={() => void decideEdit(p.id)} disabled={!editBody.trim()}>
+                      <CheckIcon /> 保存修改并批准
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setEditing(null)}>
+                      取消
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <pre className="max-h-64 overflow-auto rounded-md bg-muted px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+                    {p.draft.body}
+                  </pre>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" onClick={() => void decide(p.id, "approve")}>
+                      <CheckIcon /> 批准并写入{p.draft.repo === "legacy" ? "传承库" : "策略库"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setEditing(p.id);
+                        setEditTitle(p.draft.title);
+                        setEditBody(p.draft.body);
+                      }}
+                    >
+                      修改后批准
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => void decide(p.id, "reject")}>
+                      <XIcon /> 丢弃
+                    </Button>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
       {proposals.length === 0 && (
         <p className="text-muted-foreground px-1 text-sm">暂无待审提议。检索完成后草稿会出现在这里。</p>
       )}
