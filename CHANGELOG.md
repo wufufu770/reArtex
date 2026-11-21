@@ -5,52 +5,6 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.25] - 2026-11-21
-
-### 功能（finding_gate 启发式预检——注定被打回的上报不再占用复核带宽）
-
-- **① report_finding 落库前确定性预检**（`agent/finding_gate.go` 新文件，XIB-Artex finding_gate.go 的本仓化）：三条保守规则——R1 证据空白（TrimSpace 空）；R2 summary 结论自否（「不是(一个)漏洞/误报/不成立/false positive…」）；R3 summary 自认未验证（「未验证/未触发/无 PoC/待验证/存疑…」）。命中即当场拒绝（与 severity 归一化同一形态：当场拒 + 告知改道 `record_fact` 标 inferred），违规上报不再落 pending 占探索图节点与复核带宽。正则/词表挂源码常量（同 shortcircuit 纪律：不进 DB/settings 热改面）。
-- **② 判定面刻意收窄（误伤最低裁决）**：R2/R3 只查 **summary**（结论陈述），不查 evidence——证据文本引用上下文（复测记录、目标回复「不存在漏洞」等）出现这些词是正常的；只查 summary 同样能拦住「注入面存在（未验证）」这类自认候选。
-- **③ 两条 XIB 原版规则不移植（留档裁决）**：「缺 HTTP 交互标记即拒」——本仓明文支持 TCP 等非 HTTP 漏洞省略流量绑定，会误伤合法 TCP 类上报；「decompiled 字面拦截」——小程序渗透的 wxapkg 反编译产物凭据泄露是合法上报场景（key 泄露本身是洞）。
-- **④ 接线钉死**：addFinding 的 Run 在 severity 校验后调用 `CheckFindingGate(a.Summary, a.Evidence)`；既有合约测试 fixture 补 evidence 适配（fixture 是原子性合约测试，输入本就该过预检）。
-- 测试：finding_gate 单测 4 条（空证据/自否/合法零误伤含 TCP+反编译场景/接线钉死）；agent 全量回归绿（83s）；db 全量绿。
-
-## [0.15.26] - 2026-11-21
-
-### 功能（任务授权面 EngagementPolicy——预授权三档，XIB engagement policy 本仓化）
-
-- **① tasks.engagement_profile 列**（`db/engagement.go` 新文件 + schema.sql 迁移）：三档——`authorized_active`（默认=现状全部行为，零行为变化）/ `passive_recon`（对目标的出网动作先经人工确认）/ `strict_manual`（除平台内安全读写外一律先确认）。CHECK 枚举约束 + `NormalizeEngagementProfile` 写侧拒绝非法值（授权面坏值不静默回落）；读侧查不到/失败一律回落默认档（不收紧不放宽，收紧是显式写入的结果）。与执行档位（difficulty/mode）正交：那管算力，本列管「允许自动做什么」。
-- **② 合并闸放行出口按档收紧**（`internal/sod/mergedgate.go` engagementElevate + ChainDeps.EngagementProfileOf 注入）：闸门即将自动放行时按档复核——合同内放行照旧，合同外先敲门；deny/auditor-route/review 路径不受影响（那些本来就不自动放行）。passive_recon 的「出网」判定用分类器结论（远端主机/GET/DNS/目标写形态）——分不出「这次 curl 只读还是写目标」按最保守解释宁可多问；strict_manual 放行 ClassBenign/ClassLocalSafe（平台内安全动作问人纯属骚扰）。
-- **③ server 面**：createTask 接收 `engagement_profile`（非法 400）+ execution-profile GET/PATCH 扩展（切档 activity 播报）；wireMergedGateDeps 注入（db 读失败回落默认档）。
-- **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
-- 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
-
-## [0.15.28] - 2026-11-21
-
-### 功能（微信 iLink 任务通道——个人微信扫码接入，长轮询零公网依赖）
-
-- **① `wechat-ilink/` Python 侧车**（参照 email-intake 架构）：扫码登录（二维码
-  内容终端打印 + 轮询确认 → bot_token 持久化）→ `getupdates` 长轮询（35s hold，
-  游标持久化防重复）→ **allowlist user_id 信任边界**（与飞书 `/start`、邮箱通道
-  同层；空集拒绝启动，宁漏勿误）→ 命令面（`/tasks` 列任务 / `/create 描述|目标`
-  / `/help` / 裸文本直建任务 ≤300 字）→ 经飞书桥 `/internal/notice` 推创建通知（可选）。
-- **② 协议字段集中映射**：基于 2026-03 社区逆向文档（openclaw-weixin 1.0.2），
-  字段名全部集中在 `ilink.py` 的 `FIELD` 映射区——实测漂移时只改一处。README
-  留档腾讯条款风险（限制/拦截/终止权）与群聊权限限制（本侧车只接 1v1）。
-- **③ 零公网依赖**：长轮询拉模式（无回调 URL），与 email-intake 同架构；
-  reArtex 主程序零改动（复用 `/api/tasks`）。
-- 验证：py_compile 过；协议层冒烟（登录态 roundtrip/UIN 头/updates 解析容错）
-  + 命令层冒烟（/help//tasks 降级路径）；通道文档矩阵补 iLink 行。
-
-## [0.15.27] - 2026-11-21
-
-### 功能（Tier B LLM 裁决器——授权面收紧消化进 auditor 裁决岗，零新增 LLM 面）
-
-- **① 收紧命中先经 auditor 裁决**（`internal/sod/mergedgate.go` engagementElevate 升级）：passive_recon/strict_manual 档命中收紧后，先交 **auditor LLM 三态裁决**（复用 deps.Adjudicator——缓存/并发槽/90s 超时/失败审计全复用，**零新增 LLM 面**）：pass=放行（常规出网动作不落人工带宽）、deny=拒（note 带裁决理由）、ask/裁决失败=人工兜底（elevateAsk）。auditor 未装配时整段回落 elevateAsk（宁问人不断链）。
-- **② 裁决请求带授权面语境**：Reason 前缀 `engagement:<档>`，auditor（或未来任何 Adjudicator 实现）按任务授权面语境裁决；裁决理由进审计 marker（`engagement_reason`，120 rune 截断）。
-- **③ 与铁律的对齐**：auditor 裁决的是「放不放行这次工具调用」（权限面），fail-closed 三态 + ask 人工兜底 + deny 可回放——它不是业务结论裁决（finding 确认/意图仲裁仍是确定性层），SoD 铁律语义不变。
-- 测试：engagement 测试扩到 6 条（默认零收紧/passive 出网 ask/strict 非安全 ask/拒答 fail-closed/auditor pass/deny/ask/失败四路）；sod 全量回归绿。
-
 ## [0.15.30] - 2026-11-21
 
 ### 功能（审计专项技能 4 件——渐进披露的深钻手册落库）
@@ -114,6 +68,26 @@
 - **② 裁决请求带授权面语境**：Reason 前缀 `engagement:<档>`，auditor（或未来任何 Adjudicator 实现）按任务授权面语境裁决；裁决理由进审计 marker（`engagement_reason`，120 rune 截断）。
 - **③ 与铁律的对齐**：auditor 裁决的是「放不放行这次工具调用」（权限面），fail-closed 三态 + ask 人工兜底 + deny 可回放——它不是业务结论裁决（finding 确认/意图仲裁仍是确定性层），SoD 铁律语义不变。
 - 测试：engagement 测试扩到 6 条（默认零收紧/passive 出网 ask/strict 非安全 ask/拒答 fail-closed/auditor pass/deny/ask/失败四路）；sod 全量回归绿。
+
+## [0.15.26] - 2026-11-21
+
+### 功能（任务授权面 EngagementPolicy——预授权三档，XIB engagement policy 本仓化）
+
+- **① tasks.engagement_profile 列**（`db/engagement.go` 新文件 + schema.sql 迁移）：三档——`authorized_active`（默认=现状全部行为，零行为变化）/ `passive_recon`（对目标的出网动作先经人工确认）/ `strict_manual`（除平台内安全读写外一律先确认）。CHECK 枚举约束 + `NormalizeEngagementProfile` 写侧拒绝非法值（授权面坏值不静默回落）；读侧查不到/失败一律回落默认档（不收紧不放宽，收紧是显式写入的结果）。与执行档位（difficulty/mode）正交：那管算力，本列管「允许自动做什么」。
+- **② 合并闸放行出口按档收紧**（`internal/sod/mergedgate.go` engagementElevate + ChainDeps.EngagementProfileOf 注入）：闸门即将自动放行时按档复核——合同内放行照旧，合同外先敲门；deny/auditor-route/review 路径不受影响（那些本来就不自动放行）。passive_recon 的「出网」判定用分类器结论（远端主机/GET/DNS/目标写形态）——分不出「这次 curl 只读还是写目标」按最保守解释宁可多问；strict_manual 放行 ClassBenign/ClassLocalSafe（平台内安全动作问人纯属骚扰）。
+- **③ server 面**：createTask 接收 `engagement_profile`（非法 400）+ execution-profile GET/PATCH 扩展（切档 activity 播报）；wireMergedGateDeps 注入（db 读失败回落默认档）。
+- **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
+- 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
+
+## [0.15.25] - 2026-11-21
+
+### 功能（finding_gate 启发式预检——注定被打回的上报不再占用复核带宽）
+
+- **① report_finding 落库前确定性预检**（`agent/finding_gate.go` 新文件，XIB-Artex finding_gate.go 的本仓化）：三条保守规则——R1 证据空白（TrimSpace 空）；R2 summary 结论自否（「不是(一个)漏洞/误报/不成立/false positive…」）；R3 summary 自认未验证（「未验证/未触发/无 PoC/待验证/存疑…」）。命中即当场拒绝（与 severity 归一化同一形态：当场拒 + 告知改道 `record_fact` 标 inferred），违规上报不再落 pending 占探索图节点与复核带宽。正则/词表挂源码常量（同 shortcircuit 纪律：不进 DB/settings 热改面）。
+- **② 判定面刻意收窄（误伤最低裁决）**：R2/R3 只查 **summary**（结论陈述），不查 evidence——证据文本引用上下文（复测记录、目标回复「不存在漏洞」等）出现这些词是正常的；只查 summary 同样能拦住「注入面存在（未验证）」这类自认候选。
+- **③ 两条 XIB 原版规则不移植（留档裁决）**：「缺 HTTP 交互标记即拒」——本仓明文支持 TCP 等非 HTTP 漏洞省略流量绑定，会误伤合法 TCP 类上报；「decompiled 字面拦截」——小程序渗透的 wxapkg 反编译产物凭据泄露是合法上报场景（key 泄露本身是洞）。
+- **④ 接线钉死**：addFinding 的 Run 在 severity 校验后调用 `CheckFindingGate(a.Summary, a.Evidence)`；既有合约测试 fixture 补 evidence 适配（fixture 是原子性合约测试，输入本就该过预检）。
+- 测试：finding_gate 单测 4 条（空证据/自否/合法零误伤含 TCP+反编译场景/接线钉死）；agent 全量回归绿（83s）；db 全量绿。
 
 ## [0.15.24] - 2026-11-21
 
