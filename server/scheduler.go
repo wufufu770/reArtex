@@ -135,6 +135,9 @@ func (sc *Scheduler) step() {
 	// 不能被这个提前返回挡掉（否则没配 trigger 时策略永远不晋级）。
 	sc.dispatchStrategyCurator()
 	sc.sweepStaleReviews()
+	// Amber curator 观察模式（0.15.40，批次 J2）：每小时水位闸内扫隔离区产
+	// 拟晋升清单——观察态不落写；amber 关闭时函数内直接返回（零开销）。
+	go sc.s.AmberCuratorObserve()
 	// 偏锋轮转唤醒（EDGE E7）：放在 triggers 提前返回之前——edge_exec 是内置
 	// agent，不能配 agent_triggers（HTTP 面对内置 400），它的轮间接力走这里。
 	schedCounters.tickTotal.Add(1)

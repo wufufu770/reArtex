@@ -1416,9 +1416,48 @@ func (e *Engine) emitTaskTokenTotal(t *Task) {
 	// Veto exporter（0.15.32，批次 E1）：任务终态导出 reartex_pentest_v1
 	// responses——挂在 token 总量播报旁 = 四个终态落点（停滞/goalless/超时/常规）
 	// 全覆盖且只跑一次。best-effort，失败不影响终态。
-	if s := e.serverRef(); s != nil {
+	if s := e.vetoServer; s != nil {
 		s.ExportVetoResponses(t)
+		// Amber 经验写入（0.15.39，批次 J1）：任务终态把结构化经验摘要写进
+		// Amber 隔离区（agent 通道，晋升走 curator/人工）。开关默认关。
+		s.amberWriteTaskExperience(t)
 	}
+}
+
+// amberWriteTaskExperience 把任务终态经验摘要写进 Amber（best-effort，开关关/
+// 未部署时静默跳过）。
+func (s *Server) amberWriteTaskExperience(t *Task) {
+	if !s.amberEnabled() {
+		return
+	}
+	resp, err := s.VetoResponseForTask(taskNumericIDOf(t))
+	if err != nil {
+		log.Printf("[amber] 任务 %s 经验汇总失败（跳过）: %v", t.ID, err)
+		return
+	}
+	scope := fmt.Sprintf("reartex:specialize:task-%s", t.ID)
+	body := fmt.Sprintf("任务「%s」终态=%s：确认漏洞类别 %v，复测确认 %d 次，工具调用 %d，token %d，SoD 链有效=%v",
+		taskDisplayName(t), t.lifecycleSnapshot().Status,
+		resp["confirmed_vuln_classes"], resp["retest_confirmed_count"],
+		resp["tool_calls"], resp["total_tokens"], resp["sod_chain_valid"])
+	if _, err := s.amberWrite(scope, body, "task-"+t.ID); err != nil {
+		log.Printf("[amber] 任务 %s 经验写入失败（隔离区未启用或服务不在）: %v", t.ID, err)
+		return
+	}
+	log.Printf("[amber] 任务 %s 经验已写入隔离区（scope=%s）", t.ID, scope)
+}
+
+// taskNumericIDOf / taskDisplayName 局部助手。
+func taskNumericIDOf(t *Task) int64 {
+	id, _ := strconv.ParseInt(strings.TrimSpace(t.ID), 10, 64)
+	return id
+}
+
+func taskDisplayName(t *Task) string {
+	if strings.TrimSpace(t.Name) != "" {
+		return t.Name
+	}
+	return t.Description
 }
 
 // serverRef 返回引擎背书的 server 引用（engine 无法直接持有 server——由 server

@@ -5,6 +5,29 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.39] - 2026-11-21
+
+### 功能（批次 J1+J2：Amber 记忆库接入（可选组件）+ curator 观察模式）
+
+- **① 裁决更新（0.15.18 的延续）**：用户交付 Amber v0.5.0 包（117/117 全绿），
+  「不引入外部记忆库」裁决更新为**可选组件引入**——功能开关默认关
+  （amber_enabled settings 键 + amber_base_url），未部署/未开启时零行为变化。
+- **② worker 经验写入**（server/amber_client.go + engine 终态挂点）：任务终态
+  把结构化经验摘要（终态/确认漏洞类别/复测确认/工具调用/token/SoD 链有效）写
+  Amber 隔离区——agent 通道强制隔离（Amber 原生权限矩阵，worker 无晋升权限）；
+  正文过 SensitiveHit 敏感面（平台凭据形态拒绝外带）；best-effort 失败静默。
+- **③ curator 观察模式**（server/amber_curator.go + scheduler 每小时）：扫隔离区
+  → 按规则评估（specialize:* 拟自动晋升 / generalize:* 需同 scope active ≥2 /
+  冲突交人工）→ **拟晋升清单写 sched_state——观察态不落写**（不调 review 接口）。
+  观察数据积累后人工确认规则行为再切 enforce（J3 期）。
+- **④ 部署形态**：amber-memory/ 落仓（v0.5.0）+ venv 部署（127.0.0.1:8002 loopback，
+  AMBER_BOOTSTRAP=1 首次授权；AMBER_WORKER_TOKEN/AMBER_OWNER_TOKEN 角色令牌只存
+  环境变量）。
+- **⑤ J3（Tier-1 RSI 自动闭环）推迟留档**：依赖 E2 真实 baseline（无 LLM+靶场
+  未录）+ J2 观察数据（触发条件 ≥15 泛化 trace）；自动改提示词+自动 revert 是
+  最高风险面，基线与观察数据齐备后再开。闭环的门禁本体（Veto paired_exact
+  gate）已在 E1 就位。
+
 ## [0.15.38] - 2026-11-21
 
 ### 功能（批次 I：Peak Search——人工专属知识蒸馏器）
