@@ -5,6 +5,26 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.38] - 2026-11-21
+
+### 功能（批次 I：Peak Search——人工专属知识蒸馏器）
+
+- **① peaksearch 包**（4 路径检索故障链）：SourceDocument 归一化契约 +
+  Retriever 接口 + Chain 优先级故障切换（失败/空结果自动下探，连续 3 次失败开
+  5 分钟熔断窗）。V1 落地路径 1（内置 WebFetch——URL 抓取，egress 治理复用）+
+  路径 4（手动离线摄入——粘贴文本零网络兜底）；路径 2（外部 MCP 提供者）/
+  路径 3（域名直取器）框架位留档 V2。
+- **② 人工专属纪律落地**（C 方案 5.1）：全部端点要求显式 UI 头
+  X-Peak-Search-UI: 1（缺失 → 403——agent/侧车常规调用不携带）；不注册任何
+  agent 工具定义（零暴露面）；写面硬绑 strategies/legacy 双库。
+- **③ 三端点**：POST search（检索→蒸馏草稿→提议入队；LLM 缺席时回落原文摘录
+  草稿，审批流不断）/ GET proposals / POST decide（approve/edit_approve/reject，
+  批准才原子写 data/knowledge/{repo}/<slug>.md + PG knowledge_entries 索引）。
+  单测：无头 403 / 有头通过 / 手动路径全链（提议→批准→文件落库→重复裁决 404）。
+- **④ 前端**：Peak Search 页（检索框+目标库选择+手动粘贴+待审提议卡列表，
+  批准/丢弃）+ sidebar 新项（Telescope 图标）。
+- 测试：peaksearch API 2 条全绿；tsc/biome/build:static 过。
+
 ## [0.15.37] - 2026-11-21
 
 ### 功能（批次 H：reartex-cve-mcp 独立 CVE 情报服务）

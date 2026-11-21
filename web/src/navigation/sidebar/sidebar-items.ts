@@ -26,6 +26,7 @@ import {
   Smartphone,
   Sparkles,
   Target,
+  Telescope,
   Terminal,
   Users,
   Waypoints,
@@ -93,6 +94,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "miniprogram", title: "小程序渗透", url: "/function/miniprogram", icon: Smartphone },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
+      { id: "peak-search", title: "Peak Search", url: "/function/peak-search", icon: Telescope },
     ],
   },
   {

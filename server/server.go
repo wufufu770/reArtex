@@ -965,6 +965,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerTaskSteerRoutes(mux)        // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
 	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
 	s.registerVetoExportRoutes(mux)      // 0.15.32：Veto 导出（GET veto-export）
+	s.registerPeakSearchRoutes(mux)      // 0.15.38：Peak Search（人工专属蒸馏面）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。
