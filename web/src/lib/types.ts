@@ -504,6 +504,9 @@ export interface Finding {
   summary: string;
   evidence: string;
   report?: string; // 详细报告(Markdown);仅详情接口返回,列表为空
+  // 证据交叉验证与同根因标记（0.15.35）：
+  evidence_status?: "verified" | "unverified" | "na";
+  root_cause_key?: string; // 相同键 = 疑似同根因组（合并走人工）
   intent_id?: string;
   param_id?: string;
   task_id?: string;

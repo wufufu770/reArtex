@@ -330,6 +330,11 @@ type FindingDTO struct {
 	Summary   string `json:"summary"`
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // 详细报告(Markdown);仅详情接口返回,列表为空
+	// 证据交叉验证态与同根因标记（0.15.35）：verified=证据行命中真实工具输出；
+	// unverified=活动流有输出但无一命中（claimed 输出没发生过）；na=无任务上下文。
+	// root_cause_key 相同的 findings 为「疑似同根因」组（合并走人工）。
+	EvidenceStatus string `json:"evidence_status,omitempty"`
+	RootCauseKey   string `json:"root_cause_key,omitempty"`
 
 	IntentID        string            `json:"intent_id,omitempty"`
 	ParamID         string            `json:"param_id,omitempty"`
@@ -467,6 +472,8 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Summary:   f.Summary,
 		Evidence:  f.Evidence,
 		Report:    f.Report,
+		EvidenceStatus: f.EvidenceStatus,
+		RootCauseKey:   f.RootCauseKey,
 		TS:        rfc3339(f.CreatedAt),
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)

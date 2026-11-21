@@ -189,7 +189,12 @@ func (s *Store) Record(ctx context.Context, in db.RecordFindingInput, refs []db.
 			return err
 		}
 		out, err = s.DB.RecordFindingTx(ctx, tx, in, prepared)
-		return err
+		if err != nil {
+			return err
+		}
+		// 证据交叉验证 + root_cause 标记（0.15.35）：同事务 best-effort 旁路。
+		s.markEvidenceAndRootCause(ctx, tx, out.FindingID, in.ExplorationID, in.VulnClass, in.Evidence)
+		return nil
 	})
 	return
 }
@@ -416,4 +421,83 @@ func (s *Store) RunGC(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// ── 证据交叉验证 + root_cause 标记（0.15.35，批次 G1）─────────────────────────
+
+// VerifyEvidenceAgainstActivity 把 finding.evidence 的证据行与活动流里最近的
+// 工具输出做逐字比对：任一证据行（≥8 字符非空白行，规范化空白后）作为子串
+// 出现在真实 tool_result 输出中 = verified。返回 verified / unverified / na：
+//   - verified：至少一行命中（证据与实际执行输出对得上）；
+//   - unverified：活动流有输出但没有任何证据行命中（声称的输出没发生过）；
+//   - na：无可解析证据行 / 活动流为空（无任务上下文或尚未执行）。
+func (s *Store) VerifyEvidenceAgainstActivity(ctx context.Context, tx *sql.Tx, explorationID int64, evidence string) (string, error) {
+	rows := evidenceClaimLines(evidence)
+	if len(rows) == 0 {
+		return "na", nil
+	}
+	const scanLimit = 500
+	dbRows, err := tx.QueryContext(ctx, `
+SELECT COALESCE(detail,'') FROM activity
+WHERE exploration_id=$1 AND kind='tool_result'
+ORDER BY id DESC LIMIT $2`, explorationID, scanLimit)
+	if err != nil {
+		return "na", err
+	}
+	defer dbRows.Close()
+	var outputs []string
+	for dbRows.Next() {
+		var d string
+		if err := dbRows.Scan(&d); err != nil {
+			return "na", err
+		}
+		outputs = append(outputs, normalizeEvidenceLine(d))
+	}
+	if len(outputs) == 0 {
+		return "na", nil
+	}
+	for _, line := range rows {
+		for O := range outputs {
+			if strings.Contains(outputs[O], line) {
+				return "verified", nil
+			}
+		}
+	}
+	return "unverified", nil
+}
+
+// evidenceClaimLines 抽证据行：规范化空白后 ≥8 rune 的行，最多 8 行
+// （防超长 evidence 拖慢比对——头部行通常是核心证据）。
+func evidenceClaimLines(evidence string) []string {
+	var out []string
+	for _, raw := range strings.Split(evidence, "\n") {
+		line := normalizeEvidenceLine(raw)
+		if len([]rune(line)) < 8 {
+			continue
+		}
+		out = append(out, line)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
+// normalizeEvidenceLine 折叠空白（比对时空白差异不构成「证据不实」）。
+func normalizeEvidenceLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// markEvidenceAndRootCause 在 finding 落库后同事务补两列：evidence_status
+//（交叉验证态）与 root_cause_key（同根因合并标记）。失败不回滚主写入
+//（best-effort 旁路；两列有默认值，缺一次标记无审计破坏）。
+func (s *Store) markEvidenceAndRootCause(ctx context.Context, tx *sql.Tx, findingID, explorationID int64, vulnClass, evidence string) {
+	status, err := s.VerifyEvidenceAgainstActivity(ctx, tx, explorationID, evidence)
+	if err != nil {
+		status = "na"
+	}
+	rck := RootCauseKeyFromEvidence(vulnClass, evidence)
+	_, _ = tx.ExecContext(ctx,
+		`UPDATE findings SET evidence_status=$2, root_cause_key=$3 WHERE id=$1`,
+		findingID, status, rck)
 }

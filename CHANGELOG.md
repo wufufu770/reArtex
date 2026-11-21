@@ -5,6 +5,28 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.35] - 2026-11-21
+
+### 功能（批次 G1：证据逐字交叉验证 + root-cause 同根因标记）
+
+- **① 证据交叉验证**（evidence/store.go VerifyEvidenceAgainstActivity，finding 落库
+  同事务 best-effort）：evidence 的证据行（≥8 rune 行，最多 8 行，空白折叠后）
+  与活动流最近 500 条 tool_result 输出逐字比对——任一行命中 = verified；
+  活动流有输出但无一命中 = **unverified（声称的输出没发生过）**；无可解析行/
+  活动流空 = na。findings.evidence_status 列（schema 迁移）+ 发现页徽标
+  （绿「证据已核实」/琥珀「证据未核实」）。
+- **② root_cause_key 同根因标记**（evidence/finding_dedup.go）：键 =
+  hash(vulnclass | host | 归一化路径模式)——query 全剥、数字/UUID/长 token 段
+  归一化 {var}（/item/123 与 /item/456 同根因两个位置）；host 参与（跨 host 不
+  合并）。**自动标记，不自动合并**（裁决：合并是高后果写，折叠已验证记录破坏
+  复核流——标记是提议，合并是人权）；同键组在发现页标「同根因组」徽标。
+  evidence 无 URL → 空键不标记（自由文本归因不可靠，宁缺勿错）。
+- **③ 数据面**：findingSelectCols 扩两列（GetFinding/scanFindings 列序同步——
+  全量 db/evidence 测试抓出两处 Scan 错位即修）；FindingDTO/Finding 类型 +
+  前端徽标。
+- 测试：evidence 三态判定/抽行纪律/归一化键 3 条 + db/evidence 全量回归绿
+  （152s）。
+
 ## [0.15.34] - 2026-11-21
 
 ### 功能（批次 F：loopguard 重复调用拦截 + 两项裁决留档）

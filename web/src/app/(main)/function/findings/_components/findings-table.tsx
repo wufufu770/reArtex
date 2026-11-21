@@ -379,6 +379,23 @@ export function FindingsTable({
                       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <ShieldAlertIcon className="size-3.5" />
                         证据
+                        {/* 证据交叉验证态（0.15.35）：verified=命中真实工具输出；
+                            unverified=活动流有输出但无一命中（声称的输出没发生过） */}
+                        {f.evidence_status === "verified" && (
+                          <Badge variant="outline" className="text-[10px] text-emerald-600">
+                            证据已核实
+                          </Badge>
+                        )}
+                        {f.evidence_status === "unverified" && (
+                          <Badge variant="outline" className="text-[10px] text-amber-600">
+                            证据未核实
+                          </Badge>
+                        )}
+                        {f.root_cause_key && (
+                          <Badge variant="outline" className="text-[10px]" title={`同根因组 ${f.root_cause_key}`}>
+                            同根因组
+                          </Badge>
+                        )}
                         {f.vulnclass && (
                           <span>
                             · 类型：

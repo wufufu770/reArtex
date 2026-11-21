@@ -1195,6 +1195,12 @@ CREATE TABLE IF NOT EXISTS findings (
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
+-- 证据交叉验证态（0.15.35）：evidence 行在活动流真实工具输出中命中 ≥1 行 = verified；
+-- 未命中 = unverified（标注不降级处置——验证是「证据可信度」维度，与处置状态正交）；
+-- 无任务上下文/无可解析证据行 = na。root_cause_key：同根因合并标记键（0.15.35）。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_status TEXT NOT NULL DEFAULT 'na';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS root_cause_key TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_findings_root_cause ON findings(root_cause_key) WHERE root_cause_key <> '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
