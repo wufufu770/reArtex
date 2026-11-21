@@ -4,6 +4,8 @@ package sod
 // 词表/档位语义改一处这里就红（与 db/engagement_test.go 互为表里）。
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +111,86 @@ func TestEngagementElevateDeclinedFailsClosed(t *testing.T) {
 	}
 	if note == "" {
 		t.Fatal("deny note 不得为空（审计要能回放为什么）")
+	}
+}
+
+func TestEngagementElevateAuditorVerdicts(t *testing.T) {
+	// Tier B（0.15.27）：auditor 裁决四路——pass 放行（不落人工带宽）/ deny 拒 /
+	// ask 落人工 / 裁决失败落人工。消化常规出网动作的是 auditor，不是人。
+	cls := ClassResult{Kind: ClassTargetKnown, Hosts: []string{"target.example"}}
+	mkCall := func() chainCall { return chainCallFor(1, "Bash", `{"command":"curl x"}`) }
+	asked := false
+
+	// pass：auditor 放行，人工通路零触发；裁决理由进审计 marker。
+	pass := &Chain{deps: ChainDeps{
+		EngagementProfileOf: func(int64) string { return "passive_recon" },
+		Adjudicator: func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
+			if !strings.Contains(req.Reason, "passive_recon") {
+				t.Fatalf("裁决请求应带授权面语境: %q", req.Reason)
+			}
+			return AuditorVerdict{Verdict: "pass", Reason: "范围内被动查询"}, nil
+		},
+		ElevateAsk: func(ctx context.Context, req AskRequest) (bool, string, error) { asked = true; return true, "human", nil },
+	}}
+	markers := map[string]string{}
+	if block, _ := pass.engagementElevate(t.Context(), mkCall(), cls, &markers); block || asked {
+		t.Fatalf("auditor pass 应直接放行且不落人工（block=%v asked=%v）", block, asked)
+	}
+	if markers["engagement"] != "passive_recon:auditor_pass" {
+		t.Fatalf("marker 应记 auditor_pass: %q", markers["engagement"])
+	}
+	if markers["engagement_reason"] != "范围内被动查询" {
+		t.Fatalf("裁决理由应进审计: %q", markers["engagement_reason"])
+	}
+
+	// deny：auditor 拒绝 → 直接拒（note 带裁决理由），人工通路零触发。
+	deny := &Chain{deps: ChainDeps{
+		EngagementProfileOf: func(int64) string { return "strict_manual" },
+		Adjudicator: func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
+			return AuditorVerdict{Verdict: "deny", Reason: "破坏性写"}, nil
+		},
+		ElevateAsk: func(ctx context.Context, req AskRequest) (bool, string, error) { asked = true; return true, "human", nil },
+	}}
+	markers = map[string]string{}
+	block, note := deny.engagementElevate(t.Context(), mkCall(), cls, &markers)
+	if !block || asked {
+		t.Fatalf("auditor deny 应直接拒绝且不落人工（block=%v asked=%v）", block, asked)
+	}
+	if !strings.Contains(note, "破坏性写") {
+		t.Fatalf("deny note 应带裁决理由: %q", note)
+	}
+	if markers["engagement"] != "strict_manual:auditor_deny" {
+		t.Fatalf("marker 应记 auditor_deny: %q", markers["engagement"])
+	}
+
+	// ask：auditor 升级 → 人工兜底（elevateAsk 触发）。
+	ask := &Chain{deps: ChainDeps{
+		EngagementProfileOf: func(int64) string { return "passive_recon" },
+		Adjudicator: func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
+			return AuditorVerdict{Verdict: "ask"}, nil
+		},
+		ElevateAsk: func(ctx context.Context, req AskRequest) (bool, string, error) { asked = true; return true, "human", nil },
+	}}
+	asked = false
+	markers = map[string]string{}
+	if block, _ := ask.engagementElevate(t.Context(), mkCall(), cls, &markers); block || !asked {
+		t.Fatalf("auditor ask 应落人工兜底（block=%v asked=%v）", block, asked)
+	}
+	if markers["engagement"] != "passive_recon:approved" {
+		t.Fatalf("marker 应记 approved: %q", markers["engagement"])
+	}
+
+	// 裁决失败（模型不可用）→ 人工兜底（宁问人不断链）。
+	failed := &Chain{deps: ChainDeps{
+		EngagementProfileOf: func(int64) string { return "passive_recon" },
+		Adjudicator:        func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
+			return AuditorVerdict{}, errors.New("auditor 模型不可用")
+		},
+		ElevateAsk: func(ctx context.Context, req AskRequest) (bool, string, error) { asked = true; return true, "human", nil },
+	}}
+	asked = false
+	markers = map[string]string{}
+	if block, _ := failed.engagementElevate(t.Context(), mkCall(), cls, &markers); block || !asked {
+		t.Fatalf("裁决失败应落人工兜底（block=%v asked=%v）", block, asked)
 	}
 }

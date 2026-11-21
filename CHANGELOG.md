@@ -15,7 +15,24 @@
 - **④ 接线钉死**：addFinding 的 Run 在 severity 校验后调用 `CheckFindingGate(a.Summary, a.Evidence)`；既有合约测试 fixture 补 evidence 适配（fixture 是原子性合约测试，输入本就该过预检）。
 - 测试：finding_gate 单测 4 条（空证据/自否/合法零误伤含 TCP+反编译场景/接线钉死）；agent 全量回归绿（83s）；db 全量绿。
 
+## [0.15.26] - 2026-11-21
 
+### 功能（任务授权面 EngagementPolicy——预授权三档，XIB engagement policy 本仓化）
+
+- **① tasks.engagement_profile 列**（`db/engagement.go` 新文件 + schema.sql 迁移）：三档——`authorized_active`（默认=现状全部行为，零行为变化）/ `passive_recon`（对目标的出网动作先经人工确认）/ `strict_manual`（除平台内安全读写外一律先确认）。CHECK 枚举约束 + `NormalizeEngagementProfile` 写侧拒绝非法值（授权面坏值不静默回落）；读侧查不到/失败一律回落默认档（不收紧不放宽，收紧是显式写入的结果）。与执行档位（difficulty/mode）正交：那管算力，本列管「允许自动做什么」。
+- **② 合并闸放行出口按档收紧**（`internal/sod/mergedgate.go` engagementElevate + ChainDeps.EngagementProfileOf 注入）：闸门即将自动放行时按档复核——合同内放行照旧，合同外先敲门；deny/auditor-route/review 路径不受影响（那些本来就不自动放行）。passive_recon 的「出网」判定用分类器结论（远端主机/GET/DNS/目标写形态）——分不出「这次 curl 只读还是写目标」按最保守解释宁可多问；strict_manual 放行 ClassBenign/ClassLocalSafe（平台内安全动作问人纯属骚扰）。
+- **③ server 面**：createTask 接收 `engagement_profile`（非法 400）+ execution-profile GET/PATCH 扩展（切档 activity 播报）；wireMergedGateDeps 注入（db 读失败回落默认档）。
+- **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
+- 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
+
+## [0.15.27] - 2026-11-21
+
+### 功能（Tier B LLM 裁决器——授权面收紧消化进 auditor 裁决岗，零新增 LLM 面）
+
+- **① 收紧命中先经 auditor 裁决**（`internal/sod/mergedgate.go` engagementElevate 升级）：passive_recon/strict_manual 档命中收紧后，先交 **auditor LLM 三态裁决**（复用 deps.Adjudicator——缓存/并发槽/90s 超时/失败审计全复用，**零新增 LLM 面**）：pass=放行（常规出网动作不落人工带宽）、deny=拒（note 带裁决理由）、ask/裁决失败=人工兜底（elevateAsk）。auditor 未装配时整段回落 elevateAsk（宁问人不断链）。
+- **② 裁决请求带授权面语境**：Reason 前缀 `engagement:<档>`，auditor（或未来任何 Adjudicator 实现）按任务授权面语境裁决；裁决理由进审计 marker（`engagement_reason`，120 rune 截断）。
+- **③ 与铁律的对齐**：auditor 裁决的是「放不放行这次工具调用」（权限面），fail-closed 三态 + ask 人工兜底 + deny 可回放——它不是业务结论裁决（finding 确认/意图仲裁仍是确定性层），SoD 铁律语义不变。
+- 测试：engagement 测试扩到 6 条（默认零收紧/passive 出网 ask/strict 非安全 ask/拒答 fail-closed/auditor pass/deny/ask/失败四路）；sod 全量回归绿。
 
 ## [0.15.24] - 2026-11-21
 

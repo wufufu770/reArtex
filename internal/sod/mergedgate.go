@@ -11,6 +11,7 @@ package sod
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/internal/sodpolicy"
@@ -401,21 +402,23 @@ func withScopePass(in GateInput, reason string) GateInput {
 }
 
 // elevateAsk 走人工 ask 通路；未装配/出错 = 未批准（fail-safe 拒绝）。
-// engagementElevate 是任务授权面（EngagementPolicy，0.15.26）的收紧判定：闸门
-// 即将自动放行时按档位复核。返回 (true, note) 表示要求先经人工确认且未被批准
-// ——调用方据此 deny；false = 放行照旧（合同内或档位未要求收紧）。
+//
+// engagementElevate 是任务授权面（EngagementPolicy）的收紧判定：闸门即将自动
+// 放行时按档位复核。返回 (true, note) 表示 deny；false = 放行照旧。
 //
 // 三档语义（db/engagement.go 为权威定义）：
 //   - authorized_active / ""：零收紧（现状全部行为）；
 //   - passive_recon：一切对目标的出网动作（有远端主机 / GET 拉取 / DNS·whois
-//     查询）先经人工确认——「只许看不许碰」按最保守解释执行：分不出「这次
-//     curl 只读目标还是写目标」，宁可多问；
+//     查询）先裁决——「只许看不许碰」按最保守解释：分不出「这次 curl 只读目标
+//     还是写目标」，宁可多问；
 //   - strict_manual：除平台内安全动作（ClassBenign 无出网迹象 / ClassLocalSafe
-//     全部路径在工作区内）外一律先经人工确认。
+//     全部路径在工作区内）外一律先裁决。
 //
-// ask 通路复用 elevateAsk（审批页 + 群聊卡 + 外部通道共用 HandleAsk）；批准时
-// 打上 engagement marker 继续放行，拒答/超时按 deny（fail-closed，与种类 ask
-// 同语义）。deny/auditor/review 路径不进本函数——那些本来就不自动放行。
+// 裁决链（0.15.27 Tier B 裁决器）：收紧命中 → **auditor LLM 裁决**（复用
+// deps.Adjudicator：缓存/并发槽/90s 超时/失败审计全复用，零新增 LLM 面）——
+// pass=放行（常规出网不落人工带宽）、deny=拒、ask/裁决失败=人工兜底
+// （elevateAsk）。auditor 不可用/未装配时整段回落 elevateAsk（宁问人不断链）。
+// deny/auditor-route/review 路径不进本函数——那些本来就不自动放行。
 func (c *Chain) engagementElevate(ctx context.Context, call chainCall, cls ClassResult, markers *map[string]string) (bool, string) {
 	if c.deps.EngagementProfileOf == nil {
 		return false, ""
@@ -436,6 +439,36 @@ func (c *Chain) engagementElevate(ctx context.Context, call chainCall, cls Class
 		// 未知档位：不在运行期做创造性解释（写入侧已校验枚举），按不收紧处理。
 		return false, ""
 	}
+	// ① Tier B：auditor LLM 裁决（复用既有裁决岗，零新增 LLM 面）。
+	if c.deps.Adjudicator != nil {
+		req := AuditorRequest{
+			TaskID:         call.taskID,
+			ConversationID: call.conversationID,
+			ToolName:       call.toolName,
+			SourceAgent:    call.sourceAgent,
+			PayloadPreview: RedactPreview(call.payload, sodpolicy.PayloadPreviewMaxBytes),
+			PayloadDigest:  call.payloadDigest,
+			ScopeDigest:    call.scopeDigest,
+			Reason:         "engagement:" + profile + " 任务授权面收紧，请裁决本次 " + call.toolName + " 调用",
+		}
+		v, err := c.deps.Adjudicator(ctx, req)
+		if err == nil {
+			switch v.Verdict {
+			case "pass":
+				(*markers)["engagement"] = profile + ":auditor_pass"
+				if v.Reason != "" {
+					(*markers)["engagement_reason"] = truncForMarker(v.Reason)
+				}
+				return false, ""
+			case "deny":
+				(*markers)["engagement"] = profile + ":auditor_deny"
+				return true, "任务授权面为 " + profile + "：auditor 裁决拒绝本次调用 " + truncForMarker(v.Reason)
+			}
+			// ask / 未知裁决值 → 落人工兜底。
+		}
+		// 裁决失败（模型不可用/超时/输出不合规）→ 人工兜底（宁问人不断链）。
+	}
+	// ② 人工兜底：审批页/群聊卡/外部通道共用 HandleAsk。
 	reason := "任务授权面为 " + profile + "：本次动作需人工确认后放行"
 	if c.elevateAsk(ctx, call, reason) {
 		(*markers)["engagement"] = profile + ":approved"
@@ -443,6 +476,15 @@ func (c *Chain) engagementElevate(ctx context.Context, call chainCall, cls Class
 	}
 	(*markers)["engagement"] = profile + ":declined"
 	return true, reason + "（拒答或超时，按拒绝处理）"
+}
+
+// truncForMarker 截断 auditor 理由进审计 marker（Checks 值不宜过长）。
+func truncForMarker(s string) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) > 120 {
+		return string(r[:120]) + "…"
+	}
+	return string(r)
 }
 
 // elevateAsk 是人工确认通路（审批页/群聊卡/外部通道共用 HandleAsk）。
