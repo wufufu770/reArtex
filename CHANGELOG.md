@@ -5,6 +5,31 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.37] - 2026-11-21
+
+### 功能（批次 H：reartex-cve-mcp 独立 CVE 情报服务）
+
+- **① 独立 Go 模块**（reartex-cve-mcp/，module github.com/Autumn-27/reartex-cve-mcp，
+  唯一依赖 modernc.org/sqlite）：MCP stdio（4 工具）+ 只读 REST（:8400 默认）双面；
+  SQLite WAL + auto_vacuum=incremental + FTS5（traffic 同款纪律）本地缓存库，
+  离线毫秒级查询。
+- **② 4 工具面**（<30 活跃定义纪律）：cve_lookup（精确查）/ cve_match_component
+  （ecosystem+package+version 命中）/ cve_search（FTS5+结构化过滤）/ cve_sync_status
+  （水位）。MCP stdio 协议实测通过（initialize/tools/list 冒烟）。
+- **③ cve_intel.v1 契约**：含 related_skills[]（CWE→0.15.30 四技能路由，读取时
+  派生不落库）、source_provenance 多源标注、affected_ranges/fixed_versions。
+- **④ 三源同步**（后台/显式触发，永不阻塞 agent 轮；凭据只存环境变量）：
+  CISA KEV 全量 feed（最简）/ NVD API 2.0 增量（lastMod 窗口+分页）/ GHSA
+  ecosystem advisories（REST）。单源失败互不影响，水位各自记录。
+- **⑤ 三源合并语义（两个真 bug 修复过程中钉死）**：a) nil slice 经 json.Marshal
+  是字面 "null"（非 "[]"）——UPSERT 合并 CASE 失效、反序列化打回 nil；
+  b) []byte 参数绑定为 BLOB，与 TEXT 的 <> 比较恒真（类型不同）——CASE 全失效。
+  修复：nil 归一化 + string 绑定 + CASE 双排除；KEV 位取 OR、字段空值不覆盖
+  旧值、来源追加标注。**这个语义（BLOB vs TEXT 类型分离）已进测试钉死**。
+- **⑥ 版本命中判定**：GHSA vulnerable_version_range 带操作符（>= 1.0.0, < 1.3.0
+  形态）——剥操作符后数字段比较（零依赖简化 semver；预发/元数据边角留档 V2）。
+- 测试：store 合并语义/三过滤/组件匹配全绿；go vet 过。
+
 ## [0.15.36] - 2026-11-21
 
 ### 功能（批次 G2：findings 导出补全——TXT / SARIF 2.1.0 / HTML 三渲染器）
