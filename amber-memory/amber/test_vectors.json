@@ -1,0 +1,41 @@
+{
+  "_note": "ChaCha20-Poly1305 固定向量。生成方式：本实现输出 → 与 Node.js 内置 crypto（OpenSSL）逐字节比对通过。修改 crypto.py 后必须重新比对并更新本文件。",
+  "vectors": [
+    {
+      "name": "RFC8439-style fixed vector",
+      "key": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8=",
+      "nonce": "BwAAAEBBQkNERUZH",
+      "plaintext": "TGFkaWVzIGFuZCBHZW50bGVtZW4gb2YgdGhlIGNsYXNzIG9mICc5OTogSWYgSSBjb3VsZCBvZmZlciB5b3Ugb25seSBvbmUgdGlwIGZvciB0aGUgZnV0dXJlLCBzdW5zY3JlZW4gd291bGQgYmUgaXQu",
+      "aad": "UFFSU8DBwsPExcbH",
+      "ciphertext": "0xqNNGSOYNt7hq+8U+9+wqSt7VEpbgj+qeK1pzbuYtY9vqRejKlnEoL6+2naknKLGnHeCp4GCykF1qW2fs07NpLdvX8td4uMmAOu4ygJG1j6syTk+tZ1lFWFgItIMde8P/Te8I5Lep3ldtJlhs7GS2EW",
+      "tag": "GuELWU8J4mp+kC7L0GAGkQ=="
+    },
+    {
+      "name": "empty plaintext",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "nonce": "AAAAAAAAAAAAAAAA",
+      "plaintext": "",
+      "aad": "",
+      "ciphertext": "",
+      "tag": "EDJPgAoWC9mheUJVvn7CnQ=="
+    },
+    {
+      "name": "empty aad",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "nonce": "AQIDBAUGBwgJCgsM",
+      "plaintext": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA==",
+      "aad": "",
+      "ciphertext": "HPA8EnEq3MswkT0/rNn0dsaE6+Y+8cczA6XUsT6Xl01gw/HQ4EpZgj/OMqAewu1Ivz+bkgNJRIPJDE9gaER9qw==",
+      "tag": "an44m7MtCDy23rEu1LpWeQ=="
+    },
+    {
+      "name": "long aad",
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "nonce": "AQIDBAUGBwgJCgsM",
+      "plaintext": "eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5",
+      "aad": "enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6eg==",
+      "ciphertext": "HfE9E3Ar3coxkDw+rdj1d8eF6uc/8MYyAqTVsD+Wlkxh",
+      "tag": "kyvpzFWeHsJv7jNfTaerGQ=="
+    }
+  ]
+}

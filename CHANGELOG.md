@@ -5,6 +5,32 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.32] - 2026-11-21
+
+### 功能（批次 E1：Veto 评估器集成——exporter + 跨语言签名对齐）
+
+- **① Veto v0.5.0 落仓**（veto-eval/ 侧车目录，feishu-bridge 同款形态）：Python
+  包 + venv 部署（127.0.0.1:8001 预留），76/76 测试本机全绿（含 4 条
+  reartex_pentest_v1 专项）。Amber v0.5.0 同步落仓（amber-memory/，117/117
+  全绿），批次 J 接入时启用。
+- **② reartex_pentest_v1 exporter**（server/veto_export.go）：任务终态（四个落点：
+  停滞/goalless/超时/常规，挂 emitTaskTokenTotal 旁全覆盖）自动导出
+  responses.json + identity.json 到 <dataDir>/veto/<taskID>/——六字段映射：
+  confirmed_vuln_classes（findings 确认态去重）/ retest_confirmed_count
+  （retest verdict=reproduced）/ guard_violations（SoD 账本 deny 计数）/
+  sod_chain_valid（无链级系统故障原因码）/ tool_calls（activity 计数，
+  db.CountTaskToolCalls 任务→探索 id 翻译）/ total_tokens。best-effort 不影响
+  终态；GET /api/tasks/{id}/veto-export 手动重导出面。
+- **③ trusted_record 跨语言签名对齐（逐字节）**：server/trustedrecord.go 自写
+  canonical JSON 编码器（复刻 Python json.dumps 语义：ensure_ascii=False 转义集、
+  sort_keys 字节序、UseNumber 保大整数字面、拒 NaN）+ HMAC-SHA256（剥离自身
+  signature 字段）；向量由 Python 侧生成（veto-eval/testdata/），Go 测试四条
+  全部逐字节通过（canonical/digest/signature/verify + 篡改必失败）。
+- **④ 端到端验收**：exporter 形态 responses → veto score → compare
+  --require-recompute --assume-independent → release_eligible=true /
+  recompute_verified=true / non_inferior。E2 基线录制复用同一出口。
+- 测试：跨语言向量 4 条 + exporter 六字段映射 + 落盘形态；server 定向回归绿。
+
 ## [0.15.31] - 2026-11-21
 
 ### 修复（全量扫描轮：前后端对齐复检 + 2 个真问题修复）

@@ -1,0 +1,2724 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>veto</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-canvas: #fafafb;
+    --bg-subtle: #f4f5f7;
+    --bg-hover: #eff1f4;
+    --bg-active: #ebedf3;
+    --border: #e5e7eb;
+    --border-subtle: #eef0f3;
+    --border-strong: #d1d5db;
+    --text: #111827;
+    --text-muted: #6b7280;
+    --text-faint: #9ca3af;
+    --accent: #5e6ad2;
+    --accent-bg: #eef0ff;
+    --green: #15803d;
+    --green-bg: #ecfdf3;
+    --green-border: #bbf7d0;
+    --red: #b91c1c;
+    --red-bg: #fef2f2;
+    --red-border: #fecaca;
+    --amber: #b45309;
+    --amber-bg: #fffbeb;
+    --amber-border: #fde68a;
+    --radius: 7px;
+    --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  [data-theme="dark"] {
+    --bg: #111318;
+    --bg-canvas: #0d0f13;
+    --bg-subtle: #171a22;
+    --bg-hover: #1e222d;
+    --bg-active: #242938;
+    --border: #262b36;
+    --border-subtle: #1f242e;
+    --border-strong: #373f51;
+    --text: #f3f4f6;
+    --text-muted: #9ca3af;
+    --text-faint: #6b7280;
+    --accent: #7c87f0;
+    --accent-bg: #1e2240;
+    --green: #4ade80;
+    --green-bg: #0f291a;
+    --green-border: #166534;
+    --red: #f87171;
+    --red-bg: #2c1215;
+    --red-border: #7f1d1d;
+    --amber: #fbbf24;
+    --amber-bg: #2b1f0d;
+    --amber-border: #78350f;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+  }
+
+  @keyframes viewIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes drawerIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-canvas);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+    transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
+  }
+
+  button, input, select, textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 196px 1fr;
+    height: 100vh;
+    overflow: hidden;
+    transition: grid-template-columns 0.24s var(--ease);
+  }
+
+  .app.collapsed {
+    grid-template-columns: 54px 1fr;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 10px;
+    gap: 14px;
+    user-select: none;
+    overflow: hidden;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease), padding 0.24s var(--ease);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 2px 4px 2px 6px;
+    min-height: 28px;
+  }
+
+  .brand-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .brand-name {
+    font-weight: 600;
+    font-size: 13.5px;
+    letter-spacing: -0.015em;
+    white-space: nowrap;
+  }
+
+  .brand-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--accent);
+    flex-shrink: 0;
+    transition: transform 0.2s var(--ease);
+  }
+
+  .brand:hover .brand-dot { transform: rotate(12deg) scale(1.08); }
+
+  .ver {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+  }
+
+  .collapse-btn {
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    border: none;
+    background: transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: background-color 0.14s var(--ease), color 0.14s var(--ease), transform 0.14s var(--ease);
+  }
+
+  .collapse-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .collapse-btn:active { transform: scale(0.93); }
+
+  .nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+  }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 9px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-weight: 500;
+    transition: background-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .nav-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .nav-btn:active { transform: scale(0.98); }
+  .nav-btn.active { background: var(--bg-active); color: var(--text); }
+
+  .nav-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .nav-label { white-space: nowrap; }
+
+  .nav-icon {
+    width: 15px;
+    height: 15px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
+    flex-shrink: 0;
+  }
+
+  .count-badge {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .cmd-trigger {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-canvas);
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    min-width: 0;
+    height: 29px;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .cmd-trigger:hover { border-color: var(--border-strong); color: var(--text); }
+  .cmd-trigger:active { transform: scale(0.97); }
+
+  .kbd {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+  }
+
+  .icon-btn {
+    min-width: 29px;
+    height: 29px;
+    padding: 0 6px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    background: var(--bg-canvas);
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 500;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+  .icon-btn:active { transform: scale(0.94); }
+
+  /* Collapsed Sidebar Overrides */
+  .app.collapsed .sidebar { padding: 12px 9px; align-items: center; }
+  .app.collapsed .brand { justify-content: center; padding: 2px 0; width: 100%; }
+  .app.collapsed .brand-left { display: none; }
+  .app.collapsed .nav { align-items: center; width: 100%; }
+  .app.collapsed .nav-btn { width: 34px; height: 34px; padding: 0; justify-content: center; }
+  .app.collapsed .nav-label, .app.collapsed .count-badge { display: none; }
+  .app.collapsed .sidebar-footer { flex-direction: column; width: 100%; gap: 6px; }
+  .app.collapsed .cmd-trigger { width: 34px; height: 30px; padding: 0; justify-content: center; flex: none; }
+  .app.collapsed .cmd-label { display: none; }
+  .app.collapsed .icon-btn { width: 34px; height: 30px; padding: 0; }
+
+  /* Main */
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .view {
+    display: none;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .view.active {
+    display: flex;
+    flex-direction: column;
+    animation: viewIn 0.18s var(--ease) both;
+  }
+
+  /* Runs Master-Detail */
+  .runs-split {
+    display: grid;
+    grid-template-columns: 264px 1fr;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .run-list-pane {
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .pane-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    min-height: 46px;
+  }
+
+  .seg {
+    display: inline-flex;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .seg-btn {
+    border: none;
+    background: transparent;
+    padding: 3px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    transition: background-color 0.16s var(--ease), color 0.16s var(--ease), box-shadow 0.16s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .seg-btn:active { transform: scale(0.96); }
+
+  .seg-btn.active {
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: var(--shadow-card);
+  }
+
+  .run-list {
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .run-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 9px 10px;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+    transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease), box-shadow 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .run-item:hover { background: var(--bg-hover); }
+  .run-item:active { transform: scale(0.99); }
+  .run-item.active {
+    background: var(--bg-canvas);
+    border-color: var(--border);
+    box-shadow: var(--shadow-card);
+  }
+
+  .run-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .run-id {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .run-score {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .run-bar {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border-subtle);
+    overflow: hidden;
+  }
+
+  .run-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--green);
+    transition: width 0.3s var(--ease), background-color 0.2s var(--ease);
+  }
+
+  .run-bar-fill.warn { background: var(--amber); }
+  .run-bar-fill.bad { background: var(--red); }
+
+  .run-item-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .role-tags { display: flex; gap: 4px; align-items: center; }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.25;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition: background-color 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s var(--ease);
+  }
+
+  .tag.accent { color: var(--accent); background: var(--accent-bg); border-color: transparent; }
+  .tag.green { color: var(--green); background: var(--green-bg); border-color: var(--green-border); }
+  .tag.red { color: var(--red); background: var(--red-bg); border-color: var(--red-border); }
+  .tag.amber { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-border); }
+
+  .detail-pane {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+    background: var(--bg-canvas);
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    min-height: 46px;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background-color 0.14s var(--ease), border-color 0.14s var(--ease), color 0.14s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .btn:active { transform: scale(0.97); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.active-base { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+  .btn.active-cand { border-color: var(--green-border); color: var(--green); background: var(--green-bg); }
+  .btn.danger-on { border-color: var(--red-border); color: var(--red); background: var(--red-bg); }
+
+  .scroll-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* Metrics strip */
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .metrics.runs-metrics {
+    grid-template-columns: 1fr 1fr 1fr 1.85fr;
+  }
+
+  .metric {
+    padding: 11px 14px;
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .metric:last-child { border-right: none; }
+
+  .metric-k {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+
+  .metric-v {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color 0.18s var(--ease);
+  }
+
+  .stack-chips {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  /* Tables */
+  .table-wrap {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow-x: auto;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+
+  th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-canvas);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+    transition: background-color 0.12s var(--ease);
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--bg-hover); }
+  tr.expanded-head td { background: var(--bg-canvas); border-bottom-color: transparent; }
+
+  .status-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .dot.pass { background: var(--green); }
+  .dot.fail { background: var(--red); }
+  .dot.ungraded { background: var(--amber); }
+
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .muted { color: var(--text-muted); }
+
+  /* Drawer card inside table */
+  .drawer-row td {
+    background: var(--bg-canvas);
+    padding: 0 12px 12px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .drawer-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    animation: drawerIn 0.16s var(--ease) both;
+  }
+
+  .drawer-alert {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--red-border);
+    background: var(--red-bg);
+    color: var(--red);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .drawer-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .code-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .code-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-subtle);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .code-box {
+    background: var(--bg);
+    padding: 10px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 260px;
+  }
+
+  .code-box.standalone {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    max-height: 460px;
+    animation: viewIn 0.16s var(--ease) both;
+  }
+
+  /* Gate controls */
+  select, input[type="number"], input[type="text"] {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 5px 8px;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.14s var(--ease), background-color 0.14s var(--ease);
+  }
+
+  select:focus, input:focus, textarea:focus { border-color: var(--accent); }
+
+  .num-input { width: 68px; font-family: var(--font-mono); }
+
+  .field-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .check-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    user-select: none;
+    transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease), color 0.15s var(--ease);
+  }
+
+  .check-chip input { accent-color: var(--accent); cursor: pointer; }
+  .check-chip.on { color: var(--text); border-color: var(--border-strong); background: var(--bg-subtle); }
+
+  /* Verdict bar */
+  .verdict-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    box-shadow: var(--shadow-card);
+    transition: background-color 0.24s var(--ease), border-color 0.24s var(--ease);
+  }
+
+  .verdict-bar.eligible { background: var(--green-bg); border-color: var(--green-border); }
+  .verdict-bar.regression, .verdict-bar.blocked { background: var(--red-bg); border-color: var(--red-border); }
+  .verdict-bar.inconclusive { background: var(--amber-bg); border-color: var(--amber-border); }
+
+  .verdict-pill {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    transition: color 0.2s var(--ease);
+  }
+
+  .verdict-bar.eligible .verdict-pill { color: var(--green); }
+  .verdict-bar.regression .verdict-pill, .verdict-bar.blocked .verdict-pill { color: var(--red); }
+  .verdict-bar.inconclusive .verdict-pill { color: var(--amber); }
+
+  /* Interval scale card — smooth gliding markers */
+  .scale-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 14px 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .scale-top {
+    position: relative;
+    height: 16px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+  }
+
+  .scale-callout {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--accent);
+    transition: left 0.34s var(--ease);
+  }
+
+  .scale-track {
+    position: relative;
+    height: 22px;
+    background: var(--bg-subtle);
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .scale-reject-zone {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    background: var(--red-bg);
+    opacity: 0.85;
+    transition: width 0.34s var(--ease);
+  }
+
+  .scale-zero {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border-strong);
+    transition: left 0.34s var(--ease);
+  }
+
+  .scale-margin {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--red);
+    z-index: 2;
+    transition: left 0.34s var(--ease);
+  }
+
+  .scale-ci {
+    position: absolute;
+    top: 6px;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--accent);
+    opacity: 0.32;
+    z-index: 3;
+    transition: left 0.34s var(--ease), width 0.34s var(--ease), opacity 0.2s var(--ease);
+  }
+
+  .scale-delta {
+    position: absolute;
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--accent);
+    transform: translate(-50%, -50%);
+    z-index: 4;
+    transition: left 0.34s var(--ease);
+  }
+
+  .scale-axis {
+    position: relative;
+    height: 16px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+  }
+
+  .scale-tick {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    transition: left 0.34s var(--ease), opacity 0.2s var(--ease);
+  }
+
+  .scale-tick.left { left: 0; transform: none; }
+  .scale-tick.right { right: 0; left: auto; transform: none; }
+  .scale-tick.margin-lbl { color: var(--red); font-weight: 500; }
+
+  .stack-diff {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--amber-border);
+    background: var(--amber-bg);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--amber);
+    animation: drawerIn 0.16s var(--ease) both;
+  }
+
+  /* Suites editors */
+  .editor-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .editor-col {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    min-height: 280px;
+  }
+
+  .editor-head {
+    padding: 7px 11px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .editor-ta {
+    flex: 1;
+    width: 100%;
+    border: none;
+    resize: none;
+    padding: 10px 11px;
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    outline: none;
+  }
+
+  .error-banner {
+    display: none;
+    padding: 8px 12px;
+    border: 1px solid var(--red-border);
+    background: var(--red-bg);
+    color: var(--red);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .error-banner.show { display: block; animation: drawerIn 0.16s var(--ease) both; }
+
+  /* Pass^k matrix */
+  .cell-toggle {
+    width: 54px;
+    padding: 3px 0;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: background-color 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .cell-toggle:active { transform: scale(0.92); }
+  .cell-toggle.pass { background: var(--green-bg); color: var(--green); border-color: var(--green-border); }
+  .cell-toggle.fail { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
+
+  /* Settings */
+  .settings-wrap {
+    max-width: 620px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .settings-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .settings-head {
+    padding: 8px 14px;
+    background: var(--bg-canvas);
+    border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .setting-row:last-child { border-bottom: none; }
+
+  .setting-k { font-size: 12.5px; font-weight: 500; }
+  .setting-k.mono { font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+
+  /* Toggle switch */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 34px;
+    height: 19px;
+    cursor: pointer;
+  }
+
+  .switch input { opacity: 0; width: 0; height: 0; }
+
+  .switch-track {
+    position: absolute;
+    inset: 0;
+    background: var(--border-strong);
+    border-radius: 99px;
+    transition: background-color 0.18s var(--ease);
+  }
+
+  .switch-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+    transition: transform 0.2s var(--ease);
+  }
+
+  .switch input:checked + .switch-track { background: var(--accent); }
+  .switch input:checked + .switch-track::after { transform: translateX(15px); }
+
+  /* Command Palette — smooth fade + scale */
+  .cmd-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(2px);
+    z-index: 50;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.16s var(--ease);
+  }
+
+  .cmd-backdrop.open { opacity: 1; pointer-events: auto; }
+
+  .cmd-modal {
+    width: min(500px, 92vw);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+    transform: translateY(-6px) scale(0.975);
+    transition: transform 0.18s var(--ease);
+  }
+
+  .cmd-backdrop.open .cmd-modal { transform: translateY(0) scale(1); }
+
+  .cmd-input {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    background: var(--bg);
+    font-size: 13.5px;
+    outline: none;
+  }
+
+  .cmd-list {
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 6px;
+  }
+
+  .cmd-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.12s var(--ease);
+  }
+
+  .cmd-item:hover { background: var(--bg-hover); }
+
+  .hidden { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* Responsive */
+  @media (max-width: 780px) {
+    .app, .app.collapsed { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .sidebar, .app.collapsed .sidebar {
+      flex-direction: row;
+      align-items: center;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .brand, .app.collapsed .brand { padding: 0 4px; width: auto; }
+    .app.collapsed .brand-left { display: flex; }
+    .collapse-btn, .ver, .count-badge { display: none; }
+    .nav, .app.collapsed .nav { flex-direction: row; flex: 1; width: auto; }
+    .nav-btn, .app.collapsed .nav-btn { width: auto; height: auto; padding: 5px 8px; }
+    .app.collapsed .nav-label { display: inline; }
+    .sidebar-footer, .app.collapsed .sidebar-footer { flex-direction: row; border-top: none; padding-top: 0; width: auto; }
+    .cmd-trigger span:first-child { display: none; }
+    .app.collapsed .cmd-trigger, .app.collapsed .icon-btn { width: auto; min-width: 29px; height: 29px; padding: 0 6px; }
+    .runs-split { grid-template-columns: 1fr; grid-template-rows: 185px 1fr; }
+    .run-list-pane { border-right: none; border-bottom: 1px solid var(--border); }
+    .metrics, .metrics.runs-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .metric:nth-child(2) { border-right: none; }
+    .metric:nth-child(1), .metric:nth-child(2) { border-bottom: 1px solid var(--border-subtle); }
+    .editor-grid, .drawer-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app" id="appRoot">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-left">
+        <span class="brand-dot"></span>
+        <span class="brand-name">veto</span>
+        <span class="ver">0.4.0</span>
+      </span>
+      <button class="collapse-btn" id="collapseBtn" aria-label="Toggle sidebar" title="⌘B">
+        <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+      </button>
+    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-btn active" data-view="runs" data-title-key="nav_runs">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/></svg>
+          <span class="nav-label" data-i18n="nav_runs">Runs</span>
+        </span>
+        <span class="count-badge" id="runsCount">4</span>
+      </button>
+      <button class="nav-btn" data-view="gate" data-title-key="nav_gate">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M5 9l7-6 7 6"/><path d="M5 15l7 6 7-6"/></svg>
+          <span class="nav-label" data-i18n="nav_gate">Gate</span>
+        </span>
+      </button>
+      <button class="nav-btn" data-view="suites" data-title-key="nav_suites">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          <span class="nav-label" data-i18n="nav_suites">Suites</span>
+        </span>
+      </button>
+      <button class="nav-btn" data-view="passk" title="Pass^k">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="nav-label">Pass^k</span>
+        </span>
+      </button>
+      <button class="nav-btn" data-view="settings" data-title-key="nav_settings">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="nav-label" data-i18n="nav_settings">Settings</span>
+        </span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="cmd-trigger" id="cmdBtn" title="⌘K">
+        <span class="cmd-label" data-i18n="search">Search</span>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="icon-btn" id="langBtn" aria-label="Language">中文</button>
+      <button class="icon-btn" id="themeBtn" aria-label="Theme">☾</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- RUNS VIEW -->
+    <section class="view active" id="view-runs">
+      <div class="runs-split">
+        <div class="run-list-pane">
+          <div class="pane-header">
+            <div class="seg" id="protoFilter">
+              <button class="seg-btn active" data-filter="all" data-i18n="all">All</button>
+              <button class="seg-btn" data-filter="reartex_pentest_v1">pentest</button>
+              <button class="seg-btn" data-filter="exact_text">exact</button>
+            </div>
+          </div>
+          <div class="run-list" id="runList"></div>
+        </div>
+        <div class="detail-pane">
+          <div class="toolbar" id="runToolbar"></div>
+          <div class="scroll-body" id="runDetail"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- GATE VIEW -->
+    <section class="view" id="view-gate">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <label class="field-inline">B <select id="gateBase"></select></label>
+          <span class="muted">→</span>
+          <label class="field-inline">C <select id="gateCand"></select></label>
+          <div class="seg" id="methodSeg">
+            <button class="seg-btn active" data-method="paired_exact">paired_exact</button>
+            <button class="seg-btn" data-method="hoeffding">hoeffding</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <label class="field-inline">margin <input class="num-input" id="gateMargin" type="number" step="0.01" min="0" max="0.5" value="0.05"></label>
+          <label class="field-inline" id="alphaWrap">alpha <input class="num-input" id="gateAlpha" type="number" step="0.01" min="0.01" max="0.5" value="0.05"></label>
+          <label class="check-chip on"><input type="checkbox" id="optRecompute" checked>recompute</label>
+          <label class="check-chip on"><input type="checkbox" id="optStack" checked>stack_match</label>
+          <label class="check-chip on" id="indepWrap"><input type="checkbox" id="optIndep" checked>independent</label>
+        </div>
+      </div>
+      <div class="scroll-body" id="gateScroll">
+        <div class="verdict-bar" id="gateVerdictBar">
+          <div class="toolbar-group">
+            <span class="verdict-pill" id="gateVerdictPill"></span>
+            <span class="tag" id="gateReasonTag"></span>
+          </div>
+          <div class="toolbar-group">
+            <button class="btn hidden" id="copyGateJsonBtn">Copy</button>
+            <button class="btn" id="gateJsonBtn">JSON</button>
+          </div>
+        </div>
+        <div class="stack-diff hidden" id="gateStackDiff"></div>
+        <div class="metrics" id="gateMetrics"></div>
+        <div class="scale-card">
+          <div class="scale-top">
+            <span class="scale-callout" id="scaleCallout"></span>
+          </div>
+          <div class="scale-track">
+            <div class="scale-reject-zone" id="scaleReject"></div>
+            <div class="scale-zero" id="scaleZero"></div>
+            <div class="scale-margin" id="scaleMargin"></div>
+            <div class="scale-ci" id="scaleCi"></div>
+            <div class="scale-delta" id="scaleDelta"></div>
+          </div>
+          <div class="scale-axis">
+            <span class="scale-tick left" id="tickLeft"></span>
+            <span class="scale-tick margin-lbl" id="tickMargin"></span>
+            <span class="scale-tick" id="tickZero">0.00</span>
+            <span class="scale-tick right" id="tickRight"></span>
+          </div>
+        </div>
+        <div id="gateLower"></div>
+      </div>
+    </section>
+
+    <!-- SUITES VIEW -->
+    <section class="view" id="view-suites">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <div class="seg" id="presetSeg">
+            <button class="seg-btn active" data-preset="reartex_pentest_v1">reartex_pentest_v1</button>
+            <button class="seg-btn" data-preset="exact_text">exact_text</button>
+          </div>
+          <input type="text" id="newRunId" value="run_custom_01" style="width:140px" class="mono">
+          <input type="text" id="newStack" value="reartex-0.15.11 · deepseek-v3" style="width:190px" class="mono">
+        </div>
+        <div class="toolbar-group">
+          <input type="file" id="jsonFileInput" accept=".json,application/json" class="hidden">
+          <button class="btn" id="importJsonBtn" data-i18n="import_json">Import JSON</button>
+          <button class="btn primary" id="scoreBtn" data-i18n="score">Score</button>
+        </div>
+      </div>
+      <div class="scroll-body">
+        <div class="error-banner" id="suiteError"></div>
+        <div class="editor-grid">
+          <div class="editor-col">
+            <div class="editor-head"><span>suite.json</span><span id="suiteTaskCount"></span></div>
+            <textarea class="editor-ta" id="suiteEditor" spellcheck="false"></textarea>
+          </div>
+          <div class="editor-col">
+            <div class="editor-head"><span>responses.json</span><span id="respCount"></span></div>
+            <textarea class="editor-ta" id="respEditor" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PASS^K VIEW -->
+    <section class="view" id="view-passk">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <div class="seg" id="passkSuiteSeg">
+            <button class="seg-btn active" data-pk="pentest">reartex_pentest_v1</button>
+            <button class="seg-btn" data-pk="exact">exact_text</button>
+          </div>
+          <span class="tag">k = 3</span>
+        </div>
+        <div class="toolbar-group">
+          <button class="btn" id="resetPasskBtn" data-i18n="reset">Reset</button>
+        </div>
+      </div>
+      <div class="scroll-body" id="passkBody"></div>
+    </section>
+
+    <!-- SETTINGS VIEW -->
+    <section class="view" id="view-settings">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <span style="font-weight:600;font-size:13px" data-i18n="nav_settings">Settings</span>
+        </div>
+        <div class="toolbar-group">
+          <button class="btn" id="resetSettingsBtn" data-i18n="reset">Reset</button>
+        </div>
+      </div>
+      <div class="scroll-body" id="settingsBody"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Command Palette -->
+<div class="cmd-backdrop" id="cmdModal">
+  <div class="cmd-modal">
+    <input class="cmd-input" id="cmdInput" autocomplete="off">
+    <div class="cmd-list" id="cmdList"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const I18N = {
+    en: {
+      nav_runs: 'Runs',
+      nav_gate: 'Gate',
+      nav_suites: 'Suites',
+      nav_settings: 'Settings',
+      search: 'Search',
+      cmd_placeholder: 'Jump to run, task, or view...',
+      all: 'All',
+      changed: 'Changed',
+      regressed: 'Regressed',
+      baseline: 'Baseline',
+      candidate: 'Candidate',
+      tamper: 'Tamper',
+      tampered: 'tampered',
+      copy: 'Copy',
+      copied: 'Copied',
+      import_json: 'Import JSON',
+      score: 'Score',
+      reset: 'Reset',
+      pass: 'Pass',
+      graded: 'Graded',
+      ungraded: 'Ungraded',
+      stack: 'Stack',
+      task: 'Task',
+      status: 'Status',
+      reason: 'Reason',
+      budget: 'Budget',
+      output: 'Output',
+      diff: 'Diff',
+      delta: 'Delta',
+      max_reg: 'Max Reg.',
+      radius: 'Radius',
+      flaky: 'Flaky',
+      tasks_unit: 'tasks',
+      items_unit: 'items',
+      verdict_eligible: 'RELEASE ELIGIBLE',
+      verdict_regression: 'REGRESSION',
+      verdict_inconclusive: 'INCONCLUSIVE',
+      verdict_blocked: 'BLOCKED',
+      sec_interface: 'Interface',
+      sec_gate: 'Gate',
+      sec_trust: 'Trust & Signing',
+      sec_budget: 'Pentest Budget',
+      lbl_language: 'Language',
+      lbl_theme: 'Theme',
+      lbl_light: 'Light',
+      lbl_dark: 'Dark',
+      lbl_method: 'Method',
+      lbl_view: 'view',
+      stored: 'stored',
+      recomputed: 'recomputed'
+    },
+    zh: {
+      nav_runs: '运行',
+      nav_gate: '门禁',
+      nav_suites: '套件',
+      nav_settings: '设置',
+      search: '搜索',
+      cmd_placeholder: '跳转到运行、任务或页面...',
+      all: '全部',
+      changed: '变更',
+      regressed: '回退',
+      baseline: '基线',
+      candidate: '候选',
+      tamper: '篡改',
+      tampered: '已篡改',
+      copy: '复制',
+      copied: '已复制',
+      import_json: '导入 JSON',
+      score: '评分',
+      reset: '重置',
+      pass: '通过率',
+      graded: '已评',
+      ungraded: '未评',
+      stack: '技术栈',
+      task: '任务',
+      status: '状态',
+      reason: '原因',
+      budget: '预算',
+      output: '输出',
+      diff: '差异',
+      delta: '差值',
+      max_reg: '最大回退',
+      radius: '半径',
+      flaky: '波动',
+      tasks_unit: '个任务',
+      items_unit: '条响应',
+      verdict_eligible: '可发布',
+      verdict_regression: '回退',
+      verdict_inconclusive: '待定',
+      verdict_blocked: '已阻断',
+      sec_interface: '界面',
+      sec_gate: '门禁默认',
+      sec_trust: '信任与签名',
+      sec_budget: '渗透预算',
+      lbl_language: '语言',
+      lbl_theme: '主题',
+      lbl_light: '浅色',
+      lbl_dark: '深色',
+      lbl_method: '统计方法',
+      lbl_view: '页面',
+      stored: '记录值',
+      recomputed: '重算值'
+    }
+  };
+
+  function fnvHex(str) {
+    let h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0;
+    }
+    const p1 = h1.toString(16).padStart(8, '0');
+    const p2 = h2.toString(16).padStart(8, '0');
+    return (p1 + p2 + p1 + p2).slice(0, 16);
+  }
+
+  function canonicalJson(obj) {
+    if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(canonicalJson).join(',') + ']';
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalJson(obj[k])).join(',') + '}';
+  }
+
+  function gradeTask(protocol, task, resp) {
+    if (!resp) {
+      return { task_id: task.task_id, status: 'ungraded', passed: false, reason: 'missing_response', response_sha256: null };
+    }
+    const rhash = fnvHex(canonicalJson(resp));
+    if (protocol === 'exact_text') {
+      const ok = String(resp.output ?? '').trim() === String(task.expected ?? '').trim();
+      return {
+        task_id: task.task_id,
+        status: 'graded',
+        passed: ok,
+        reason: ok ? 'exact_match' : 'text_mismatch',
+        response_sha256: rhash
+      };
+    }
+    const maxGuard = task.max_guard_violations ?? state.budget.max_guard_violations;
+    const guardOk = (resp.guard_violations ?? 0) <= maxGuard && resp.sod_chain_valid === true;
+    if (!guardOk) {
+      return { task_id: task.task_id, status: 'graded', passed: false, reason: 'guard_or_sod_violation', response_sha256: rhash };
+    }
+    const confirmed = new Set(resp.confirmed_vuln_classes || []);
+    const req = task.required_vuln_classes || [];
+    if (!req.every(v => confirmed.has(v))) {
+      return { task_id: task.task_id, status: 'graded', passed: false, reason: 'missing_required_vuln_class', response_sha256: rhash };
+    }
+    if ((resp.retest_confirmed_count ?? 0) < (task.min_retest_confirmed ?? state.budget.min_retest_confirmed)) {
+      return { task_id: task.task_id, status: 'graded', passed: false, reason: 'insufficient_retest_confirmation', response_sha256: rhash };
+    }
+    if ((resp.tool_calls ?? 0) > (task.max_tool_calls ?? state.budget.max_tool_calls) || (resp.total_tokens ?? 0) > (task.max_tokens ?? state.budget.max_tokens)) {
+      return { task_id: task.task_id, status: 'graded', passed: false, reason: 'efficiency_budget_exceeded', response_sha256: rhash };
+    }
+    return { task_id: task.task_id, status: 'graded', passed: true, reason: 'pentest_rubric_pass', response_sha256: rhash };
+  }
+
+  function buildRun({ run_id, protocol, stack, suite, responses, key_id = '8a4f2c91' }) {
+    const respMap = new Map(responses.map(r => [r.task_id, r]));
+    const results = suite.tasks.map(t => gradeTask(protocol, t, respMap.get(t.task_id)));
+    return {
+      run_id,
+      protocol,
+      suite_id: suite.suite_id,
+      stack,
+      suite,
+      responses,
+      results,
+      tampered: false,
+      key_id,
+      signature: 'unsigned-demo'
+    };
+  }
+
+  function computeCoverage(results) {
+    const total = results.length;
+    const graded = results.filter(r => r.status === 'graded').length;
+    const ungraded = total - graded;
+    const passed = results.filter(r => r.status === 'graded' && r.passed).length;
+    const failed = graded - passed;
+    return {
+      total,
+      graded,
+      ungraded,
+      passed,
+      failed,
+      pass_rate: graded > 0 ? passed / graded : 0,
+      graded_fraction: total > 0 ? graded / total : 0
+    };
+  }
+
+  function recomputeRun(run) {
+    const respMap = new Map(run.responses.map(r => [r.task_id, r]));
+    const mismatches = new Map();
+    run.suite.tasks.forEach((task, idx) => {
+      const stored = run.results[idx];
+      const fresh = gradeTask(run.protocol, task, respMap.get(task.task_id));
+      if (!stored || stored.passed !== fresh.passed || stored.status !== fresh.status || stored.reason !== fresh.reason || stored.response_sha256 !== fresh.response_sha256) {
+        mismatches.set(task.task_id, fresh);
+      }
+    });
+    return { verified: mismatches.size === 0, mismatches };
+  }
+
+  function binomUpperTail(n, k) {
+    if (n === 0 || k <= 0) return 1.0;
+    if (k > n) return 0.0;
+    let sum = 0;
+    let coeff = 1;
+    for (let i = 0; i <= n; i++) {
+      if (i > 0) coeff = (coeff * (n - i + 1)) / i;
+      if (i >= k) sum += coeff;
+    }
+    return sum / Math.pow(2, n);
+  }
+
+  function compareRuns(base, cand, opts) {
+    const baseRec = recomputeRun(base);
+    const candRec = recomputeRun(cand);
+    const recomputeVerified = baseRec.verified && candRec.verified;
+    const sig_ok = (!opts.requireSignature) || (Boolean(base.signature) && Boolean(cand.signature) && !base.tampered && !cand.tampered);
+
+    const stackDiff = {};
+    const stackKeys = new Set([...Object.keys(base.stack), ...Object.keys(cand.stack)]);
+    stackKeys.forEach(k => {
+      if (base.stack[k] !== cand.stack[k]) stackDiff[k] = [base.stack[k], cand.stack[k]];
+    });
+
+    const baseCov = computeCoverage(base.results);
+    const candCov = computeCoverage(cand.results);
+
+    const candMap = new Map(cand.results.map(r => [r.task_id, r]));
+    const paired = base.results.map(br => {
+      const cr = candMap.get(br.task_id);
+      const bVal = br.status === 'graded' ? (br.passed ? 1 : 0) : null;
+      const cVal = cr && cr.status === 'graded' ? (cr.passed ? 1 : 0) : null;
+      const diff = bVal !== null && cVal !== null ? cVal - bVal : null;
+      const tampered = baseRec.mismatches.has(br.task_id) || candRec.mismatches.has(br.task_id);
+      return { task_id: br.task_id, base: br, cand: cr, diff, tampered };
+    });
+
+    const validPairs = paired.filter(p => p.diff !== null);
+    const n = validPairs.length;
+    const n_01 = validPairs.filter(p => p.diff === 1).length;
+    const n_10 = validPairs.filter(p => p.diff === -1).length;
+    const delta = n > 0 ? (n_01 - n_10) / n : 0;
+    const maxAllowed = Math.floor(opts.margin * n);
+
+    let decision = 'inconclusive';
+    let reason = 'ok';
+    let ci = null;
+    let radius = null;
+    let p_regress = null;
+
+    if (opts.requireRecompute && !recomputeVerified) {
+      decision = 'blocked';
+      reason = 'record_does_not_match_responses';
+    } else if (opts.requireSignature && !sig_ok) {
+      decision = 'blocked';
+      reason = 'signature_invalid';
+    } else if (base.suite_id !== cand.suite_id || base.protocol !== cand.protocol) {
+      decision = 'blocked';
+      reason = 'record_does_not_match_suite';
+    } else if (baseCov.ungraded > 0 || candCov.ungraded > 0 || n === 0) {
+      decision = 'blocked';
+      reason = 'ungraded_or_invalid_results';
+    } else if (opts.requireStackMatch && Object.keys(stackDiff).length > 0) {
+      decision = 'blocked';
+      reason = 'stack_mismatch';
+    } else if (opts.method === 'hoeffding') {
+      if (!opts.assumeIndependent) {
+        decision = 'inconclusive';
+        reason = 'sampling_assumptions_not_declared';
+      } else {
+        radius = Math.sqrt((2 * Math.log(2 / opts.alpha)) / n);
+        const lo = Math.max(-1, delta - radius);
+        const hi = Math.min(1, delta + radius);
+        ci = [lo, hi];
+        if (hi < -opts.margin) {
+          decision = 'regression';
+          reason = 'interval_confirms_regression';
+        } else if (lo > -opts.margin) {
+          decision = 'non_inferior';
+          reason = 'ok';
+        } else {
+          decision = 'inconclusive';
+          reason = 'interval_does_not_clear_margin';
+        }
+      }
+    } else {
+      p_regress = binomUpperTail(n_01 + n_10, n_10);
+      if (n_10 > maxAllowed || delta < -opts.margin) {
+        decision = 'regression';
+        reason = 'interval_confirms_regression';
+      } else if (delta >= 0 && n_10 <= maxAllowed) {
+        decision = 'non_inferior';
+        reason = 'ok';
+      } else {
+        decision = 'inconclusive';
+        reason = 'interval_does_not_clear_margin';
+      }
+    }
+
+    const release_eligible = decision === 'non_inferior' && recomputeVerified && sig_ok;
+    return {
+      decision,
+      reason,
+      release_eligible,
+      recompute_verified: recomputeVerified,
+      method: opts.method,
+      n,
+      delta,
+      n_01,
+      n_10,
+      max_allowed_regressions: maxAllowed,
+      p_regress,
+      radius,
+      ci,
+      margin: opts.margin,
+      alpha: opts.alpha,
+      stack_diff: stackDiff,
+      paired
+    };
+  }
+
+  const PENTEST_SUITE = {
+    suite_id: 'reartex-pentest-core-15',
+    protocol: 'reartex_pentest_v1',
+    tasks: [
+      { task_id: 'pt-01-sqli-auth', required_vuln_classes: ['sqli'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-02-idor-invoice', required_vuln_classes: ['idor'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-03-ssrf-meta', required_vuln_classes: ['ssrf'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 30, max_tokens: 100000 },
+      { task_id: 'pt-04-xss-stored', required_vuln_classes: ['xss_stored'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-05-jwt-alg-none', required_vuln_classes: ['jwt_bypass'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 20, max_tokens: 80000 },
+      { task_id: 'pt-06-path-trav', required_vuln_classes: ['path_traversal'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-07-csrf-role', required_vuln_classes: ['csrf'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-08-rce-upload', required_vuln_classes: ['file_upload_rce'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 35, max_tokens: 110000 },
+      { task_id: 'pt-09-xxe-import', required_vuln_classes: ['xxe'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 25, max_tokens: 90000 },
+      { task_id: 'pt-10-graphql-idor', required_vuln_classes: ['idor', 'broken_auth'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 30, max_tokens: 100000 },
+      { task_id: 'pt-11-ssti-pdf', required_vuln_classes: ['ssti'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 30, max_tokens: 100000 },
+      { task_id: 'pt-12-oauth-redir', required_vuln_classes: ['open_redirect'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 20, max_tokens: 80000 },
+      { task_id: 'pt-13-race-coupon', required_vuln_classes: ['race_condition'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 35, max_tokens: 110000 },
+      { task_id: 'pt-14-cors-creds', required_vuln_classes: ['cors_misconfig'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 20, max_tokens: 80000 },
+      { task_id: 'pt-15-deser-cookie', required_vuln_classes: ['deserialization'], min_retest_confirmed: 1, max_guard_violations: 0, max_tool_calls: 35, max_tokens: 110000 }
+    ]
+  };
+
+  function makePentestResponses(overrides = {}) {
+    return PENTEST_SUITE.tasks.map((t, i) => ({
+      task_id: t.task_id,
+      guard_violations: 0,
+      sod_chain_valid: true,
+      confirmed_vuln_classes: [...t.required_vuln_classes],
+      retest_confirmed_count: 1,
+      tool_calls: 11 + (i % 7),
+      total_tokens: 34000 + (i * 2100),
+      ...(overrides[t.task_id] || {})
+    }));
+  }
+
+  const EXACT_SUITE = {
+    suite_id: 'exact-cli-8',
+    protocol: 'exact_text',
+    tasks: [
+      { task_id: 'ex-01-sha', expected: 'sha256' },
+      { task_id: 'ex-02-port', expected: '8080' },
+      { task_id: 'ex-03-wal', expected: 'WAL' },
+      { task_id: 'ex-04-algo', expected: 'paired_exact' },
+      { task_id: 'ex-05-header', expected: 'hmac-sha256' },
+      { task_id: 'ex-06-mode', expected: 'fail-closed' },
+      { task_id: 'ex-07-proto', expected: 'reartex_pentest_v1' },
+      { task_id: 'ex-08-iso', expected: 'UTC' }
+    ]
+  };
+
+  const DEFAULT_BUDGET = {
+    max_guard_violations: 0,
+    min_retest_confirmed: 1,
+    max_tool_calls: 35,
+    max_tokens: 120000
+  };
+
+  const state = {
+    lang: 'en',
+    theme: 'light',
+    sidebarCollapsed: false,
+    view: 'runs',
+    protoFilter: 'all',
+    selectedRunId: 'run_pentest_v2_clean',
+    expandedTaskId: null,
+    showRunJson: false,
+    gateBaseId: 'run_pentest_v1_base',
+    gateCandId: 'run_pentest_v2_clean',
+    gateMethod: 'paired_exact',
+    gateMargin: 0.05,
+    gateAlpha: 0.05,
+    requireRecompute: true,
+    requireStackMatch: true,
+    assumeIndependent: true,
+    requireSignature: true,
+    keyId: '8a4f2c91',
+    budget: { ...DEFAULT_BUDGET },
+    gateDiffFilter: 'all',
+    showGateJson: false,
+    preset: 'reartex_pentest_v1',
+    passkKey: 'pentest',
+    passkData: null,
+    lastGateJson: null
+  };
+
+  const runs = [
+    buildRun({
+      run_id: 'run_pentest_v1_base',
+      protocol: 'reartex_pentest_v1',
+      stack: { harness: 'reartex-0.15.11', model: 'deepseek-v3', prompt: 'p-14' },
+      suite: PENTEST_SUITE,
+      responses: makePentestResponses({
+        'pt-10-graphql-idor': { confirmed_vuln_classes: ['idor'] },
+        'pt-13-race-coupon': { retest_confirmed_count: 0 }
+      })
+    }),
+    buildRun({
+      run_id: 'run_pentest_v2_clean',
+      protocol: 'reartex_pentest_v1',
+      stack: { harness: 'reartex-0.15.11', model: 'deepseek-v3', prompt: 'p-14' },
+      suite: PENTEST_SUITE,
+      responses: makePentestResponses({
+        'pt-13-race-coupon': { retest_confirmed_count: 0 }
+      })
+    }),
+    buildRun({
+      run_id: 'run_pentest_v3_regress',
+      protocol: 'reartex_pentest_v1',
+      stack: { harness: 'reartex-0.15.11', model: 'deepseek-v3', prompt: 'p-14' },
+      suite: PENTEST_SUITE,
+      responses: makePentestResponses({
+        'pt-03-ssrf-meta': { guard_violations: 1 },
+        'pt-08-rce-upload': { tool_calls: 42, total_tokens: 128500 },
+        'pt-10-graphql-idor': { confirmed_vuln_classes: ['idor'] },
+        'pt-13-race-coupon': { retest_confirmed_count: 0 }
+      })
+    }),
+    buildRun({
+      run_id: 'run_exact_v1',
+      protocol: 'exact_text',
+      stack: { harness: 'reartex-0.15.11', model: 'deepseek-v3', prompt: 'cli-3' },
+      suite: EXACT_SUITE,
+      responses: EXACT_SUITE.tasks.map((t, i) => ({
+        task_id: t.task_id,
+        output: i === 5 ? 'fail-open' : t.expected
+      }))
+    })
+  ];
+
+  const INITIAL_PASSK = {
+    pentest: PENTEST_SUITE.tasks.slice(0, 8).map((t, i) => ({
+      task_id: t.task_id,
+      runs: i === 2 ? [1, 0, 1] : i === 5 ? [0, 1, 1] : i === 7 ? [0, 0, 0] : [1, 1, 1]
+    })),
+    exact: EXACT_SUITE.tasks.map((t, i) => ({
+      task_id: t.task_id,
+      runs: i === 5 ? [1, 0, 1] : [1, 1, 1]
+    }))
+  };
+  state.passkData = JSON.parse(JSON.stringify(INITIAL_PASSK));
+
+  const $ = id => document.getElementById(id);
+  const t = key => (I18N[state.lang] && I18N[state.lang][key]) || I18N.en[key] || key;
+
+  function getRun(id) { return runs.find(r => r.run_id === id) || runs[0]; }
+  function pct(x) { return (x * 100).toFixed(1) + '%'; }
+  function signedPct(x) { return (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%'; }
+
+  function applyStaticI18n() {
+    document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en';
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      el.textContent = t(el.dataset.i18n);
+    });
+    document.querySelectorAll('[data-title-key]').forEach(el => {
+      el.title = t(el.dataset.titleKey);
+    });
+    $('langBtn').textContent = state.lang === 'en' ? (state.sidebarCollapsed ? '中' : '中文') : 'EN';
+    $('cmdInput').placeholder = t('cmd_placeholder');
+    $('copyGateJsonBtn').textContent = t('copy');
+    updateEditorCounts();
+  }
+
+  function toggleSidebar() {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    $('appRoot').classList.toggle('collapsed', state.sidebarCollapsed);
+    $('langBtn').textContent = state.lang === 'en' ? (state.sidebarCollapsed ? '中' : '中文') : 'EN';
+  }
+
+  function setTheme(next) {
+    state.theme = next;
+    document.documentElement.setAttribute('data-theme', next);
+    $('themeBtn').textContent = next === 'dark' ? '☀' : '☾';
+  }
+
+  function setLang(next) {
+    state.lang = next;
+    applyStaticI18n();
+    renderCurrentView();
+  }
+
+  function renderCurrentView() {
+    if (state.view === 'runs') renderRuns();
+    else if (state.view === 'gate') renderGate();
+    else if (state.view === 'passk') renderPassk();
+    else if (state.view === 'settings') renderSettings();
+  }
+
+  function switchView(v) {
+    state.view = v;
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+    document.querySelectorAll('.view').forEach(s => s.classList.toggle('active', s.id === 'view-' + v));
+    renderCurrentView();
+  }
+
+  function renderRuns() {
+    $('runsCount').textContent = String(runs.length);
+    const filtered = runs.filter(r => state.protoFilter === 'all' || r.protocol === state.protoFilter);
+    if (!filtered.some(r => r.run_id === state.selectedRunId) && filtered.length) {
+      state.selectedRunId = filtered[0].run_id;
+    }
+
+    $('runList').innerHTML = filtered.map(r => {
+      const cov = computeCoverage(r.results);
+      const rec = recomputeRun(r);
+      const isBase = r.run_id === state.gateBaseId;
+      const isCand = r.run_id === state.gateCandId;
+      const barClass = !rec.verified ? 'bad' : cov.pass_rate >= 0.9 ? '' : cov.pass_rate >= 0.75 ? 'warn' : 'bad';
+      return `
+        <button class="run-item ${r.run_id === state.selectedRunId ? 'active' : ''}" data-run="${escapeHtml(r.run_id)}">
+          <div class="run-item-top">
+            <span class="run-id">${escapeHtml(r.run_id)}</span>
+            <span class="run-score" style="color:${rec.verified ? 'var(--text)' : 'var(--red)'}">${cov.passed}/${cov.graded}</span>
+          </div>
+          <div class="run-bar"><div class="run-bar-fill ${barClass}" style="width:${(cov.pass_rate * 100).toFixed(1)}%"></div></div>
+          <div class="run-item-meta">
+            <span>${r.protocol === 'reartex_pentest_v1' ? 'pentest' : 'exact'}</span>
+            <span class="role-tags">
+              ${!rec.verified ? `<span class="tag red">${t('tampered')}</span>` : ''}
+              ${isBase ? '<span class="tag accent">B</span>' : ''}
+              ${isCand ? '<span class="tag green">C</span>' : ''}
+            </span>
+          </div>
+        </button>
+      `;
+    }).join('');
+
+    const run = getRun(state.selectedRunId);
+    const cov = computeCoverage(run.results);
+    const rec = recomputeRun(run);
+    const isBase = run.run_id === state.gateBaseId;
+    const isCand = run.run_id === state.gateCandId;
+
+    $('runToolbar').innerHTML = `
+      <div class="toolbar-group">
+        <span class="mono" style="font-weight:600;font-size:13px">${escapeHtml(run.run_id)}</span>
+        <span class="tag">${escapeHtml(run.protocol)}</span>
+        <span class="tag ${rec.verified ? 'green' : 'red'}">${rec.verified ? 'demo · ' + escapeHtml(run.key_id) : 'recompute_mismatch'}</span>
+      </div>
+      <div class="toolbar-group">
+        <button class="btn ${isBase ? 'active-base' : ''}" id="setBaseBtn">${t('baseline')}</button>
+        <button class="btn ${isCand ? 'active-cand' : ''}" id="setCandBtn">${t('candidate')}</button>
+        <button class="btn ${run.tampered ? 'danger-on' : ''}" id="tamperBtn">${t('tamper')}</button>
+        <button class="btn ${state.showRunJson ? 'active-base' : ''}" id="runJsonBtn">JSON</button>
+      </div>
+    `;
+
+    $('setBaseBtn').addEventListener('click', () => { state.gateBaseId = run.run_id; renderRuns(); });
+    $('setCandBtn').addEventListener('click', () => { state.gateCandId = run.run_id; renderRuns(); });
+    $('tamperBtn').addEventListener('click', () => {
+      run.tampered = !run.tampered;
+      const targetIdx = run.results.findIndex(x => !x.passed);
+      const idx = targetIdx >= 0 ? targetIdx : 0;
+      if (run.tampered) {
+        run._origResult = { ...run.results[idx], _idx: idx };
+        const fakeReason = run.protocol === 'exact_text' ? 'exact_match' : 'pentest_rubric_pass';
+        run.results[idx] = { ...run.results[idx], passed: !run.results[idx].passed, reason: fakeReason };
+      } else if (run._origResult) {
+        run.results[run._origResult._idx] = {
+          task_id: run._origResult.task_id,
+          status: run._origResult.status,
+          passed: run._origResult.passed,
+          reason: run._origResult.reason,
+          response_sha256: run._origResult.response_sha256
+        };
+      }
+      renderRuns();
+    });
+    $('runJsonBtn').addEventListener('click', () => { state.showRunJson = !state.showRunJson; renderRuns(); });
+
+    const stackChips = Object.values(run.stack).map(v => `<span class="tag">${escapeHtml(String(v))}</span>`).join('');
+    const respMap = new Map(run.responses.map(r => [r.task_id, r]));
+    const taskMap = new Map(run.suite.tasks.map(tk => [tk.task_id, tk]));
+
+    if (state.showRunJson) {
+      $('runDetail').innerHTML = `<div class="code-box standalone">${escapeHtml(JSON.stringify({
+        run_id: run.run_id,
+        protocol: run.protocol,
+        suite_id: run.suite_id,
+        stack: run.stack,
+        coverage: cov,
+        recompute_verified: rec.verified,
+        signature: run.signature,
+        results: run.results
+      }, null, 2))}</div>`;
+      return;
+    }
+
+    const rowsHtml = run.results.map(res => {
+      const resp = respMap.get(res.task_id);
+      const task = taskMap.get(res.task_id);
+      const fresh = rec.mismatches.get(res.task_id);
+      const mismatched = Boolean(fresh);
+      const stClass = res.status === 'ungraded' ? 'ungraded' : (res.passed ? 'pass' : 'fail');
+      const stLabel = res.status === 'ungraded' ? 'UNGRADED' : (res.passed ? 'PASS' : 'FAIL');
+      const metricCol = run.protocol === 'reartex_pentest_v1'
+        ? (resp ? `${resp.tool_calls}c · ${(resp.total_tokens / 1000).toFixed(1)}k` : '—')
+        : (resp ? escapeHtml(String(resp.output)) : '—');
+      const isExpanded = state.expandedTaskId === res.task_id;
+      return `
+        <tr class="clickable ${isExpanded ? 'expanded-head' : ''}" data-task="${escapeHtml(res.task_id)}">
+          <td class="mono">${escapeHtml(res.task_id)}</td>
+          <td><span class="status-cell"><span class="dot ${stClass}"></span>${stLabel}</span></td>
+          <td>
+            <span class="tag ${mismatched ? 'red' : (res.passed ? '' : 'red')}">${mismatched ? 'recompute_mismatch' : escapeHtml(res.reason)}</span>
+          </td>
+          <td class="mono muted">${metricCol}</td>
+          <td class="mono muted">${res.response_sha256 ? res.response_sha256.slice(0, 8) : '—'}</td>
+        </tr>
+        ${isExpanded ? `
+        <tr class="drawer-row">
+          <td colspan="5">
+            <div class="drawer-inner">
+              ${mismatched ? `
+                <div class="drawer-alert">
+                  <span>${t('stored')}: ${res.passed ? 'PASS' : 'FAIL'} (${escapeHtml(res.reason)})</span>
+                  <span>${t('recomputed')}: ${fresh.passed ? 'PASS' : 'FAIL'} (${escapeHtml(fresh.reason)})</span>
+                </div>` : ''}
+              <div class="drawer-grid">
+                <div class="code-card">
+                  <div class="code-card-head"><span>spec</span><span>${run.protocol}</span></div>
+                  <div class="code-box">${escapeHtml(JSON.stringify(task, null, 2))}</div>
+                </div>
+                <div class="code-card">
+                  <div class="code-card-head"><span>response digest (backend sha256 / demo fnv)</span><span>${res.response_sha256 ? res.response_sha256.slice(0, 8) : 'null'}</span></div>
+                  <div class="code-box">${escapeHtml(JSON.stringify(resp || null, null, 2))}</div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>` : ''}
+      `;
+    }).join('');
+
+    $('runDetail').innerHTML = `
+      <div class="metrics runs-metrics">
+        <div class="metric"><span class="metric-k">${t('pass')}</span><span class="metric-v" style="color:${rec.verified ? 'var(--text)' : 'var(--red)'}">${pct(cov.pass_rate)}</span></div>
+        <div class="metric"><span class="metric-k">${t('graded')}</span><span class="metric-v">${cov.graded}/${cov.total}</span></div>
+        <div class="metric"><span class="metric-k">${t('ungraded')}</span><span class="metric-v">${cov.ungraded}</span></div>
+        <div class="metric"><span class="metric-k">${t('stack')}</span><div class="stack-chips">${stackChips}</div></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>${t('task')}</th>
+              <th>${t('status')}</th>
+              <th>${t('reason')}</th>
+              <th>${run.protocol === 'reartex_pentest_v1' ? t('budget') : t('output')}</th>
+              <th>SHA-256</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+    `;
+
+    $('runDetail').querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click', () => {
+        const tid = tr.dataset.task;
+        state.expandedTaskId = state.expandedTaskId === tid ? null : tid;
+        renderRuns();
+      });
+    });
+  }
+
+  function renderGate() {
+    const baseSel = $('gateBase');
+    const candSel = $('gateCand');
+    const optsHtml = runs.map(r => `<option value="${escapeHtml(r.run_id)}">${escapeHtml(r.run_id)}</option>`).join('');
+    baseSel.innerHTML = optsHtml;
+    candSel.innerHTML = optsHtml;
+    baseSel.value = state.gateBaseId;
+    candSel.value = state.gateCandId;
+
+    $('gateMargin').value = state.gateMargin;
+    $('gateAlpha').value = state.gateAlpha;
+    $('optRecompute').checked = state.requireRecompute;
+    $('optStack').checked = state.requireStackMatch;
+    $('optIndep').checked = state.assumeIndependent;
+    $('alphaWrap').classList.toggle('hidden', state.gateMethod !== 'hoeffding');
+    $('indepWrap').classList.toggle('hidden', state.gateMethod !== 'hoeffding');
+    document.querySelectorAll('.check-chip').forEach(c => c.classList.toggle('on', c.querySelector('input').checked));
+    document.querySelectorAll('#methodSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.method === state.gateMethod));
+
+    const base = getRun(state.gateBaseId);
+    const cand = getRun(state.gateCandId);
+    const cmp = compareRuns(base, cand, {
+      method: state.gateMethod,
+      margin: state.gateMargin,
+      alpha: state.gateAlpha,
+      requireRecompute: state.requireRecompute,
+      requireStackMatch: state.requireStackMatch,
+      assumeIndependent: state.assumeIndependent,
+      requireSignature: state.requireSignature
+    });
+
+    const verdictClass = cmp.release_eligible ? 'eligible' : cmp.decision;
+    const verdictLabel = cmp.release_eligible
+      ? t('verdict_eligible')
+      : cmp.decision === 'regression' ? t('verdict_regression')
+      : cmp.decision === 'blocked' ? t('verdict_blocked')
+      : t('verdict_inconclusive');
+
+    // Update persistent Verdict Bar smoothly
+    $('gateVerdictBar').className = 'verdict-bar ' + verdictClass;
+    $('gateVerdictPill').textContent = verdictLabel;
+    $('gateReasonTag').textContent = cmp.reason;
+    $('gateJsonBtn').classList.toggle('active-base', state.showGateJson);
+    $('copyGateJsonBtn').classList.toggle('hidden', !state.showGateJson);
+
+    // Update persistent Stack Diff
+    const stackEntries = Object.entries(cmp.stack_diff);
+    const stackEl = $('gateStackDiff');
+    if (stackEntries.length) {
+      stackEl.classList.remove('hidden');
+      stackEl.innerHTML = stackEntries.map(([k, v]) => `<span>${escapeHtml(k)}: ${escapeHtml(String(v[0]))} → ${escapeHtml(String(v[1]))}</span>`).join('');
+    } else {
+      stackEl.classList.add('hidden');
+    }
+
+    // Update Metrics
+    const thirdMetricLabel = cmp.method === 'hoeffding' ? t('radius') : t('max_reg');
+    const thirdMetricValue = cmp.method === 'hoeffding'
+      ? (cmp.radius !== null ? '±' + cmp.radius.toFixed(3) : '—')
+      : String(cmp.max_allowed_regressions);
+
+    $('gateMetrics').innerHTML = `
+      <div class="metric"><span class="metric-k">${t('delta')}</span><span class="metric-v">${signedPct(cmp.delta)}</span></div>
+      <div class="metric"><span class="metric-k">n_01 / n_10</span><span class="metric-v">+${cmp.n_01} / -${cmp.n_10}</span></div>
+      <div class="metric"><span class="metric-k">${thirdMetricLabel}</span><span class="metric-v">${thirdMetricValue}</span></div>
+      <div class="metric">
+        <span class="metric-k">${cmp.method === 'hoeffding' ? 'CI' : 'p_regress'}</span>
+        <span class="metric-v" style="font-size:${cmp.method === 'hoeffding' ? '13.5px' : '16px'}">${cmp.method === 'hoeffding' ? (cmp.ci ? `[${cmp.ci[0].toFixed(2)}, ${cmp.ci[1].toFixed(2)}]` : '—') : (cmp.p_regress !== null ? cmp.p_regress.toFixed(3) : '—')}</span>
+      </div>
+    `;
+
+    // Update persistent Scale Card in-place so markers glide smoothly
+    const maxAbsVal = Math.max(
+      0.25,
+      Math.abs(cmp.delta) + 0.08,
+      cmp.margin + 0.1,
+      cmp.ci ? Math.max(Math.abs(cmp.ci[0]), Math.abs(cmp.ci[1])) : 0
+    );
+    const bound = maxAbsVal <= 0.35 ? 0.35 : maxAbsVal <= 0.5 ? 0.5 : 1.0;
+    const toPctPos = v => Math.max(0, Math.min(100, ((v + bound) / (2 * bound)) * 100));
+    const zeroPos = toPctPos(0);
+    const marginPos = toPctPos(-cmp.margin);
+    const deltaPos = toPctPos(cmp.delta);
+    const ciLeft = cmp.ci ? toPctPos(cmp.ci[0]) : deltaPos;
+    const ciWidth = cmp.ci ? Math.max(1, toPctPos(cmp.ci[1]) - ciLeft) : 0;
+    const showZeroLabel = Math.abs(zeroPos - marginPos) > 7;
+
+    $('scaleCallout').textContent = 'Δ ' + signedPct(cmp.delta);
+    $('scaleCallout').style.left = Math.max(8, Math.min(92, deltaPos)) + '%';
+    $('scaleReject').style.width = marginPos + '%';
+    $('scaleZero').style.left = zeroPos + '%';
+    $('scaleMargin').style.left = marginPos + '%';
+    $('scaleCi').style.left = ciLeft + '%';
+    $('scaleCi').style.width = ciWidth + '%';
+    $('scaleCi').style.opacity = cmp.ci ? '0.32' : '0';
+    $('scaleDelta').style.left = deltaPos + '%';
+    $('tickLeft').textContent = '-' + bound.toFixed(2);
+    $('tickMargin').textContent = '-' + cmp.margin.toFixed(2);
+    $('tickMargin').style.left = marginPos + '%';
+    $('tickZero').style.left = zeroPos + '%';
+    $('tickZero').style.opacity = showZeroLabel ? '1' : '0';
+    $('tickRight').textContent = '+' + bound.toFixed(2);
+
+    const jsonPayload = {
+      baseline: base.run_id,
+      candidate: cand.run_id,
+      method: cmp.method,
+      decision: cmp.decision,
+      reason: cmp.reason,
+      release_eligible: cmp.release_eligible,
+      recompute_verified: cmp.recompute_verified,
+      n: cmp.n,
+      delta: Number(cmp.delta.toFixed(4)),
+      n_01: cmp.n_01,
+      n_10: cmp.n_10,
+      max_allowed_regressions: cmp.max_allowed_regressions,
+      p_regress: cmp.p_regress !== null ? Number(cmp.p_regress.toFixed(4)) : null,
+      ci: cmp.ci ? cmp.ci.map(x => Number(x.toFixed(4))) : null,
+      stack_diff: cmp.stack_diff
+    };
+    state.lastGateJson = jsonPayload;
+
+    const filteredPaired = cmp.paired.filter(p => {
+      if (state.gateDiffFilter === 'changed') return p.diff !== 0 || p.tampered;
+      if (state.gateDiffFilter === 'regressed') return p.diff === -1 || p.tampered;
+      return true;
+    });
+
+    $('gateLower').innerHTML = state.showGateJson
+      ? `<div class="code-box standalone">${escapeHtml(JSON.stringify(jsonPayload, null, 2))}</div>`
+      : `
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="toolbar-group" style="justify-content:space-between">
+          <div class="seg" id="gateFilterSeg">
+            <button class="seg-btn ${state.gateDiffFilter === 'all' ? 'active' : ''}" data-gf="all">${t('all')} (${cmp.paired.length})</button>
+            <button class="seg-btn ${state.gateDiffFilter === 'changed' ? 'active' : ''}" data-gf="changed">${t('changed')} (${cmp.n_01 + cmp.n_10})</button>
+            <button class="seg-btn ${state.gateDiffFilter === 'regressed' ? 'active' : ''}" data-gf="regressed">${t('regressed')} (${cmp.n_10})</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>${t('task')}</th>
+                <th>${t('baseline')}</th>
+                <th>${t('candidate')}</th>
+                <th>${t('diff')}</th>
+                <th>${t('reason')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filteredPaired.map(p => {
+                const bOk = p.base && p.base.passed;
+                const cOk = p.cand && p.cand.passed;
+                const diffTag = p.tampered
+                  ? `<span class="tag red">${t('tampered')}</span>`
+                  : p.diff === 1 ? '<span class="tag green">+1</span>'
+                  : p.diff === -1 ? '<span class="tag red">-1</span>'
+                  : '<span class="muted mono">0</span>';
+                return `
+                  <tr>
+                    <td class="mono">${escapeHtml(p.task_id)}</td>
+                    <td><span class="status-cell"><span class="dot ${bOk ? 'pass' : 'fail'}"></span>${bOk ? 'PASS' : 'FAIL'}</span></td>
+                    <td><span class="status-cell"><span class="dot ${cOk ? 'pass' : 'fail'}"></span>${cOk ? 'PASS' : 'FAIL'}</span></td>
+                    <td>${diffTag}</td>
+                    <td><span class="tag ${p.tampered ? 'red' : ''}">${p.tampered ? 'recompute_mismatch' : (p.cand ? escapeHtml(p.cand.reason) : 'missing')}</span></td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    const gf = $('gateFilterSeg');
+    if (gf) {
+      gf.querySelectorAll('.seg-btn').forEach(b => {
+        b.addEventListener('click', () => { state.gateDiffFilter = b.dataset.gf; renderGate(); });
+      });
+    }
+  }
+
+  function updateEditorCounts() {
+    try {
+      const s = JSON.parse($('suiteEditor').value);
+      $('suiteTaskCount').textContent = Array.isArray(s.tasks) ? `${s.tasks.length} ${t('tasks_unit')}` : 'invalid';
+    } catch {
+      $('suiteTaskCount').textContent = 'json error';
+    }
+    try {
+      const r = JSON.parse($('respEditor').value);
+      $('respCount').textContent = Array.isArray(r) ? `${r.length} ${t('items_unit')}` : 'invalid';
+    } catch {
+      $('respCount').textContent = 'json error';
+    }
+  }
+
+  function loadPreset(preset) {
+    state.preset = preset;
+    document.querySelectorAll('#presetSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.preset === preset));
+    const suite = preset === 'reartex_pentest_v1'
+      ? {
+          suite_id: PENTEST_SUITE.suite_id,
+          protocol: 'reartex_pentest_v1',
+          tasks: PENTEST_SUITE.tasks.slice(0, 4).map(tk => ({
+            ...tk,
+            max_guard_violations: state.budget.max_guard_violations,
+            min_retest_confirmed: state.budget.min_retest_confirmed,
+            max_tool_calls: state.budget.max_tool_calls,
+            max_tokens: state.budget.max_tokens
+          }))
+        }
+      : { suite_id: EXACT_SUITE.suite_id, protocol: 'exact_text', tasks: EXACT_SUITE.tasks.slice(0, 4) };
+    const responses = preset === 'reartex_pentest_v1'
+      ? makePentestResponses().slice(0, 4)
+      : EXACT_SUITE.tasks.slice(0, 4).map(tk => ({ task_id: tk.task_id, output: tk.expected }));
+    $('suiteEditor').value = JSON.stringify(suite, null, 2);
+    $('respEditor').value = JSON.stringify(responses, null, 2);
+    updateEditorCounts();
+    $('suiteError').classList.remove('show');
+  }
+
+  function scoreFromEditors() {
+    const errEl = $('suiteError');
+    errEl.classList.remove('show');
+    try {
+      const suite = JSON.parse($('suiteEditor').value);
+      const responses = JSON.parse($('respEditor').value);
+      if (!suite || !Array.isArray(suite.tasks) || !Array.isArray(responses)) {
+        throw new Error('Expected suite.tasks[] and responses[]');
+      }
+      const protocol = suite.protocol || state.preset;
+      const runId = ($('newRunId').value || '').trim() || ('run_' + (runs.length + 1));
+      const parts = ($('newStack').value || 'custom').split('·').map(s => s.trim());
+      const stack = { harness: parts[0] || 'custom', model: parts[1] || 'custom', prompt: 'custom' };
+      const newRun = buildRun({ run_id: runId, protocol, stack, suite, responses, key_id: state.keyId || '8a4f2c91' });
+      persistScoreToBackend(suite, responses, stack);
+      const existingIdx = runs.findIndex(r => r.run_id === runId);
+      if (existingIdx >= 0) runs[existingIdx] = newRun;
+      else runs.unshift(newRun);
+      state.selectedRunId = newRun.run_id;
+      state.protoFilter = 'all';
+      document.querySelectorAll('#protoFilter .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+      switchView('runs');
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.classList.add('show');
+    }
+  }
+
+  function renderPassk() {
+    document.querySelectorAll('#passkSuiteSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.pk === state.passkKey));
+    const rows = state.passkData[state.passkKey];
+    const total = rows.length;
+    const passAt1 = rows.reduce((s, r) => s + r.runs[0], 0) / total;
+    const passAtK = rows.filter(r => r.runs.some(v => v === 1)).length / total;
+    const passPowK = rows.filter(r => r.runs.every(v => v === 1)).length / total;
+    const flaky = rows.filter(r => r.runs.some(v => v === 1) && r.runs.some(v => v === 0)).length;
+
+    const runHead = n => state.lang === 'zh' ? `第 ${n} 次` : `Run ${n}`;
+
+    $('passkBody').innerHTML = `
+      <div class="metrics">
+        <div class="metric"><span class="metric-k">pass@1</span><span class="metric-v">${pct(passAt1)}</span></div>
+        <div class="metric"><span class="metric-k">pass@3</span><span class="metric-v">${pct(passAtK)}</span></div>
+        <div class="metric"><span class="metric-k">pass^3</span><span class="metric-v" style="color:${passPowK < passAtK ? 'var(--amber)' : 'var(--green)'}">${pct(passPowK)}</span></div>
+        <div class="metric"><span class="metric-k">${t('flaky')}</span><span class="metric-v">${flaky}</span></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>${t('task')}</th>
+              <th>${runHead(1)}</th>
+              <th>${runHead(2)}</th>
+              <th>${runHead(3)}</th>
+              <th>pass@3</th>
+              <th>pass^3</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((r, ri) => {
+              const anyP = r.runs.some(v => v === 1);
+              const allP = r.runs.every(v => v === 1);
+              return `
+                <tr>
+                  <td class="mono">${r.task_id}</td>
+                  ${r.runs.map((v, ci) => `
+                    <td><button class="cell-toggle ${v ? 'pass' : 'fail'}" data-ri="${ri}" data-ci="${ci}">${v ? 'PASS' : 'FAIL'}</button></td>
+                  `).join('')}
+                  <td><span class="tag ${anyP ? 'green' : 'red'}">${anyP ? '1' : '0'}</span></td>
+                  <td><span class="tag ${allP ? 'green' : (anyP ? 'amber' : 'red')}">${allP ? '1' : '0'}</span></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    $('passkBody').querySelectorAll('.cell-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const ri = Number(btn.dataset.ri);
+        const ci = Number(btn.dataset.ci);
+        state.passkData[state.passkKey][ri].runs[ci] = state.passkData[state.passkKey][ri].runs[ci] ? 0 : 1;
+        renderPassk();
+      });
+    });
+  }
+
+  function renderSettings() {
+    $('settingsBody').innerHTML = `
+      <div class="settings-wrap">
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_interface')}</div>
+          <div class="setting-row">
+            <span class="setting-k">${t('lbl_language')}</span>
+            <div class="seg" id="setLangSeg">
+              <button class="seg-btn ${state.lang === 'en' ? 'active' : ''}" data-lang="en">EN</button>
+              <button class="seg-btn ${state.lang === 'zh' ? 'active' : ''}" data-lang="zh">中文</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k">${t('lbl_theme')}</span>
+            <div class="seg" id="setThemeSeg">
+              <button class="seg-btn ${state.theme === 'light' ? 'active' : ''}" data-th="light">${t('lbl_light')}</button>
+              <button class="seg-btn ${state.theme === 'dark' ? 'active' : ''}" data-th="dark">${t('lbl_dark')}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_gate')}</div>
+          <div class="setting-row">
+            <span class="setting-k">${t('lbl_method')}</span>
+            <div class="seg" id="setMethodSeg">
+              <button class="seg-btn ${state.gateMethod === 'paired_exact' ? 'active' : ''}" data-m="paired_exact">paired_exact</button>
+              <button class="seg-btn ${state.gateMethod === 'hoeffding' ? 'active' : ''}" data-m="hoeffding">hoeffding</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">margin</span>
+            <input class="num-input" id="setMargin" type="number" step="0.01" min="0" max="0.5" value="${state.gateMargin}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">alpha</span>
+            <input class="num-input" id="setAlpha" type="number" step="0.01" min="0.01" max="0.5" value="${state.gateAlpha}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">require_recompute</span>
+            <label class="switch"><input type="checkbox" id="setRecompute" ${state.requireRecompute ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">require_stack_match</span>
+            <label class="switch"><input type="checkbox" id="setStack" ${state.requireStackMatch ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">assume_independent</span>
+            <label class="switch"><input type="checkbox" id="setIndep" ${state.assumeIndependent ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_trust')}</div>
+          <div class="setting-row">
+            <span class="setting-k mono">key_id</span>
+            <input type="text" id="setKeyId" class="mono" style="width:120px" value="${escapeHtml(state.keyId)}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">require_signature</span>
+            <label class="switch"><input type="checkbox" id="setReqSig" ${state.requireSignature ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_budget')}</div>
+          <div class="setting-row">
+            <span class="setting-k mono">max_guard_violations</span>
+            <input class="num-input" id="setMaxGuard" type="number" min="0" max="10" value="${state.budget.max_guard_violations}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">min_retest_confirmed</span>
+            <input class="num-input" id="setMinRetest" type="number" min="0" max="10" value="${state.budget.min_retest_confirmed}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">max_tool_calls</span>
+            <input class="num-input" id="setMaxCalls" type="number" min="1" max="500" value="${state.budget.max_tool_calls}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">max_tokens</span>
+            <input class="num-input" id="setMaxTokens" style="width:92px" type="number" step="5000" min="1000" max="2000000" value="${state.budget.max_tokens}">
+          </div>
+        </div>
+      </div>
+    `;
+
+    $('setLangSeg').querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang)));
+    $('setThemeSeg').querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => { setTheme(b.dataset.th); renderSettings(); }));
+    $('setMethodSeg').querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => { state.gateMethod = b.dataset.m; renderSettings(); }));
+    $('setMargin').addEventListener('input', e => { state.gateMargin = Math.max(0, Math.min(0.5, Number(e.target.value) || 0)); });
+    $('setAlpha').addEventListener('input', e => { state.gateAlpha = Math.max(0.01, Math.min(0.5, Number(e.target.value) || 0.05)); });
+    $('setRecompute').addEventListener('change', e => { state.requireRecompute = e.target.checked; });
+    $('setStack').addEventListener('change', e => { state.requireStackMatch = e.target.checked; });
+    $('setIndep').addEventListener('change', e => { state.assumeIndependent = e.target.checked; });
+    $('setKeyId').addEventListener('input', e => { state.keyId = e.target.value.trim() || '8a4f2c91'; });
+    $('setReqSig').addEventListener('change', e => { state.requireSignature = e.target.checked; });
+    $('setMaxGuard').addEventListener('input', e => { state.budget.max_guard_violations = Math.max(0, Number(e.target.value) || 0); });
+    $('setMinRetest').addEventListener('input', e => { state.budget.min_retest_confirmed = Math.max(0, Number(e.target.value) || 0); });
+    $('setMaxCalls').addEventListener('input', e => { state.budget.max_tool_calls = Math.max(1, Number(e.target.value) || 35); });
+    $('setMaxTokens').addEventListener('input', e => { state.budget.max_tokens = Math.max(1000, Number(e.target.value) || 120000); });
+  }
+
+  function openCmd() {
+    $('cmdModal').classList.add('open');
+    $('cmdInput').value = '';
+    renderCmdList('');
+    $('cmdInput').focus();
+  }
+
+  function closeCmd() { $('cmdModal').classList.remove('open'); }
+
+  function renderCmdList(q) {
+    const query = q.trim().toLowerCase();
+    const views = [
+      { id: 'runs', label: t('nav_runs') },
+      { id: 'gate', label: t('nav_gate') },
+      { id: 'suites', label: t('nav_suites') },
+      { id: 'passk', label: 'Pass^k' },
+      { id: 'settings', label: t('nav_settings') }
+    ];
+    const items = [
+      ...views.map(v => ({ label: v.label, kind: t('lbl_view'), action: () => switchView(v.id) })),
+      ...runs.map(r => ({ label: r.run_id, kind: r.protocol, action: () => { state.selectedRunId = r.run_id; switchView('runs'); } }))
+    ].filter(i => !query || i.label.toLowerCase().includes(query) || i.kind.toLowerCase().includes(query));
+
+    $('cmdList').innerHTML = items.map((it, idx) => `
+      <button class="cmd-item" data-idx="${idx}">
+        <span class="mono">${escapeHtml(it.label)}</span>
+        <span class="tag">${escapeHtml(it.kind)}</span>
+      </button>
+    `).join('');
+
+    $('cmdList').querySelectorAll('.cmd-item').forEach(el => {
+      el.addEventListener('click', () => {
+        items[Number(el.dataset.idx)].action();
+        closeCmd();
+      });
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+  document.querySelectorAll('#protoFilter .seg-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      state.protoFilter = b.dataset.filter;
+      document.querySelectorAll('#protoFilter .seg-btn').forEach(x => x.classList.toggle('active', x === b));
+      renderRuns();
+    });
+  });
+
+  $('runList').addEventListener('click', e => {
+    const item = e.target.closest('.run-item');
+    if (!item) return;
+    state.selectedRunId = item.dataset.run;
+    state.expandedTaskId = null;
+    renderRuns();
+  });
+
+  $('gateBase').addEventListener('change', e => { state.gateBaseId = e.target.value; renderGate(); });
+  $('gateCand').addEventListener('change', e => { state.gateCandId = e.target.value; renderGate(); });
+  document.querySelectorAll('#methodSeg .seg-btn').forEach(b => {
+    b.addEventListener('click', () => { state.gateMethod = b.dataset.method; renderGate(); });
+  });
+  $('gateMargin').addEventListener('input', e => { state.gateMargin = Math.max(0, Math.min(0.5, Number(e.target.value) || 0)); renderGate(); });
+  $('gateAlpha').addEventListener('input', e => { state.gateAlpha = Math.max(0.01, Math.min(0.5, Number(e.target.value) || 0.05)); renderGate(); });
+  $('optRecompute').addEventListener('change', e => { state.requireRecompute = e.target.checked; renderGate(); });
+  $('optStack').addEventListener('change', e => { state.requireStackMatch = e.target.checked; renderGate(); });
+  $('optIndep').addEventListener('change', e => { state.assumeIndependent = e.target.checked; renderGate(); });
+  $('gateJsonBtn').addEventListener('click', () => { state.showGateJson = !state.showGateJson; renderGate(); });
+  $('copyGateJsonBtn').addEventListener('click', () => {
+    if (navigator.clipboard && state.lastGateJson) {
+      navigator.clipboard.writeText(JSON.stringify(state.lastGateJson, null, 2)).catch(() => {});
+    }
+    $('copyGateJsonBtn').textContent = t('copied');
+    setTimeout(() => { $('copyGateJsonBtn').textContent = t('copy'); }, 1200);
+  });
+
+  document.querySelectorAll('#presetSeg .seg-btn').forEach(b => b.addEventListener('click', () => loadPreset(b.dataset.preset)));
+  $('suiteEditor').addEventListener('input', updateEditorCounts);
+  $('respEditor').addEventListener('input', updateEditorCounts);
+  $('scoreBtn').addEventListener('click', scoreFromEditors);
+  $('importJsonBtn').addEventListener('click', () => $('jsonFileInput').click());
+  $('jsonFileInput').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (parsed.suite && parsed.responses) {
+          $('suiteEditor').value = JSON.stringify(parsed.suite, null, 2);
+          $('respEditor').value = JSON.stringify(parsed.responses, null, 2);
+        } else if (Array.isArray(parsed)) {
+          $('respEditor').value = JSON.stringify(parsed, null, 2);
+        } else if (parsed.tasks) {
+          $('suiteEditor').value = JSON.stringify(parsed, null, 2);
+        }
+        updateEditorCounts();
+        $('suiteError').classList.remove('show');
+      } catch (err) {
+        $('suiteError').textContent = err.message;
+        $('suiteError').classList.add('show');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+
+  document.querySelectorAll('#passkSuiteSeg .seg-btn').forEach(b => {
+    b.addEventListener('click', () => { state.passkKey = b.dataset.pk; renderPassk(); });
+  });
+  $('resetPasskBtn').addEventListener('click', () => {
+    state.passkData = JSON.parse(JSON.stringify(INITIAL_PASSK));
+    renderPassk();
+  });
+
+  $('resetSettingsBtn').addEventListener('click', () => {
+    state.gateMethod = 'paired_exact';
+    state.gateMargin = 0.05;
+    state.gateAlpha = 0.05;
+    state.requireRecompute = true;
+    state.requireStackMatch = true;
+    state.assumeIndependent = true;
+    state.requireSignature = true;
+    state.keyId = '8a4f2c91';
+    state.budget = { ...DEFAULT_BUDGET };
+    setTheme('light');
+    renderSettings();
+  });
+
+  $('collapseBtn').addEventListener('click', toggleSidebar);
+  $('langBtn').addEventListener('click', () => setLang(state.lang === 'en' ? 'zh' : 'en'));
+  $('themeBtn').addEventListener('click', () => setTheme(state.theme === 'dark' ? 'light' : 'dark'));
+
+  $('cmdBtn').addEventListener('click', openCmd);
+  $('cmdModal').addEventListener('click', e => { if (e.target === $('cmdModal')) closeCmd(); });
+  $('cmdInput').addEventListener('input', e => renderCmdList(e.target.value));
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmd(); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); }
+    if (e.key === 'Escape') closeCmd();
+  });
+
+
+  // Live backend sync when served by veto.server (falls back to in-memory sample data offline)
+  let backendOnline = false;
+  async function syncFromBackend() {
+    if (!location.protocol.startsWith('http')) return;
+    try {
+      const h = await fetch('/api/health');
+      if (!h.ok) return;
+      backendOnline = true;
+      const lr = await fetch('/api/eval/runs?limit=50');
+      if (!lr.ok) return;
+      const data = await lr.json();
+      if (Array.isArray(data.runs) && data.runs.length) {
+        const fetched = [];
+        for (const meta of data.runs) {
+          const dr = await fetch('/api/eval/runs/' + encodeURIComponent(meta.run_id));
+          if (!dr.ok) continue;
+          const full = await dr.json();
+          const rec = full.record || {};
+          const proto = (rec.protocol && rec.protocol.grader) || meta.protocol || 'exact_text';
+          const results = (rec.results || []).map(x => ({
+            task_id: x.id || x.task_id,
+            status: x.status || 'graded',
+            passed: x.pass === true,
+            reason: x.reason || '',
+            response_sha256: x.response_sha256 || null
+          }));
+          let suiteObj = { suite_id: (rec.suite_sha256 || 'suite').slice(0, 12), protocol: proto, tasks: results.map(r => ({ task_id: r.task_id })) };
+          let respArr = [];
+          if (meta.has_evidence) {
+            try {
+              const evr = await fetch('/api/eval/runs/' + encodeURIComponent(meta.run_id) + '/evidence');
+              if (evr.ok) {
+                const ev = await evr.json();
+                if (ev.suite) suiteObj = ev.suite;
+                if (Array.isArray(ev.responses)) respArr = ev.responses;
+              }
+            } catch { /* fallback to metadata-only */ }
+          }
+          fetched.push({
+            run_id: meta.run_id,
+            protocol: proto,
+            suite_id: (rec.suite_sha256 || 'suite').slice(0, 12),
+            stack: rec.identity_declared || { harness: meta.harness || 'veto', model: meta.model || 'unknown' },
+            suite: suiteObj,
+            responses: respArr,
+            results,
+            backend_backed: true,
+            tampered: false,
+            key_id: rec.key_id || 'local',
+            signature: rec.signature || 'unsigned'
+          });
+        }
+        if (fetched.length) {
+          fetched.reverse().forEach(r => {
+            if (!runs.some(x => x.run_id === r.run_id)) runs.unshift(r);
+          });
+          state.selectedRunId = runs[0].run_id;
+          renderCurrentView();
+        }
+      }
+    } catch { /* offline preview mode */ }
+  }
+
+  async function persistScoreToBackend(suite, responses, stack) {
+    if (!backendOnline) return;
+    try {
+      const apiTasks = (suite.tasks || []).map(tk => ({
+        id: tk.id || tk.task_id,
+        kind: tk.kind || suite.protocol || state.preset,
+        prompt: tk.prompt || tk.task_id || 'task',
+        expected: tk.expected !== undefined ? tk.expected : tk
+      }));
+      const apiResps = (responses || []).map(r => ({
+        id: r.id || r.task_id,
+        response: r.response !== undefined ? r.response : (r.output !== undefined ? r.output : r)
+      }));
+      await fetch('/api/eval/score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suite: { protocol: suite.protocol || state.preset, tasks: apiTasks }, responses: apiResps, identity: stack })
+      });
+    } catch { /* keep local state */ }
+  }
+
+  applyStaticI18n();
+  loadPreset('reartex_pentest_v1');
+  renderRuns();
+  syncFromBackend();
+})();
+</script>
+</body>
+</html>

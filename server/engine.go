@@ -132,6 +132,10 @@ type Engine struct {
 	m        *Manager
 	debounce time.Duration
 
+	// vetoServer 是 Veto exporter 的宿主引用（0.15.32）：engine 在 Server 之下
+	// 装配、不能反向 import，由 server.New 在装配期回填；nil = exporter 不跑。
+	vetoServer *Server
+
 	bc *Broadcaster // live activity pub/sub (SSE)
 
 	// ActivityMirror / ClaimMirror 是总控会话播报的注入点（server/session_task_mirror.go）：
@@ -1409,7 +1413,17 @@ func (e *Engine) emitTaskTokenTotal(t *Task) {
 	}
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
 		Summary: fmt.Sprintf("本任务 token 总量（input+output，缓存含在 input）：%d", total)})
+	// Veto exporter（0.15.32，批次 E1）：任务终态导出 reartex_pentest_v1
+	// responses——挂在 token 总量播报旁 = 四个终态落点（停滞/goalless/超时/常规）
+	// 全覆盖且只跑一次。best-effort，失败不影响终态。
+	if s := e.serverRef(); s != nil {
+		s.ExportVetoResponses(t)
+	}
 }
+
+// serverRef 返回引擎背书的 server 引用（engine 无法直接持有 server——由 server
+// 在装配期回填；未回填 = exporter 不跑，零影响）。
+func (e *Engine) serverRef() *Server { return e.vetoServer }
 
 // freezeReplayCorpus 冻结这个任务的重放语料（一次性、可重入）。
 //

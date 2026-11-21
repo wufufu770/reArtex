@@ -413,3 +413,19 @@ WHERE kind='tool_use' AND tool=$1 AND created_at > now() - $2::interval`
 	}
 	return out, rows.Err()
 }
+
+// CountTaskToolCalls 统计一个任务的 tool_use 总数（Veto exporter 用，0.15.32）。
+// taskID 语义与 ListCommands 的 ?task= 一致：任务 id → 探索 id 翻译（两者数值
+// 经常错位，直接当 exploration_id 会查空）。任务不存在计 0。
+func (d *DB) CountTaskToolCalls(taskID int64) (int, error) {
+	var n int
+	err := d.QueryRow(`
+SELECT COUNT(*) FROM activity u
+WHERE u.kind = 'tool_use'
+  AND u.exploration_id = (SELECT t.exploration_id FROM tasks t WHERE t.id=$1 AND t.deleted_at IS NULL)`,
+		taskID).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}

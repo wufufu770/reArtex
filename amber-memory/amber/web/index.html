@@ -1,0 +1,2189 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>amber</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-canvas: #fafafb;
+    --bg-subtle: #f4f5f7;
+    --bg-hover: #eff1f4;
+    --bg-active: #ebedf3;
+    --border: #e5e7eb;
+    --border-subtle: #eef0f3;
+    --border-strong: #d1d5db;
+    --text: #111827;
+    --text-muted: #6b7280;
+    --text-faint: #9ca3af;
+    --accent: #5e6ad2;
+    --accent-bg: #eef0ff;
+    --green: #15803d;
+    --green-bg: #ecfdf3;
+    --green-border: #bbf7d0;
+    --red: #b91c1c;
+    --red-bg: #fef2f2;
+    --red-border: #fecaca;
+    --amber: #b45309;
+    --amber-bg: #fffbeb;
+    --amber-border: #fde68a;
+    --radius: 7px;
+    --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  [data-theme="dark"] {
+    --bg: #111318;
+    --bg-canvas: #0d0f13;
+    --bg-subtle: #171a22;
+    --bg-hover: #1e222d;
+    --bg-active: #242938;
+    --border: #262b36;
+    --border-subtle: #1f242e;
+    --border-strong: #373f51;
+    --text: #f3f4f6;
+    --text-muted: #9ca3af;
+    --text-faint: #6b7280;
+    --accent: #7c87f0;
+    --accent-bg: #1e2240;
+    --green: #4ade80;
+    --green-bg: #0f291a;
+    --green-border: #166534;
+    --red: #f87171;
+    --red-bg: #2c1215;
+    --red-border: #7f1d1d;
+    --amber: #fbbf24;
+    --amber-bg: #2b1f0d;
+    --amber-border: #78350f;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+  }
+
+  @keyframes viewIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes drawerIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-canvas);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+    transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
+  }
+
+  button, input, select, textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 196px 1fr;
+    height: 100vh;
+    overflow: hidden;
+    transition: grid-template-columns 0.24s var(--ease);
+  }
+
+  .app.collapsed { grid-template-columns: 54px 1fr; }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 12px 10px;
+    gap: 14px;
+    user-select: none;
+    overflow: hidden;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease), padding 0.24s var(--ease);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 2px 4px 2px 6px;
+    min-height: 28px;
+  }
+
+  .brand-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .brand-name { font-weight: 600; font-size: 13.5px; letter-spacing: -0.015em; white-space: nowrap; }
+
+  .brand-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    transition: transform 0.2s var(--ease);
+  }
+
+  .brand:hover .brand-dot { transform: scale(1.18); }
+  .ver { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+
+  .collapse-btn {
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    border: none;
+    background: transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: background-color 0.14s var(--ease), color 0.14s var(--ease), transform 0.14s var(--ease);
+  }
+
+  .collapse-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .collapse-btn:active { transform: scale(0.93); }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 9px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-weight: 500;
+    transition: background-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .nav-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .nav-btn:active { transform: scale(0.98); }
+  .nav-btn.active { background: var(--bg-active); color: var(--text); }
+
+  .nav-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .nav-label { white-space: nowrap; }
+
+  .nav-icon {
+    width: 15px;
+    height: 15px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
+    flex-shrink: 0;
+  }
+
+  .count-badge { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+  .sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .cmd-trigger {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-canvas);
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    min-width: 0;
+    height: 29px;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .cmd-trigger:hover { border-color: var(--border-strong); color: var(--text); }
+  .cmd-trigger:active { transform: scale(0.97); }
+  .kbd { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+
+  .icon-btn {
+    min-width: 29px;
+    height: 29px;
+    padding: 0 6px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    background: var(--bg-canvas);
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 11.5px;
+    font-weight: 500;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+  .icon-btn:active { transform: scale(0.94); }
+
+  .app.collapsed .sidebar { padding: 12px 9px; align-items: center; }
+  .app.collapsed .brand { justify-content: center; padding: 2px 0; width: 100%; }
+  .app.collapsed .brand-left { display: none; }
+  .app.collapsed .nav { align-items: center; width: 100%; }
+  .app.collapsed .nav-btn { width: 34px; height: 34px; padding: 0; justify-content: center; }
+  .app.collapsed .nav-label, .app.collapsed .count-badge { display: none; }
+  .app.collapsed .sidebar-footer { flex-direction: column; width: 100%; gap: 6px; }
+  .app.collapsed .cmd-trigger { width: 34px; height: 30px; padding: 0; justify-content: center; flex: none; }
+  .app.collapsed .cmd-label { display: none; }
+  .app.collapsed .icon-btn { width: 34px; height: 30px; padding: 0; }
+
+  /* Main */
+  .main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .view { display: none; height: 100%; overflow: hidden; }
+  .view.active { display: flex; flex-direction: column; animation: viewIn 0.18s var(--ease) both; }
+
+  /* Master-Detail */
+  .split { display: grid; grid-template-columns: 276px 1fr; height: 100%; overflow: hidden; }
+
+  .list-pane {
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .pane-header {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .search-input {
+    width: 100%;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-canvas);
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease);
+  }
+
+  .search-input:focus { border-color: var(--accent); background: var(--bg); }
+
+  .seg {
+    display: inline-flex;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .seg-btn {
+    border: none;
+    background: transparent;
+    padding: 3px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 500;
+    transition: background-color 0.16s var(--ease), color 0.16s var(--ease), box-shadow 0.16s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .seg-btn:active { transform: scale(0.96); }
+  .seg-btn.active { background: var(--bg); color: var(--text); box-shadow: var(--shadow-card); }
+
+  .entry-list {
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .entry-item {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 9px 10px;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+    transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease), box-shadow 0.15s var(--ease), transform 0.12s var(--ease);
+  }
+
+  .entry-item:hover { background: var(--bg-hover); }
+  .entry-item:active { transform: scale(0.99); }
+  .entry-item.active {
+    background: var(--bg-canvas);
+    border-color: var(--border);
+    box-shadow: var(--shadow-card);
+  }
+
+  .entry-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .entry-key {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .entry-snippet {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .entry-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot.active { background: var(--green); }
+  .dot.superseded { background: var(--amber); }
+  .dot.revoked { background: var(--red); }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.25;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition: background-color 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s var(--ease);
+  }
+
+  .tag.accent { color: var(--accent); background: var(--accent-bg); border-color: transparent; }
+  .tag.green { color: var(--green); background: var(--green-bg); border-color: var(--green-border); }
+  .tag.red { color: var(--red); background: var(--red-bg); border-color: var(--red-border); }
+  .tag.amber { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-border); }
+
+  .detail-pane {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+    background: var(--bg-canvas);
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    min-height: 46px;
+    transition: background-color 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+
+  .toolbar-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background-color 0.14s var(--ease), border-color 0.14s var(--ease), color 0.14s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.active-base { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+  .btn.danger-on { border-color: var(--red-border); color: var(--red); background: var(--red-bg); }
+
+  .scroll-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* Metrics strip */
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+
+  .metric {
+    padding: 11px 14px;
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .metric:last-child { border-right: none; }
+  .metric-k { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+  .metric-v {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Apple Notes Content Card */
+  .note-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+
+  .note-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 9px 14px;
+    background: var(--bg-canvas);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .note-body {
+    padding: 16px 18px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .redacted-token {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--amber-bg);
+    color: var(--amber);
+    border: 1px solid var(--amber-border);
+  }
+
+  /* Lineage strip */
+  .lineage-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .lineage-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: border-color 0.14s var(--ease), background-color 0.14s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .lineage-node:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  .lineage-node:active { transform: scale(0.96); }
+  .lineage-node.current { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+
+  /* Inline Supersede Composer */
+  .composer-card {
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    animation: drawerIn 0.16s var(--ease) both;
+  }
+
+  .composer-ta {
+    width: 100%;
+    min-height: 110px;
+    border: none;
+    resize: vertical;
+    padding: 12px 14px;
+    background: var(--bg);
+    font-size: 13px;
+    line-height: 1.55;
+    outline: none;
+  }
+
+  .composer-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-subtle);
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* Tables */
+  .table-wrap {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow-x: auto;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+
+  th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-canvas);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+    transition: background-color 0.12s var(--ease);
+  }
+
+  tr:last-child td { border-bottom: none; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--bg-hover); }
+
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .muted { color: var(--text-muted); }
+
+  /* Controls */
+  select, input[type="number"], input[type="text"] {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 5px 8px;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.14s var(--ease);
+  }
+
+  select:focus, input:focus, textarea:focus { border-color: var(--accent); }
+  .num-input { width: 76px; font-family: var(--font-mono); }
+
+  .field-inline { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted); }
+
+  .check-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    user-select: none;
+    transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease), color 0.15s var(--ease);
+  }
+
+  .check-chip input { accent-color: var(--accent); cursor: pointer; }
+  .check-chip.on { color: var(--text); border-color: var(--border-strong); background: var(--bg-subtle); }
+
+  /* Write two-column */
+  .editor-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .editor-col {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    min-height: 280px;
+  }
+
+  .editor-head {
+    padding: 8px 12px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .editor-ta {
+    flex: 1;
+    width: 100%;
+    border: none;
+    resize: none;
+    padding: 12px 14px;
+    background: var(--bg);
+    font-size: 13px;
+    line-height: 1.6;
+    outline: none;
+  }
+
+  .preview-pane {
+    flex: 1;
+    padding: 12px 14px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Budget bar (gliding in-place) */
+  .budget-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .budget-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  .budget-track {
+    height: 10px;
+    border-radius: 5px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .budget-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.34s var(--ease), background-color 0.2s var(--ease);
+  }
+
+  .budget-fill.full { background: var(--amber); }
+
+  /* Audit Banner */
+  .verdict-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    box-shadow: var(--shadow-card);
+    transition: background-color 0.24s var(--ease), border-color 0.24s var(--ease);
+  }
+
+  .verdict-bar.ok { background: var(--green-bg); border-color: var(--green-border); }
+  .verdict-bar.broken { background: var(--red-bg); border-color: var(--red-border); }
+  .verdict-pill { font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: 0.03em; }
+  .verdict-bar.ok .verdict-pill { color: var(--green); }
+  .verdict-bar.broken .verdict-pill { color: var(--red); }
+
+  .code-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 460px;
+    animation: viewIn 0.16s var(--ease) both;
+  }
+
+  /* Settings */
+  .settings-wrap { max-width: 620px; width: 100%; display: flex; flex-direction: column; gap: 14px; }
+
+  .settings-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+
+  .settings-head {
+    padding: 8px 14px;
+    background: var(--bg-canvas);
+    border-bottom: 1px solid var(--border);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .setting-row:last-child { border-bottom: none; }
+  .setting-k { font-size: 12.5px; font-weight: 500; }
+  .setting-k.mono { font-family: var(--font-mono); font-size: 12px; }
+
+  .switch { position: relative; display: inline-block; width: 34px; height: 19px; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch-track { position: absolute; inset: 0; background: var(--border-strong); border-radius: 99px; transition: background-color 0.18s var(--ease); }
+  .switch-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+    transition: transform 0.2s var(--ease);
+  }
+  .switch input:checked + .switch-track { background: var(--accent); }
+  .switch input:checked + .switch-track::after { transform: translateX(15px); }
+
+  /* Command Palette */
+  .cmd-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(2px);
+    z-index: 50;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 12vh;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.16s var(--ease);
+  }
+
+  .cmd-backdrop.open { opacity: 1; pointer-events: auto; }
+
+  .cmd-modal {
+    width: min(500px, 92vw);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+    transform: translateY(-6px) scale(0.975);
+    transition: transform 0.18s var(--ease);
+  }
+
+  .cmd-backdrop.open .cmd-modal { transform: translateY(0) scale(1); }
+
+  .cmd-input {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    background: var(--bg);
+    font-size: 13.5px;
+    outline: none;
+  }
+
+  .cmd-list { max-height: 300px; overflow-y: auto; padding: 6px; }
+
+  .cmd-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.12s var(--ease);
+  }
+
+  .cmd-item:hover { background: var(--bg-hover); }
+
+  .hidden { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+
+  @media (max-width: 780px) {
+    .app, .app.collapsed { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .sidebar, .app.collapsed .sidebar {
+      flex-direction: row;
+      align-items: center;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .brand, .app.collapsed .brand { padding: 0 4px; width: auto; }
+    .app.collapsed .brand-left { display: flex; }
+    .collapse-btn, .ver, .count-badge { display: none; }
+    .nav, .app.collapsed .nav { flex-direction: row; flex: 1; width: auto; }
+    .nav-btn, .app.collapsed .nav-btn { width: auto; height: auto; padding: 5px 8px; }
+    .app.collapsed .nav-label { display: inline; }
+    .sidebar-footer, .app.collapsed .sidebar-footer { flex-direction: row; border-top: none; padding-top: 0; width: auto; }
+    .cmd-trigger span:first-child { display: none; }
+    .app.collapsed .cmd-trigger, .app.collapsed .icon-btn { width: auto; min-width: 29px; height: 29px; padding: 0 6px; }
+    .split { grid-template-columns: 1fr; grid-template-rows: 205px 1fr; }
+    .list-pane { border-right: none; border-bottom: 1px solid var(--border); }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .metric:nth-child(2) { border-right: none; }
+    .metric:nth-child(1), .metric:nth-child(2) { border-bottom: 1px solid var(--border-subtle); }
+    .editor-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app" id="appRoot">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-left">
+        <span class="brand-dot"></span>
+        <span class="brand-name">amber</span>
+        <span class="ver">0.5.0</span>
+      </span>
+      <button class="collapse-btn" id="collapseBtn" aria-label="Toggle sidebar" title="⌘B">
+        <svg class="nav-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+      </button>
+    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-btn active" data-view="entries" data-title-key="nav_entries">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="nav-label" data-i18n="nav_entries">Entries</span>
+        </span>
+        <span class="count-badge" id="entriesCount">6</span>
+      </button>
+      <button class="nav-btn" data-view="write" data-title-key="nav_write">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          <span class="nav-label" data-i18n="nav_write">Write</span>
+        </span>
+      </button>
+      <button class="nav-btn" data-view="recall" data-title-key="nav_recall">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span class="nav-label" data-i18n="nav_recall">Recall</span>
+        </span>
+      </button>
+      <button class="nav-btn" data-view="audit" data-title-key="nav_audit">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span class="nav-label" data-i18n="nav_audit">Audit</span>
+        </span>
+        <span class="count-badge" id="auditCount">6</span>
+      </button>
+      <button class="nav-btn" data-view="settings" data-title-key="nav_settings">
+        <span class="nav-left">
+          <svg class="nav-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="nav-label" data-i18n="nav_settings">Settings</span>
+        </span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="cmd-trigger" id="cmdBtn" title="⌘K">
+        <span class="cmd-label" data-i18n="search">Search</span>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="icon-btn" id="langBtn" aria-label="Language">中文</button>
+      <button class="icon-btn" id="themeBtn" aria-label="Theme">☾</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- ENTRIES VIEW -->
+    <section class="view active" id="view-entries">
+      <div class="split">
+        <div class="list-pane">
+          <div class="pane-header">
+            <input class="search-input" id="entrySearch" type="text" autocomplete="off">
+            <div class="seg" id="statusFilter">
+              <button class="seg-btn active" data-st="all" data-i18n="all">All</button>
+              <button class="seg-btn" data-st="active" data-i18n="st_active">Active</button>
+              <button class="seg-btn" data-st="superseded" data-i18n="st_superseded">Old</button>
+              <button class="seg-btn" data-st="revoked" data-i18n="st_revoked">Revoked</button>
+            </div>
+          </div>
+          <div class="entry-list" id="entryList"></div>
+        </div>
+        <div class="detail-pane">
+          <div class="toolbar" id="entryToolbar"></div>
+          <div class="scroll-body" id="entryDetail"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- WRITE VIEW -->
+    <section class="view" id="view-write">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <input type="text" id="writeKey" value="reartex_mcp_policy" class="mono" style="width:180px">
+          <select id="writeScope">
+            <option value="project:reartex">project:reartex</option>
+            <option value="global">global</option>
+            <option value="session">session</option>
+          </select>
+          <select id="writeTier">
+            <option value="L2">L2</option>
+            <option value="L1">L1</option>
+            <option value="L3">L3</option>
+          </select>
+          <div class="seg" id="sampleSeg">
+            <button class="seg-btn" data-sample="clean" data-i18n="sample_clean">Clean</button>
+            <button class="seg-btn" data-sample="secret" data-i18n="sample_secret">Secret</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <input type="file" id="importFile" accept=".json,application/json" class="hidden">
+          <button class="btn" id="importBtn" data-i18n="import_json">Import JSON</button>
+          <button class="btn primary" id="commitBtn" data-i18n="commit">Commit</button>
+        </div>
+      </div>
+      <div class="scroll-body">
+        <div class="editor-grid">
+          <div class="editor-col">
+            <div class="editor-head"><span data-i18n="raw_input">raw</span><span id="rawTokens"></span></div>
+            <textarea class="editor-ta" id="writeInput" spellcheck="false"></textarea>
+          </div>
+          <div class="editor-col">
+            <div class="editor-head"><span data-i18n="redacted_preview">sanitized</span><span id="redactBadge"></span></div>
+            <div class="preview-pane" id="writePreview"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RECALL VIEW -->
+    <section class="view" id="view-recall">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <input type="text" id="recallQuery" value="pentest sod wal" style="width:200px">
+          <select id="recallScope">
+            <option value="all">all</option>
+            <option value="project:reartex">project:reartex</option>
+            <option value="global">global</option>
+            <option value="session">session</option>
+          </select>
+          <label class="field-inline"><span data-i18n="budget_lbl">budget</span> <input class="num-input" id="recallBudget" type="number" step="50" min="50" max="4096" value="220"></label>
+        </div>
+        <div class="toolbar-group">
+          <label class="check-chip on"><input type="checkbox" id="recallActiveOnly" checked>active_only</label>
+          <label class="check-chip on"><input type="checkbox" id="recallStrictSig" checked>strict_sig</label>
+          <button class="btn" id="recallJsonBtn">MCP JSON</button>
+        </div>
+      </div>
+      <div class="scroll-body">
+        <div class="budget-card">
+          <div class="budget-top">
+            <span id="budgetUsedLbl">0 / 220 tok</span>
+            <span id="budgetCountLbl" class="muted"></span>
+          </div>
+          <div class="budget-track">
+            <div class="budget-fill" id="budgetFill" style="width:0%"></div>
+          </div>
+        </div>
+        <div id="recallBody"></div>
+      </div>
+    </section>
+
+    <!-- AUDIT VIEW -->
+    <section class="view" id="view-audit">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <div class="seg" id="auditFilter">
+            <button class="seg-btn active" data-af="all" data-i18n="all">All</button>
+            <button class="seg-btn" data-af="write">write</button>
+            <button class="seg-btn" data-af="supersede">supersede</button>
+            <button class="seg-btn" data-af="revoke">revoke</button>
+          </div>
+        </div>
+        <div class="toolbar-group">
+          <button class="btn" id="tamperAuditBtn" data-i18n="tamper">Tamper</button>
+        </div>
+      </div>
+      <div class="scroll-body" id="auditBody"></div>
+    </section>
+
+    <!-- SETTINGS VIEW -->
+    <section class="view" id="view-settings">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <span style="font-weight:600;font-size:13px" data-i18n="nav_settings">Settings</span>
+        </div>
+        <div class="toolbar-group">
+          <button class="btn" id="resetSettingsBtn" data-i18n="reset">Reset</button>
+        </div>
+      </div>
+      <div class="scroll-body" id="settingsBody"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Command Palette -->
+<div class="cmd-backdrop" id="cmdModal">
+  <div class="cmd-modal">
+    <input class="cmd-input" id="cmdInput" autocomplete="off">
+    <div class="cmd-list" id="cmdList"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const I18N = {
+    en: {
+      nav_entries: 'Entries',
+      nav_write: 'Write',
+      nav_recall: 'Recall',
+      nav_audit: 'Audit',
+      nav_settings: 'Settings',
+      search: 'Search',
+      filter_placeholder: 'Filter key or content...',
+      cmd_placeholder: 'Jump to entry or view...',
+      all: 'All',
+      st_active: 'Active',
+      st_superseded: 'Old',
+      st_revoked: 'Revoked',
+      supersede: 'Supersede',
+      revoke: 'Revoke',
+      commit: 'Commit',
+      cancel: 'Cancel',
+      copy: 'Copy',
+      copied: 'Copied',
+      import_json: 'Import JSON',
+      reset: 'Reset',
+      tamper: 'Tamper',
+      sample_clean: 'Clean',
+      sample_secret: 'Secret',
+      raw_input: 'raw',
+      redacted_preview: 'audit redaction preview (bodies stored verbatim)',
+      scope: 'Scope',
+      tier: 'Tier',
+      version: 'Version',
+      hash: 'Hash',
+      lineage: 'Lineage',
+      content: 'Content',
+      redactions: 'redactions',
+      budget_lbl: 'budget',
+      entry: 'Entry',
+      score: 'Score',
+      tokens: 'Tokens',
+      status: 'Status',
+      event: 'Event',
+      target: 'Target',
+      actor: 'Actor',
+      prev_hash: 'Prev',
+      event_hash: 'Hash',
+      chain_valid: 'CHAIN VALID',
+      chain_broken: 'CHAIN BROKEN',
+      included: 'INCLUDED',
+      budget_cut: 'BUDGET_CUT',
+      excluded: 'EXCLUDED',
+      sec_interface: 'Interface',
+      sec_storage: 'Storage',
+      sec_policy: 'Redaction & Policy',
+      lbl_language: 'Language',
+      lbl_theme: 'Theme',
+      lbl_light: 'Light',
+      lbl_dark: 'Dark',
+      lbl_view: 'view',
+      supersede_ph: 'Write updated memory content...'
+    },
+    zh: {
+      nav_entries: '记忆',
+      nav_write: '写入',
+      nav_recall: '检索',
+      nav_audit: '审计',
+      nav_settings: '设置',
+      search: '搜索',
+      filter_placeholder: '筛选键名或内容...',
+      cmd_placeholder: '跳转到记忆或页面...',
+      all: '全部',
+      st_active: '有效',
+      st_superseded: '旧版',
+      st_revoked: '已吊销',
+      supersede: '更新版本',
+      revoke: '吊销',
+      commit: '写入',
+      cancel: '取消',
+      copy: '复制',
+      copied: '已复制',
+      import_json: '导入 JSON',
+      reset: '重置',
+      tamper: '篡改',
+      sample_clean: '常规',
+      sample_secret: '含密钥',
+      raw_input: '原文',
+      redacted_preview: '审计脱敏预览（正文原样存储）',
+      scope: '作用域',
+      tier: '层级',
+      version: '版本',
+      hash: '摘要',
+      lineage: '版本链',
+      content: '内容',
+      redactions: '处脱敏',
+      budget_lbl: '预算',
+      entry: '条目',
+      score: '相关度',
+      tokens: 'Tokens',
+      status: '状态',
+      event: '操作',
+      target: '目标',
+      actor: '主体',
+      prev_hash: '前序哈希',
+      event_hash: '事件哈希',
+      chain_valid: '哈希链完整',
+      chain_broken: '哈希链断裂',
+      included: '已注入',
+      budget_cut: '超预算',
+      excluded: '已过滤',
+      sec_interface: '界面',
+      sec_storage: '存储引擎',
+      sec_policy: '脱敏与策略',
+      lbl_language: '语言',
+      lbl_theme: '主题',
+      lbl_light: '浅色',
+      lbl_dark: '深色',
+      lbl_view: '页面',
+      supersede_ph: '输入新版本记忆内容...'
+    }
+  };
+
+  function fnvHex(str) {
+    let h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0;
+    }
+    return (h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0'));
+  }
+
+  function estTokens(text) {
+    return Math.max(1, Math.ceil(String(text || '').length / 3.8));
+  }
+
+  const REDACT_RULES = [
+    { name: 'OPENAI_KEY', re: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
+    { name: 'GITHUB_PAT', re: /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g },
+    { name: 'AWS_KEY', re: /\bAKIA[0-9A-Z]{16}\b/g },
+    { name: 'BEARER_TOKEN', re: /\bBearer\s+[A-Za-z0-9._-]{12,}\b/gi },
+    { name: 'DB_URI', re: /\b(?:postgres|mysql|mongodb):\/\/[^\s"']+/gi },
+    { name: 'PRIVATE_KEY', re: /-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----/g }
+  ];
+
+  function redactText(raw, enabled = true) {
+    if (!enabled) return { text: raw, hits: [] };
+    let out = String(raw || '');
+    const hits = [];
+    REDACT_RULES.forEach(rule => {
+      out = out.replace(rule.re, () => {
+        hits.push(rule.name);
+        return `[REDACTED:${rule.name}]`;
+      });
+    });
+    return { text: out, hits };
+  }
+
+  function formatRedactedHtml(text) {
+    return escapeHtml(text).replace(/\[REDACTED:[A-Z_]+\]/g, m => `<span class="redacted-token">${m}</span>`);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  const state = {
+    lang: 'en',
+    theme: 'light',
+    sidebarCollapsed: false,
+    view: 'entries',
+    statusFilter: 'all',
+    entryQuery: '',
+    selectedId: 'mem_02',
+    showEntryJson: false,
+    showSupersede: false,
+    recallQuery: 'pentest sod wal',
+    recallScope: 'all',
+    recallBudget: 220,
+    recallActiveOnly: true,
+    recallStrictSig: true,
+    showRecallJson: false,
+    auditFilter: 'all',
+    auditTamperedIdx: -1,
+    settings: {
+      journal_mode: 'WAL',
+      encryption: 'chacha20-poly1305',
+      key_id: '8a4f2c91',
+      auto_redact: true,
+      fail_closed_sig: true,
+      default_ttl_days: 90,
+      default_recall_budget: 220
+    }
+  };
+
+  const entries = [];
+  const auditLog = [];
+
+  function appendAudit(action, target_id, actor = 'local-user') {
+    const prev_hash = auditLog.length ? auditLog[auditLog.length - 1].event_hash : '0000000000000000';
+    const seq = auditLog.length + 1;
+    const ts = new Date(Date.UTC(2026, 10, 19, 10, seq * 3, 0)).toISOString().slice(11, 19) + 'Z';
+    const event_hash = fnvHex(`${seq}|${action}|${target_id}|${actor}|${prev_hash}`);
+    auditLog.push({ seq, action, target_id, actor, ts, prev_hash, event_hash });
+  }
+
+  function addEntry({ id, key, scope, tier, version, status = 'active', supersedes = null, raw, ttl_days = 90, actor = 'local-user' }) {
+    const red = redactText(raw, state.settings.auto_redact);
+    const content_sha256 = fnvHex(red.text);
+    const entry = {
+      id: id || 'mem_' + String(entries.length + 1).padStart(2, '0'),
+      key,
+      scope,
+      tier,
+      version,
+      status,
+      supersedes,
+      content: red.text,
+      redactions: red.hits,
+      tokens: estTokens(red.text),
+      ttl_days,
+      key_id: state.settings.key_id,
+      content_sha256,
+      signature: 'unsigned-demo'
+    };
+    entries.unshift(entry);
+    appendAudit(supersedes ? 'supersede' : 'write', entry.id, actor);
+    return entry;
+  }
+
+  // Seed realistic governance-memory entries
+  addEntry({
+    id: 'mem_01',
+    key: 'reartex_pentest_gate',
+    scope: 'project:reartex',
+    tier: 'L2',
+    version: 1,
+    status: 'superseded',
+    raw: 'Use Hoeffding two-sided bound on n=15 pentest suites with margin 0.05 and alpha 0.05.'
+  });
+  addEntry({
+    id: 'mem_02',
+    key: 'reartex_pentest_gate',
+    scope: 'project:reartex',
+    tier: 'L2',
+    version: 2,
+    status: 'active',
+    supersedes: 'mem_01',
+    raw: 'Use paired_exact small-sample gate (n_10 <= floor(margin * n)) for n <= 30 pentest suites; enforce SoD chain validity and deterministic recomputation.'
+  });
+  addEntry({
+    id: 'mem_03',
+    key: 'sqlite_wal_config',
+    scope: 'project:reartex',
+    tier: 'L2',
+    version: 1,
+    status: 'active',
+    raw: 'SQLite runs in WAL mode with busy_timeout=5000ms and synchronous=NORMAL for concurrent MCP gateway reads and append-only audit writes.'
+  });
+  addEntry({
+    id: 'mem_04',
+    key: 'redaction_webhook_note',
+    scope: 'project:reartex',
+    tier: 'L1',
+    version: 1,
+    status: 'active',
+    raw: 'Staging webhook verified using Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 and key sk-proj-9a8b7c6d5e4f3a2b1c0d9e8f before rotation.'
+  });
+  addEntry({
+    id: 'mem_05',
+    key: 'ui_minimalism_rule',
+    scope: 'global',
+    tier: 'L3',
+    version: 1,
+    status: 'active',
+    raw: 'Follow Linear and Apple Notes minimalism: zero taglines, zero explanatory paragraphs, collapsible icon rail, EN/ZH toggle, and smooth micro-motion.'
+  });
+  addEntry({
+    id: 'mem_06',
+    key: 'legacy_temp_endpoint',
+    scope: 'session',
+    tier: 'L1',
+    version: 1,
+    status: 'revoked',
+    raw: 'Deprecated local debug endpoint on port 9999 without HMAC signing; revoked before production cutover.'
+  });
+  appendAudit('revoke', 'mem_06', 'local-user');
+
+  const $ = id => document.getElementById(id);
+  const t = key => (I18N[state.lang] && I18N[state.lang][key]) || I18N.en[key] || key;
+
+  function applyStaticI18n() {
+    document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en';
+    document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-title-key]').forEach(el => { el.title = t(el.dataset.titleKey); });
+    $('langBtn').textContent = state.lang === 'en' ? (state.sidebarCollapsed ? '中' : '中文') : 'EN';
+    $('entrySearch').placeholder = t('filter_placeholder');
+    $('cmdInput').placeholder = t('cmd_placeholder');
+    updateWritePreview();
+  }
+
+  function toggleSidebar() {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    $('appRoot').classList.toggle('collapsed', state.sidebarCollapsed);
+    $('langBtn').textContent = state.lang === 'en' ? (state.sidebarCollapsed ? '中' : '中文') : 'EN';
+  }
+
+  function setTheme(next) {
+    state.theme = next;
+    document.documentElement.setAttribute('data-theme', next);
+    $('themeBtn').textContent = next === 'dark' ? '☀' : '☾';
+  }
+
+  function setLang(next) {
+    state.lang = next;
+    applyStaticI18n();
+    renderCurrentView();
+  }
+
+  function renderCurrentView() {
+    $('entriesCount').textContent = String(entries.length);
+    $('auditCount').textContent = String(auditLog.length);
+    if (state.view === 'entries') renderEntries();
+    else if (state.view === 'recall') renderRecall();
+    else if (state.view === 'audit') renderAudit();
+    else if (state.view === 'settings') renderSettings();
+  }
+
+  function switchView(v) {
+    state.view = v;
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+    document.querySelectorAll('.view').forEach(s => s.classList.toggle('active', s.id === 'view-' + v));
+    renderCurrentView();
+  }
+
+  function getLineage(entry) {
+    const byKey = entries.filter(e => e.key === entry.key).sort((a, b) => a.version - b.version);
+    return byKey;
+  }
+
+  function renderEntries() {
+    $('entriesCount').textContent = String(entries.length);
+    const q = state.entryQuery.trim().toLowerCase();
+    const filtered = entries.filter(e => {
+      if (state.statusFilter !== 'all' && e.status !== state.statusFilter) return false;
+      if (!q) return true;
+      return e.key.toLowerCase().includes(q) || e.content.toLowerCase().includes(q) || e.scope.toLowerCase().includes(q);
+    });
+
+    if (!filtered.some(e => e.id === state.selectedId) && filtered.length) {
+      state.selectedId = filtered[0].id;
+      state.showSupersede = false;
+    }
+
+    $('entryList').innerHTML = filtered.map(e => `
+      <button class="entry-item ${e.id === state.selectedId ? 'active' : ''}" data-id="${e.id}">
+        <div class="entry-item-top">
+          <span class="entry-key"><span class="dot ${e.status}"></span>${escapeHtml(e.key)}</span>
+          <span class="tag">v${e.version}</span>
+        </div>
+        <div class="entry-snippet">${escapeHtml(e.content)}</div>
+        <div class="entry-meta">
+          <span class="mono">${escapeHtml(e.scope)}</span>
+          <span>${e.tier} · ${e.tokens}t</span>
+        </div>
+      </button>
+    `).join('');
+
+    const cur = entries.find(e => e.id === state.selectedId) || entries[0];
+    if (!cur) return;
+
+    const stTagClass = cur.status === 'active' ? 'green' : cur.status === 'superseded' ? 'amber' : 'red';
+    const stLabel = cur.status === 'active' ? t('st_active') : cur.status === 'superseded' ? t('st_superseded') : t('st_revoked');
+
+    $('entryToolbar').innerHTML = `
+      <div class="toolbar-group">
+        <span class="mono" style="font-weight:600;font-size:13px">${escapeHtml(cur.key)}</span>
+        <span class="tag ${stTagClass}">${stLabel}</span>
+        <span class="tag">hmac · ${cur.key_id}</span>
+      </div>
+      <div class="toolbar-group">
+        <button class="btn ${state.showSupersede ? 'active-base' : ''}" id="supersedeBtn" ${cur.status !== 'active' ? 'disabled' : ''}>${t('supersede')}</button>
+        <button class="btn ${cur.status === 'revoked' ? 'danger-on' : ''}" id="revokeBtn" ${cur.status === 'revoked' ? 'disabled' : ''}>${t('revoke')}</button>
+        <button class="btn ${state.showEntryJson ? 'active-base' : ''}" id="entryJsonBtn">JSON</button>
+      </div>
+    `;
+
+    $('supersedeBtn').addEventListener('click', () => {
+      state.showSupersede = !state.showSupersede;
+      state.showEntryJson = false;
+      renderEntries();
+    });
+
+    $('revokeBtn').addEventListener('click', () => {
+      cur.status = 'revoked';
+      appendAudit('revoke', cur.id, 'local-user');
+      postBackend('/api/memory/repair', { item_id: cur.id });
+      state.showSupersede = false;
+      renderCurrentView();
+    });
+
+    $('entryJsonBtn').addEventListener('click', () => {
+      state.showEntryJson = !state.showEntryJson;
+      state.showSupersede = false;
+      renderEntries();
+    });
+
+    if (state.showEntryJson) {
+      $('entryDetail').innerHTML = `<div class="code-box">${escapeHtml(JSON.stringify(cur, null, 2))}</div>`;
+      return;
+    }
+
+    const lineage = getLineage(cur);
+    const lineageHtml = lineage.length > 1 ? `
+      <div class="lineage-card">
+        <span class="metric-k">${t('lineage')}</span>
+        ${lineage.map((node, i) => `
+          ${i > 0 ? '<span class="muted">→</span>' : ''}
+          <button class="lineage-node ${node.id === cur.id ? 'current' : ''}" data-lid="${node.id}">
+            <span class="dot ${node.status}"></span>v${node.version} · ${node.id}
+          </button>
+        `).join('')}
+      </div>` : '';
+
+    const composerHtml = state.showSupersede ? `
+      <div class="composer-card">
+        <textarea class="composer-ta" id="supInput" placeholder="${escapeHtml(t('supersede_ph'))}">${escapeHtml(cur.content)}</textarea>
+        <div class="composer-foot">
+          <span class="tag accent">v${cur.version} → v${cur.version + 1}</span>
+          <div class="toolbar-group">
+            <button class="btn" id="cancelSupBtn">${t('cancel')}</button>
+            <button class="btn primary" id="commitSupBtn">${t('commit')}</button>
+          </div>
+        </div>
+      </div>` : '';
+
+    $('entryDetail').innerHTML = `
+      <div class="metrics">
+        <div class="metric"><span class="metric-k">${t('scope')}</span><span class="metric-v">${escapeHtml(cur.scope)}</span></div>
+        <div class="metric"><span class="metric-k">${t('tier')}</span><span class="metric-v">${cur.tier}</span></div>
+        <div class="metric"><span class="metric-k">${t('version')}</span><span class="metric-v">v${cur.version}</span></div>
+        <div class="metric"><span class="metric-k">${t('hash')}</span><span class="metric-v">${cur.content_sha256.slice(0, 10)}</span></div>
+      </div>
+      ${composerHtml}
+      <div class="note-card">
+        <div class="note-head">
+          <div class="toolbar-group">
+            <span class="mono muted">${cur.id}</span>
+            <span class="tag">${cur.tokens} tok</span>
+            <span class="tag">TTL ${cur.ttl_days}d</span>
+          </div>
+          <div class="toolbar-group">
+            ${cur.redactions.length ? `<span class="tag amber">${cur.redactions.length} ${t('redactions')}</span>` : ''}
+          </div>
+        </div>
+        <div class="note-body">${formatRedactedHtml(cur.content)}</div>
+      </div>
+      ${lineageHtml}
+    `;
+
+    $('entryDetail').querySelectorAll('.lineage-node').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.selectedId = btn.dataset.lid;
+        state.showSupersede = false;
+        renderEntries();
+      });
+    });
+
+    if (state.showSupersede) {
+      $('cancelSupBtn').addEventListener('click', () => { state.showSupersede = false; renderEntries(); });
+      $('commitSupBtn').addEventListener('click', () => {
+        const text = ($('supInput').value || '').trim();
+        if (!text) return;
+        cur.status = 'superseded';
+        const next = addEntry({
+          key: cur.key,
+          scope: cur.scope,
+          tier: cur.tier,
+          version: cur.version + 1,
+          status: 'active',
+          supersedes: cur.id,
+          raw: text,
+          ttl_days: cur.ttl_days
+        });
+        postBackend('/api/memory/supersede', { old_item_id: cur.id, scope: cur.scope, new_body: text });
+        state.selectedId = next.id;
+        state.showSupersede = false;
+        renderCurrentView();
+      });
+    }
+  }
+
+  // Write View
+  const SAMPLES = {
+    clean: 'MCP gateway exposes /mcp over HTTP+SSE with Bearer auth disabled on loopback 127.0.0.1 and strict canonical JSON responses.',
+    secret: 'Connect to postgres://admin:s3cr3t@10.0.0.4:5432/govmem using token ghp_a1b2c3d4e5f6g7h8i9j0k1l2 and key sk-live-9876543210abcdef123456.'
+  };
+
+  let _previewSeq = 0;
+  function updateWritePreview() {
+    const raw = $('writeInput').value || '';
+    $('rawTokens').textContent = `${estTokens(raw)} tok`;
+    if (backendOnline) {
+      const seq = ++_previewSeq;
+      if (!raw) {
+        $('writePreview').innerHTML = '';
+        $('redactBadge').innerHTML = `<span class="tag green">0 ${t('redactions')}</span>`;
+        return;
+      }
+      fetch('/api/redact-preview', { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ text: raw }) })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then(data => {
+          if (seq !== _previewSeq) return;
+          $('writePreview').innerHTML = escapeHtml(data.text || '');
+          $('redactBadge').innerHTML = data.changed
+            ? `<span class="tag amber">redacted (audit detail)</span>`
+            : `<span class="tag green">clean</span>`;
+        })
+        .catch(err => {
+          if (seq !== _previewSeq) return;
+          showApiError('Redaction preview failed: ' + err.message);
+        });
+      return;
+    }
+    const red = redactText(raw, state.settings.auto_redact);
+    $('redactBadge').innerHTML = red.hits.length
+      ? `<span class="tag amber">${red.hits.length} ${t('redactions')}</span>`
+      : `<span class="tag green">0 ${t('redactions')}</span>`;
+    $('writePreview').innerHTML = formatRedactedHtml(red.text);
+  }
+
+  // Recall View
+  function scoreEntry(entry, query) {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return 1.0;
+    const hay = (entry.key + ' ' + entry.content + ' ' + entry.scope).toLowerCase();
+    let hits = 0;
+    terms.forEach(w => { if (hay.includes(w)) hits += 1; });
+    const tierBoost = entry.tier === 'L3' ? 0.15 : entry.tier === 'L2' ? 0.1 : 0;
+    return Math.min(1, (hits / terms.length) + (hits > 0 ? tierBoost : 0));
+  }
+
+  function renderRecall() {
+    $('recallQuery').value = state.recallQuery;
+    $('recallScope').value = state.recallScope;
+    $('recallBudget').value = state.recallBudget;
+    $('recallActiveOnly').checked = state.recallActiveOnly;
+    $('recallStrictSig').checked = state.recallStrictSig;
+    $('recallJsonBtn').classList.toggle('active-base', state.showRecallJson);
+    document.querySelectorAll('#view-recall .check-chip').forEach(c => c.classList.toggle('on', c.querySelector('input').checked));
+
+    const scored = entries.map(e => {
+      const scopeOk = state.recallScope === 'all' || e.scope === state.recallScope;
+      const statusOk = !state.recallActiveOnly || e.status === 'active';
+      const sigOk = !state.recallStrictSig || Boolean(e.signature);
+      const eligible = scopeOk && statusOk && sigOk;
+      const sc = scoreEntry(e, state.recallQuery);
+      return { entry: e, eligible, score: sc };
+    }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+
+    let used = 0;
+    let incCount = 0;
+    const rows = scored.map(item => {
+      let stateTag = 'excluded';
+      if (item.eligible && item.score > 0) {
+        if (used + item.entry.tokens <= state.recallBudget) {
+          used += item.entry.tokens;
+          incCount += 1;
+          stateTag = 'included';
+        } else {
+          stateTag = 'budget_cut';
+        }
+      }
+      return { ...item, stateTag };
+    });
+
+    const pctFill = Math.min(100, (used / Math.max(1, state.recallBudget)) * 100);
+    $('budgetUsedLbl').textContent = `${used} / ${state.recallBudget} tok`;
+    $('budgetCountLbl').textContent = `${incCount} / ${entries.length}`;
+    $('budgetFill').style.width = pctFill.toFixed(1) + '%';
+    $('budgetFill').classList.toggle('full', pctFill >= 85);
+
+    if (state.showRecallJson) {
+      const pack = {
+        query: state.recallQuery,
+        scope: state.recallScope,
+        token_budget: state.recallBudget,
+        tokens_used: used,
+        items: rows.filter(r => r.stateTag === 'included').map(r => ({
+          id: r.entry.id,
+          key: r.entry.key,
+          version: r.entry.version,
+          tier: r.entry.tier,
+          score: Number(r.score.toFixed(2)),
+          tokens: r.entry.tokens,
+          content: r.entry.content
+        }))
+      };
+      $('recallBody').innerHTML = `<div class="code-box">${escapeHtml(JSON.stringify(pack, null, 2))}</div>`;
+      return;
+    }
+
+    $('recallBody').innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>${t('entry')}</th>
+              <th>${t('score')}</th>
+              <th>${t('tier')}</th>
+              <th>${t('tokens')}</th>
+              <th>${t('status')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => {
+              const cls = r.stateTag === 'included' ? 'green' : r.stateTag === 'budget_cut' ? 'amber' : '';
+              return `
+                <tr class="clickable" data-rid="${r.entry.id}">
+                  <td class="mono">${escapeHtml(r.entry.key)} <span class="muted">v${r.entry.version}</span></td>
+                  <td class="mono">${r.score.toFixed(2)}</td>
+                  <td><span class="tag">${r.entry.tier}</span></td>
+                  <td class="mono muted">${r.entry.tokens}</td>
+                  <td><span class="tag ${cls}">${t(r.stateTag)}</span></td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    $('recallBody').querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click', () => {
+        state.selectedId = tr.dataset.rid;
+        switchView('entries');
+      });
+    });
+  }
+
+  // Audit View
+  function renderAudit() {
+    $('auditCount').textContent = String(auditLog.length);
+    $('tamperAuditBtn').classList.toggle('danger-on', state.auditTamperedIdx >= 0);
+
+    let brokenAt = -1;
+    const verified = auditLog.map((ev, idx) => {
+      const expectedPrev = idx === 0 ? '0000000000000000' : auditLog[idx - 1].event_hash;
+      const expectedHash = fnvHex(`${ev.seq}|${ev.action}|${ev.target_id}|${ev.actor}|${expectedPrev}`);
+      const tamperedHere = idx === state.auditTamperedIdx;
+      const shownHash = tamperedHere ? 'deadbeef00000000' : ev.event_hash;
+      const ok = brokenAt === -1 && !tamperedHere && ev.prev_hash === expectedPrev && shownHash === expectedHash;
+      if (!ok && brokenAt === -1) brokenAt = ev.seq;
+      return { ...ev, shownHash, ok };
+    });
+
+    const filtered = verified.filter(ev => state.auditFilter === 'all' || ev.action === state.auditFilter);
+    const chainOk = brokenAt === -1;
+
+    $('auditBody').innerHTML = `
+      <div class="verdict-bar ${chainOk ? 'ok' : 'broken'}">
+        <div class="toolbar-group">
+          <span class="verdict-pill">${chainOk ? t('chain_valid') : t('chain_broken')}</span>
+          <span class="tag">${chainOk ? `${auditLog.length} events` : `seq #${brokenAt}`}</span>
+        </div>
+        <span class="tag">${state.settings.journal_mode} · ${state.settings.encryption}</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>${t('event')}</th>
+              <th>${t('target')}</th>
+              <th>${t('actor')}</th>
+              <th>${t('prev_hash')}</th>
+              <th>${t('event_hash')}</th>
+              <th>${t('status')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.slice().reverse().map(ev => `
+              <tr>
+                <td class="mono muted">${ev.seq}</td>
+                <td><span class="tag">${ev.action}</span></td>
+                <td class="mono">${ev.target_id}</td>
+                <td class="mono muted">${ev.actor}</td>
+                <td class="mono muted">${ev.prev_hash.slice(0, 8)}</td>
+                <td class="mono">${ev.shownHash.slice(0, 8)}</td>
+                <td><span class="tag ${ev.ok ? 'green' : 'red'}">${ev.ok ? 'OK' : 'BROKEN'}</span></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // Settings View
+  function renderSettings() {
+    $('settingsBody').innerHTML = `
+      <div class="settings-wrap">
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_interface')}</div>
+          <div class="setting-row">
+            <span class="setting-k">${t('lbl_language')}</span>
+            <div class="seg" id="setLangSeg">
+              <button class="seg-btn ${state.lang === 'en' ? 'active' : ''}" data-lang="en">EN</button>
+              <button class="seg-btn ${state.lang === 'zh' ? 'active' : ''}" data-lang="zh">中文</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k">${t('lbl_theme')}</span>
+            <div class="seg" id="setThemeSeg">
+              <button class="seg-btn ${state.theme === 'light' ? 'active' : ''}" data-th="light">${t('lbl_light')}</button>
+              <button class="seg-btn ${state.theme === 'dark' ? 'active' : ''}" data-th="dark">${t('lbl_dark')}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_storage')} (read-only server status)</div>
+          <div class="setting-row">
+            <span class="setting-k mono">journal_mode</span>
+            <span class="mono muted">${escapeHtml(serverHealth ? serverHealth.journal_mode : 'offline-demo')}</span>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">storage_mode</span>
+            <span class="mono muted">${escapeHtml(serverHealth ? serverHealth.storage_mode : 'offline-demo')}</span>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">auth_required</span>
+            <span class="mono muted">${escapeHtml(serverHealth ? String(serverHealth.auth_required) : 'offline-demo')}</span>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">api_bearer_token</span>
+            <input type="password" id="setApiToken" class="mono" style="width:180px" placeholder="Bearer token" value="${escapeHtml(apiToken)}">
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-head">${t('sec_policy')}</div>
+          <div class="setting-row">
+            <span class="setting-k mono">auto_redact</span>
+            <label class="switch"><input type="checkbox" id="setAutoRedact" ${state.settings.auto_redact ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">fail_closed_sig</span>
+            <label class="switch"><input type="checkbox" id="setFailClosed" ${state.settings.fail_closed_sig ? 'checked' : ''}><span class="switch-track"></span></label>
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">default_ttl_days</span>
+            <input class="num-input" id="setTtl" type="number" min="1" max="3650" value="${state.settings.default_ttl_days}">
+          </div>
+          <div class="setting-row">
+            <span class="setting-k mono">default_recall_budget</span>
+            <input class="num-input" id="setDefBudget" type="number" step="50" min="50" max="4096" value="${state.settings.default_recall_budget}">
+          </div>
+        </div>
+      </div>
+    `;
+
+    $('setLangSeg').querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang)));
+    $('setThemeSeg').querySelectorAll('.seg-btn').forEach(b => b.addEventListener('click', () => { setTheme(b.dataset.th); renderSettings(); }));
+    $('setApiToken').addEventListener('change', e => {
+      apiToken = e.target.value.trim();
+      try { localStorage.setItem('amber_api_token', apiToken); } catch {}
+      syncFromBackend();
+    });
+    $('setAutoRedact').addEventListener('change', e => { state.settings.auto_redact = e.target.checked; updateWritePreview(); });
+    $('setFailClosed').addEventListener('change', e => { state.settings.fail_closed_sig = e.target.checked; state.recallStrictSig = e.target.checked; });
+    $('setTtl').addEventListener('input', e => { state.settings.default_ttl_days = Math.max(1, Number(e.target.value) || 90); });
+    $('setDefBudget').addEventListener('input', e => {
+      const val = Math.max(50, Number(e.target.value) || 220);
+      state.settings.default_recall_budget = val;
+      state.recallBudget = val;
+    });
+  }
+
+  // Command Palette
+  function openCmd() {
+    $('cmdModal').classList.add('open');
+    $('cmdInput').value = '';
+    renderCmdList('');
+    $('cmdInput').focus();
+  }
+
+  function closeCmd() { $('cmdModal').classList.remove('open'); }
+
+  function renderCmdList(q) {
+    const query = q.trim().toLowerCase();
+    const views = [
+      { id: 'entries', label: t('nav_entries') },
+      { id: 'write', label: t('nav_write') },
+      { id: 'recall', label: t('nav_recall') },
+      { id: 'audit', label: t('nav_audit') },
+      { id: 'settings', label: t('nav_settings') }
+    ];
+    const items = [
+      ...views.map(v => ({ label: v.label, kind: t('lbl_view'), action: () => switchView(v.id) })),
+      ...entries.map(e => ({ label: `${e.key} (v${e.version})`, kind: e.status, action: () => { state.selectedId = e.id; switchView('entries'); } }))
+    ].filter(i => !query || i.label.toLowerCase().includes(query) || i.kind.toLowerCase().includes(query));
+
+    $('cmdList').innerHTML = items.map((it, idx) => `
+      <button class="cmd-item" data-idx="${idx}">
+        <span class="mono">${escapeHtml(it.label)}</span>
+        <span class="tag">${escapeHtml(it.kind)}</span>
+      </button>
+    `).join('');
+
+    $('cmdList').querySelectorAll('.cmd-item').forEach(el => {
+      el.addEventListener('click', () => { items[Number(el.dataset.idx)].action(); closeCmd(); });
+    });
+  }
+
+  // Static listeners
+  document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+  $('entrySearch').addEventListener('input', e => { state.entryQuery = e.target.value; renderEntries(); });
+  document.querySelectorAll('#statusFilter .seg-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      state.statusFilter = b.dataset.st;
+      document.querySelectorAll('#statusFilter .seg-btn').forEach(x => x.classList.toggle('active', x === b));
+      renderEntries();
+    });
+  });
+
+  $('entryList').addEventListener('click', e => {
+    const item = e.target.closest('.entry-item');
+    if (!item) return;
+    state.selectedId = item.dataset.id;
+    state.showSupersede = false;
+    renderEntries();
+  });
+
+  $('writeInput').value = SAMPLES.secret;
+  $('writeInput').addEventListener('input', updateWritePreview);
+  document.querySelectorAll('#sampleSeg .seg-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      $('writeInput').value = SAMPLES[b.dataset.sample];
+      updateWritePreview();
+    });
+  });
+
+  $('commitBtn').addEventListener('click', async () => {
+    const key = ($('writeKey').value || '').trim() || ('mem_key_' + (entries.length + 1));
+    const raw = ($('writeInput').value || '').trim();
+    if (!raw) return;
+    const scope = $('writeScope').value;
+    if (backendOnline) {
+      const res = await postBackend('/api/memory/write', { scope, body: raw, session: 'web-ui' });
+      if (!res || !res.item_id) return;
+      await syncFromBackend();
+      state.selectedId = res.item_id;
+      state.statusFilter = 'all';
+      document.querySelectorAll('#statusFilter .seg-btn').forEach(x => x.classList.toggle('active', x.dataset.st === 'all'));
+      switchView('entries');
+      return;
+    }
+    const prevActive = entries.find(e => e.key === key && e.status === 'active');
+    if (prevActive) prevActive.status = 'superseded';
+    const created = addEntry({
+      key,
+      scope,
+      tier: $('writeTier').value,
+      version: prevActive ? prevActive.version + 1 : 1,
+      status: 'active',
+      supersedes: prevActive ? prevActive.id : null,
+      raw,
+      ttl_days: state.settings.default_ttl_days
+    });
+    state.selectedId = created.id;
+    state.statusFilter = 'all';
+    document.querySelectorAll('#statusFilter .seg-btn').forEach(x => x.classList.toggle('active', x.dataset.st === 'all'));
+    switchView('entries');
+  });
+
+  $('importBtn').addEventListener('click', () => $('importFile').click());
+  $('importFile').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (parsed.key) $('writeKey').value = parsed.key;
+        if (parsed.content) $('writeInput').value = parsed.content;
+        else $('writeInput').value = JSON.stringify(parsed, null, 2);
+        updateWritePreview();
+      } catch { /* ignore invalid json */ }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+
+  $('recallQuery').addEventListener('input', e => { state.recallQuery = e.target.value; renderRecall(); });
+  $('recallScope').addEventListener('change', e => { state.recallScope = e.target.value; renderRecall(); });
+  $('recallBudget').addEventListener('input', e => { state.recallBudget = Math.max(50, Math.min(4096, Number(e.target.value) || 220)); renderRecall(); });
+  $('recallActiveOnly').addEventListener('change', e => { state.recallActiveOnly = e.target.checked; renderRecall(); });
+  $('recallStrictSig').addEventListener('change', e => { state.recallStrictSig = e.target.checked; renderRecall(); });
+  $('recallJsonBtn').addEventListener('click', () => { state.showRecallJson = !state.showRecallJson; renderRecall(); });
+
+  document.querySelectorAll('#auditFilter .seg-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      state.auditFilter = b.dataset.af;
+      document.querySelectorAll('#auditFilter .seg-btn').forEach(x => x.classList.toggle('active', x === b));
+      renderAudit();
+    });
+  });
+
+  $('tamperAuditBtn').addEventListener('click', () => {
+    state.auditTamperedIdx = state.auditTamperedIdx >= 0 ? -1 : Math.max(0, Math.floor(auditLog.length / 2));
+    renderAudit();
+  });
+
+  $('resetSettingsBtn').addEventListener('click', () => {
+    state.settings = {
+      journal_mode: 'WAL',
+      encryption: 'chacha20-poly1305',
+      key_id: '8a4f2c91',
+      auto_redact: true,
+      fail_closed_sig: true,
+      default_ttl_days: 90,
+      default_recall_budget: 220
+    };
+    state.recallBudget = 220;
+    state.recallStrictSig = true;
+    setTheme('light');
+    renderSettings();
+  });
+
+  $('collapseBtn').addEventListener('click', toggleSidebar);
+  $('langBtn').addEventListener('click', () => setLang(state.lang === 'en' ? 'zh' : 'en'));
+  $('themeBtn').addEventListener('click', () => setTheme(state.theme === 'dark' ? 'light' : 'dark'));
+
+  $('cmdBtn').addEventListener('click', openCmd);
+  $('cmdModal').addEventListener('click', e => { if (e.target === $('cmdModal')) closeCmd(); });
+  $('cmdInput').addEventListener('input', e => renderCmdList(e.target.value));
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmd(); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); }
+    if (e.key === 'Escape') closeCmd();
+  });
+
+
+  // Live backend sync when served by amber.server (falls back to in-memory sample data offline)
+  let backendOnline = false;
+  let serverHealth = null;
+  let apiToken = '';
+  try { apiToken = localStorage.getItem('amber_api_token') || ''; } catch {}
+
+  function apiHeaders(json = false) {
+    const hdr = {};
+    if (json) hdr['Content-Type'] = 'application/json';
+    if (apiToken) hdr['Authorization'] = 'Bearer ' + apiToken;
+    return hdr;
+  }
+
+  function showApiError(msg) {
+    let el = document.getElementById('amberErrorBanner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'amberErrorBanner';
+      el.style.cssText = 'position:fixed;bottom:14px;right:14px;z-index:9999;background:var(--red-bg);color:var(--red);border:1px solid var(--red-border);padding:8px 12px;border-radius:7px;font-size:12px;max-width:420px;box-shadow:0 4px 14px rgba(0,0,0,0.12);';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.display = 'block';
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.display = 'none'; }, 6000);
+  }
+
+  async function syncFromBackend() {
+    if (!location.protocol.startsWith('http')) return;
+    try {
+      const h = await fetch('/api/health');
+      if (!h.ok) return;
+      serverHealth = await h.json();
+      backendOnline = true;
+      const sr = await fetch('/api/memory/items?limit=50', { headers: apiHeaders() });
+      if (sr.status === 401 || sr.status === 403) {
+        entries.length = 0;
+        auditLog.length = 0;
+        showApiError('Authentication required (' + sr.status + '). Set your API Bearer token in Settings.');
+        renderCurrentView();
+        return;
+      }
+      if (!sr.ok) {
+        showApiError('Failed to load items: HTTP ' + sr.status);
+        return;
+      }
+      const data = await sr.json();
+      entries.length = 0;
+      (data.items || []).forEach(hit => {
+        entries.push({
+          id: hit.id,
+          key: hit.id.slice(0, 12),
+          scope: hit.scope || 'default',
+          tier: 'L2',
+          version: 1,
+          status: hit.state || 'active',
+          supersedes: null,
+          content: hit.body || '',
+          redactions: [],
+          tokens: estTokens(hit.body || ''),
+          ttl_days: state.settings.default_ttl_days,
+          key_id: 'server',
+          content_sha256: (hit.evidence_hash || '').slice(0, 16),
+          signature: 'backend-verified'
+        });
+      });
+      state.selectedId = entries.length ? entries[0].id : null;
+      const ar = await fetch('/api/memory/audit?scope=default', { headers: apiHeaders() });
+      if (ar.ok) {
+        const ad = await ar.json();
+        auditLog.length = 0;
+        (ad.events || []).forEach(ev => {
+          auditLog.push({
+            seq: ev.seq,
+            action: ev.action || '',
+            target_id: ev.scope || '',
+            actor: ev.actor || '',
+            ts: ev.created || '',
+            prev_hash: ev.prev_hash || '',
+            event_hash: ev.event_hash || ''
+          });
+        });
+      }
+      renderCurrentView();
+    } catch { /* offline preview mode */ }
+  }
+
+  async function postBackend(path, body) {
+    if (!backendOnline) return null;
+    try {
+      const resp = await fetch(path, { method: 'POST', headers: apiHeaders(true), body: JSON.stringify(body) });
+      if (!resp.ok) {
+        let detail = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j.detail) detail += ': ' + j.detail; } catch {}
+        showApiError(detail);
+        return null;
+      }
+      return await resp.json();
+    } catch (err) {
+      showApiError('Network error: ' + err.message);
+      return null;
+    }
+  }
+
+  applyStaticI18n();
+  renderEntries();
+  syncFromBackend();
+})();
+</script>
+</body>
+</html>

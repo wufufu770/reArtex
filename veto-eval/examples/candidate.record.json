@@ -1,0 +1,75 @@
+{
+  "schema": "audit-eval-record-v1",
+  "created_utc": "2026-11-20T09:20:09.194467+00:00",
+  "instrument": {
+    "version": "0.5.0",
+    "file_sha256": "f09444cbaf8d4747027be419cf0d5e71f3229fc73699e671c2a849cbf71c1c06",
+    "python": "3.11.2",
+    "trusted_record_sha256": "d37d50d8aa4d53e54496e3f2f994d23ba069dfdecbe9a4a78cc7e5fd3390ba9d",
+    "manifest_sha256": "1a9c9c8d8b4706481b0c1a6280b1c88bf1801e1dfb0b6835211ec7cd1628dbd6"
+  },
+  "protocol": {
+    "grader": "exact_text",
+    "match": "strip_then_exact",
+    "missing": "ungraded"
+  },
+  "suite_sha256": "94ac107265da2151fd2a907477a167235f1d3707d1ea4d206fda75f0abf07281",
+  "responses_sha256": "272b7b638852553f9031ef63796d0055837fdc3642d544a36a5f930e5b2e1932",
+  "identity_declared": {
+    "model": "synthetic-candidate",
+    "harness": "offline-fixture",
+    "prompt_version": "v1",
+    "stack": {
+      "harness": "offline-fixture",
+      "prompt_version": "v1"
+    },
+    "stack_fingerprint": "sha256:1a9c9c8d8b4706481b0c1a6280b1c88bf1801e1dfb0b6835211ec7cd1628dbd6"
+  },
+  "identity_sha256": "8cc40346a9028b13e72ed2012cebe3b6f46e3bd32abf977b27901ae07d5929cd",
+  "identity_assurance": "self-declared; not runtime attestation",
+  "stack_fingerprint": "sha256:1a9c9c8d8b4706481b0c1a6280b1c88bf1801e1dfb0b6835211ec7cd1628dbd6",
+  "summary": {
+    "total": 3,
+    "graded": 3,
+    "ungraded": 0,
+    "passed": 2,
+    "coverage": {
+      "total": 3,
+      "graded": 3,
+      "ungraded": 0,
+      "failed": 1,
+      "graded_fraction": 1.0,
+      "failure_rate": 0.3333333333333333,
+      "failure_denominator": 3
+    }
+  },
+  "results": [
+    {
+      "id": "one",
+      "status": "graded",
+      "reason": "exact_match",
+      "pass": true,
+      "response_sha256": "40ec7f71ea684c8b976e79e8e425f87779e6de57f4821dcfc8066dbcad2defe0"
+    },
+    {
+      "id": "two",
+      "status": "graded",
+      "reason": "exact_match",
+      "pass": true,
+      "response_sha256": "8334c554c7276f59674810b92fff5197cd46bf6ccbe872742f9b04ca31dfe3d1"
+    },
+    {
+      "id": "three",
+      "status": "graded",
+      "reason": "exact_match",
+      "pass": false,
+      "response_sha256": "04a06452677210a3cdaec376fd5ebbca1714cb7af9e62bf5cce1644310a9086a"
+    }
+  ],
+  "limitations": [
+    "清单哈希仅能检测已覆盖且真实采集的变化，不构成可信部署证明",
+    "identity 为自报内容摘要，非运行时证明",
+    "评分口径：ungraded 不计入分母，也不计为失败",
+    "记录未签名：签名只在提供 EVAL_TRUST_KEY 时写入"
+  ]
+}

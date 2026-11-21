@@ -49,6 +49,7 @@ type Server struct {
 	ctx    context.Context
 
 	skillDir string // root directory for skill subdirectories
+	dataDir  string // runtime data root (veto export dir etc.)
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
@@ -192,7 +193,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
 	engine := NewEngine(m)
-	s := &Server{m: m, engine: engine, ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	s := &Server{m: m, engine: engine, ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, sessionWakePending: map[string][]pendingWake{},
 		sessionWakeChain: map[string]int{}, mirror: newTaskSessionMirror(), denials: newDenialEscalation(),
 		triggerQ:      map[string][]triggeredRun{},
@@ -204,6 +205,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
 	s.engine.ClaimMirror = s.onEngineIntentClaim
+	// Veto exporter（0.15.32）：终态导出 reartex_pentest_v1 responses 的宿主回填。
+	s.engine.vetoServer = s
 	// P5 传承图：任务终局蒸馏（server/legacy.go）。
 	s.engine.LegacyDistiller = s.DistillLegacyExperience
 	// B6：工具连续拒绝的升级观察者（意图转 blocked + 会话播报）。
@@ -961,6 +964,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerSideRoutes(mux)
 	s.registerTaskSteerRoutes(mux)        // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
 	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
+	s.registerVetoExportRoutes(mux)      // 0.15.32：Veto 导出（GET veto-export）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。

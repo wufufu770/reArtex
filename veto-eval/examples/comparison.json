@@ -1,0 +1,34 @@
+{
+  "decision": "inconclusive",
+  "reason": "interval_does_not_clear_margin",
+  "release_eligible": false,
+  "n_pairs": 3,
+  "delta_candidate_minus_baseline": -0.3333333333333333,
+  "interval": [
+    -1.0,
+    1.0
+  ],
+  "alpha": 0.05,
+  "margin": 0.1,
+  "method": "two-sided Hoeffding bound",
+  "assumption": "independent task pairs and pre-specified fixed sample size; no repeated testing",
+  "interpretation": "interval does not establish non-inferiority or regression",
+  "recompute_verified": false,
+  "stack_diff": null,
+  "baseline_identity_sha256": "726424e4cc444eb80fbc1ac0bbe087b3b06089bebde24310b6243450a1396f90",
+  "candidate_identity_sha256": "8cc40346a9028b13e72ed2012cebe3b6f46e3bd32abf977b27901ae07d5929cd",
+  "limitations": [
+    "identity 为自报内容摘要，非运行时证明",
+    "本结论未做回算校验：记录文件中的 pass 值被直接采信",
+    "签名未校验：签名缺失或无法校验，都不能当作记录可信的证据",
+    "两侧记录都没有签名，真实性无法由本工具确认"
+  ],
+  "signature_verified": null,
+  "stack_mismatch_accepted": false,
+  "stack_info_incomplete": false,
+  "mismatches": [],
+  "recompute_checked": {
+    "baseline": false,
+    "candidate": false
+  }
+}

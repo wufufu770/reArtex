@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amber-memory"
+version = "0.5.0"
+description = "Governed, tamper-evident external persistent memory store for AI agents"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+server = ["fastapi>=0.111.0", "uvicorn[standard]>=0.30.0", "pydantic>=2.7.0"]
+fast = ["cryptography>=42"]
+
+[project.scripts]
+amber-mcp = "amber.mcp_server:main"
+amber-server = "amber.server:main"
+
+[tool.setuptools.packages.find]
+include = ["amber*"]
+
+[tool.setuptools.package-data]
+amber = ["web/*.html", "test_vectors.json"]

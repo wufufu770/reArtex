@@ -1,0 +1,1 @@
+{"tasks":[{"id":"one","kind":"exact_text","prompt":"Return the word ready.","expected":"ready"},{"id":"two","kind":"exact_text","prompt":"Return 42.","expected":"42"},{"id":"three","kind":"exact_text","prompt":"Return yes.","expected":"yes"}]}

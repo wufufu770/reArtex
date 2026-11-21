@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veto-eval"
+version = "0.5.0"
+description = "Evidence-first deterministic agent evaluator and fail-closed release gate"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+server = ["fastapi>=0.111.0", "uvicorn[standard]>=0.30.0", "pydantic>=2.7.0"]
+
+[project.scripts]
+veto = "veto.eval_core:main"
+veto-mcp = "veto.mcp_server:main"
+veto-server = "veto.server:main"
+
+[tool.setuptools.packages.find]
+include = ["veto*"]
+
+[tool.setuptools.package-data]
+veto = ["web/*.html"]
