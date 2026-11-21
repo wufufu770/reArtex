@@ -36,6 +36,7 @@ type Report struct {
 	Title      string    `json:"title"`
 	TaskID     *int64    `json:"task_id,omitempty"`
 	SourcePath string    `json:"source_path,omitempty"`
+	Tags       string    `json:"tags"` // 逗号分隔；系统标签 reartex:report forward-only（0.15.43 #8）
 	Content    string    `json:"content"`
 	CreatedBy  string    `json:"created_by"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -48,14 +49,18 @@ type ReportMeta struct {
 	Title      string    `json:"title"`
 	TaskID     *int64    `json:"task_id,omitempty"`
 	SourcePath string    `json:"source_path,omitempty"`
+	Tags       string    `json:"tags"`
 	Size       int       `json:"size"`
 	CreatedBy  string    `json:"created_by"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// CreateReport 新建一份报告；content 为空时给标题做占位正文。
-func (d *DB) CreateReport(title, content, createdBy string, taskID *int64, sourcePath string) (int64, error) {
+// ReportSystemTag 是报告中心的系统标签（forward-only：人工更新不可移除）。
+const ReportSystemTag = "reartex:report"
+
+// CreateReport 新建一份报告；content 为空时给标题做占位正文；tags 逗号分隔。
+func (d *DB) CreateReport(title, content, createdBy string, taskID *int64, sourcePath, tags string) (int64, error) {
 	if err := d.ensureReportsSchema(); err != nil {
 		return 0, err
 	}
@@ -68,23 +73,49 @@ func (d *DB) CreateReport(title, content, createdBy string, taskID *int64, sourc
 	}
 	var id int64
 	err := d.QueryRow(`
-INSERT INTO reports (title, task_id, source_path, content, created_by)
-VALUES ($1, $2, NULLIF($3,''), $4, $5) RETURNING id`,
-		title, taskID, sourcePath, content, createdBy).Scan(&id)
+INSERT INTO reports (title, task_id, source_path, content, created_by, tags)
+VALUES ($1, $2, NULLIF($3,''), $4, $5, $6) RETURNING id`,
+		title, taskID, sourcePath, content, createdBy, normalizeReportTags(tags)).Scan(&id)
 	return id, err
 }
 
-// ListReports 列报告中心（元信息，按更新时间倒序）。
-func (d *DB) ListReports(limit int) ([]ReportMeta, error) {
+// normalizeReportTags 折叠空白 + 去重 + 排序（稳定存储形态）。
+func normalizeReportTags(tags string) string {
+	parts := strings.Split(tags, ",")
+	seen := map[string]bool{}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return strings.Join(out, ",")
+}
+
+// ListReports 列报告中心（元信息，按更新时间倒序）。tagFilter 非空时按标签过滤
+//（命中标签之一即返回——标签是逗号分隔集合）。
+func (d *DB) ListReports(limit int, tagFilter string) ([]ReportMeta, error) {
 	if err := d.ensureReportsSchema(); err != nil {
 		return nil, err
 	}
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := d.Query(`
-SELECT id, title, task_id, COALESCE(source_path,''), LENGTH(content), created_by, created_at, updated_at
-FROM reports ORDER BY updated_at DESC, id DESC LIMIT $1`, limit)
+	q := `
+SELECT id, title, task_id, COALESCE(source_path,''), COALESCE(tags,''), LENGTH(content), created_by, created_at, updated_at
+FROM reports`
+	args := []any{limit}
+	if tf := strings.TrimSpace(tagFilter); tf != "" {
+		// 参数化精确匹配：tags 是归一化逗号集合（normalizeReportTags），
+		// 过滤值只作参数绝不拼接 SQL。
+		q += ` WHERE $2 = ANY(string_to_array(tags, ','))`
+		args = append(args, tf)
+	}
+	q += ` ORDER BY updated_at DESC, id DESC LIMIT $1`
+	rows, err := d.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +123,7 @@ FROM reports ORDER BY updated_at DESC, id DESC LIMIT $1`, limit)
 	out := []ReportMeta{}
 	for rows.Next() {
 		var m ReportMeta
-		if err := rows.Scan(&m.ID, &m.Title, &m.TaskID, &m.SourcePath, &m.Size, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.TaskID, &m.SourcePath, &m.Tags, &m.Size, &m.CreatedBy, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -107,9 +138,9 @@ func (d *DB) GetReport(id int64) (*Report, error) {
 	}
 	var r Report
 	err := d.QueryRow(`
-SELECT id, title, task_id, COALESCE(source_path,''), content, created_by, created_at, updated_at
+SELECT id, title, task_id, COALESCE(source_path,''), COALESCE(tags,''), content, created_by, created_at, updated_at
 FROM reports WHERE id=$1`, id).
-		Scan(&r.ID, &r.Title, &r.TaskID, &r.SourcePath, &r.Content, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.Title, &r.TaskID, &r.SourcePath, &r.Tags, &r.Content, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -119,8 +150,10 @@ FROM reports WHERE id=$1`, id).
 	return &r, nil
 }
 
-// UpdateReport 改标题/正文（可空 = 不改）；updated_at 刷新。
-func (d *DB) UpdateReport(id int64, title, content *string) (int64, error) {
+// UpdateReport 改标题/正文/标签（可空 = 不改）；updated_at 刷新。
+// forward-only（0.15.43 #8）：原报告带系统标签 reartex:report 时，人工更新
+// 的新标签集里若不含它则强制保留——系统标签只能由系统产生，不可被洗掉。
+func (d *DB) UpdateReport(id int64, title, content, tags *string) (int64, error) {
 	if err := d.ensureReportsSchema(); err != nil {
 		return 0, err
 	}
@@ -130,14 +163,28 @@ func (d *DB) UpdateReport(id int64, title, content *string) (int64, error) {
 			return 0, fmt.Errorf("报告标题不能为空")
 		}
 	}
+	// 系统标签 forward-only：读原 tags，含系统标签则并入新集合。
+	var oldTags string
+	if err := d.QueryRow(`SELECT COALESCE(tags,'') FROM reports WHERE id=$1`, id).Scan(&oldTags); err != nil {
+		return 0, err
+	}
+	if tags != nil {
+		merged := *tags
+		if strings.Contains(","+oldTags+",", ","+ReportSystemTag+",") &&
+			!strings.Contains(","+normalizeReportTags(merged)+",", ","+ReportSystemTag+",") {
+			merged = merged + "," + ReportSystemTag
+		}
+		*tags = normalizeReportTags(merged)
+	}
 	var n int64
 	err := d.QueryRow(`
 UPDATE reports SET
   title = COALESCE(NULLIF($2,''), title),
   content = COALESCE($3, content),
+  tags = COALESCE($4, tags),
   updated_at = now()
 WHERE id=$1 RETURNING id`,
-		id, derefOrEmpty(title), content).Scan(&n)
+		id, derefOrEmpty(title), content, tags).Scan(&n)
 	return n, err
 }
 

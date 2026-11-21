@@ -964,6 +964,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerSideRoutes(mux)
 	s.registerTaskSteerRoutes(mux)        // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
 	s.registerTaskDrainRoutes(mux)        // 0.15.42：人工软截止面（POST {id}/drain）
+	s.registerDiagnosticsRoutes(mux)      // 0.15.43：脱敏诊断包（GET diagnostics/bundle）
 	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
 	s.registerVetoExportRoutes(mux)      // 0.15.32：Veto 导出（GET veto-export）
 	s.registerPeakSearchRoutes(mux)      // 0.15.38：尖峰探索（人工专属蒸馏面）
@@ -2750,6 +2751,16 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	case "html":
 		setDownload("text/html; charset=utf-8", "findings-"+stamp+".html")
 		_, _ = w.Write(report.FindingsHTML(fs, now))
+	case "doc":
+		// 0.15.43 #8：Word 兼容单文件（ProgId=Word.Document，Word/WPS 直开）。
+		setDownload("application/msword", "findings-"+stamp+".doc")
+		_, _ = w.Write(report.FindingsDoc(fs, now))
+	case "pdf":
+		// 0.15.43 #8：打印就绪视图——纯标准库纪律下不出二进制 PDF（中文需嵌
+		// CJK 字体 ≥10MB 不可入库），浏览器引擎负责「另存为 PDF」：响应自动
+		// 唤起打印对话框。inline 展示（.pdf.html 后缀）。
+		setDownload("text/html; charset=utf-8", "findings-"+stamp+".pdf.html")
+		_, _ = w.Write(report.FindingsPrintHTML(fs, now))
 	default:
 		writeErr(w, 400, "bad format: "+format)
 	}

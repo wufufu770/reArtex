@@ -29,6 +29,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 	s.registerTaskDrainRoutes(mux)          // 0.15.42 人工软截止面
 	s.registerExecutionProfileRoutes(mux)   // 0.15.17 执行档位
 	s.registerSelfEvolveRoutes(mux)         // 0.15.41 自进化可见面
+	s.registerDiagnosticsRoutes(mux)        // 0.15.43 脱敏诊断包
 
 	cases := []struct {
 		method, path string
@@ -47,6 +48,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 		{"GET", "/api/self-evolve/amber/search?q=x"},
 		{"GET", "/api/self-evolve/veto/exports"},
 		{"GET", "/api/self-evolve/veto/exports/1"},
+		{"GET", "/api/diagnostics/bundle"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)

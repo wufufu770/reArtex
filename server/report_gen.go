@@ -195,7 +195,9 @@ FROM findings WHERE task_id=$1 ORDER BY severity, id`, req.TaskID)
 	b.WriteString("\n---\n\n*本初稿由平台确定性拼装生成（数据截至生成时刻）；结论与定稿以人工复核为准。*\n")
 
 	var taskPtr = &req.TaskID
-	id, err := pg.CreateReport(title, b.String(), "report-gen", taskPtr, "")
+	// 0.15.43 #8：任务生成初稿自动打系统标签 reartex:report（forward-only，
+	// 人工更新不可移除——db 层强制保留）。
+	id, err := pg.CreateReport(title, b.String(), "report-gen", taskPtr, "", db.ReportSystemTag)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

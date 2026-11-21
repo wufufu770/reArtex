@@ -289,7 +289,7 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   if (q.severity && q.severity !== "all") p.set("severity", q.severity);
   if (q.status && q.status !== "all") p.set("status", q.status);
   if (q.vulnclass && q.vulnclass !== "all") p.set("vulnclass", q.vulnclass);
-  if (q.task && q.task !== "all") p.set("task_id", q.task);
+  if (q.task && q.task !== "all") p.set("task_id", q.task); // 0.15.43：逗号多值 = 多任务合并（后端 where 支持）
   if (q.query?.trim()) p.set("q", q.query.trim());
   if (q.sort) p.set("sort", q.sort);
   if (q.assetScope) p.set("asset_scope", q.assetScope);
@@ -724,10 +724,13 @@ export const api = {
   },
 
   // ---- 报告中心（/system/reports）----
-  reports: () => get<{ reports: ReportMeta[]; count: number }>("/reports").then((r) => r.reports ?? []),
+  reports: (tag?: string) =>
+    get<{ reports: ReportMeta[]; count: number }>(`/reports${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`).then(
+      (r) => r.reports ?? [],
+    ),
   reportGet: (id: number) => get<ReportFull>(`/reports/${id}`),
   createReport: (title: string, content = "") => post<{ id: number }>("/reports", { title, content }),
-  updateReport: (id: number, patch: { title?: string; content?: string }) =>
+  updateReport: (id: number, patch: { title?: string; content?: string; tags?: string }) =>
     put<{ ok: boolean }>(`/reports/${id}`, patch),
   deleteReport: (id: number) => del<{ ok: boolean }>(`/reports/${id}`),
   reportsDiscover: () =>
@@ -843,7 +846,7 @@ export const api = {
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
-    format: "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html";
+    format: "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html" | "doc" | "pdf";
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];

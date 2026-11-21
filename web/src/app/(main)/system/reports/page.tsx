@@ -35,9 +35,10 @@ export default function ReportsPage() {
   const [reports, setReports] = React.useState<ReportMeta[]>([]);
   const [loaded, setLoaded] = React.useState(false);
 
-  // 编辑器状态：打开时持有整篇 + 标题草稿。
+  // 编辑器状态：打开时持有整篇 + 标题/标签草稿。
   const [editing, setEditing] = React.useState<ReportFull | null>(null);
   const [draftTitle, setDraftTitle] = React.useState("");
+  const [draftTags, setDraftTags] = React.useState("");
   const [draftContent, setDraftContent] = React.useState("");
   const [saving, setSaving] = React.useState(false);
 
@@ -66,13 +67,16 @@ export default function ReportsPage() {
     }
   };
 
+  // 标签过滤（0.15.43 #8）：reartex:report 为系统标签（生成初稿自动打标，
+  // forward-only——人工编辑不可移除）。
+  const [tagFilter, setTagFilter] = React.useState("");
   const load = React.useCallback(() => {
     api
-      .reports()
+      .reports(tagFilter.trim() || undefined)
       .then(setReports)
       .catch((e) => toast.error(`读取报告列表失败：${(e as Error).message}`))
       .finally(() => setLoaded(true));
-  }, []);
+  }, [tagFilter]);
 
   React.useEffect(() => {
     load();
@@ -81,6 +85,7 @@ export default function ReportsPage() {
   function openEditor(full: ReportFull) {
     setEditing(full);
     setDraftTitle(full.title);
+    setDraftTags(full.tags);
     setDraftContent(full.content);
   }
 
@@ -108,7 +113,7 @@ export default function ReportsPage() {
     if (!editing) return;
     setSaving(true);
     api
-      .updateReport(editing.id, { title: draftTitle, content: draftContent })
+      .updateReport(editing.id, { title: draftTitle, content: draftContent, tags: draftTags })
       .then(() => {
         toast.success("已保存");
         setEditing(null);
@@ -212,6 +217,7 @@ export default function ReportsPage() {
             <TableRow>
               <TableHead>名称</TableHead>
               <TableHead className="w-24">大小</TableHead>
+              <TableHead className="w-36">标签</TableHead>
               <TableHead className="hidden w-56 md:table-cell">来源</TableHead>
               <TableHead className="w-40">更新时间</TableHead>
               <TableHead className="w-32 text-right">操作</TableHead>
@@ -227,6 +233,23 @@ export default function ReportsPage() {
                   </span>
                 </TableCell>
                 <TableCell className="text-muted-foreground tabular-nums">{fmtBytes(r.size)}</TableCell>
+                <TableCell>
+                  <span className="flex flex-wrap items-center gap-1">
+                    {(r.tags ?? "")
+                      .split(",")
+                      .filter(Boolean)
+                      .map((t) => (
+                        <Badge
+                          key={t}
+                          variant={t === "reartex:report" ? "default" : "outline"}
+                          className="font-mono text-[10px]"
+                          title={t === "reartex:report" ? "系统标签（生成初稿自动打标，不可移除）" : undefined}
+                        >
+                          {t}
+                        </Badge>
+                      ))}
+                  </span>
+                </TableCell>
                 <TableCell className="hidden md:table-cell">
                   {r.source_path ? (
                     <Badge variant="outline" className="max-w-48 truncate font-mono text-[10px]">
@@ -272,6 +295,16 @@ export default function ReportsPage() {
             最终报告统一管理 · 点击直接展示、实时编辑 · 下载导出为 .md（与工作空间下载同体验）
           </p>
         </div>
+        <Input
+          className="h-8 w-44"
+          placeholder="按标签过滤（如 reartex:report）"
+          value={tagFilter}
+          onChange={(e) => setTagFilter(e.target.value)}
+          onBlur={() => load()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") load();
+          }}
+        />
         <div className="flex gap-2">
           {/* 从任务生成（0.14.5 批次四）：确定性拼装初稿，终审人工 */}
           <div className="flex items-center gap-1.5 rounded-md border px-2">
@@ -321,6 +354,15 @@ export default function ReportsPage() {
             <div className="grid gap-2">
               <Label htmlFor="report-title">标题</Label>
               <Input id="report-title" value={draftTitle} onChange={(e) => setDraftTitle(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="report-tags">标签（逗号分隔）</Label>
+              <Input
+                id="report-tags"
+                value={draftTags}
+                onChange={(e) => setDraftTags(e.target.value)}
+                placeholder="reartex:report 为系统标签，保存时自动保留"
+              />
             </div>
             <div className="grid min-h-0 flex-1 gap-2">
               <Label htmlFor="report-content">正文（Markdown）</Label>

@@ -5,6 +5,33 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.43] - 2026-11-21
+
+### 功能（vNext #8 收尾：导出 9 格式齐 + 报告中心标签化 + 多任务合并 + 脱敏诊断包）
+
+- **① DOC / 打印即 PDF（导出补全收尾，现 9 格式齐）**：
+  - `format=doc`：Word 兼容单文件（ProgId=Word.Document——HTML 存 .doc 的
+    业界惯用形态，Word/WPS 直接打开编辑）；二进制 OLE 老格式手写不现实，
+    本形态为标准做法；
+  - `format=pdf`：打印就绪视图（@page A4 分页 + 自动唤起打印对话框，浏览器
+    「另存为 PDF」）——纯标准库纪律裁决留档：中文 PDF 需嵌 CJK 字体
+    （≥10MB 二进制不入库），浏览器引擎承担排版导出。
+- **② 报告中心标签化（C-T2 `reartex:report`）**：reports 表加 tags 列
+  （幂等迁移）；任务生成初稿自动打系统标签 `reartex:report`；
+  **forward-only**：人工更新不可移除系统标签（db 层强制并入）；列表
+  `?tag=` 精确过滤（string_to_array ANY，参数化）；前端标签徽章列 +
+  过滤框 + 编辑器标签输入。
+- **③ 多任务合并导出**：FindingFilter.TaskID 支持逗号多值（向后兼容单值；
+  `__unassigned__` 哨兵可混用；全非法 = 不筛选保持原语义）；发现页任务
+  筛选改多选面板（合并导出直接挑多任务）。
+- **④ 脱敏诊断包**：GET /api/diagnostics/bundle → 排障 zip（manifest/
+  config-safe 白名单键/tasks 摘要/SoD 裁决摘要/最近活动摘要）。所有文本过
+  sensitivePathRes 脱敏；**打码文本不回显命中片段**（片段即敏感特征，
+  本条在测试中实钉：初版回显 "id_rsa" 被测试抓住即改）；payload/detail
+  blob/凭据位永不入包。
+- 验证：report 渲染器 2 新测试 + db 报告/Finding 回归 + 诊断包 3 测试
+  （含脱敏泄漏钉子）+ wiring 全绿；tsc/biome(2.5.1)/前端检查过。
+
 ## [0.15.42] - 2026-11-21
 
 ### 修复（远程交接第三份实锤：「软截止卡死」三层修复——drain 不再是无解陷阱）

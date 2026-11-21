@@ -584,7 +584,7 @@ export interface FindingQuery {
   severity?: "all" | Severity;
   status?: "all" | FindingStatus;
   vulnclass?: string;
-  task?: string; // 任务 id;"all"/空 = 不按任务筛选
+  task?: string; // 任务 id；"all"/空 = 不筛选；逗号分隔多值 = 多任务合并导出（0.15.43，后端 where 支持多值）
   query?: string;
   sort?: "severity" | "time";
   // 资产树节点 key;选中一个节点 = 选中它的整棵子树。空 = 不按资产筛选。
@@ -2580,6 +2580,8 @@ export interface ReportMeta {
   title: string;
   task_id?: number;
   source_path?: string;
+  /** 逗号分隔标签；reartex:report 为系统标签（forward-only，人工不可移除） */
+  tags: string;
   size: number;
   created_by: string;
   created_at: string;
@@ -2592,6 +2594,7 @@ export interface ReportFull {
   title: string;
   task_id?: number;
   source_path?: string;
+  tags: string;
   content: string;
   created_by: string;
   created_at: string;

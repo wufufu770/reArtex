@@ -161,7 +161,7 @@ type FindingFilter struct {
 	Severity  string // high | medium | low
 	Status    string // pending | false_positive | ignored | resolved
 	VulnClass string
-	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
+	TaskID    string // 任务 id(逗号分隔可多值——0.15.43 多任务合并导出;空/全非法 = 不按任务筛选)
 	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort      string // "severity" | "time"
 	// AssetScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
@@ -195,12 +195,31 @@ func (f FindingFilter) where() (string, []any) {
 	add("severity", f.Severity)
 	add("status", f.Status)
 	add("vulnclass", f.VulnClass)
-	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/非法值忽略。
+	// task_id 是 bigint 列,按整数比较(不能走上面的文本 add);空/全非法值忽略。
+	// 0.15.43 #8 多任务合并导出：逗号分隔多值（向后兼容单值）——每个值可为
+	// 任务号或 __unassigned__ 哨兵，非法项忽略，全部 OR 连接。
 	if f.TaskID == FindingUnassignedTask {
 		conds = append(conds, "(f.task_id IS NULL OR t.id IS NULL)")
-	} else if tid, err := strconv.ParseInt(f.TaskID, 10, 64); err == nil && tid > 0 {
-		args = append(args, tid)
-		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
+	} else if f.TaskID != "" {
+		var ors []string
+		unassigned := false
+		for _, part := range strings.Split(f.TaskID, ",") {
+			part = strings.TrimSpace(part)
+			if part == FindingUnassignedTask {
+				unassigned = true
+				continue
+			}
+			if tid, err := strconv.ParseInt(part, 10, 64); err == nil && tid > 0 {
+				args = append(args, tid)
+				ors = append(ors, fmt.Sprintf("f.task_id = $%d", len(args)))
+			}
+		}
+		if unassigned {
+			ors = append(ors, "(f.task_id IS NULL OR t.id IS NULL)")
+		}
+		if len(ors) > 0 {
+			conds = append(conds, "("+strings.Join(ors, " OR ")+")")
+		}
 	}
 	// 资产筛选:asset_ids 是 jsonb 数组,@> ANY(...) 能走 idx_findings_asset_ids。
 	switch {

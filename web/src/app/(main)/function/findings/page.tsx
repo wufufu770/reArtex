@@ -4,7 +4,7 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ArrowUpRightIcon, BugIcon, ChevronRightIcon, DownloadIcon, SearchIcon } from "lucide-react";
+import { ArrowUpRightIcon, BugIcon, ChevronDownIcon, ChevronRightIcon, DownloadIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
@@ -12,6 +12,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -22,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
@@ -38,6 +40,7 @@ import type {
   FindingGroup,
   FindingStats,
   FindingStatus,
+  FindingTaskOption,
   Severity,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -265,7 +268,7 @@ export default function FindingsPage() {
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
   const [exportFormat, setExportFormat] = React.useState<
-    "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html"
+    "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html" | "doc" | "pdf"
   >("md-single");
   const [exporting, setExporting] = React.useState(false);
 
@@ -966,32 +969,8 @@ export default function FindingsPage() {
             </SelectContent>
           </Select>
 
-          <Select value={task} onValueChange={setTask}>
-            <SelectTrigger size="sm" className="w-48">
-              <SelectValue placeholder="任务" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部任务</SelectItem>
-              <SelectItem value={UNASSIGNED_TASK}>未关联 / 任务已删除</SelectItem>
-              {(stats.tasks ?? []).map((t) => {
-                const id = String(t.id);
-                const label = t.name || t.description || `任务 #${id}（已删除）`;
-                return (
-                  <SelectItem key={id} value={id}>
-                    <span className="flex w-full items-center gap-2">
-                      <span className="max-w-[14rem] truncate" title={label}>
-                        {label}
-                      </span>
-                      <span className="inline-flex items-center gap-1 text-muted-foreground tabular-nums">
-                        <BugIcon className="size-3.5" aria-hidden="true" />
-                        {t.count}
-                      </span>
-                    </span>
-                  </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
+          {/* 0.15.43 多任务合并筛选：多选任务（逗号串传后端，where 支持多值 OR） */}
+          <TaskMultiSelect task={task} setTask={setTask} tasks={stats.tasks ?? []} />
 
           <Select value={sort} onValueChange={(v) => setSort(v as "severity" | "time")}>
             <SelectTrigger size="sm" className="w-36">
@@ -1317,7 +1296,7 @@ export default function FindingsPage() {
                 <label htmlFor="export-format-json" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-json" value="json" /> JSON（.json）
                 </label>
-                {/* 0.15.36 导出补全：TXT/SARIF/HTML（纯 Go 渲染，PDF 可由 HTML 打印产生） */}
+                {/* 0.15.36 导出补全：TXT/SARIF/HTML；0.15.43 收尾：DOC/打印即 PDF */}
                 <label htmlFor="export-format-txt" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-txt" value="txt" /> 纯文本（.txt，邮件/工单形态）
                 </label>
@@ -1325,7 +1304,13 @@ export default function FindingsPage() {
                   <RadioGroupItem id="export-format-sarif" value="sarif" /> SARIF 2.1.0（.sarif.json，GitHub/VS Code）
                 </label>
                 <label htmlFor="export-format-html" className="flex items-center gap-2 text-sm">
-                  <RadioGroupItem id="export-format-html" value="html" /> HTML 报告（.html，可打印为 PDF）
+                  <RadioGroupItem id="export-format-html" value="html" /> HTML 报告（.html）
+                </label>
+                <label htmlFor="export-format-doc" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-doc" value="doc" /> Word 文档（.doc，可直接编辑）
+                </label>
+                <label htmlFor="export-format-pdf" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-pdf" value="pdf" /> PDF（打开后自动唤起打印，另存为 PDF）
                 </label>
               </RadioGroup>
             </div>
@@ -1342,5 +1327,106 @@ export default function FindingsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// TaskMultiSelect 是任务筛选的多选面板（0.15.43 多任务合并导出）：
+// task 状态值 = "all"（不筛选）或逗号分隔任务 id 串（含 UNASSIGNED_TASK 哨兵），
+// 直传后端 where() 的多值 OR——UI 多选，传输层零新协议。
+function TaskMultiSelect({
+  task,
+  setTask,
+  tasks,
+}: {
+  task: string;
+  setTask: (v: string) => void;
+  tasks: FindingTaskOption[];
+}) {
+  const [open, setOpen] = React.useState(false);
+  const selected = React.useMemo(() => new Set(task === "all" ? [] : task.split(",")), [task]);
+  const label = React.useMemo(() => {
+    if (task === "all" || selected.size === 0) return "全部任务";
+    if (selected.size === 1) {
+      const only = [...selected][0];
+      if (only === UNASSIGNED_TASK) return "未关联 / 任务已删除";
+      const t = tasks.find((x) => String(x.id) === only);
+      if (t) return t.name || t.description || `任务 #${only}`;
+      return `任务 #${only}`;
+    }
+    return `已选 ${selected.size} 个任务（合并）`;
+  }, [task, selected, tasks]);
+
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setTask(next.size === 0 ? "all" : [...next].join(","));
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="w-48 justify-between font-normal">
+          <span className="min-w-0 truncate" title={label}>
+            {label}
+          </span>
+          <ChevronDownIcon className="size-3.5 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="max-h-80 w-72 overflow-auto p-1">
+        <label
+          htmlFor="task-sel-all"
+          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
+        >
+          <Checkbox
+            id="task-sel-all"
+            checked={task === "all"}
+            onCheckedChange={() => setTask("all")}
+            aria-label="全部任务"
+          />
+          全部任务 / 清空多选
+        </label>
+        <label
+          htmlFor="task-sel-unassigned"
+          className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
+        >
+          <Checkbox
+            id="task-sel-unassigned"
+            checked={selected.has(UNASSIGNED_TASK)}
+            onCheckedChange={() => toggle(UNASSIGNED_TASK)}
+            aria-label="未关联任务"
+          />
+          未关联 / 任务已删除
+        </label>
+        {tasks.map((t) => {
+          const id = String(t.id);
+          const name = t.name || t.description || `任务 #${id}（已删除）`;
+          return (
+            <label
+              key={id}
+              htmlFor={`task-sel-${id}`}
+              className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
+            >
+              <Checkbox
+                id={`task-sel-${id}`}
+                checked={selected.has(id)}
+                onCheckedChange={() => toggle(id)}
+                aria-label={name}
+              />
+              <span className="min-w-0 flex-1 truncate" title={name}>
+                {name}
+              </span>
+              <span className="inline-flex items-center gap-1 text-muted-foreground tabular-nums">
+                <BugIcon className="size-3.5" aria-hidden="true" />
+                {t.count}
+              </span>
+            </label>
+          );
+        })}
+      </PopoverContent>
+    </Popover>
   );
 }

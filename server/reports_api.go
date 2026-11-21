@@ -14,13 +14,13 @@ import (
 // 导入时拷贝正文进来，两边从此独立。下载从库里出（Content-Disposition 附件），
 // 与工作空间的下载体验一致。
 
-// reportsList GET /api/reports —— 列表（元信息）。
+// reportsList GET /api/reports —— 列表（元信息；?tag= 按标签过滤，0.15.43 #8）。
 func (s *Server) reportsList(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {
 		return
 	}
-	items, err := pg.ListReports(200)
+	items, err := pg.ListReports(200, r.URL.Query().Get("tag"))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -55,6 +55,7 @@ type reportsCreateReq struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
 	TaskID  *int64 `json:"task_id"`
+	Tags    string `json:"tags"` // 0.15.43 #8：逗号分隔标签（自由标签；系统标签由生成端打）
 }
 
 // reportsCreate POST /api/reports —— 新建（content 空 = 标题占位正文）。
@@ -68,7 +69,7 @@ func (s *Server) reportsCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	id, err := pg.CreateReport(req.Title, req.Content, "operator", req.TaskID, "")
+	id, err := pg.CreateReport(req.Title, req.Content, "operator", req.TaskID, "", req.Tags)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -79,6 +80,7 @@ func (s *Server) reportsCreate(w http.ResponseWriter, r *http.Request) {
 type reportsUpdateReq struct {
 	Title   *string `json:"title"`
 	Content *string `json:"content"`
+	Tags    *string `json:"tags"` // 0.15.43 #8：nil=不改；系统标签 forward-only 由 db 层强制保留
 }
 
 // reportsUpdate PUT /api/reports/{id} —— 保存编辑（实时编辑的落库点）。
@@ -97,7 +99,7 @@ func (s *Server) reportsUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if _, err := pg.UpdateReport(id, req.Title, req.Content); err != nil {
+	if _, err := pg.UpdateReport(id, req.Title, req.Content, req.Tags); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -242,7 +244,7 @@ func (s *Server) reportsImport(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = "未命名报告"
 	}
-	id, err := pg.CreateReport(title, string(data), "operator", req.TaskID, filepath.ToSlash(req.Path))
+	id, err := pg.CreateReport(title, string(data), "operator", req.TaskID, filepath.ToSlash(req.Path), "")
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

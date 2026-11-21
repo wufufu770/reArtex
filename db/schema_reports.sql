@@ -18,3 +18,7 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_updated ON reports (updated_at DESC);
+
+-- 0.15.43 #8：报告标签（逗号分隔自由标签 + 系统标签）。系统标签 reartex:report
+-- 由任务生成初稿端自动打标，forward-only：人工更新不可移除系统标签（db 层强制）。
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS tags TEXT NOT NULL DEFAULT '';
