@@ -23,3 +23,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_coverage_gap_task_asset
 
 CREATE INDEX IF NOT EXISTS idx_coverage_gaps_task
   ON coverage_gaps (task_id, state);
+
+-- 外键补 ON DELETE（0.15.40 修复）：0.14.3 建表漏配，三条 FK 全裸露——
+-- 删除任务时 gap 行以 RESTRICT 拦死 assets/tasks/explorations 任一方向
+--（SQLSTATE 23503，远程部署实锤）。幂等迁移（DROP IF EXISTS + ADD）；
+-- targeted_by 用 SET NULL：缺口是任务级账目，锚点节点删除后 gap 保留但
+-- 解除 targeting（比 CASCADE 更贴合设计）。
+ALTER TABLE coverage_gaps DROP CONSTRAINT IF EXISTS coverage_gaps_task_id_fkey;
+ALTER TABLE coverage_gaps ADD CONSTRAINT coverage_gaps_task_id_fkey
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE;
+ALTER TABLE coverage_gaps DROP CONSTRAINT IF EXISTS coverage_gaps_asset_id_fkey;
+ALTER TABLE coverage_gaps ADD CONSTRAINT coverage_gaps_asset_id_fkey
+  FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE;
+ALTER TABLE coverage_gaps DROP CONSTRAINT IF EXISTS coverage_gaps_targeted_by_fkey;
+ALTER TABLE coverage_gaps ADD CONSTRAINT coverage_gaps_targeted_by_fkey
+  FOREIGN KEY (targeted_by) REFERENCES exploration_nodes(id) ON DELETE SET NULL;

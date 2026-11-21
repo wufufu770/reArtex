@@ -34,3 +34,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_intent_conflict_open
 
 CREATE INDEX IF NOT EXISTS idx_intent_conflicts_expl
   ON intent_conflicts (exploration_id, state);
+
+-- 外键补 ON DELETE CASCADE（0.15.40 修复）：两条 node 外键建表时裸露——
+-- 任务删除链 DELETE explorations 级联删 nodes 时以 RESTRICT 拦死
+--（与 coverage_gaps 同款漏配）。冲突是任务级账目，随探索图消亡；
+-- 幂等迁移（DROP IF EXISTS + ADD，照 schema_gap.sql 先例）。
+ALTER TABLE intent_conflicts DROP CONSTRAINT IF EXISTS intent_conflicts_a_node_id_fkey;
+ALTER TABLE intent_conflicts ADD CONSTRAINT intent_conflicts_a_node_id_fkey
+  FOREIGN KEY (a_node_id) REFERENCES exploration_nodes(id) ON DELETE CASCADE;
+ALTER TABLE intent_conflicts DROP CONSTRAINT IF EXISTS intent_conflicts_b_node_id_fkey;
+ALTER TABLE intent_conflicts ADD CONSTRAINT intent_conflicts_b_node_id_fkey
+  FOREIGN KEY (b_node_id) REFERENCES exploration_nodes(id) ON DELETE CASCADE;

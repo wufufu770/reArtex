@@ -714,7 +714,21 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 	}
 	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
 	// task — it is kept as historical accounting even after the task is gone.
+	// coverage_gaps 先清（0.15.40 修复）：0.14.3 建表时三条外键全部裸露（无
+	// ON DELETE 子句），gap 行会以 RESTRICT 拦死 tasks/explorations 删除
+	//（SQLSTATE 23503，远程部署实锤）。无条件删本任务 gap 账——无论删除选项
+	// 如何组合，gap 是任务级派生账目，随任务消亡（schema 迁移的 CASCADE 为
+	// 另一层保险）。
+	if _, err := tx.Exec(`DELETE FROM coverage_gaps WHERE task_id=$1`, id); err != nil {
+		return result, err
+	}
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id=$1`, id); err != nil {
+		return result, err
+	}
+	// intent_conflicts 先清（0.15.40 修复，与 coverage_gaps 同款）：两条 node
+	// 外键裸露（v0.15.39 及此前无 ON DELETE），DELETE explorations 级联删
+	// nodes 时 RESTRICT 拦死。防御性清理 + schema 迁移 CASCADE 双保险。
+	if _, err := tx.Exec(`DELETE FROM intent_conflicts WHERE exploration_id=$1`, expID); err != nil {
 		return result, err
 	}
 	if _, err := tx.Exec(`DELETE FROM explorations WHERE id=$1`, expID); err != nil {

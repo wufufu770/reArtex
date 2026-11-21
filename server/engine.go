@@ -1765,12 +1765,15 @@ func (e *Engine) tryExtendActiveIntent(t *Task, intentID int64, wrote agent.Writ
 // 结论物写回 ⇒ 零产出到线不立即收尾。
 const recentConclusionWindow = 20 * time.Minute
 
-// recentConclusion 报告任务最近是否有结论物入账（锁外查询——调用方持有
-// stagnationMu，这里只读内存时间戳）。
-func (e *Engine) recentConclusion(t *Task) bool {
-	e.stagnationMu.Lock()
+// recentConclusion 报告任务最近是否有结论物入账（锁外查询——调用方
+// noteIntentWriteBack 持有 stagnationMu，这里只读内存时间戳）。
+// ⚠️ 修复（0.15.40）：此前函数体内自己 Lock/Unlock 同一把 stagnationMu——
+// 不可重入互斥锁被重入 = 永久死锁（sync.Mutex 无所有者概念，重入即阻塞）。
+// 触发史：任一任务连续 6 个零产出意图收尾即引爆，Engine 单例锁 ⇒ 全平台
+// planner/worker 循环永久阻塞（远程部署 11-20 实锤）。调用约定：**必须在
+// 持 stagnationMu 状态下调用**，函数名加 Locked 后缀明示。
+func (e *Engine) recentConclusionLocked(t *Task) bool {
 	last, ok := e.lastConclusionAt[t.ID]
-	e.stagnationMu.Unlock()
 	return ok && time.Since(last) < recentConclusionWindow
 }
 
@@ -1797,7 +1800,7 @@ func (e *Engine) noteIntentWriteBack(t *Task, wrote agent.WriteCounts) {
 	// D2 三门收敛（d2d 借鉴）：零产出计数到线 ≠ 立即收尾——任务近期有过
 	// 结论物入账（finding/资产/事实）说明整体仍在产出期，「有 churn 不关」。
 	// 推迟本轮判定，不重置计数（连续性还在）。
-	if st.zeroWrites >= stagnationThreshold && !st.wrapup && e.recentConclusion(t) {
+	if st.zeroWrites >= stagnationThreshold && !st.wrapup && e.recentConclusionLocked(t) {
 		log.Printf("[stagnation] task %s 零产出到线但近期有结论物入账——收尾判定推迟（三门收敛）", t.ID)
 		e.stagnationMu.Unlock()
 		return

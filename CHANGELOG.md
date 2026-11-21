@@ -5,6 +5,35 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.40] - 2026-11-21
+
+### 修复（远程部署交接文档实锤两 bug：0.15.39 仍存在，双修 + 普化排查）
+
+- **① Engine 自我死锁修复（交接文档根因实锤，0.15.39 复核确认仍在）**：
+  recentConclusion 函数体内 Lock stagnationMu，而唯一调用方
+  noteIntentWriteBack **持同一把锁**调用——不可重入互斥锁重入 = 永久死锁
+  （sync.Mutex 无所有者概念）。触发条件：任一任务连续 6 个零产出意图收尾
+  （LLM 配额风暴即凑齐）→ Engine 单例锁 → **全平台 planner/worker 永久阻塞**
+  （远程 goroutine 转储 12 组循环卡死 1475 分钟）。修复：函数改纯读 + 更名
+  recentConclusionLocked 明示「必须在持锁状态调用」。回归测试 2 条（持锁同
+  goroutine 调用带超时断言 / 7 连零产出全链不阻塞）。
+- **② 删除链漏接双修（与 coverage_gaps 同款普化）**：
+  a) **coverage_gaps**（0.14.3 建表三 FK 全裸露无 ON DELETE）——任务删除时
+  gap 行以 RESTRICT 拦死 assets/tasks/explorations 任一方向（SQLSTATE 23503，
+  远程任务 #13 删除实锤）。修复：schema 迁移（task_id/asset_id CASCADE、
+  targeted_by SET NULL——缺口是任务级账目，锚点删除保留 gap）+
+  DeleteTaskCascadePrepared 无条件先删本任务 gap 账（防御性双保险）。
+  b) **intent_conflicts**（普化扫描发现的同类漏配）：两条 node 外键裸露——
+  DELETE explorations 级联删 nodes 时 RESTRICT 拦死。修复：schema 迁移
+  （CASCADE）+ 删除链先清（exploration_id 维度）。
+- **③ 普化排查结论**：
+  - 锁重入：静态分析全部 Engine 方法（Lock 集合 × 调用闭包），6 个疑点逐一
+    核实——5 个为「先解锁再调 / go 异步 / 异锁」安全形态，唯一重入点即①已修；
+  - 裸外键：全 schema 扫描 + 运行库实查——finding_traffic_bindings.snapshot_id
+    的裸 FK 为**有意设计**（证据快照随 evidence GC 管生命周期，不随 finding
+    静默消失，留档）；其余两条（coverage_gaps/intent_conflicts）即②已修。
+- 测试：死锁回归 2 条 + db Delete/Gap/Conflict 全绿。
+
 ## [0.15.39] - 2026-11-21
 
 ### 功能（批次 J1+J2：Amber 记忆库接入（可选组件）+ curator 观察模式）
