@@ -25,6 +25,24 @@
 - **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
 - 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
 
+## [0.15.29] - 2026-11-21
+
+### 功能（finding 报告导出 Word——纯标准库 docx 生成器，零依赖）
+
+- **① `server/docx.go` 纯标准库 OOXML 生成器**：docx = ZIP + XML，Markdown 子集
+  （标题 H1-3 / 有序无序列表 / 围栏代码块 / `**加粗**` / `` `行内代码` `` / 普通段落）
+  → 最小 OOXML 包（Content_Types + rels + document + styles 五 part）。go.mod 零新增；
+  子集外语法原样落段落（宁朴素勿丢内容）；全部文本过 XML 转义（报告证据里的
+  `< > &` 与非法 XML 字符）；reporter 报告模板（概述/影响/范围/复现/证据/PoC/根因/
+  修复）正好全部落在子集内。
+- **② `GET /api/exploration/findings/{id}/report.docx`**：GetFinding → Report 为空
+  404（没报告没有可导出的东西）→ 渲染下发（Content-Disposition 附件名）。
+- **③ 前端**：发现页行内展开的详细报告旁新增「Word」导出按钮——fetch blob + 认证
+  头 + Content-Disposition 文件名（与 exportFindings 同款模式，认证部署不 401）。
+- 测试：docx 单测 4 条（最小包完整性/子集转换钉死/行内 runs 切分/1200 行大报告）；
+  finding_workflow 既有 fixture 补 evidence 适配（finding_gate 空证据预检，语义保真：
+  must-fail 用例的失败点保持在 hint 绑定层）；server 全量回归 531s 全绿。
+
 ## [0.15.28] - 2026-11-21
 
 ### 功能（微信 iLink 任务通道——个人微信扫码接入，长轮询零公网依赖）

@@ -865,6 +865,30 @@ export const api = {
     a.remove();
     URL.revokeObjectURL(url);
   },
+  // exportFindingDocx 把单个漏洞的 Markdown 详细报告导出为 Word（0.15.29，后端
+  // 纯标准库 docx 生成器）。带认证头 + blob 下载（与 exportFindings 同款模式）。
+  exportFindingDocx: async (findingId: string | number) => {
+    const token = getToken();
+    const r = await fetch(`/api/exploration/findings/${findingId}/report.docx`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!r.ok) {
+      if (r.status === 404) throw new Error("该漏洞还没有报告");
+      throw new Error(`export docx: ${r.status}`);
+    }
+    const blob = await r.blob();
+    const disp = r.headers.get("Content-Disposition") ?? "";
+    const m = disp.match(/filename="?([^"]+)"?/);
+    const filename = m?.[1] ?? `finding-${findingId}-report.docx`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   getFinding: (id: string, contextTaskId?: string) =>
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,

@@ -107,7 +107,9 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 		t.Fatal("worker missed runtime guidance")
 	}
 	report := workflowTool(t, tools, "report_finding")
-	result := workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "Planner handoff fixture", "evidence_hint_id": hints.IDs[0]}, false)
+	// evidence 必填：finding_gate（0.15.25）对空证据上报当场拒绝——本用例测的是
+	// 登记链路交接引导，输入需先过预检。
+	result := workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "Planner handoff fixture", "evidence": "fixture verified PoC output", "evidence_hint_id": hints.IDs[0]}, false)
 	var recorded db.RecordedFinding
 	if err := json.Unmarshal([]byte(strings.SplitN(result, "\n", 2)[1]), &recorded); err != nil {
 		t.Fatal(err)
@@ -155,7 +157,8 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	badHint := workflowCall(t, ctx, s.toolAddHint(), map[string]any{"task_id": task.ID, "text": "missing packet", "traffic_refs": []db.TrafficRef{{TrafficID: "missing"}}}, false)
 	var badID int64
 	fmt.Sscanf(badHint, "hint added: %d", &badID)
-	workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "must fail", "evidence_hint_id": badID}, true)
+	// evidence 必带：让失败发生在 hint 绑定层（本用例钉的是畸形交接，不是空证据）。
+	workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "must fail", "evidence": "fixture PoC", "evidence_hint_id": badID}, true)
 	if notices != 1 {
 		t.Fatal("failed handoff notified before commit")
 	}
@@ -176,7 +179,8 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	workflowCall(t, ctx, bind, input, true)
 	// Turning binding off must still save a confirmed finding from an already
 	// assembled tool, even if the model sends the old optional evidence fields.
-	offResult := workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "off", "evidence_hint_id": hints.IDs[0]}, false)
+	// evidence 必填：finding_gate（0.15.25）对空证据上报当场拒绝。
+	offResult := workflowCall(t, ctx, report, map[string]any{"vulnclass": "TEST", "severity": "low", "summary": "off", "evidence": "fixture verified PoC output", "evidence_hint_id": hints.IDs[0]}, false)
 	var offRecord struct {
 		db.RecordedFinding
 		EvidenceStatus string `json:"evidence_status"`
@@ -188,7 +192,7 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 	if offRecord.FindingID <= 0 || len(offRecord.Traffic.Bindings) != 0 || offRecord.EvidenceStatus != "not_bound" || !strings.Contains(offRecord.EvidenceNote, "已关闭") {
 		t.Fatal("disabled binding discarded finding or bound evidence", offResult)
 	}
-	workflowCall(t, ctx, report, map[string]any{"vulnclass": "TCP", "severity": "low", "summary": "no packet needed"}, false)
+	workflowCall(t, ctx, report, map[string]any{"vulnclass": "TCP", "severity": "low", "summary": "no packet needed", "evidence": "redis-cli PING returned PONG"}, false)
 	if notices != 3 {
 		t.Fatal("optional no-packet report failed")
 	}

@@ -7,12 +7,14 @@ import Link from "next/link";
 import {
   ArrowUpRightIcon,
   ChevronRightIcon,
+  FileDownIcon,
   FileTextIcon,
   FlaskConicalIcon,
   RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
@@ -36,6 +38,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -407,12 +410,28 @@ export function FindingsTable({
                               详细报告
                             </span>
                             {reports[rowKey]?.status === "done" && reports[rowKey]?.text.trim() && (
-                              <CopyButton
-                                text={reports[rowKey]?.text}
-                                successMessage="已复制详细报告"
-                                variant="ghost"
-                                className="h-6 px-2 text-xs"
-                              />
+                              <span className="flex items-center gap-1">
+                                <CopyButton
+                                  text={reports[rowKey]?.text}
+                                  successMessage="已复制详细报告"
+                                  variant="ghost"
+                                  className="h-6 px-2 text-xs"
+                                />
+                                {/* 导出 Word（0.15.29）：后端把 Markdown 报告转 docx 下发（带认证 blob 下载） */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void api
+                                      .exportFindingDocx(f.finding_id as string | number)
+                                      .catch((e) => toast.error(`导出失败：${(e as Error).message}`));
+                                  }}
+                                  className="text-muted-foreground hover:text-primary inline-flex h-6 items-center gap-1 rounded px-2 text-xs"
+                                  title="导出 Word (.docx)"
+                                >
+                                  <FileDownIcon className="size-3.5" />
+                                  Word
+                                </button>
+                              </span>
                             )}
                           </div>
                           {(() => {
