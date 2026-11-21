@@ -25,6 +25,52 @@
 - **④ 前端**：建任务对话框授权面下拉（默认授权/被动侦察/全人工）+ 执行档位卡授权面三 chip（Tooltip 带语义说明，非默认档琥珀色边提示）。
 - 测试：db 读写回归 + sod 三态收紧 6 条；tsc/biome/build:static 过；server 定向回归绿。
 
+## [0.15.28] - 2026-11-21
+
+### 功能（微信 iLink 任务通道——个人微信扫码接入，长轮询零公网依赖）
+
+- **① `wechat-ilink/` Python 侧车**（参照 email-intake 架构）：扫码登录（二维码
+  内容终端打印 + 轮询确认 → bot_token 持久化）→ `getupdates` 长轮询（35s hold，
+  游标持久化防重复）→ **allowlist user_id 信任边界**（与飞书 `/start`、邮箱通道
+  同层；空集拒绝启动，宁漏勿误）→ 命令面（`/tasks` 列任务 / `/create 描述|目标`
+  / `/help` / 裸文本直建任务 ≤300 字）→ 经飞书桥 `/internal/notice` 推创建通知（可选）。
+- **② 协议字段集中映射**：基于 2026-03 社区逆向文档（openclaw-weixin 1.0.2），
+  字段名全部集中在 `ilink.py` 的 `FIELD` 映射区——实测漂移时只改一处。README
+  留档腾讯条款风险（限制/拦截/终止权）与群聊权限限制（本侧车只接 1v1）。
+- **③ 零公网依赖**：长轮询拉模式（无回调 URL），与 email-intake 同架构；
+  reArtex 主程序零改动（复用 `/api/tasks`）。
+- 验证：py_compile 过；协议层冒烟（登录态 roundtrip/UIN 头/updates 解析容错）
+  + 命令层冒烟（/help//tasks 降级路径）；通道文档矩阵补 iLink 行。
+
+## [0.15.27] - 2026-11-21
+
+### 功能（Tier B LLM 裁决器——授权面收紧消化进 auditor 裁决岗，零新增 LLM 面）
+
+- **① 收紧命中先经 auditor 裁决**（`internal/sod/mergedgate.go` engagementElevate 升级）：passive_recon/strict_manual 档命中收紧后，先交 **auditor LLM 三态裁决**（复用 deps.Adjudicator——缓存/并发槽/90s 超时/失败审计全复用，**零新增 LLM 面**）：pass=放行（常规出网动作不落人工带宽）、deny=拒（note 带裁决理由）、ask/裁决失败=人工兜底（elevateAsk）。auditor 未装配时整段回落 elevateAsk（宁问人不断链）。
+- **② 裁决请求带授权面语境**：Reason 前缀 `engagement:<档>`，auditor（或未来任何 Adjudicator 实现）按任务授权面语境裁决；裁决理由进审计 marker（`engagement_reason`，120 rune 截断）。
+- **③ 与铁律的对齐**：auditor 裁决的是「放不放行这次工具调用」（权限面），fail-closed 三态 + ask 人工兜底 + deny 可回放——它不是业务结论裁决（finding 确认/意图仲裁仍是确定性层），SoD 铁律语义不变。
+- 测试：engagement 测试扩到 6 条（默认零收紧/passive 出网 ask/strict 非安全 ask/拒答 fail-closed/auditor pass/deny/ask/失败四路）；sod 全量回归绿。
+
+## [0.15.30] - 2026-11-21
+
+### 功能（审计专项技能 4 件——渐进披露的深钻手册落库）
+
+- **① 四个审计技能**（`skills/` 目录，norma skill.LoadDir 解析验证过）：
+  - `audit-taint`（污点追踪）：定源→定汇→追链→坐实四步循环；正向/反向双追、
+    二级链（stored）两段各自验证；「净化了什么字符集」才是链成立的关键。
+  - `audit-auth-access`（认证与访问控制）：垂直越权/水平越权（IDOR）/会话管理/
+    认证流程/租户隔离五核查面；**双账号双坐实**标配；非 ID 引用面与批量接口归属过滤。
+  - `audit-config-hardening`（配置与暴露面）：密钥泄露/CORS/TLS/调试面/不安全
+    默认值/错误泄露六盘点；**组合升权是核心产出**（配置缺陷单看 info、链起来 high）；
+    零元项不单独报（与 report_finding 不报清单一致）。
+  - `finding-synthesis`（多线索综合与定级）：收全证据→拼链（组合升权对照表）→
+    定级三问→落笔；每一环独立证据、缺环如实记 inferred；降级原则优先。
+- **② 与既有体系的分工（刻意设计）**：四技能是「候选面铺开后的**专项深钻手册**」，
+  通过 Skill 元工具按需渐进加载——不重复 pentest/worker 提示词的常驻心法，不与
+  report_finding 的评级基准重复（引用同一口径）；每步都与平台工具配合
+  （record_fact/report_finding/traffic_search）。
+- 验证：norma skill.LoadDir 四技能全解析通过（repo 外独立程序实测）。
+
 ## [0.15.29] - 2026-11-21
 
 ### 功能（finding 报告导出 Word——纯标准库 docx 生成器，零依赖）
