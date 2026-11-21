@@ -963,6 +963,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
 	s.registerTaskSteerRoutes(mux)        // 0.15.16：任务级三档干预（steer/barge_in/follow_up）
+	s.registerTaskDrainRoutes(mux)        // 0.15.42：人工软截止面（POST {id}/drain）
 	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
 	s.registerVetoExportRoutes(mux)      // 0.15.32：Veto 导出（GET veto-export）
 	s.registerPeakSearchRoutes(mux)      // 0.15.38：尖峰探索（人工专属蒸馏面）
@@ -1455,6 +1456,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		"id": t.ID, "description": t.Description, "goal": t.Goal,
 		"running":       running,
 		"paused":        paused,
+		"drained":       s.engine.Drained(t.ID), // 0.15.42 A3：软截止可见化
 		"engine_mode":   engineMode,
 		"in_flight":     inFlight,
 		"llm_in_flight": activeCalls,
@@ -1477,6 +1479,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
+		dto.Drained = s.engine.Drained(t.ID) // 0.15.42 A3：软截止可见化（列表徽章）
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
 		metric := metrics[t.ExpID]
 		dto.Tokens = tokenTotalDTO(metric.Tokens)
@@ -1679,6 +1682,13 @@ func (s *Server) rerunBlocked(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.engine.decInflight(t.ID)
+	// B1（0.15.42，v0.15.11 交接实锤）：软截止中的任务重开是无效操作——
+	// planner/claim 双闸把重开的意图晾在 open 无人认领（现场 13:40:26 批量
+	// 重开 7 条后依然无人问津，用户以为重开无效其实是 drain 在拦）。明确拒绝。
+	if s.engine.Drained(t.ID) {
+		writeErr(w, 409, "任务处于软截止（停派新意图），重开的意图不会被执行——先恢复派发（任务详情「恢复派发」按钮，或 POST /api/tasks/{id}/drain {\"drain\":false}）")
+		return
+	}
 	intents, err := t.Store.ListByKind(db.KindIntent, 1000000)
 	if err != nil {
 		writeErr(w, 500, err.Error())

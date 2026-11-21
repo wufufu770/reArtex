@@ -5,6 +5,45 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.42] - 2026-11-21
+
+### 修复（远程交接第三份实锤：「软截止卡死」三层修复——drain 不再是无解陷阱）
+
+- **① 核查结论（0.15.41 现场复核）**：三层根因**全部仍在**——drain 双闸
+  （planner 静默返回 + worker 停派）是设计语义；但解除面为零：全仓
+  `engine.Drain` 唯一调用方是 `task_drain` 工具（只绑 auto），监督环
+  fireSupervision/fireSupervisionEvent 对 drained 任务直接 return（永久
+  失联），drained 又是进程内存态——一旦 drain 除重启外无解；批量重开
+  blocked 意图在 drain 中是静默无效操作。本版按交接方案 A1+A2+A3+B 全量修复。
+- **② A1 监督环降频审查（打破永久失联）**：fireSupervision 对软截止任务从
+  「永久跳过」改「10 分钟一轮只读评估」（drainedReviewDue 水位）——快照
+  明确标注任务处于软截止，auto 判断诱因已消失即 task_drain(false) 解除；
+  收口理由仍成立则零动作维持（保留「不打扰」本意）。事件轮保持不打扰
+  （headline 多为 cap 命中等收口相关，解除线索由轮询环兜底）。
+- **③ A2 人工双入口（确定性解除）**：
+  - a. 新端点 `POST /api/tasks/{id}/drain` body `{"drain":bool,"reason"}`——
+    终态任务 drain=true 拒 409；解除幂等；动作走 govRecord 审计（人工留痕）；
+  - b. resume 顺带清 drain：用户要它跑 = 清除停派（旧版 resume 不清 drain，
+    任务显示已恢复但双闸仍在——误导源之一；幂等，未 drain 零副作用）。
+- **④ A3 软截止可见化**：任务列表/详情 DTO 加 `drained` 字段；列表页
+  「软截止中」琥珀徽章；详情页徽章 + 一键「恢复派发」按钮（调 a 端点）。
+  旧版软截止对用户完全不可见，只表现为「卡住」。
+- **⑤ B1 重开陷阱修复**：软截止中的任务 POST rerun-blocked → 409 明确
+  报「先恢复派发」（旧版静默接受，重开的意图晾在 open 无人认领——现场
+  13:40:26 批量重开 7 条无效的根因）。
+- **⑥ B2 drain 决策可追溯**：task_drain(true) 落审计/活动时并上「诱因：
+  最近闸门拒绝摘要」（SoD 账本 deny 的 reason_code 计数，前 4 类）——
+  现场那句「进入软截止」没写为什么，用户无从下手。
+- **⑦ B3 注释留档**：事件轮跳过语义 + 解除线索路径注明，防后人再踩。
+- 验证：新回归 5 条全绿（端点 on/off/400/404、重开 409→解除放行、
+  resume 清 drain 全链、水位降频、诱因摘要计数、DTO 字段）+ 路由接线；
+  Go 全包回归绿（agent/db/evidence/guard/intercept…+ server 598s）；
+  tsc/biome(2.5.1 权威)/build:static 过；e2e 47 页全 200（health=0.15.42）。
+- 注：交接文档 D 表提到的 engine_timeout settle-drain 在本仓现行版本无
+  对应调用（`.Drain(` 全仓唯一调用方为治理工具），正常收尾路径回归不受影响；
+  第 3 层诱因（scope 缺子域 → out_of_scope 连拒）属任务运行期配置，代码面
+  由 A1（监督环可自主解除）+ 既有 scope 编辑面缓解，无需新代码。
+
 ## [0.15.41] - 2026-11-21
 
 ### 功能（RSI 可见化：自进化面板）+ 改名 + 集成 bug 修复 + 全量体检

@@ -26,6 +26,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 	s.RegisterTaskHallQuotaRoutes(mux)
 	RegisterEgressGovernanceRoutes(mux)
 	s.registerTaskSteerRoutes(mux)          // 0.15.16 三档干预
+	s.registerTaskDrainRoutes(mux)          // 0.15.42 人工软截止面
 	s.registerExecutionProfileRoutes(mux)   // 0.15.17 执行档位
 	s.registerSelfEvolveRoutes(mux)         // 0.15.41 自进化可见面
 
@@ -37,6 +38,7 @@ func TestRoutesRegisteredWiring(t *testing.T) {
 		{"GET", "/api/task-hall/groups/1/quota"},
 		{"GET", "/api/settings/egress-governance"},
 		{"POST", "/api/tasks/1/steer"},
+		{"POST", "/api/tasks/1/drain"}, // 0.15.42 人工软截止面
 		{"GET", "/api/tasks/1/execution-profile"},
 		{"PATCH", "/api/tasks/1/execution-profile"},
 		{"GET", "/api/self-evolve/status"},

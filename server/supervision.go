@@ -84,7 +84,23 @@ func (s *Server) supervisionPass() {
 // fireSupervision 组装快照并唤醒 auto（一次监督轮）。
 func (s *Server) fireSupervision(taskID string) {
 	if s.engine.Drained(taskID) {
-		return // 软截止中的任务不再监督打扰
+		// A1（0.15.42，v0.15.11 交接实锤）：软截止任务从「永久跳过」改
+		// 「降频只读审查」。旧逻辑 = 唯一能解除 drain 的 auto agent 恰好被
+		// 这里拦住——一旦 drain，除重启外无解（鸡蛋死锁：人工重开意图也
+		// 无人认领）。降频保留「不打扰」本意，打破不可恢复死锁。
+		if !drainedReviewDue(taskID, time.Now()) {
+			return
+		}
+		snapshot := s.buildSupervisionSnapshot(taskID)
+		if snapshot == "" {
+			return
+		}
+		numeric, _ := parseTaskID(taskID)
+		s.StartTriggeredRun(supervisionAgent,
+			fmt.Sprintf("监督·软截止审查 · 任务#%s", taskID),
+			drainedReviewPrompt(snapshot),
+			numeric, true, "", "")
+		return
 	}
 	snapshot := s.buildSupervisionSnapshot(taskID)
 	if snapshot == "" {
@@ -95,6 +111,39 @@ func (s *Server) fireSupervision(taskID string) {
 		fmt.Sprintf("监督 · 任务#%s", taskID),
 		supervisionPrompt(snapshot),
 		numeric, true, "", "")
+}
+
+// drainedReviewInterval 是软截止任务的审查间隔（A1：10 分钟一轮只读评估，
+// 远稀于正常监督轮 3min——降频不打扰，但不永久失联）。
+const drainedReviewInterval = 10 * time.Minute
+
+// drainedReviewLast 记录每任务最近一次软截止审查（进程内即可：重启清零后
+// 首轮即审，方向正确）。
+var drainedReviewLast = map[string]time.Time{}
+
+// drainedReviewDue 判定（并记录）该任务此刻是否该做一轮软截止审查。
+func drainedReviewDue(taskID string, now time.Time) bool {
+	supervisionMu.Lock()
+	defer supervisionMu.Unlock()
+	if last, ok := drainedReviewLast[taskID]; ok && now.Sub(last) < drainedReviewInterval {
+		return false
+	}
+	drainedReviewLast[taskID] = now
+	return true
+}
+
+// drainedReviewPrompt 是软截止审查轮的 prompt（A1）：快照 + 明确的解除线索
+// ——auto 判断诱因已消失就 task_drain(false) 解除；收口理由仍成立就维持。
+func drainedReviewPrompt(snapshot string) string {
+	var b strings.Builder
+	b.WriteString("【软截止审查】本任务当前处于【软截止】（停派新意图，在飞 worker 收尾中）。以下是任务快照：\n\n")
+	b.WriteString(snapshot)
+	b.WriteString(`
+你的职责：判断软截止是否仍然合理。行动准则：
+- 软截止的诱因已消失（如人工已重开被拦意图、任务范围已修正、误伤 cap 已放宽）→ 调用 task_drain(task_id, drain=false) 解除，恢复正常派发。
+- 收口理由仍成立（目标接近达成 / 预算将尽）→ 不调用工具，简短说明维持软截止即可（零打扰）。
+- 不确定 → 维持，并在说明里写清下一步人工可以做什么（如修正 scope / 重开意图）。`)
+	return b.String()
 }
 
 // eventSupervisionInterval 是事件驱动监督的最小间隔（v9 批次1⑥）：cap 命中等
@@ -112,7 +161,8 @@ func (s *Server) fireSupervisionEvent(taskID, headline string) {
 		return
 	}
 	if s.engine.Drained(taskID) {
-		return
+		return // 事件轮不打扰软截止任务（headline 多为 cap 命中等收口相关）；
+		// 解除线索由轮询环的降频审查兜底（drainedReviewInterval，0.15.42 A1）
 	}
 	supervisionMu.Lock()
 	last, ok := eventSupervisionLast[taskID]

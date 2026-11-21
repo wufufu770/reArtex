@@ -390,6 +390,11 @@ export const api = {
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
   // C7 人工有序收尾：走完整 settle 时序落终态（区别于硬 cancel）。
   settleTask: (id: string) => post<{ ok: boolean }>(`/tasks/${id}/settle`, {}),
+  // 软截止人工直连面（0.15.42 A2a）：drain=true 停派新意图；false 恢复派发。
+  // 旧版唯一解除通道是 auto 的 task_drain 工具，而监督环又跳过 drained 任务
+  // ——一旦 drain 除重启外无解（v0.15.11 实锤）。本端点是确定性人工出口。
+  taskDrain: (id: string, drain: boolean, reason?: string) =>
+    post<{ ok: boolean; task_id: string; drained: boolean }>(`/tasks/${id}/drain`, { drain, reason }),
   controlTask: (id: string, action: "pause" | "resume") =>
     post<{ id: string; paused: boolean; queued: boolean; status: string; blocked_intents?: number }>(
       `/tasks/${id}/control`,

@@ -1212,7 +1212,17 @@ const TaskRow = React.memo(function TaskRow({
         {task.goal}
       </TableCell>
       <TableCell>
-        <StatusBadge domain="task" value={task.status} dot />
+        {/* 0.15.42 A3：软截止可见化——旧版只表现为「卡住」，用户无从分辨 */}
+        {task.drained ? (
+          <span className="inline-flex items-center gap-1.5">
+            <StatusBadge domain="task" value={task.status} dot />
+            <Badge variant="secondary" className="border-amber-500/40 text-amber-600 dark:text-amber-400">
+              软截止中
+            </Badge>
+          </span>
+        ) : (
+          <StatusBadge domain="task" value={task.status} dot />
+        )}
       </TableCell>
       <TableCell className="text-muted-foreground text-center text-xs tabular-nums">
         {typeof task.goals_total === "number" && task.goals_total > 0 ? (

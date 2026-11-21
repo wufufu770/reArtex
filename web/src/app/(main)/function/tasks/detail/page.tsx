@@ -5,7 +5,16 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArrowLeftIcon,
+  BrainIcon,
+  CheckIcon,
+  CircleAlertIcon,
+  PauseIcon,
+  PlayIcon,
+  Undo2Icon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
@@ -22,6 +31,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -40,8 +50,8 @@ import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
 import { AssetsTab } from "./_tabs/assets-tab";
-import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { BizTab } from "./_tabs/biz-tab";
+import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
 import { GovernanceTab } from "./_tabs/governance-tab";
@@ -212,6 +222,8 @@ function TaskDetailInner() {
   const id = searchParams.get("id") ?? "";
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
+  // 软截止可见化（0.15.42 A3）：旧版 drain 只表现为「卡住」，用户无从分辨。
+  const [drained, setDrained] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("sessions");
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
@@ -259,9 +271,11 @@ function TaskDetailInner() {
           base.goals_met = at.goals_met;
           base.engine_mode = s?.engine_mode ?? at.engine_mode;
           base.paused = at.paused;
+          base.drained = at.drained;
         }
         setTask(base);
         setPaused(at?.paused ?? base.paused ?? false);
+        setDrained(at?.drained ?? base.drained ?? false);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
@@ -311,6 +325,20 @@ function TaskDetailInner() {
     } catch (e) {
       // 409（终态/已暂停/删除中）等失败必须可见——此前静默，点了没反应也无从排查。
       toast.error(`操作失败：${(e as Error).message}`);
+    }
+  }
+
+  // 解除软截止（0.15.42 A3）：人工直连 drain 移除——「软截止卡死」场景的
+  // 确定性出口（旧版唯一解除通道是 auto 的 task_drain 工具，而监督环又对
+  // drained 任务永久跳过，除重启外无解）。
+  async function resumeDispatch() {
+    if (!task) return;
+    try {
+      await api.taskDrain(task.id, false);
+      toast.success("已恢复派发（planner/worker 会重新认领意图）");
+      load();
+    } catch (e) {
+      toast.error(`恢复失败：${(e as Error).message}`);
     }
   }
 
@@ -411,6 +439,17 @@ function TaskDetailInner() {
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
+          {/* 软截止可见化（0.15.42 A3）：徽章 + 一键恢复派发 */}
+          {drained && !terminal && (
+            <>
+              <Badge variant="secondary" className="border-amber-500/40 text-amber-600 dark:text-amber-400">
+                软截止中
+              </Badge>
+              <Button size="sm" variant="outline" onClick={() => void resumeDispatch()}>
+                <Undo2Icon data-icon="inline-start" /> 恢复派发
+              </Button>
+            </>
+          )}
           {canArchive ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>{archiveTrigger}</AlertDialogTrigger>

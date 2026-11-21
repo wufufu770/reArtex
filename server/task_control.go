@@ -187,6 +187,12 @@ func (s *Server) applyTaskControlInner(t *Task, action string, pauseCause error)
 		}
 		out.Queued = queued
 		out.Status = map[bool]string{true: "queued", false: "running"}[queued]
+		// A2b（0.15.42，v0.15.11 交接实锤）：用户要它跑 = 清除软截止（若有）。
+		// 旧版 resume 不清 drain：任务显示「已恢复」但 planner/claim 双闸仍在，
+		// 用户看到的还是卡死——误导源之一。幂等：未 drain 时零副作用。
+		if s.engine.Drained(t.ID) {
+			s.engine.Drain(t.ID, false)
+		}
 		// F1 语义补全：恢复成功后统计 blocked 尾巴数带回 UI。计数失败不阻塞
 		// 恢复本身（best-effort——它只是提示，不是恢复链路的组成部分）。
 		if t.Store != nil {

@@ -40,6 +40,7 @@ type TaskDTO struct {
 	Description        string             `json:"description"`
 	Goal               string             `json:"goal"`
 	Status             string             `json:"status"` // created | running | paused | done | failed
+	Drained            bool               `json:"drained"` // 0.15.42 A3：软截止中（停派新意图；列表徽章 + 详情一键恢复）
 	CreatedAt          string             `json:"created_at"`
 	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
 	CompletedAt        string             `json:"completed_at"`       // RFC3339 finish time (done/failed); "" if unfinished

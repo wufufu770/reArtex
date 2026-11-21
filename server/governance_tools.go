@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -184,9 +185,66 @@ func (s *Server) toolTaskDrain() actool.CoreTool {
 			if !*a.Drain {
 				verb = "恢复派发"
 			}
-			s.govRecord(a.TaskID, "task_drain", verb+"（"+trimGov(a.Reason)+"）")
+			summary := verb + "（" + trimGov(a.Reason) + "）"
+			// B2（0.15.42，v0.15.11 交接实锤）：软截止活动只有一句「进入软截止」
+			// 没写为什么——用户无从下手。drain=true 时把最近闸门拒绝摘要并进
+			// 审计与活动流（诱因留痕）。
+			if *a.Drain {
+				if causes := s.recentGateDenySummary(a.TaskID); causes != "" {
+					summary = verb + "（" + trimGov(a.Reason) + "）· 诱因：最近闸门拒绝 " + causes
+				}
+			}
+			s.govRecord(a.TaskID, "task_drain", summary)
 			return actool.Text("task " + verb + ": " + a.TaskID), nil
 		})
+}
+
+// recentGateDenySummary 汇总任务最近的闸门拒绝（SoD 账本 verdict=deny 的
+// reason_code 计数，看最近 50 条，展示最多 4 类）——软截止活动的「诱因」
+// 留痕（0.15.42 B2）。查询失败/无拒绝时返回空串（不阻塞 drain 主路径）。
+func (s *Server) recentGateDenySummary(taskID string) string {
+	if s.m == nil || s.m.pg == nil {
+		return ""
+	}
+	numeric, err := parseTaskID(taskID)
+	if err != nil {
+		return ""
+	}
+	decisions, err := s.m.pg.ListSoDDecisions(numeric, 50)
+	if err != nil {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, d := range decisions {
+		if d.Verdict == "deny" {
+			counts[d.ReasonCode]++
+		}
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	type denyCount struct {
+		code string
+		n    int
+	}
+	list := make([]denyCount, 0, len(counts))
+	for c, n := range counts {
+		list = append(list, denyCount{c, n})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].code < list[j].code
+	})
+	parts := make([]string, 0, 4)
+	for i, it := range list {
+		if i == 4 {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s×%d", it.code, it.n))
+	}
+	return strings.Join(parts, "、")
 }
 
 // toolTaskConclude 双签收尾。

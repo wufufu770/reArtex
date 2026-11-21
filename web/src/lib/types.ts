@@ -21,6 +21,7 @@ export interface Task {
   last_activity_unix?: number; // unix seconds of the last activity (0/undef if none)
   paused?: boolean;
   queued?: boolean;
+  drained?: boolean; // 软截止中（停派新意图；0.15.42 可见化：列表徽章 + 详情一键恢复）
   active?: boolean;
   in_flight?: number;
   findings?: { critical: number; high: number; medium: number; low: number }; // 已登记漏洞数(按严重度分档)
