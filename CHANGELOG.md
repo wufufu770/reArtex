@@ -5,7 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.23] - 2026-11-20
+## [0.15.24] - 2026-11-21
+
+### 修复（自治计划 Phase 0 细项复核轮：1 缺口补齐 + 2 条无缺口留档）
+
+- **① 双层转义绕过补齐（真缺口，intercept 归一化）**：`normalizeToolInput` 此前只做一层 `json.Unmarshal`——传输层 `\u0072m` 能拦，但 payload 自身再带一层转义（`\\u0072m`，解码后仍是字面 `\u0072m`）时词表正则永不命中。补递归解码：字符串字段循环「包引号 Unmarshal」解到不再变化（上限 4 层防深嵌套兜圈），复合字段（args 数组/对象）经 `decodeValue` 递归走遍；解不开的非法形态（字面换行/悬空反斜杠）保持原样参与匹配（fail-safe：少解，raw 原文始终兜底，不产生误放行）。单测 4 条：双重转义命中 / 非法形态保持 / 多层转义解净 / 嵌套结构走遍。
+- **② 破坏性路径 deny 清单：无缺口，不移植（留档裁决）**：XIB-Artex 的 `/delete` 等破坏性路径 deny 在本仓架构下由 netguard 拨号面等价闭合——agent 直调平台 API 的面在 `AgentEgress` 拨号时刻被挡（环回默认不放行、`dialControl` 建连时校验），且对目标系统的 DELETE 是渗透测试合法面（REST 越权删除测试），本就不该拦。移植反而引入误拦面。
+- **③ dial-stage SSRF：已完备，零改动（复核留档）**：`netguard.dialControl`（Control 回调=最终建连地址时刻校验）+ DNS 重绑定覆盖（校验时解析到公网、连接时解析到内网）+ `ResolveOnceDialContext`（解析一次拿 IP 建连，重连不重解析）——XIB-Artex 的 dial-stage 防护在本仓已全部等价存在。
+- 验证：intercept 包测试全绿（含新 4 条）+ go vet 过。
+
+
 
 ### 功能（会话 Todo 悬浮框统一入口——Worker 执行会话可见）
 

@@ -688,12 +688,14 @@ func normalizeToolInput(input []byte) string {
 		if !ok {
 			continue
 		}
-		switch t := v.(type) {
+		switch v.(type) {
 		case string:
-			b.WriteString(t)
-			b.WriteByte('\n')
+			if t, ok := v.(string); ok {
+				b.WriteString(decodeEscapedString(t))
+				b.WriteByte('\n')
+			}
 		default:
-			enc, err := json.Marshal(t)
+			enc, err := json.Marshal(decodeValue(v))
 			if err == nil {
 				b.Write(enc)
 				b.WriteByte('\n')
@@ -701,6 +703,56 @@ func normalizeToolInput(input []byte) string {
 		}
 	}
 	return b.String()
+}
+
+// maxDecodeLayers 是字符串递归解码的层数上限。真实 payload 的嵌套转义两三层
+// 就到头；上限只为防恶意深嵌套在匹配热路径上兜圈，到顶即停（残余形态仍有
+// raw 原文兜底匹配，只影响拦截面不产生误放行——解不开的部分保持原样参与匹配）。
+const maxDecodeLayers = 4
+
+// decodeEscapedString 把仍含 JSON 转义的字符串按层解开。一层 json.Unmarshal
+// 解掉的是【传输层】转义；payload 自身再带一层（`\u0072m` 的双重转义形态）时
+// 解出的仍是字面 `\u0072m`，词表正则依旧不命中——循环解到不再变化为止。
+// 包引号 Unmarshal 解不开（字面换行、悬空反斜杠等非法形态）就保持原样：
+// fail-safe 方向是「少解」，raw 原文始终参与匹配，不会因此放行。
+func decodeEscapedString(s string) string {
+	for i := 0; i < maxDecodeLayers; i++ {
+		if !strings.Contains(s, `\`) {
+			return s
+		}
+		var unquoted string
+		if err := json.Unmarshal([]byte(`"`+s+`"`), &unquoted); err != nil {
+			return s
+		}
+		if unquoted == s {
+			return s
+		}
+		s = unquoted
+	}
+	return s
+}
+
+// decodeValue 递归解码复合值（数组/对象）里的字符串，再由调用方 Marshal 供
+// 词表匹配——args 这类结构化字段里嵌套的命令串同样带转义形态。
+func decodeValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		return decodeEscapedString(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = decodeValue(e)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = decodeValue(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func defaultMessage(action, name string) string {
