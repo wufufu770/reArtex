@@ -170,6 +170,12 @@ func (s *Server) wireMergedGateDeps(deps *sod.ChainDeps) {
 	deps.RecordShadowDiff = s.recordSodShadowDiff
 	deps.OnCapHit = s.capHitSupervisor
 	deps.OnBaselineDestructive = s.baselineDestructiveStopper
+	// 任务授权面（EngagementPolicy，0.15.26）：合并闸放行出口按档位收紧。
+	// db 侧读失败/未设置一律回落 authorized_active（不收紧不放宽）。
+	if s.m != nil && s.m.pg != nil {
+		pg := s.m.pg
+		deps.EngagementProfileOf = pg.TaskEngagementProfile
+	}
 }
 
 // sodShadowRowOf 转换 internal/sod.ShadowDiff → db 行（db 不 import internal）。

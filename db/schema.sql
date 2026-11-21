@@ -598,6 +598,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at D
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
     WHERE deleted_at IS NULL AND pinned_at IS NOT NULL;
+-- 任务授权面（EngagementPolicy，0.15.26）。authorized_active=默认=现状全部行为；
+-- passive_recon=一切对目标的出网动作先经人工确认；strict_manual=除平台内安全读写
+-- 外一律先经人工确认。枚举校验在 db.ValidEngagementProfile（写入侧拒绝非法值），
+-- 收紧判定在 internal/sod 合并闸放行出口（宿主注入 EngagementProfileOf）。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS engagement_profile TEXT NOT NULL DEFAULT 'authorized_active';
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS ck_tasks_engagement_profile;
+ALTER TABLE tasks ADD CONSTRAINT ck_tasks_engagement_profile
+    CHECK (engagement_profile IN ('authorized_active','passive_recon','strict_manual'));
 CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived_at DESC)
     WHERE archived_at IS NOT NULL;
 

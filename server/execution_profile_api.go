@@ -40,12 +40,19 @@ func (s *Server) executionProfileGet(w http.ResponseWriter, r *http.Request) {
 	if s.m.pg != nil {
 		autoOn = s.m.pg.GetBool(settingAutoScaling, false)
 	}
+	// 任务授权面（EngagementPolicy，0.15.26）：与执行档位同卡展示，可选项随档返回。
+	engagement := db.EngagementAuthorizedActive
+	if s.m.pg != nil {
+		engagement = s.m.pg.TaskEngagementProfile(taskIDInt)
+	}
 	writeJSON(w, 200, map[string]any{
 		"profile":      p,
 		"auto_scaling": autoOn,
+		"engagement_profile": engagement,
 		"options": map[string]any{
-			"difficulties": []string{"auto", "simple", "medium", "hard"},
-			"modes":        []string{"auto", "fast", "balanced", "super_heavy"},
+			"difficulties":       []string{"auto", "simple", "medium", "hard"},
+			"modes":              []string{"auto", "fast", "balanced", "super_heavy"},
+			"engagement_profiles": []string{db.EngagementAuthorizedActive, db.EngagementPassiveRecon, db.EngagementStrictManual},
 		},
 	})
 }
@@ -62,8 +69,9 @@ func (s *Server) executionProfilePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	var req struct {
-		Difficulty *string `json:"difficulty,omitempty"`
-		Mode       *string `json:"mode,omitempty"`
+		Difficulty        *string `json:"difficulty,omitempty"`
+		Mode              *string `json:"mode,omitempty"`
+		EngagementProfile *string `json:"engagement_profile,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -93,10 +101,43 @@ func (s *Server) executionProfilePatch(w http.ResponseWriter, r *http.Request) {
 	// 显式非法值在 Resolve 里回落默认（档位是运营旋钮，坏输入不炸任务）。
 	p := agent.ResolveExecutionProfile(diff, mode)
 	s.engine.SetExecutionProfile(taskIDInt, p)
+	// 任务授权面（0.15.26）：独立于算力档，只传了 engagement 时算力档保持不变。
+	// 非法值 400（授权面坏值不静默回落，与 createTask 同口径）。
+	engagementChanged := ""
+	if req.EngagementProfile != nil {
+		normalized, err := db.NormalizeEngagementProfile(*req.EngagementProfile)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		if s.m.pg == nil {
+			writeErr(w, 500, "数据库未装配")
+			return
+		}
+		if err := s.m.pg.SetTaskEngagementProfile(taskIDInt, normalized); err != nil {
+			writeErr(w, 500, "授权面写入失败: "+err.Error())
+			return
+		}
+		engagementChanged = normalized
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+			Summary: "任务授权面切换：" + engagementLabel(normalized) +
+				"（合并闸自动放行出口按档收紧；审计与审批页可查每次确认）"})
+	}
 	s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
 		Summary: "执行档位切换：难度=" + string(p.Difficulty) + " 模式=" + string(p.Mode) +
 			"（推理强度 " + effortLabel(p.ReasoningEffort) + "；只调请求级参数，上下文与工具面不变）"})
-	writeJSON(w, 200, map[string]any{"ok": true, "task_id": t.ID, "profile": p})
+	writeJSON(w, 200, map[string]any{"ok": true, "task_id": t.ID, "profile": p, "engagement_profile": engagementChanged})
+}
+
+// engagementLabel 把授权面枚举渲染成人话（活动播报/UI 共用）。
+func engagementLabel(p string) string {
+	switch p {
+	case db.EngagementPassiveRecon:
+		return "passive_recon（对目标的出网动作先经人工确认）"
+	case db.EngagementStrictManual:
+		return "strict_manual（除平台内安全读写外一律先经人工确认）"
+	}
+	return "authorized_active（默认：范围内动作自动进行）"
 }
 
 func effortLabel(e string) string {

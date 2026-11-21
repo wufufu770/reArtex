@@ -31,6 +31,7 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Progress } from "@/components/ui/progress";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type {
   AssetInterceptKind,
@@ -1352,6 +1353,7 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
     hard_token_budget: number;
   } | null>(null);
   const [autoScaling, setAutoScaling] = React.useState(false);
+  const [engagement, setEngagement] = React.useState("authorized_active");
   const [loaded, setLoaded] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
 
@@ -1361,6 +1363,7 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
       .then((r) => {
         setProfile(r.profile);
         setAutoScaling(r.auto_scaling);
+        setEngagement(r.engagement_profile ?? "authorized_active");
       })
       .catch(() => setLoaded(true))
       .finally(() => setLoaded(true));
@@ -1370,13 +1373,17 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
     load();
   }, [load]);
 
-  const switchTo = (patch: { difficulty?: string; mode?: string }) => {
+  const switchTo = (patch: { difficulty?: string; mode?: string; engagement_profile?: string }) => {
     setSaving(true);
     api
       .patchExecutionProfile(taskId, patch)
       .then(() => {
         load(); // 重新拉全量档位（帽/预算由后端解析，局部合并会漏字段）
-        toast.success("执行档位已切换（即时生效，上下文与工具面不变）");
+        toast.success(
+          patch.engagement_profile
+            ? "任务授权面已切换（下个动作起按档收紧）"
+            : "执行档位已切换（即时生效，上下文与工具面不变）",
+        );
       })
       .catch((e) => toast.error(`切换失败：${(e as Error).message}`))
       .finally(() => setSaving(false));
@@ -1385,6 +1392,19 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
   const DIFF_LABEL: Record<string, string> = { auto: "自动", simple: "轻量", medium: "标准", hard: "困难" };
   const MODE_LABEL: Record<string, string> = { auto: "自动", fast: "轻快", balanced: "均衡", super_heavy: "重火力" };
   const modeOptions = ["auto", "fast", "balanced", "super_heavy"] as const;
+  // 任务授权面（0.15.26）：authorized_active=默认现状 / passive_recon=出网先确认 /
+  // strict_manual=除平台内安全读写外先确认。收紧发生在合并闸自动放行出口。
+  const ENGAGE_LABEL: Record<string, string> = {
+    authorized_active: "默认授权",
+    passive_recon: "被动侦察",
+    strict_manual: "全人工",
+  };
+  const ENGAGE_HINT: Record<string, string> = {
+    authorized_active: "范围内动作自动进行（现状）",
+    passive_recon: "对目标的出网动作先经人工确认",
+    strict_manual: "除平台内安全读写外一律先经人工确认",
+  };
+  const engageOptions = ["authorized_active", "passive_recon", "strict_manual"] as const;
 
   if (loaded && !profile) return null; // 端点不可用（旧后端）时整卡隐去
 
@@ -1432,6 +1452,31 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
           </button>
         ))}
         {saving && <Spinner className="size-3.5" />}
+        {/* 任务授权面（0.15.26）：授权收紧独立于算力档 */}
+        <span className="ml-2 text-muted-foreground text-xs">授权面</span>
+        {engageOptions.map((p) => (
+          <Tooltip key={p}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => switchTo({ engagement_profile: p })}
+                className={cn(
+                  "rounded-full border px-2.5 py-0.5 text-xs transition-colors disabled:opacity-50",
+                  engagement === p
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:text-foreground",
+                  p !== "authorized_active" && engagement !== p && "border-amber-500/40",
+                )}
+              >
+                {ENGAGE_LABEL[p] ?? p}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-xs">
+              {ENGAGE_HINT[p]}
+            </TooltipContent>
+          </Tooltip>
+        ))}
       </CardContent>
     </Card>
   );

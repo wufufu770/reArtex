@@ -330,6 +330,7 @@ export const api = {
     interceptRules?: AssetInterceptRuleInput[];
     difficulty?: string; // 执行档位（0.15.17）：auto=文本启发式判定
     mode?: string;
+    engagementProfile?: string; // 任务授权面（0.15.26）：默认 authorized_active
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -346,6 +347,7 @@ export const api = {
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       difficulty: input.difficulty ?? "", // auto=后端文本启发式判定
       mode: input.mode ?? "",
+      engagement_profile: input.engagementProfile ?? "", // 省略=authorized_active
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
@@ -453,13 +455,16 @@ export const api = {
         hard_token_budget: number;
       };
       auto_scaling: boolean;
-      options: { difficulties: string[]; modes: string[] };
+      engagement_profile: string; // 任务授权面（0.15.26）：authorized_active|passive_recon|strict_manual
+      options: { difficulties: string[]; modes: string[]; engagement_profiles: string[] };
     }>(`/tasks/${taskId}/execution-profile`),
-  patchExecutionProfile: (taskId: string, body: { difficulty?: string; mode?: string }) =>
-    patch<{ ok: boolean; task_id: string; profile: { difficulty: string; mode: string; reasoning_effort: string } }>(
-      `/tasks/${taskId}/execution-profile`,
-      body,
-    ),
+  patchExecutionProfile: (taskId: string, body: { difficulty?: string; mode?: string; engagement_profile?: string }) =>
+    patch<{
+      ok: boolean;
+      task_id: string;
+      profile: { difficulty: string; mode: string; reasoning_effort: string };
+      engagement_profile: string;
+    }>(`/tasks/${taskId}/execution-profile`, body),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

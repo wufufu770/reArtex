@@ -3089,6 +3089,7 @@ function CreateTaskSheet({
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [execDifficulty, setExecDifficulty] = React.useState("auto"); // 执行档位难度(0.15.17);auto=后端按任务书判定
   const [execMode, setExecMode] = React.useState("auto"); // 执行档位模式;auto=后端按任务书判定
+  const [engagementProfile, setEngagementProfile] = React.useState("authorized_active"); // 任务授权面(0.15.26);默认=现状行为
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
@@ -3159,6 +3160,7 @@ function CreateTaskSheet({
         coverageEnabled,
         difficulty: execDifficulty,
         mode: execMode,
+        engagementProfile: engagementProfile === "authorized_active" ? undefined : engagementProfile,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3389,6 +3391,24 @@ function CreateTaskSheet({
                       <option value="super_heavy">重火力（高强度+熔断预算）</option>
                     </select>
                   </div>
+                </div>
+                {/* 任务授权面（0.15.26）：声明本任务允许自动进行的动作边界；
+                    创建后可在任务总览「执行档位」卡中途切换。 */}
+                <div className="grid gap-2">
+                  <Label htmlFor="engagement-profile">任务授权面</Label>
+                  <select
+                    id="engagement-profile"
+                    className="h-8 rounded-md border bg-background px-2 text-sm"
+                    value={engagementProfile}
+                    onChange={(e) => setEngagementProfile(e.target.value)}
+                  >
+                    <option value="authorized_active">默认授权（范围内动作自动进行）</option>
+                    <option value="passive_recon">被动侦察（出网动作先经人工确认）</option>
+                    <option value="strict_manual">全人工（除平台内安全读写外先确认）</option>
+                  </select>
+                  <p className="text-muted-foreground text-xs">
+                    合并闸在自动放行出口按档收紧：合同内放行，合同外先敲门（审批页/群聊卡确认）。
+                  </p>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="heartbeat-min">planner 心跳（分钟）</Label>

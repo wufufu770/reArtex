@@ -246,6 +246,12 @@ type ChainDeps struct {
 	// DegradeEnabled 读降级开关（方案 v3 缺陷 B4，settings sod.degrade_enabled，
 	// 默认 false）。nil = 永不降级（fail-closed 原样）。
 	DegradeEnabled func() bool
+	// EngagementProfileOf 读任务的授权面档位（EngagementPolicy，0.15.26）：
+	// "authorized_active"（默认）/ "passive_recon" / "strict_manual"。
+	// nil 或空串 = 不收紧 = 默认档现状行为。档位收紧发生在合并闸【即将自动
+	// 放行】的出口（见 enforceGate 的 engagementElevate）——合同内放行照旧，
+	// 合同外先敲门；deny/auditor/review 路径不受影响（那些本来就不自动放行）。
+	EngagementProfileOf func(taskID int64) string
 	// DegradedAllow 判定降级期哪些工具可以确定性放行。宿主注入分级器：
 	// 只有 Tier1/2 类（平台只读 + 结构化写）返回 true；Tier3（Bash/出网/
 	// MCP/扩权/状态迁移）必须 false —— 降级**永不**豁免 Tier3（§4 不变式 1）。

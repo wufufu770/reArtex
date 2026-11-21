@@ -24,6 +24,7 @@ type mergedDecision struct {
 	note    string
 	review  *DecisionRecord
 	markers map[string]string // 追加进审计 Checks 的合并闸标记
+	cls     ClassResult       // 分类器结论（engagement 档位收紧判定用，0.15.26）
 }
 
 // enforceGate 是 enforce 态的入口：纯裁决 → 副作用（闸门/凭证/审计）。
@@ -39,6 +40,13 @@ func (c *Chain) enforceGate(ctx context.Context, call chainCall, name string) (b
 		// auditor 代批 / 人工 ask（v4.1 决策点 1，cap 挂 egress_new_host 行）。
 		if out.Verdict == sodpolicy.VerdictDeny && out.ReasonCode == sodpolicy.ReasonOutOfScope {
 			return c.outOfScopeRoute(ctx, call, d)
+		}
+		// engagement 档位收紧（0.15.26）：闸门即将自动放行时按任务授权面复核——
+		// 合同内照旧放行，合同外先敲门（ask 拒/超时 ⇒ deny，审计带 engagement 标记）。
+		if out.Verdict != sodpolicy.VerdictDeny {
+			if block, note := c.engagementElevate(ctx, call, d.cls, &d.markers); block {
+				return c.denyWithChecks(ctx, call, sodpolicy.ReasonAskDeclined, note, d.markers)
+			}
 		}
 		out.Checks = mergeChecks(out.Checks, d.markers)
 		return c.finalize(ctx, call, out, d.gateIn.Normalized, false, false, d.markers, nil)
@@ -75,9 +83,9 @@ func (c *Chain) denyWithChecks(ctx context.Context, call chainCall, reasonCode, 
 // mergedVerdict 是纯裁决（无副作用）：分类 → 种类表 → auditor。
 // 影子态也走它（拿到「假如 enforce 会怎么判」），但不铸凭证不落 sod 账本。
 func (c *Chain) mergedVerdict(ctx context.Context, call chainCall, name string) mergedDecision {
-	mk := func(kind string) mergedDecision { return mergedDecision{kind: kind, markers: map[string]string{}} }
 	intelSource := c.deps.IntelSource
 	cls := Classify(call.taskID, name, call.payload, intelSource)
+	mk := func(kind string) mergedDecision { return mergedDecision{kind: kind, markers: map[string]string{}, cls: cls} }
 
 	var cats []sodpolicy.SodCategory
 	if c.deps.Categories != nil {
@@ -393,6 +401,51 @@ func withScopePass(in GateInput, reason string) GateInput {
 }
 
 // elevateAsk 走人工 ask 通路；未装配/出错 = 未批准（fail-safe 拒绝）。
+// engagementElevate 是任务授权面（EngagementPolicy，0.15.26）的收紧判定：闸门
+// 即将自动放行时按档位复核。返回 (true, note) 表示要求先经人工确认且未被批准
+// ——调用方据此 deny；false = 放行照旧（合同内或档位未要求收紧）。
+//
+// 三档语义（db/engagement.go 为权威定义）：
+//   - authorized_active / ""：零收紧（现状全部行为）；
+//   - passive_recon：一切对目标的出网动作（有远端主机 / GET 拉取 / DNS·whois
+//     查询）先经人工确认——「只许看不许碰」按最保守解释执行：分不出「这次
+//     curl 只读目标还是写目标」，宁可多问；
+//   - strict_manual：除平台内安全动作（ClassBenign 无出网迹象 / ClassLocalSafe
+//     全部路径在工作区内）外一律先经人工确认。
+//
+// ask 通路复用 elevateAsk（审批页 + 群聊卡 + 外部通道共用 HandleAsk）；批准时
+// 打上 engagement marker 继续放行，拒答/超时按 deny（fail-closed，与种类 ask
+// 同语义）。deny/auditor/review 路径不进本函数——那些本来就不自动放行。
+func (c *Chain) engagementElevate(ctx context.Context, call chainCall, cls ClassResult, markers *map[string]string) (bool, string) {
+	if c.deps.EngagementProfileOf == nil {
+		return false, ""
+	}
+	profile := c.deps.EngagementProfileOf(call.taskID)
+	switch profile {
+	case "", "authorized_active":
+		return false, ""
+	case "passive_recon":
+		if len(cls.Hosts) == 0 && !cls.HTTPGet && !cls.DNSQuery && !cls.TargetWrite {
+			return false, ""
+		}
+	case "strict_manual":
+		if cls.Kind == ClassBenign || cls.Kind == ClassLocalSafe {
+			return false, ""
+		}
+	default:
+		// 未知档位：不在运行期做创造性解释（写入侧已校验枚举），按不收紧处理。
+		return false, ""
+	}
+	reason := "任务授权面为 " + profile + "：本次动作需人工确认后放行"
+	if c.elevateAsk(ctx, call, reason) {
+		(*markers)["engagement"] = profile + ":approved"
+		return false, ""
+	}
+	(*markers)["engagement"] = profile + ":declined"
+	return true, reason + "（拒答或超时，按拒绝处理）"
+}
+
+// elevateAsk 是人工确认通路（审批页/群聊卡/外部通道共用 HandleAsk）。
 func (c *Chain) elevateAsk(ctx context.Context, call chainCall, reason string) bool {
 	if c.deps.ElevateAsk == nil {
 		return false

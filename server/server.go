@@ -1912,6 +1912,10 @@ type createTaskReq struct {
 	// auto(默认)/fast/balanced/super_heavy。省略 = 默认档（medium/balanced）。
 	Difficulty string `json:"difficulty,omitempty"`
 	Mode       string `json:"mode,omitempty"`
+	// 任务授权面（EngagementPolicy，0.15.26）：authorized_active(默认=现状)/
+	// passive_recon(出网动作先确认)/strict_manual(除平台内安全读写外先确认)。
+	// 省略 = 默认档。非法值 400（授权面是安全面，坏值不静默回落）。
+	EngagementProfile string `json:"engagement_profile,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1989,6 +1993,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		d, m := agent.AssessAutoProfile(req.Goal, req.Description, 0, 0,
 			agent.TaskDifficulty(req.Difficulty), agent.ExecutionMode(req.Mode))
 		s.engine.SetExecutionProfile(taskIDInt, agent.ResolveExecutionProfile(d, m))
+	}
+	// 任务授权面（0.15.26）：创建时点声明（省略=authorized_active）；切档走
+	// execution-profile PATCH 面。非法值 400——授权面坏值不静默回落。
+	if req.EngagementProfile != "" {
+		if _, err := db.NormalizeEngagementProfile(req.EngagementProfile); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		if err := s.m.pg.SetTaskEngagementProfile(taskIDInt, req.EngagementProfile); err != nil {
+			writeErr(w, 500, "授权面写入失败: "+err.Error())
+			return
+		}
 	}
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
