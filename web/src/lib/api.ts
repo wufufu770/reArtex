@@ -835,7 +835,7 @@ export const api = {
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
-    format: "md-single" | "md-zip" | "csv" | "json";
+    format: "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html";
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];

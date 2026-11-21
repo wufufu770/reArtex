@@ -2724,6 +2724,20 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(out)
+	case "txt":
+		setDownload("text/plain; charset=utf-8", "findings-"+stamp+".txt")
+		_, _ = w.Write(report.FindingsTXT(fs, now))
+	case "sarif":
+		body, err := report.FindingsSARIF(fs, now)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		setDownload("application/json; charset=utf-8", "findings-"+stamp+".sarif.json")
+		_, _ = w.Write(body)
+	case "html":
+		setDownload("text/html; charset=utf-8", "findings-"+stamp+".html")
+		_, _ = w.Write(report.FindingsHTML(fs, now))
 	default:
 		writeErr(w, 400, "bad format: "+format)
 	}

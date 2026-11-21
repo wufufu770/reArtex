@@ -264,7 +264,9 @@ export default function FindingsPage() {
   // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
-  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  const [exportFormat, setExportFormat] = React.useState<
+    "md-single" | "md-zip" | "csv" | "json" | "txt" | "sarif" | "html"
+  >("md-single");
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -1314,6 +1316,16 @@ export default function FindingsPage() {
                 </label>
                 <label htmlFor="export-format-json" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-json" value="json" /> JSON（.json）
+                </label>
+                {/* 0.15.36 导出补全：TXT/SARIF/HTML（纯 Go 渲染，PDF 可由 HTML 打印产生） */}
+                <label htmlFor="export-format-txt" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-txt" value="txt" /> 纯文本（.txt，邮件/工单形态）
+                </label>
+                <label htmlFor="export-format-sarif" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-sarif" value="sarif" /> SARIF 2.1.0（.sarif.json，GitHub/VS Code）
+                </label>
+                <label htmlFor="export-format-html" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-html" value="html" /> HTML 报告（.html，可打印为 PDF）
                 </label>
               </RadioGroup>
             </div>

@@ -5,6 +5,26 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.36] - 2026-11-21
+
+### 功能（批次 G2：findings 导出补全——TXT / SARIF 2.1.0 / HTML 三渲染器）
+
+- **① report 包三渲染器**（纯标准库零依赖，docx 同款纪律）：
+  - FindingsTXT：分节纯文本（邮件/工单/CLI 审阅形态，分隔线+中文字段名）；
+  - FindingsSARIF：OASIS SARIF 2.1.0（GitHub Code Scanning / VS Code 兼容）——
+    vulnclass 作 ruleId、severity 映射（critical/high→error、medium→warning、
+    low/info→note）、finding id 作 partialFingerprints、automationDetails 按
+    时间戳；
+  - FindingsHTML：自包含 HTML（内联 CSS 零外链，可直接浏览器打开或打印为
+    PDF——PDF 导出即此路径的打印动作）；**证据 HTML 转义钉死**（&lt;script&gt;
+    不得逃逸）。
+- **② findingsExport 扩三格式**（txt/sarif/html，现 7 格式：md-single/md-zip/
+  csv/json/txt/sarif/html）+ 前端导出对话框三选项。
+- **③ 裁决留档**：PDF/DOC 独立格式推迟（HTML 打印覆盖 PDF 场景、docx 覆盖
+  Word 场景，独立渲染器性价比低）；报告中心标签化（reartex:report 系统标签 +
+  Combine 合并）体量为新批次，随后续排期。
+- 测试：TXT 分节/SARIF shape+level 映射/HTML 转义 3 条全绿。
+
 ## [0.15.35] - 2026-11-21
 
 ### 功能（批次 G1：证据逐字交叉验证 + root-cause 同根因标记）
