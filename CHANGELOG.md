@@ -5,6 +5,24 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.33] - 2026-11-21
+
+### 功能（批次 E2：golden holdout 套件 + baseline 录制工具链）
+
+- **① eval/suite.json**：15 个 golden 任务定义（reartex_pentest_v1，**Veto schema
+  校验 15/15 通过**），四维度与 0.15.30 四审计技能同构：污点 ×4（SQLi/SSTI/SSRF/
+  路径穿越）/ 越权认证 ×4（IDOR/提权/会话固定/批量赋值）/ 配置暴露 ×4（密钥/CORS/
+  调试面/错误泄露）/ 综合复测 ×3（组合链/跨报告去重/定级复核）。expected 全零
+  守卫容忍（max_guard_violations=0）+ 按任务类型的复测/工具/token 帽。
+- **② eval/collect_baseline.py**：终态导出聚合器——data/veto/<taskID>/responses.json
+  → Veto responses + identity；套件 id 对齐（golden 任务按套件 id 命名）、未终态
+  任务清单退出、跨构建混录拒绝（基线必须同一 prompt_version）。
+- **③ eval/README.md**：完整录制流程（建任务→等终态→聚合→score→归档→回归对照
+  的 veto compare 命令全链）+ 现状说明（首次录制待 LLM+授权靶场条件具备）。
+- **④ CLI 全链已验证**：空响应探针 score 跑通（ungraded 15/15=schema 合法）；
+  E1 端到端（score→compare release_eligible=true）已验。发布前回归门：后续
+  一切改动 compare 本基线 n_10=0 才算无回归。
+
 ## [0.15.32] - 2026-11-21
 
 ### 功能（批次 E1：Veto 评估器集成——exporter + 跨语言签名对齐）
