@@ -685,6 +685,11 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 			pass := ""
 			if sub.StructuredIntent.TargetHint == "" || !compoundNetwork {
 				pass = "compound_local_segment"
+			} else if scopePassFileTarget(sub.StructuredIntent.TargetHint, call.payload, fastHit) {
+				// 0.15.48：规整器把本地文件名当「目标」填进 target_hint 且载荷
+				// 无任何出网能力（正则字面量误触网络指示符）⇒ 文件形目标按构造
+				// 通过，否则本地分析命令被文件名对 scope 裁决成批误拒。
+				pass = "compound_local_segment"
 			}
 			if subOut := c.evaluate(ctx, call, sub, degradeOn, pass); subOut.Verdict != sodpolicy.VerdictApprove {
 				c.shadowCompare(call, subOut)
@@ -707,6 +712,13 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		// scope 按构造通过（no_egress_local）——否则一切本地分析命令被「无可
 		// 判定目标」拒绝（实测 授权测试靶场 任务的 grep/tshark/排序全被拦）。
 		scopePass = "no_egress_local"
+	} else if scopePassFileTarget(normalized.StructuredIntent.TargetHint, call.payload, fastHit) {
+		// 0.15.48：规整器把本地文件名当「目标」填进 target_hint 的构造放行
+		// （local_file_target）——与复合子段同根因：正则字面量误触网络指示符
+		// ⇒ 本地豁免（B5/no_egress_local）全灭 ⇒ 文件名被当主机名对 scope
+		// 裁决，本地分析命令成批误拒（真实渗透首日实测）。前置条件见
+		// scopePassFileTarget：非快路径 + 载荷无出网能力 + 文件形目标。
+		scopePass = "local_file_target"
 	}
 	out := c.evaluate(ctx, call, normalized, degradeOn, scopePass)
 	if mode == sodpolicy.MergedGateShadow {

@@ -5,6 +5,38 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.48] - 2026-11-22
+
+### 修复（真实渗透实战实锤：本地分析命令被 out_of_scope 成批误拒——文件形 target_hint 构造放行）
+
+- **问题（实战首日 4 分钟内 4 起 escalation 实锤）**：worker 的本地分析命令
+  （python 读下载的 HTML/JSON 做正则扫描）被 SoD 闸门以 out_of_scope 连拒：
+  - 被拒载荷全部是**纯本地操作**（`python3 - <<'EOF'` 扫描 page*.html、
+    `cd /workdir && python3 -c` 解析 catalog.html）；
+  - 根因链：脚本里的正则字面量含 URL 形字符串（`inet=re.compile(r'https?://…')`）
+    → networkIndicatorRe 误判「命令在碰网络」→ B5 本地任务目录豁免被反向
+    守卫杀掉 + 复合动作 compound_local_segment 被跳过 → 规整器塞进
+    target_hint 的本地文件名（hostmap.py / page__.html 逗号列表）被当主机名
+    对 scope 裁决 → 文件名不在授权范围 → 拒绝。
+- **修复（文件形目标构造放行 + 出网能力判别）**：新增
+  `scopePassFileTarget`（链侧单意图/复合子段共用）——三重前置齐备才放行：
+  ① 非快路径（快路径提取的 hint 一定是主机，照常裁决）；② 载荷**无任何
+  出网能力**（新增 networkAPIRe：只认 urllib/requests/curl/socket 等出网
+  API/工具调用形态——URL 形字符串只是数据/正则）；③ 目标是**文件形**
+  （新增 localFileTargetHint：路径形/裸名扩展名白名单/逗号列表逐段判定，
+  混入主机段保守从严）。放行理由 `local_file_target` 如实进审计。
+- **方向安全**：主机形目标（console.bce.baidu.com 这类真正越界的）照常
+  scope 裁决拒绝；有出网能力的载荷（urllib/curl）不享受豁免；形态不明
+  （无扩展名/白名单外扩展名）保守按网络目标裁决。networkAPIRe 误中只是
+  少一条豁免（与 networkIndicatorRe 同款取舍）。
+- **测试**：TestLocalFileTargetHint（实测误拒形态 vs 真实主机形态 22 例）、
+  TestNetworkAPIRe（正则字面量 vs 出网 API 13 例）、TestScopePassFileTarget
+  （三重前置逐条钉）。
+- 注：既有已知口子留档——复合动作载荷无网络指示符时全段按构造通过
+  （compound_local_segment），两段裸域名（evil.com 形态）不出 networkIndicatorRe，
+  该路径的 scope 旁路是 0.15.5 以来的既有形态，本次未动（改它会把
+  `grep 'evil.com' file` 这类本地检索误拒回来）；follow-up 另议。
+
 ## [0.15.47] - 2026-11-22
 
 ### 修复（真实渗透开战前体检实锤：凭据熔断全工具记账会误伤主通道——收窄为注册制）
