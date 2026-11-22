@@ -5,6 +5,28 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.45] - 2026-11-22
+
+### 修复（0.15.44 首次推送实测：分支 CI lint 门 2 处 error 清零）
+
+- 推送 0.15.44 后分支 ci.yml 的 frontend lint 门（biome 棘轮，只查相对基线
+  改动文件）红了 2 处 error——文件因 0.15.44 改动进入棘轮集合，连带暴露：
+  - **api.ts organizeImports**（error 级）：0.15.44 新增的
+    `TaskEscalationProposal` import 插错位置（排在 Asset 后），违反导入名
+    字母序。挪到 TaskConstraint 与 TaskGoal 之间（净位置修正，零行为变化）。
+  - **reports 页 noStaticElementInteractions**（error 级）：行内操作区 span
+    的 biome-ignore 抑制注释用的是 `//` 行注释形态且写在 JSX 开标签属性区
+    内——biome 2.5.1 对该形态判「抑制无效果」，抑制形同虚设。改为与
+    system/mcp 页同款且实测有效的形态：`{/* … */}` JSX 注释 + 紧贴元素
+    之前的子节点位。被抑制的元素与行为零变化。
+- **本机复现门**：CI 的 `npx biome check $changed` 依赖 bash 分词；本机
+  zsh 不分词导致多路径被并成单参数、出现「全部路径被忽略」的假象——
+  本地复现须走 xargs 等价形态。修正后 19 文件集 0 error（38 warnings/
+  171 infos 为棘轮容忍的既有旧账）。
+- 附带发现（未改）：web/node_modules 里 biome 残留 2.6.8（早前 pnpm 漂移
+  沉淀），与权威 npm lock 的 2.5.1 不符——npx @biomejs/biome@2.5.1 钉版
+  验证不受影响；node_modules 属未跟踪产物，不推不修。
+
 ## [0.15.44] - 2026-11-22
 
 ### 功能（#12 single_loop 硬锁 + 升级提议卡 + #6 两小项——vNext 用户裁决三项落地）

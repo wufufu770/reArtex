@@ -261,8 +261,8 @@ export default function ReportsPage() {
                 </TableCell>
                 <TableCell className="text-muted-foreground text-xs tabular-nums">{fmtTime(r.updated_at)}</TableCell>
                 <TableCell className="text-right">
+                  {/* biome-ignore lint/a11y/noStaticElementInteractions: 行内操作区仅阻止冒泡，不做交互元素（与 system/mcp 页同款纪律） */}
                   <span
-                    // biome-ignore lint/a11y/noStaticElementInteractions: 行内操作区仅阻止冒泡，不做交互元素（与 system/mcp 页同款纪律）
                     className="inline-flex items-center gap-1"
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => e.stopPropagation()}
