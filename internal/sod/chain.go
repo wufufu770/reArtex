@@ -197,6 +197,14 @@ type Chain struct {
 	// credCircuit 是凭据级熔断状态（0.15.44 #6）：tool → *credCircuitState。
 	// 进程内存态——重启清零 = 冷却后重新探测一次，方向正确，不需落库。
 	credCircuit sync.Map
+	// credToolsCache 是凭据面注册表缓存（0.15.47 收窄）：settings 键
+	// sod_credential_tools（逗号分隔精确工具名）。只有注册进来的平台凭据
+	// 承载面才进凭据熔断；默认空 = 熔断完全休眠——真实渗透里目标返回的
+	// 401/403 是**数据**（鉴权探测正是靠它）不是故障，curl/HTTP/浏览器等
+	// 主通道绝不因此被熔断。TTL 重读，运行期改注册表 1 分钟内生效。
+	credToolsMu    sync.Mutex
+	credToolsCache map[string]bool
+	credToolsAt    time.Time
 }
 
 // credCircuitState 是单工具的凭据熔断计数（连续 401/403 → 开路 30 分钟）。
@@ -215,15 +223,42 @@ func (c *Chain) noteDeniedByName(tool, payloadDigest string) {
 }
 
 // credAuthFailRe 匹配工具结果里的 401/403 鉴权失败形态（HTTP 状态行 / SDK
-// 错误串 / 响应体的鉴权失败字样）。宽松匹配是有意的：凭据熔断只挡「连撞墙」，
-// 误报的代价只是提前一次熔断，漏报的代价是整场任务空转。
+// 错误串 / 响应体的鉴权失败字样）。宽松匹配是有意的——但 0.15.47 起它只作用
+// 于**注册进凭据面的工具**：宽松模式把「目标返回 401」也算进来的误伤面已被
+// 注册表挡住（未注册 = 永不记账），漏报的代价是凭据面空转多撞几轮。
 var credAuthFailRe = regexp.MustCompile(`(?i)\b(?:status\s*40[13]|HTTP[ /]?40[13]|401\s+Unauthorized|403\s+Forbidden|Unauthorized|Forbidden)`)
 
-// noteCredentialOutcome 在 PostToolUse 记凭据面结果（0.15.44 #6）：
-// 命中 401/403 形态计数 +1，非命中（且非执行层错误）清零——一次正常响应说明
-// 凭据可能已恢复。执行层错误（isErr）归工具健康熔断（RecordToolCallOutcome），
-// 不进凭据面。
+// credToolRegistered 报告工具是否注册进了凭据面（TTL 缓存，注册表来自
+// settings 键 sod_credential_tools）。链未接 DB（单测直构）或键为空 ⇒ 空集
+// ⇒ 所有工具都不进凭据面（熔断休眠）。
+func (c *Chain) credToolRegistered(tool string) bool {
+	c.credToolsMu.Lock()
+	defer c.credToolsMu.Unlock()
+	if c.credToolsCache == nil || time.Since(c.credToolsAt) >= sodpolicy.CredentialToolsRefreshInterval {
+		set := map[string]bool{}
+		if c.deps.DB != nil {
+			if raw, _, err := c.deps.DB.GetSetting(sodpolicy.SettingKeyCredentialTools); err == nil {
+				for _, part := range strings.Split(raw, ",") {
+					if name := strings.TrimSpace(part); name != "" {
+						set[name] = true
+					}
+				}
+			}
+		}
+		c.credToolsCache = set
+		c.credToolsAt = time.Now()
+	}
+	return c.credToolsCache[tool]
+}
+
+// noteCredentialOutcome 在 PostToolUse 记凭据面结果（0.15.44 #6，0.15.47 收窄）：
+// 只对注册进凭据面的工具记账；命中 401/403 形态计数 +1，非命中（且非执行层
+// 错误）清零——一次正常响应说明凭据可能已恢复。执行层错误（isErr）归工具
+// 健康熔断（RecordToolCallOutcome），不进凭据面。
 func (c *Chain) noteCredentialOutcome(tool string, result []byte, isErr bool) {
+	if !c.credToolRegistered(tool) {
+		return
+	}
 	v, ok := c.credCircuit.Load(tool)
 	if !ok {
 		v, _ = c.credCircuit.LoadOrStore(tool, &credCircuitState{})
@@ -470,11 +505,14 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	}
 	call.scopeDigest = scopeDigest
 
-	// ⑤.0 credential circuit（0.15.44 #6）：凭据级熔断——同一工具连续 2 次收到
-	// 401/403 形态响应 ⇒ 开路 30 分钟。凭据失效不是「工具坏了」（工具健康熔断
-	// 5×/300s 管那类），而是本次测试的实况信号——但连续撞墙只会浪费预算并污染
-	// 目标日志；确定性闸拦下，worker 拿到明确 reason_code 可转报人工换凭据。
-	if c.credentialCircuitOpen(name) {
+	// ⑤.0 credential circuit（0.15.44 #6，0.15.47 收窄为注册制）：凭据级熔断
+	// ——**注册进凭据面的工具**（settings 键 sod_credential_tools，默认空）
+	// 连续 2 次收到 401/403 形态响应 ⇒ 开路 30 分钟。凭据失效不是「工具坏了」
+	// （工具健康熔断 5×/300s 管那类），而是凭据面的实况信号——但连续撞墙只会
+	// 浪费预算；确定性闸拦下，worker 拿到明确 reason_code 可转报人工换凭据。
+	// 未注册的工具（curl/HTTP/浏览器等全部渗透主通道）永不通此路径：目标返回
+	// 的 401/403 是数据不是故障（0.15.47：真实渗透首日实测发现的全量误伤）。
+	if c.credToolRegistered(name) && c.credentialCircuitOpen(name) {
 		rec := &DecisionRecord{
 			TaskID:         call.taskID,
 			ConversationID: call.conversationID,

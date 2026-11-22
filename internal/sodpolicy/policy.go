@@ -142,6 +142,18 @@ const (
 	// 拦下，不再浪费预算并污染目标日志。
 	CredentialOpenWindow = 30 * time.Minute
 
+	// SettingKeyCredentialTools 是凭据面注册表的 settings 键（0.15.47 收窄）：
+	// 逗号分隔的精确工具名。只有注册进来的平台凭据承载面才进凭据熔断——
+	// 默认空 = 熔断休眠。为什么收窄：真实渗透里目标返回的 401/403 是数据
+	// （鉴权探测正是靠它），0.15.44 的全工具记账会在渗透首日把 curl/HTTP/
+	// 浏览器等主通道整只熔断。注册表是给未来接入的平台凭据集成（如
+	// reartex-cve-mcp、ScopeSentry 等）预留的显式入口。
+	SettingKeyCredentialTools = "sod_credential_tools"
+
+	// CredentialToolsRefreshInterval 是凭据面注册表的缓存重读间隔：运行期改
+	// settings，1 分钟内生效（无需重启）。
+	CredentialToolsRefreshInterval = 60 * time.Second
+
 	// TokenTTLSeconds 是一次性执行凭证的寿命（秒）。
 	//
 	// 它存在的唯一目的是**兜住「批准了但没执行」的窗口**（工具被上层取消、

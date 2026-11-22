@@ -5,6 +5,32 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.47] - 2026-11-22
+
+### 修复（真实渗透开战前体检实锤：凭据熔断全工具记账会误伤主通道——收窄为注册制）
+
+- **问题（0.15.44 #6 的范围缺陷）**：凭据熔断在 PostToolUse 对**所有工具**
+  无差别记账，匹配模式含裸词 `Unauthorized|Forbidden` 与 `HTTP/1.1 401`。
+  真实渗透里**目标返回的 401/403 是核心数据**（鉴权探测正是靠它），同一
+  工具（curl/HTTP 请求/浏览器）连续两次 401 形态结果就会触发熔断——该工具
+  被确定性闸拦 30 分钟，渗透主通道被平台自己打残。
+- **修复（注册制收窄）**：新增 settings 键 `sod_credential_tools`（逗号分隔
+  精确工具名）。只有**注册进凭据面的工具**才进熔断记账与 PreToolUse ⑤.0
+  拦截；未注册的工具无论撞多少次 401 都不可达状态机（`credCircuit` 连条目
+  都不落）。**默认空 = 熔断完全休眠**。注册表 60s TTL 缓存重读，运行期改键
+  无需重启。
+- **为什么默认休眠是对的**：当前代理面没有任何承载平台凭据的工具（Amber 走
+  服务端内部客户端不经工具链；NVD/GitHub 令牌尚无消费者；ScopeSentry 未配
+  URL 未发现工具）。注册表是给未来接入的凭据集成（reartex-cve-mcp、
+  ScopeSentry 等）预留的显式入口——出现即注册，语义精准。
+- **配套**：`credToolRegistered`（TTL 缓存读 settings）+ PreToolUse ⑤.0
+  条件加注册检查（注册表移除的工具即使熔断态残留也不再拦）+ credAuthFailRe
+  注释更新（宽松匹配的误伤面已由注册表挡住）。
+- **测试**：存量 4 例改注册表注入；新增
+  `TestCredentialCircuitDormantForUnregisteredTools`（未注册工具撞 3 次 401
+  不熔断、状态表零条目、注册后同链照常工作的回归钉）。
+- 验证：`go vet` + `go test ./internal/sod/ ./internal/sodpolicy/` 全绿。
+
 ## [0.15.46] - 2026-11-22
 
 ### 修复（v0.15.44 release 描述陈旧——RELEASE_NOTES.md 机制性欠账）
