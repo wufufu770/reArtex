@@ -5,6 +5,40 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.49] - 2026-11-22
+
+### 修复（0.15.48 判别粒度实测修正——混合复合命令本地子段被连坐 + 输出件扩展名漏白名单）
+
+- **实测甄别（0.15.48 上线后 5 条 out_of_scope 逐条溯源）**：3 条是真越界
+  该拒（worker 试图访问 tcadp.cloud.tencent.com 静态 CDN——任务 scope 只授权
+  了 adp.tencentcloud.com，worker 自己的笔记确认「扩范围被 SoD 以 out_of_scope
+  拒绝」；另 1 条是 TaskStop 指向幻觉 task id）；**2 条是 v1 判别器的粒度缺口**：
+  - #1304/#1318：混合复合命令 `cd && curl … && cat bGet.body`——v1 的
+    networkAPIRe 扫**整载荷**，curl 子段把整条命令染成「有出网能力」⇒ cat
+    子段的文件形目标（bGet.body/hGet.headers）被连坐拒绝；
+  - 输出件扩展名 .body/.headers 不在 v1 白名单 ⇒ 裸名判成主机形。
+- **v2 判别器（按子意图自身三分类）**：
+  - **网络工具**（curl/wget/ssh/dig/…）：目标一律按网络目标照常裁决（hint
+    是主机不是文件）；
+  - **解释器/间接执行器**（python/bash/find/xargs/awk/sed/…）：出网能力取决
+    于代码体——内联代码（-c / stdin / heredoc）按**载荷**过 networkAPIRe
+    （代码体可见：正则字面量本地分析照常放行、urlopen/curl 代码照常裁决）；
+    **外部脚本执行**（`bash probe.sh`）代码体不可见 ⇒ 保守照常裁决（工作区
+    脚本走 B5 绝对路径豁免是设计通道；路径less 形态从严是 B5 同款取舍）；
+  - **纯本地工具**（cat/grep/jq/…）：无法出网 ⇒ 文件形目标按构造通过
+    （混合复合命令的本地子段不再被别的子段连坐）。
+- **白名单补**：body/headers/hdr/dump/trace/snap/pid/lock/part/sig/asc/sha/
+  sum/meta/idx/plist/strings/session（curl -o/-D 输出件实测形态）。
+- **/dev/tcp、/dev/udp 网络端点守卫**：形态是路径实际出网（`>/dev/tcp/evil/80`），
+  路径形豁免明确排除（该口子在 0.15.5 的 /path 豁免里就存在，顺手补上）。
+- **测试**：判定分界补 3 实测形态（bGet.body/hGet.headers//dev/tcp）；
+  TestScopePassFileTarget 重写为 9 案例子意图粒度矩阵（混合复合放行/脚本
+  写入放行/内联本地分析放行/内联出网拒绝/heredoc 出网拒绝/外部脚本拒绝/
+  网络工具拒绝/主机形拒绝/快路径拒绝）。
+- 验证：go vet + sod/sodpolicy 全包绿；server 包全量回归 **686s 全绿**
+  （0.15.48 首跑的 FAIL 系漏配 ARTEX_PG_DSN 测试库的环境性失败，非代码问题，
+  已按测试纪律带库复跑实证）。
+
 ## [0.15.48] - 2026-11-22
 
 ### 修复（真实渗透实战实锤：本地分析命令被 out_of_scope 成批误拒——文件形 target_hint 构造放行）
