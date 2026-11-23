@@ -376,6 +376,19 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused
 	return id, true, nil
 }
 
+// CountActiveIntents 数本探索图的【在途意图】（state ∈ open/running/paused）。
+// 0.15.55 软截止收尾完成（意图清零）的判据口径。
+func (s *ExplorationStore) CountActiveIntents() (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+SELECT count(*) FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused')`, s.expID).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // CountOpenIntentsByCreator 数这个创建者名下【在途】（state='open'）的意图条数。
 //
 // 创建者存在 payload->>'created_by'（不是 owner：owner 是【归属】，

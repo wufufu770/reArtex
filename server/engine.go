@@ -156,6 +156,9 @@ type Engine struct {
 	// quotaPausedOnce 记「本任务已因额度耗尽暂停过」——同一轮耗尽风暴里多个
 	// worker 同时撞墙只触发一次暂停；Resume 时清除，下次耗尽再触发。
 	quotaPausedOnce sync.Map
+	// drainDoneNotified 记「软截止收尾完成已播报过」（0.15.55）：软截止的完成
+	// 判据是意图清零——清零播报一次；软截止状态翻转时清除，下一轮可再播报。
+	drainDoneNotified sync.Map
 	// DenialWatcher 是 B6 升级路径的观察者（server/denial_escalation.go）：
 	// 工具调用被拒（「Blocked by hook」）时回调 (taskID, toolName, denialMessage)。
 	// nil = 不观察。宿主（NewServer）装配。
@@ -2032,8 +2035,13 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		if e.Drained(t.ID) {
-			// 软截止（v7）：停派新意图——触发器丢弃，在飞 worker 自然收尾。
+			// 软截止（0.15.54 语义）：停派新意图——触发器丢弃，已派发工作照常
+			// 认领收尾（认领不再被拦）。
 			_ = t.drainTriggers()
+			// 0.15.55 收尾播报：软截止的完成判据是【意图清零】（不是「只剩
+			// running」）——清零时播报一次，监督者/人据此走收尾（task_conclude
+			// 或解除软截止恢复派发）。
+			e.notifyDrainComplete(t)
 			return
 		}
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
@@ -2356,6 +2364,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if ectx.Err() != nil && e.isSettling(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "exhausted"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 超时收尾状态落库失败: %v", name, t.ID, intent.ID, err)
+		} else {
+			e.settleEdgeCellOnIntentDone(t, intent.ID, "exhausted") // 0.15.55：终态回写格点（下同）
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 因任务超时收尾结束(exhausted)，写回 %s", name, t.ID, intent.ID, wrote)
 		e.touch(t.ID)
@@ -2366,6 +2376,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if ectx.Err() != nil && isTerminalStatus(e.m.TaskStatus(t.ID)) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态停止落库失败: %v", name, t.ID, intent.ID, err)
+		} else {
+			e.settleEdgeCellOnIntentDone(t, intent.ID, "stopped")
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 因任务已完成而取消(stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
@@ -2375,6 +2387,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if killed {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "stopped"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d planner 停止落库失败: %v", name, t.ID, intent.ID, err)
+		} else {
+			// 被终止同样是终态：格点必须同步回写（若下面 reopen 放回 frontier，
+			// 该意图仍是「在飞」，在飞门会挡住复投，最终态落定时再覆盖一次）。
+			e.settleEdgeCellOnIntentDone(t, intent.ID, "stopped")
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
@@ -2789,6 +2805,8 @@ func (e *Engine) Drain(taskID string, on bool) {
 	} else {
 		delete(e.drained, taskID)
 	}
+	// 软截止状态每次翻转都重置「收尾完成」播报位：新一轮软截止重新计判据。
+	e.drainDoneNotified.Delete(taskID)
 	e.stagnationMu.Unlock()
 	if t, ok := e.m.Task(taskID); ok && t != nil {
 		verb := "进入软截止（停派新意图，在飞收尾）"
@@ -2805,6 +2823,22 @@ func (e *Engine) Drained(taskID string) bool {
 	e.stagnationMu.Lock()
 	defer e.stagnationMu.Unlock()
 	return e.drained[taskID]
+}
+
+// notifyDrainComplete 软截止收尾播报（0.15.55）：完成判据是【意图清零】
+//（open/running/paused 全无）——清零时播报一次；软截止翻转时由 Drain 清位。
+func (e *Engine) notifyDrainComplete(t *Task) {
+	if e == nil || t == nil || t.Store == nil {
+		return
+	}
+	n, err := t.Store.CountActiveIntents()
+	if err != nil || n > 0 {
+		return
+	}
+	if _, loaded := e.drainDoneNotified.LoadOrStore(t.ID, struct{}{}); !loaded {
+		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+			Summary: "【治理】软截止收尾完成：已派发工作全部落定（意图清零）——可走 task_conclude 收尾，或解除软截止恢复派发"})
+	}
 }
 
 // ExtendIntent 给监督者的意图延期入口（v7：上限 5 次，D1 软着陆同通道）：

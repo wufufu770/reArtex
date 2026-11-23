@@ -292,3 +292,59 @@ func TestEdgeDispatchInFlightGate(t *testing.T) {
 		t.Fatalf("落定后复投应真正下发（而非软跳过）: %s", out)
 	}
 }
+
+// TestEdgeConcludeRefusesWhileInFlight 钉住 0.15.55：edge_conclude 机械门与
+// 调度器 doctrine 守卫同口径——全终态但假设验证还在飞不收（封顶 falsity 会把
+// 格点批量打成终态，此时收运行等于把还没验证完的假设判了死刑）。
+func TestEdgeConcludeRefusesWhileInFlight(t *testing.T) {
+	s, _ := taskHallTestServer(t)
+	task := drainTestTask(t, s, "edge 收尾在飞门")
+	taskID, err := strconv.ParseInt(task.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.SetTaskEdgeMode(taskID, true, "reverse-negative"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.m.pg.StartEdgeRun(taskID, "reverse-negative"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.UpsertEdgeCell(taskID, "concl:1", "reverse-negative", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.FoldEdgeCell(taskID, "concl:1", db.EdgeCellDisproven); err != nil {
+		t.Fatal(err)
+	}
+	iid, err := task.Store.AddNode(db.KindIntent, map[string]any{
+		"summary": "在飞假设", "edge_cell": "concl:1", "predicted_vulnclass": "info_disclosure",
+	}, 5, "open", "edge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid := strconv.FormatInt(taskID, 10)
+	res, err := s.toolEdgeConclude().Call(context.Background(),
+		json.RawMessage(`{"task_id":`+tid+`,"summary":"测试收尾"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := res.Flatten(); !strings.Contains(out, "在飞") {
+		t.Fatalf("在飞假设未落定不得收运行, got %s", out)
+	}
+	if run, _ := s.m.pg.OpenEdgeRun(taskID); run == nil {
+		t.Fatal("被拒的收尾不得关闭运行行")
+	}
+
+	// 落定后（done 未兑现 ⇒ 格点 disproven 终态）可收。
+	if err := transitionIntentState(task.Store, iid, "open", "done"); err != nil {
+		t.Fatal(err)
+	}
+	s.engine.settleEdgeCellOnIntentDone(task, iid, "done")
+	res, err = s.toolEdgeConclude().Call(context.Background(),
+		json.RawMessage(`{"task_id":`+tid+`,"summary":"测试收尾二"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := s.m.pg.OpenEdgeRun(taskID); run != nil {
+		t.Fatalf("判据落定后应收运行行, got %s", res.Flatten())
+	}
+}

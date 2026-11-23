@@ -49,3 +49,44 @@ func TestDrainedTaskStillClaimsDispatchedWork(t *testing.T) {
 		t.Fatal("认领后意图不应还停在 open")
 	}
 }
+
+// TestDrainCompleteNotifiedOnce 钉住 0.15.55 收尾播报：软截止的完成判据是
+// 【意图清零】——清零播报一次、有在途不播、软截止翻转后重新计。
+func TestDrainCompleteNotifiedOnce(t *testing.T) {
+	s, _ := taskHallTestServer(t)
+	task := killTestTask(t, s, "软截止收尾播报")
+	countNotified := func() int {
+		var n int
+		if err := s.m.pg.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1 AND summary LIKE '%软截止收尾完成%'`,
+			task.ExpID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	iid, err := task.Store.AddNode(db.KindIntent, map[string]any{"summary": "在途工作"}, 5, "open", "human", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.engine.Drain(task.ID, true)
+	s.engine.notifyDrainComplete(task)
+	if countNotified() != 0 {
+		t.Fatal("有在途意图时不得播报收尾完成")
+	}
+	if err := transitionIntentState(task.Store, iid, "open", "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	s.engine.notifyDrainComplete(task)
+	if countNotified() != 1 {
+		t.Fatalf("意图清零应播报一次, got %d", countNotified())
+	}
+	s.engine.notifyDrainComplete(task)
+	if countNotified() != 1 {
+		t.Fatal("重复调用不得重复播报")
+	}
+	s.engine.Drain(task.ID, false)
+	s.engine.Drain(task.ID, true)
+	s.engine.notifyDrainComplete(task)
+	if countNotified() != 2 {
+		t.Fatalf("软截止翻转后应重新计、可再播报, got %d", countNotified())
+	}
+}

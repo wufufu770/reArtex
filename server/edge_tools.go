@@ -456,7 +456,7 @@ func (s *Server) toolEdgeInitCells() actool.CoreTool {
 // toolEdgeDispatch 下发一条偏锋假设到指定格点（先过溯因门禁）。
 func (s *Server) toolEdgeDispatch() actool.CoreTool {
 	return wrTool("edge_dispatch",
-		"下发一条偏锋假设：先过溯因门禁（确定性判定，零 LLM）——observation_basis 为空、引用已证伪事实、prediction 与 falsifier 不可判定，都算退化；连续 3 条退化会触发假设退化熔断（运行被终止，转人工确认）。通过后假设落成探索图意图（带可证伪预测，created_by=edge），格点尝试数 +1；同格点满 2 次强制封格（cell_exhausted）。",
+		"下发一条偏锋假设：先过溯因门禁（确定性判定，零 LLM）——observation_basis 为空、引用已证伪事实、prediction 与 falsifier 不可判定，都算退化；连续 3 条退化会触发假设退化熔断（运行被终止，转人工确认）。通过后假设落成探索图意图（带可证伪预测，created_by=edge），格点尝试数 +1。同格点同时只允许一条假设在飞（复投等验证落定）；2 次尝试落定仍未确证后，第 3 次下发时强制封格（disproven）退出候选集。",
 		objSchema(map[string]any{
 			"task_id":            map[string]any{"type": "integer", "description": "任务 id（必填）"},
 			"cell_id":            strParam("格点 id（必填；不存在时自动建格——建全坐标系仍推荐先用 edge_init_cells）"),
@@ -629,10 +629,18 @@ func (s *Server) toolEdgeConclude() actool.CoreTool {
 					undone = append(undone, fmt.Sprintf("%s(%s,尝试%d)", c.CellID, c.State, c.Attempts))
 				}
 			}
-			if len(cells) == 0 || len(undone) > 0 {
-				return actool.Text(fmt.Sprintf("第四门未过：判据未成立（%d/%d 格点终态；未终态：%s）。继续下发假设或换方法论；确要提前收尾请人工确认（stop_reason 会如实记 operator_guard）。",
-					len(cells)-len(undone), len(cells), strings.Join(undone, "、"))), nil
+		if len(cells) == 0 || len(undone) > 0 {
+			return actool.Text(fmt.Sprintf("第四门未过：判据未成立（%d/%d 格点终态；未终态：%s）。继续下发假设或换方法论；确要提前收尾请人工确认（stop_reason 会如实记 operator_guard）。",
+				len(cells)-len(undone), len(cells), strings.Join(undone, "、"))), nil
+		}
+		// 0.15.55 与调度器 doctrine 守卫同口径：全终态但假设验证还在飞 ⇒ 判据
+		// 没有落定，不收（封顶 falsity 会把格点批量打成终态，此时收运行等于把
+		// 还没验证完的假设判了死刑）。
+		if tt, ok := s.m.Task(strconv.FormatInt(a.TaskID, 10)); ok && tt.Store != nil {
+			if inflight, ierr := tt.Store.HasActiveEdgeIntent(); ierr == nil && inflight {
+				return actool.Text("第四门未过：格点虽已全终态，但仍有假设在验证（在飞意图未落定）——等验证回写落定后判据才算成立。"), nil
 			}
+		}
 			if err := s.m.pg.ConcludeEdgeRun(run.ID, db.StopReasonDoctrine, map[string]any{"summary": a.Summary}); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
