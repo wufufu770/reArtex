@@ -249,7 +249,7 @@ func (s *Server) recentGateDenySummary(taskID string) string {
 
 // toolTaskConclude 双签收尾。
 func (s *Server) toolTaskConclude() actool.CoreTool {
-	return wrTool("task_conclude", "收尾任务（判 done）。双签：三门满足（无 running/open 意图 + 有产出）时直接收；不满足则返回需人工确认（可发起人工 ask）。",
+	return wrTool("task_conclude", "收尾任务（判 done）。双签：门5 无未闭合 open goal + 三门满足（无 running/open 意图 + 有产出）时直接收；不满足则返回需人工确认（可发起人工 ask）。open goal 是人工/规划立的收口条件，未闭合时不要试图绕过。",
 		objSchema(map[string]any{
 			"task_id": strParam("任务 id"),
 			"summary": strParam("收尾结论（进审计与播报）"),

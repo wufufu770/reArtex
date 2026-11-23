@@ -5,6 +5,32 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.51] - 2026-11-23
+
+### 修复（过早收尾连发两起：task_conclude 三门不查 goal 状态——补「open goal 门」）
+
+- **实测两起过早收尾**：
+  1. task 2（09:02）：goal 达成自动收尾——goal 5「报告落库」被判 met 但
+     reports 表为空（达成误报），全部目标达成 → 自动 conclude；
+  2. task 4（09:52）：**监督者 task_conclude 治理收尾**——「三门满足（无
+     running/open 意图 + 有产出）」直接 conclude，但 goal 55 仍 **open**、
+     规划者正在派新意图（09:52:36 add_intent）；残留 9 条 blocked 意图被
+     settle 成 stopped（blocked 不计入三门）。
+- **根因（设计缺口）**：ConcludeTask 的三门只查「意图 frontier + 产出」，
+  **不查 goal 状态**——人工/规划立的收口条件（open goal）可被 agent 的
+  「目标实质达成」判定静默绕过。goal 达成自动路径与 goalless 路径都有
+  goal 状态兜底，唯独监督者直收路径没有。
+- **修复（门5）**：ConcludeTask 在额度门（门4）后加「open goal 未闭合 ⇒
+  不直接收，返回需人工确认」——与既有「三门未满足 ⇒ 需人工确认（可发起
+  人工 ask）」同款双签语义。task_conclude 工具描述同步标注（明示 open goal
+  是收口条件，不要试图绕过）。
+- **方向**：人类立的目标闭合与否由人类裁决（或 prove_goal 显式证明），
+  agent 的实质达成判断降级为「建议人工确认」——SoD 口径一致。
+- **测试**：TestConcludeTaskRefusesWithOpenGoal（产出门/意图门均满足、
+  open goal 在——必须拒到「第5门」；若无门5 用例会直接收尾，正反面都钉住）。
+- 注：goal 达成误报（报告落库 goal 无报告却判 met）为独立问题记档，后续修
+  达成判定的落库核实。
+
 ## [0.15.50] - 2026-11-23
 
 ### 修复（实战实锤：平台内部工具被「无可判定目标」成批误拒——任务内表解包识别 + 空目标面补齐）

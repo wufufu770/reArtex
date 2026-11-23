@@ -2975,6 +2975,13 @@ func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 		e.noteLLMQuotaExhausted(t)
 		return false, fmt.Sprintf("第4门不满足：存在 %d 个额度阻塞意图（模型链耗尽）——任务转自动暂停，补充额度后人工恢复", n)
 	}
+	// 门5（0.15.51）：open goal 未闭合 ⇒ 人工/规划立的收口条件未满足——不直接收，
+	// 转需人工确认。人类立的目标不由 agent 的「实质达成」判定静默绕过（实测两起：
+	// task 2 被 goal 达成误判收尾、task 4 在 goal 55 仍 open 时被监督者以三门满足
+	// 直接 conclude 且规划者还在派新意图——过早收尾连发）。
+	if openGoal, err := t.Store.HasOpenGoal(); err == nil && openGoal {
+		return false, "第5门不满足：存在未闭合的 open goal（收口条件）——需人工确认收尾"
+	}
 	running, _ := t.Store.RunningIntentIDs()
 	openIntents, _ := t.Store.OpenIntentsCount()
 	var facts, findings int
