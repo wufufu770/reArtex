@@ -99,15 +99,6 @@ func TestEdgeInitCellsAndDispatchAutoCreate(t *testing.T) {
 		t.Fatalf("首次下发尝试数应为 1, got %d", auto.Attempts)
 	}
 
-	// ③ 尝试数记账：第 2 次放行、第 3 次触发封顶。
-	if out, ok := dispatch("neg:auto", "自动建格假设 A 第二轮"); !ok {
-		t.Fatalf("第 2 次下发应放行: %s", out)
-	}
-	out, ok = dispatch("neg:auto", "自动建格假设 A 第三轮")
-	if ok && !strings.Contains(out, "已封") {
-		t.Fatalf("第 3 次下发应触发封顶, got %s", out)
-	}
-
 	// 预测必须落 intent_predictions（0.15.53：F1 登记面此前漏接 dispatch 路径
 	// ⇒ 兑现判定/矛盾对照拿不到预测）。
 	if id, found, err := task.Store.FindOpenIntentBySummary("自动建格假设 A"); err != nil || !found {
@@ -115,6 +106,28 @@ func TestEdgeInitCellsAndDispatchAutoCreate(t *testing.T) {
 	} else if pred, perr := s.m.pg.GetIntentPrediction(id); perr != nil || pred == nil ||
 		pred.PredictedVulnclass != "info_disclosure" {
 		t.Fatalf("偏锋假设的预测必须登记进 intent_predictions: pred=%+v err=%v", pred, perr)
+	}
+
+	// ③ 尝试数记账与封顶（0.15.54 在飞门语义：复投前先把在飞假设置终态——
+	// 意图转终态 + 格点回写，与生产收尾同形）。
+	settleExhausted := func(summary string) {
+		id, found, err := task.Store.FindOpenIntentBySummary(summary)
+		if err != nil || !found {
+			t.Fatalf("找回在飞假设 %q 失败: found=%v err=%v", summary, found, err)
+		}
+		if err := transitionIntentState(task.Store, id, "open", "exhausted"); err != nil {
+			t.Fatal(err)
+		}
+		s.engine.settleEdgeCellOnIntentDone(task, id, "exhausted")
+	}
+	settleExhausted("自动建格假设 A")
+	if out, ok := dispatch("neg:auto", "自动建格假设 A 第二轮"); !ok || !strings.Contains(out, "已下发") {
+		t.Fatalf("落定后第 2 次下发应放行: %s", out)
+	}
+	settleExhausted("自动建格假设 A 第二轮")
+	out, ok = dispatch("neg:auto", "自动建格假设 A 第三轮")
+	if ok && !strings.Contains(out, "已封") {
+		t.Fatalf("第 3 次下发应触发封顶, got %s", out)
 	}
 }
 
@@ -220,5 +233,62 @@ func TestEdgeCellHashesMovesOnBookkeeping(t *testing.T) {
 	}
 	if hDispatched == hSettled {
 		t.Fatal("criterion_state 变化必须改变判据哈希")
+	}
+}
+
+// TestEdgeDispatchInFlightGate 钉住 0.15.54 在飞门：同格点同时只允许一条假设
+// 在飞——复投必须等上一条验证落定。此前没有这道门，控制器对着还在飞的格点
+// 连投，尝试数被瞬间烧到封顶、格点全被判 disproven（实测 task 6 一轮 20 格全灭）。
+func TestEdgeDispatchInFlightGate(t *testing.T) {
+	s, _ := taskHallTestServer(t)
+	task := drainTestTask(t, s, "edge 在飞门")
+	taskID, err := strconv.ParseInt(task.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.SetTaskEdgeMode(taskID, true, "reverse-negative"); err != nil {
+		t.Fatal(err)
+	}
+	tid := strconv.FormatInt(taskID, 10)
+	dispatch := func(cell, summary string) (string, bool) {
+		in := `{"task_id":` + tid + `,"cell_id":"` + cell + `","summary":"` + summary + `",` +
+			`"observation_basis":"task 事实图既有观察","predicted_vulnclass":"info_disclosure",` +
+			`"prediction":"可观察到 X","falsifier":"看不到 X 即证伪"}`
+		r, e := s.toolEdgeDispatch().Call(context.Background(), json.RawMessage(in), nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return r.Flatten(), !r.IsError
+	}
+	if out, ok := dispatch("neg:gate-1", "在飞门假设一"); !ok {
+		t.Fatalf("首次下发应成功: %s", out)
+	}
+	// 第二条同格点（不同摘要绕过去重）⇒ 在飞门拦下，尝试数不动。
+	out, ok := dispatch("neg:gate-1", "在飞门假设二")
+	if ok && strings.Contains(out, "已下发") {
+		t.Fatalf("在飞门应拦下同格点复投, got %s", out)
+	}
+	if !strings.Contains(out, "在飞假设") {
+		t.Fatalf("复投拦截应说明在飞假设, got %s", out)
+	}
+	cells, _ := s.m.pg.ListEdgeCells(taskID)
+	for _, c := range cells {
+		if c.CellID == "neg:gate-1" && c.Attempts != 1 {
+			t.Fatalf("被拦下的复投不得计尝试数, attempts=%d", c.Attempts)
+		}
+	}
+	// 落定后可复投：把在飞假设置终态（意图转终态 + 格点回写，与生产收尾同形），
+	// 再投成功（软跳过不是 error——断言必须看回执文本）。
+	id, found, err := task.Store.FindOpenIntentBySummary("在飞门假设一")
+	if err != nil || !found {
+		t.Fatalf("应找回在飞假设: found=%v err=%v", found, err)
+	}
+	if err := transitionIntentState(task.Store, id, "open", "exhausted"); err != nil {
+		t.Fatal(err)
+	}
+	s.engine.settleEdgeCellOnIntentDone(task, id, "exhausted")
+	out, ok = dispatch("neg:gate-1", "在飞门假设三")
+	if !ok || !strings.Contains(out, "已下发") {
+		t.Fatalf("落定后复投应真正下发（而非软跳过）: %s", out)
 	}
 }

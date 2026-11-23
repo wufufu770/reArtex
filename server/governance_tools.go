@@ -164,7 +164,7 @@ func (s *Server) toolIntentStop() actool.CoreTool {
 
 // toolTaskDrain 软截止（可逆）。
 func (s *Server) toolTaskDrain() actool.CoreTool {
-	return wrTool("task_drain", "任务软截止：停派新意图、在飞工作自然收尾（可逆，drain=false 恢复派发）。用于监督环：目标接近达成或预算将尽时优雅收口。",
+	return wrTool("task_drain", "任务软截止（可逆，drain=false 恢复派发）：规划面停派新意图（不再产生新意图），已派发未认领的工作照旧被 worker 认领自然收尾——收尾完成的判据是意图清零，不是「只剩 running」。用于监督环：目标接近达成时优雅收口。⚠️ 需要完全冻结（含已派发工作）请改用暂停；判定收口前先看 open 意图数（open>0 = 还有已派发工作没做完，不代表交付物已齐）。",
 		objSchema(map[string]any{
 			"task_id": strParam("任务 id"),
 			"drain":   map[string]any{"type": "boolean", "description": "true=进入软截止；false=恢复派发"},

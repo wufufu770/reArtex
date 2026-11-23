@@ -352,6 +352,30 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused
 	return true, nil
 }
 
+// HasActiveEdgeCellIntent 报某个格点是否有【在飞的假设意图】（payload
+// edge_cell=cellID 且 state ∈ open/running/paused），返回其意图 id。
+//
+// 0.15.54 下发门：同格点同时只允许一条假设在飞——复投必须等上一条验证落定。
+// 此前没有这道门，控制器对着还在飞的格点连投，尝试数被瞬间烧到封顶、格点全被
+// 判 disproven（实测 task 6 一轮下来 20 格全灭，判据成色全失）。
+func (s *ExplorationStore) HasActiveEdgeCellIntent(cellID string) (int64, bool, error) {
+	if strings.TrimSpace(cellID) == "" {
+		return 0, false, nil
+	}
+	var id int64
+	err := s.db.QueryRow(`
+SELECT id FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused')
+  AND payload->>'edge_cell' = $2 LIMIT 1`, s.expID, cellID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
 // CountOpenIntentsByCreator 数这个创建者名下【在途】（state='open'）的意图条数。
 //
 // 创建者存在 payload->>'created_by'（不是 owner：owner 是【归属】，

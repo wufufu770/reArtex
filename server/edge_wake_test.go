@@ -79,6 +79,10 @@ func TestDecideEdgeWake(t *testing.T) {
 		// 0.15.53 在飞守卫：假设在 worker 手里验证 ⇒ 熔断不成立、照常唤醒
 		//（可继续对其他格点下发）。
 		{name: "假设在飞不熔断照常唤醒", hasCells: true, doctrineReady: false, workInFlight: true, stallAdvances: true, stallRounds: th - 1, want: edgeWakeFire},
+		// 0.15.54 doctrine 在飞守卫：封顶风暴会把格点批量打成终态——验证还在
+		// 飞时不机械收，等回写落定（实测 task 6 的 20 格封顶 falsity 收出
+		// doctrine_complete）。
+		{name: "全终态但假设在飞不机械收", hasCells: true, doctrineReady: true, workInFlight: true, want: edgeWakeSkip},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

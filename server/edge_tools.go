@@ -520,9 +520,17 @@ func (s *Server) toolEdgeDispatch() actool.CoreTool {
 				tr.Record(edge.AbductionOK)
 			}
 			edgeBreakerMu.Unlock()
-			// ② 去重（与 planner 同源闸门）。
+			// ② 去重（与 planner 同源闸门）。回执如实：不改判格点——重复下发只是
+			// 跳过（0.15.54 修正：此前回执宣称「本格点改判 disproven」却根本没改，
+			// 撒谎回执会误导控制轮当格点已关）。
 			if id, dup, err := store.FindOpenIntentBySummary(a.Summary); err == nil && dup {
-				return actool.Text(fmt.Sprintf("已有同摘要 open 意图 #%d，本格点改判 disproven（该方向已在跑）。", id)), nil
+				return actool.Text(fmt.Sprintf("已有同摘要 open 意图 #%d，跳过重复下发（该方向已在跑，格点保持原状）。", id)), nil
+			}
+			// ②.5 在飞门（0.15.54）：同格点同时只允许一条假设在飞——复投必须等
+			// 上一条验证落定。此前没有这道门：控制器对着还在飞的格点连投，尝试数
+			// 被瞬间烧到封顶、格点全被判 disproven（实测 task 6 一轮 20 格全灭）。
+			if inflightID, has, ierr := store.HasActiveEdgeCellIntent(a.CellID); ierr == nil && has {
+				return actool.Text(fmt.Sprintf("格点 %s 有在飞假设（intent #%d）未落定，跳过下发——等它验证出终态后再复投。", a.CellID, inflightID)), nil
 			}
 			// ③ 格点记账先行：尝试数 +1；达上限即封格并拒绝继续下发。
 			attempts, err := s.m.pg.RecordEdgeDispatch(a.TaskID, a.CellID)

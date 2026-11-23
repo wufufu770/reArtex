@@ -66,7 +66,13 @@ const (
 // stallAdvances=false 时哪怕计数已到阈值也不熔断（那轮判据动过了）。
 func decideEdgeWake(hasCells, doctrineReady, inWatermark, controllerBusy, workInFlight, stallAdvances bool, stallRounds int) edgeWakeVerdict {
 	if hasCells && doctrineReady {
-		return edgeWakeDoctrine
+		if !workInFlight {
+			return edgeWakeDoctrine
+		}
+		// 全终态但假设验证还在飞（0.15.54）：等回写落定再机械收——封顶风暴
+		// 会把格点批量打成终态，此时收运行等于把还没验证完的假设判了死刑
+		//（实测 task 6 的 20 格封顶 falsity 收出 doctrine_complete）。
+		return edgeWakeSkip
 	}
 	if controllerBusy || inWatermark {
 		return edgeWakeSkip

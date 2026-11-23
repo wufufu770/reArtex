@@ -2166,9 +2166,11 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
-	if e.Drained(t.ID) {
-		return false // 软截止（v7）：停派新意图，在飞收尾
-	}
+	// 0.15.54 软截止语义修正：drain 只停【规划面】（新意图不再产生，见规划门），
+	// 已派发未认领的工作照旧被认领自然收尾。此前这里也拦认领 ⇒ 「停派新意图」
+	// 实际做成了「全停」——监督者一句软截止就把几十条已派发工作永久冻死
+	//（实测：task 5/6 被 drain 后 40 条已下发意图无人可领，任务整面静止）。
+	// 需要完全冻结（含已派发工作）走暂停（pause），两个语义各管各的。
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
@@ -2797,7 +2799,8 @@ func (e *Engine) Drain(taskID string, on bool) {
 	}
 }
 
-// Drained 报告任务是否处于软截止。
+// Drained 报告任务是否处于软截止（0.15.54 语义：只停规划面的新意图派发；
+// 已派发未认领的工作照旧被认领收尾——全冻结走暂停）。
 func (e *Engine) Drained(taskID string) bool {
 	e.stagnationMu.Lock()
 	defer e.stagnationMu.Unlock()
