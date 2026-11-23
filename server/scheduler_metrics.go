@@ -16,6 +16,7 @@ type schedMetrics struct {
 	tickTotal       atomic.Int64 // step() 执行次数
 	wakeFired       atomic.Int64 // fireEdgeWake 实际唤醒 edge_exec 次数
 	watermarkSkips  atomic.Int64 // 水位去重跳过的唤醒（对账/唤醒共用水位）
+	controllerSkips atomic.Int64 // 控制轮在飞/在排队跳过的 tick（0.15.53 排队守卫）
 	circuitBreaks   atomic.Int64 // 判据停滞熔断次数
 	doctrineDone    atomic.Int64 // 判据成立机械收尾次数
 	taskMissingSkip atomic.Int64 // 运行行存在但任务不在 manager（归档/删除）跳过次数
@@ -32,6 +33,7 @@ func renderSchedMetrics(w http.ResponseWriter) {
 	row("artex_scheduler_tick_total", "Scheduler step() executions.", schedCounters.tickTotal.Load())
 	row("artex_edge_wake_fired_total", "edge_exec wake-ups dispatched by fireEdgeWake.", schedCounters.wakeFired.Load())
 	row("artex_edge_watermark_skips_total", "Wake-ups skipped by the 60s watermark gate (stall accounting shares the gate).", schedCounters.watermarkSkips.Load())
+	row("artex_edge_controller_skips_total", "Edge wake ticks skipped because the edge_exec controller round is in flight or queued (serial queue guard).", schedCounters.controllerSkips.Load())
 	row("artex_edge_circuit_breaks_total", "Criterion-stalled circuit breaks concluded by the scheduler.", schedCounters.circuitBreaks.Load())
 	row("artex_edge_doctrine_concludes_total", "Doctrine-complete mechanical conclusions (all cells terminal).", schedCounters.doctrineDone.Load())
 	row("artex_edge_task_missing_total", "Open edge runs whose task is absent from the manager (archived/deleted) — skipped, run left for manual close.", schedCounters.taskMissingSkip.Load())

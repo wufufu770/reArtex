@@ -2443,6 +2443,10 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			// exhausted/无预测在钩子内部自行短路。
 			e.detectContradiction(t, intent.ID, state)
 			e.settleGapOnIntentDone(t, intent.ID, state)
+			// 0.15.53：偏锋格点回写（payload 带 edge_cell 的假设意图才动作）。
+			// 此前「判据进度随终态更新」只是一句回执文案——没有任何回写路径，
+			// 格点永远停在 dispatched、判据哈希建完格就冻结 ⇒ 停滞熔断必然误杀。
+			e.settleEdgeCellOnIntentDone(t, intent.ID, state)
 		}
 	}
 	// C4 停滞闸记账：按写回量更新停滞状态（0 写回递增 / 有效写回清零）。
@@ -2853,6 +2857,9 @@ func (e *Engine) StopIntent(taskID string, intentID int64, reason string) (bool,
 	if err := transitionIntentState(t.Store, intentID, "running", "exhausted"); err != nil {
 		return false, "停止失败（意图不在 running 态？）: " + err.Error()
 	}
+	// 0.15.53：治理停止同样是意图终态——偏锋格点必须同步回写（否则格点滞留
+	// dispatched，停滞熔断会拿冻结的判据哈希误杀整条运行）。
+	e.settleEdgeCellOnIntentDone(t, intentID, "exhausted")
 	_ = t.Store.SetIntentBlockedReason(intentID, "治理停止："+reason)
 	summary := fmt.Sprintf("【治理停止】意图 #%d 已停（%s）——监督者判定跑偏/无前景", intentID, trunc(reason, 80))
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})

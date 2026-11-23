@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/edge"
 )
 
 // TestEdgeInitCellsAndDispatchAutoCreate 钉住 0.15.52 建格缺口修复：
@@ -103,5 +106,119 @@ func TestEdgeInitCellsAndDispatchAutoCreate(t *testing.T) {
 	out, ok = dispatch("neg:auto", "自动建格假设 A 第三轮")
 	if ok && !strings.Contains(out, "已封") {
 		t.Fatalf("第 3 次下发应触发封顶, got %s", out)
+	}
+
+	// 预测必须落 intent_predictions（0.15.53：F1 登记面此前漏接 dispatch 路径
+	// ⇒ 兑现判定/矛盾对照拿不到预测）。
+	if id, found, err := task.Store.FindOpenIntentBySummary("自动建格假设 A"); err != nil || !found {
+		t.Fatalf("下发的假设应能按摘要找回: found=%v err=%v", found, err)
+	} else if pred, perr := s.m.pg.GetIntentPrediction(id); perr != nil || pred == nil ||
+		pred.PredictedVulnclass != "info_disclosure" {
+		t.Fatalf("偏锋假设的预测必须登记进 intent_predictions: pred=%+v err=%v", pred, perr)
+	}
+}
+
+// TestSettleEdgeCellOnIntentDone 钉住 0.15.53 格点回写：意图终态是判据推进的
+// 落点——此前回写路径不存在（UpdateEdgeCellCriterion 零调用者、格点永远停在
+// dispatched），判据哈希建完格就冻结，停滞熔断必然误杀。
+//
+// 口径：done + 预测兑现 ⇒ confirmed；done 未兑现 ⇒ disproven（负空间也是结论）；
+// exhausted/stopped/blocked ⇒ 回 open 待复投；无 edge_cell 的普通意图不碰格点。
+func TestSettleEdgeCellOnIntentDone(t *testing.T) {
+	s, _ := taskHallTestServer(t)
+	task := drainTestTask(t, s, "edge 格点回写")
+	taskID, err := strconv.ParseInt(task.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.pg.SetTaskEdgeMode(taskID, true, "reverse-negative"); err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range []string{"hook:1", "hook:2", "hook:3"} {
+		if err := s.m.pg.UpsertEdgeCell(taskID, cell, "reverse-negative", map[string]any{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addIntent := func(cell, summary string, withEdge bool) int64 {
+		payload := map[string]any{"summary": summary, "predicted_vulnclass": "info_disclosure"}
+		if withEdge {
+			payload["edge_cell"] = cell
+		}
+		id, err := task.Store.AddNode("intent", payload, 0, "open", "edge", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	cellOf := func(cell string) *db.EdgeCell {
+		cells, err := s.m.pg.ListEdgeCells(taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range cells {
+			if c.CellID == cell {
+				return c
+			}
+		}
+		t.Fatalf("格点 %s 应存在", cell)
+		return nil
+	}
+
+	// ① done + 未兑现 ⇒ disproven（终态）+ 判据状态已写。
+	i1 := addIntent("hook:1", "回写假设 A", true)
+	s.engine.settleEdgeCellOnIntentDone(task, i1, "done")
+	if c := cellOf("hook:1"); c.State != db.EdgeCellDisproven {
+		t.Fatalf("done 未兑现应判 disproven, got %s", c.State)
+	}
+	if !strings.Contains(string(cellOf("hook:1").CriterionState), "disproven") {
+		t.Fatalf("判据状态应记录回写结果, got %s", cellOf("hook:1").CriterionState)
+	}
+
+	// ② exhausted ⇒ 回 open 待复投。
+	i2 := addIntent("hook:2", "回写假设 B", true)
+	s.engine.settleEdgeCellOnIntentDone(task, i2, "exhausted")
+	if c := cellOf("hook:2"); c.State != db.EdgeCellOpen {
+		t.Fatalf("exhausted 应把格点放回 open, got %s", c.State)
+	}
+
+	// ③ done + 兑现（yields finding 命中 predicted_vulnclass）⇒ confirmed。
+	// 用载荷里的 predicted_vulnclass 兜底（intent_predictions 未登记的存量假设）。
+	i3 := addIntent("hook:3", "回写假设 C", true)
+	fid, err := task.Store.AddNode("finding", map[string]any{"name": "命中预测", "vulnclass": "info_disclosure"}, 0, "pending", "edge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Store.Link(i3, "yields", fid); err != nil {
+		t.Fatal(err)
+	}
+	s.engine.settleEdgeCellOnIntentDone(task, i3, "done")
+	if c := cellOf("hook:3"); c.State != db.EdgeCellConfirmed {
+		t.Fatalf("done 兑现应判 confirmed, got %s", c.State)
+	}
+
+	// ④ 无 edge_cell 的普通意图不碰任何格点（hook:3 已终态，判据状态不再变）。
+	i4 := addIntent("", "普通意图", false)
+	before := string(cellOf("hook:3").CriterionState)
+	s.engine.settleEdgeCellOnIntentDone(task, i4, "done")
+	if after := string(cellOf("hook:3").CriterionState); after != before {
+		t.Fatalf("普通意图不得回写格点: before=%s after=%s", before, after)
+	}
+}
+
+// TestEdgeCellHashesMovesOnBookkeeping 钉住 0.15.53 哈希拓宽：下发记账
+//（attempts/state）与判据状态同权重算推进——只吃 criterion_state 时建完格
+// 哈希就冻结，停滞熔断必然误杀（实测 3 条运行全灭）。
+func TestEdgeCellHashesMovesOnBookkeeping(t *testing.T) {
+	base := &db.EdgeCell{CellID: "c1", State: db.EdgeCellOpen, Attempts: 0, CriterionState: json.RawMessage(`{}`)}
+	dispatched := &db.EdgeCell{CellID: "c1", State: db.EdgeCellDispatched, Attempts: 1, CriterionState: json.RawMessage(`{}`)}
+	settled := &db.EdgeCell{CellID: "c1", State: db.EdgeCellDispatched, Attempts: 1, CriterionState: json.RawMessage(`{"outcome":"done"}`)}
+	hBase := edge.CriterionHash(edgeCellHashes([]*db.EdgeCell{base}))
+	hDispatched := edge.CriterionHash(edgeCellHashes([]*db.EdgeCell{dispatched}))
+	hSettled := edge.CriterionHash(edgeCellHashes([]*db.EdgeCell{settled}))
+	if hBase == hDispatched {
+		t.Fatal("下发记账（attempts/state）变化必须改变判据哈希")
+	}
+	if hDispatched == hSettled {
+		t.Fatal("criterion_state 变化必须改变判据哈希")
 	}
 }

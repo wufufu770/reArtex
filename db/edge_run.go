@@ -165,6 +165,17 @@ func (d *DB) FoldEdgeCell(taskID int64, cellID, state string) error {
 	return err
 }
 
+// ReopenEdgeCell 把 dispatched 格点放回 open（0.15.53 意图终态回写：未确证的
+// 尝试让控制轮可复投）。只从 dispatched 翻转——终态格点不被抢写。
+func (d *DB) ReopenEdgeCell(taskID int64, cellID string) error {
+	if err := d.ensureEdgeSchema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`UPDATE edge_cells SET state=$3 WHERE task_id=$1 AND cell_id=$2 AND state=$4`,
+		taskID, cellID, EdgeCellOpen, EdgeCellDispatched)
+	return err
+}
+
 // UpdateEdgeCellCriterion 更新格点判据进度（edge_exec 每轮对账后写）。
 func (d *DB) UpdateEdgeCellCriterion(taskID int64, cellID string, criterionState map[string]any) error {
 	if err := d.ensureEdgeSchema(); err != nil {

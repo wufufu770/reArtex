@@ -57,6 +57,8 @@ func TestDecideEdgeWake(t *testing.T) {
 		hasCells      bool
 		doctrineReady bool
 		inWatermark   bool
+		controllerBusy bool
+		workInFlight  bool
 		stallAdvances bool
 		stallRounds   int
 		want          edgeWakeVerdict
@@ -69,13 +71,21 @@ func TestDecideEdgeWake(t *testing.T) {
 		{name: "首见基线不熔断", hasCells: true, doctrineReady: false, inWatermark: false, stallAdvances: false, stallRounds: 0, want: edgeWakeFire},
 		{name: "计数未到阈值唤醒", hasCells: true, doctrineReady: false, inWatermark: false, stallAdvances: true, stallRounds: th - 2, want: edgeWakeFire},
 		{name: "无格点且不水位则唤醒", hasCells: false, doctrineReady: false, inWatermark: false, stallAdvances: true, stallRounds: 0, want: edgeWakeFire},
+		// 0.15.53 排队守卫：控制轮在飞/排队 ⇒ 这个 tick 不是（也不该变成）
+		// 对账周期——实测 re-open 的 task 6 运行在等 task 3 的 40 格长轮时被
+		// criterion_stalled 误杀。
+		{name: "控制轮在飞不算对账周期", hasCells: false, doctrineReady: false, controllerBusy: true, stallAdvances: true, stallRounds: th - 1, want: edgeWakeSkip},
+		{name: "控制轮在飞即使计数达标也不熔断", hasCells: true, doctrineReady: false, controllerBusy: true, stallAdvances: true, stallRounds: th, want: edgeWakeSkip},
+		// 0.15.53 在飞守卫：假设在 worker 手里验证 ⇒ 熔断不成立、照常唤醒
+		//（可继续对其他格点下发）。
+		{name: "假设在飞不熔断照常唤醒", hasCells: true, doctrineReady: false, workInFlight: true, stallAdvances: true, stallRounds: th - 1, want: edgeWakeFire},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decideEdgeWake(tc.hasCells, tc.doctrineReady, tc.inWatermark, tc.stallAdvances, tc.stallRounds)
+			got := decideEdgeWake(tc.hasCells, tc.doctrineReady, tc.inWatermark, tc.controllerBusy, tc.workInFlight, tc.stallAdvances, tc.stallRounds)
 			if got != tc.want {
-				t.Fatalf("decideEdgeWake(%v,%v,%v,%v,%d) = %v，期望 %v",
-					tc.hasCells, tc.doctrineReady, tc.inWatermark, tc.stallAdvances, tc.stallRounds, got, tc.want)
+				t.Fatalf("decideEdgeWake(%v,%v,%v,%v,%v,%v,%d) = %v，期望 %v",
+					tc.hasCells, tc.doctrineReady, tc.inWatermark, tc.controllerBusy, tc.workInFlight, tc.stallAdvances, tc.stallRounds, got, tc.want)
 			}
 		})
 	}

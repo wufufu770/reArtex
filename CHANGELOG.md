@@ -5,6 +5,37 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.53] - 2026-11-23
+
+### 修复（偏锋判据闭环：格点回写缺失 + 停滞熔断两处误杀面）
+
+- **0.15.52 换装实测暴露的三个深层缺口**（建格修好后运行照旧全灭在
+  criterion_stalled——re-open 的 task 6 运行 5 分钟内被收）：
+  1. **格点回写路径不存在**：edge_dispatch 的「判据进度随其终态更新」只是一句
+     回执文案——`UpdateEdgeCellCriterion` 零调用者、意图终态不回写格点，
+     格点永远停在 dispatched、判据哈希建完格就冻结；
+  2. **停滞哈希只吃 criterion_state**：下发记账（attempts/state 变化）不动哈希
+     ⇒ 建完格必然冻结 ⇒ 连续 4 个对账周期后熔断**必然**误杀；
+  3. **排队被当停滞**：edge_exec 是串行单飞（serial+by_task+1）——re-open 的
+     运行排在别的任务长轮后面时哈希当然不动，4 分钟后被 criterion_stalled 收掉。
+- **修复**：
+  - 意图终态回写格点（worker 收尾与治理停止两个口都挂）：done + 预测兑现
+    （yields finding 命中 predicted_vulnclass，与 settleGap 同源判定）⇒
+    confirmed；done 未兑现 ⇒ disproven（负空间结论也是结论）；exhausted/
+    stopped/blocked ⇒ 回 open 待复投（尝试封顶照旧由 dispatch 记账把关）；
+    无论哪个分支都写 criterion_state；
+  - 停滞哈希拓宽为 判据状态+格点状态+尝试数（下发与终态都算推进）；
+  - decideEdgeWake 增两道守卫：**控制轮在飞/在排队** ⇒ 本 tick 不算对账周期
+    （计数不动、不叠唤醒）；**假设在飞**（格点意图 open/running/paused）⇒
+    熔断不成立、照常唤醒（可继续对其他格点下发）。新增
+    artex_edge_controller_skips_total 指标；
+  - edge_dispatch 补登记 intent_predictions（F1 登记面此前只接了 add_intent
+    路径——偏锋假设不登记 ⇒ 兑现判定/矛盾对照拿不到预测）；回写钩子对存量
+    未登记假设回退读载荷 predicted_vulnclass。
+- **测试**：TestSettleEdgeCellOnIntentDone（回写四口径）、
+  TestEdgeCellHashesMovesOnBookkeeping（哈希拓宽）、TestDecideEdgeWake 扩
+  排队/在飞分支、dispatch 预测登记断言。
+
 ## [0.15.52] - 2026-11-23
 
 ### 修复（偏锋探索三处缺口：建格死锁 + 延迟形态闸门漏判 + 偏锋工具家族空目标误拒）

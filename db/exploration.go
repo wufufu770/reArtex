@@ -331,6 +331,27 @@ ORDER BY id ASC`, s.expID, strings.ReplaceAll(norm, " ", ""))
 	return 0, false, rows.Err()
 }
 
+// HasActiveEdgeIntent 报本探索图上是否还有【在飞的偏锋假设意图】（payload 带
+// edge_cell 键且 state ∈ open/running/paused）。
+//
+// 0.15.53 停滞熔断的在飞守卫：假设还在 worker 手里验证 ⇒ 判据在等结果，
+// 不是停滞——停滞计数不得在在飞窗口累积（否则格点全部下发、验证未归的
+// 空窗期会被 criterion_stalled 误杀）。
+func (s *ExplorationStore) HasActiveEdgeIntent() (bool, error) {
+	var one int
+	err := s.db.QueryRow(`
+SELECT 1 FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused')
+  AND payload ? 'edge_cell' LIMIT 1`, s.expID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CountOpenIntentsByCreator 数这个创建者名下【在途】（state='open'）的意图条数。
 //
 // 创建者存在 payload->>'created_by'（不是 owner：owner 是【归属】，

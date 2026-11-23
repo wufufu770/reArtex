@@ -23,7 +23,10 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/edge"
@@ -49,20 +52,26 @@ const (
 //
 //	hasCells/doctrineReady —— 判据成立检测（每 tick 机械判定，先于水位）；
 //	inWatermark            —— 上次唤醒距今不足间隔；
+//	controllerBusy         —— edge_exec 有在跑/排队的总控轮（0.15.53）：串行
+//	                          队列下排在别的任务长轮后面时哈希当然不动——那是
+//	                          排队不是停滞，本 tick 不算对账周期也不叠唤醒；
+//	workInFlight           —— 格点假设还在 worker 手里验证（0.15.53）：判据在
+//	                          等结果——照常唤醒（可继续对其他格点下发），但
+//	                          熔断不成立；
 //	stallRounds            —— 停滞计数（上一对账轮推进后的值）；
 //	stallAdvances          —— 本对账轮判据哈希与上轮【相同】（推进语义：
 //	                          false = 变化归零 / 首见基线，熔断都不成立）。
 //
-// 优先级：doctrine > 水位 skip > 熔断 > fire。熔断要求连续无推进——
+// 优先级：doctrine > 控制轮在飞/水位 skip > 熔断 > fire。熔断要求连续无推进——
 // stallAdvances=false 时哪怕计数已到阈值也不熔断（那轮判据动过了）。
-func decideEdgeWake(hasCells, doctrineReady, inWatermark, stallAdvances bool, stallRounds int) edgeWakeVerdict {
+func decideEdgeWake(hasCells, doctrineReady, inWatermark, controllerBusy, workInFlight, stallAdvances bool, stallRounds int) edgeWakeVerdict {
 	if hasCells && doctrineReady {
 		return edgeWakeDoctrine
 	}
-	if inWatermark {
+	if controllerBusy || inWatermark {
 		return edgeWakeSkip
 	}
-	if stallAdvances && stallRounds+1 >= edge.StallThreshold {
+	if stallAdvances && !workInFlight && stallRounds+1 >= edge.StallThreshold {
 		return edgeWakeBreak
 	}
 	return edgeWakeFire
@@ -106,7 +115,17 @@ func (sc *Scheduler) fireEdgeWake() {
 		st := sc.s.loadEdgeBreaker(run.TaskID)
 		hash := edge.CriterionHash(edgeCellHashes(cells))
 		stallAdvances := st.StallLastHash != "" && hash == st.StallLastHash
-		verdict := decideEdgeWake(len(cells) > 0, doctrine, inWatermark, stallAdvances, st.StallRounds)
+		// ②.5 控制轮在飞/在排队（0.15.53）：edge_exec 串行单飞——排在别的任务
+		// 的长轮后面时哈希不动是排队不是停滞。本 tick 不算对账周期（计数不动）
+		// 也不叠唤醒（压不住串行队列，只会多并一条 mergeable 消息）。
+		controllerBusy := sc.s.edgeControllerBusy()
+		// ②.6 在飞守卫（0.15.53）：格点假设还在 worker 手里验证 ⇒ 判据在等
+		// 结果——照常唤醒（控制轮可继续对其他格点下发），但熔断不成立。
+		workInFlight := false
+		if t.Store != nil {
+			workInFlight, _ = t.Store.HasActiveEdgeIntent()
+		}
+		verdict := decideEdgeWake(len(cells) > 0, doctrine, inWatermark, controllerBusy, workInFlight, stallAdvances, st.StallRounds)
 		switch verdict {
 		case edgeWakeDoctrine:
 			schedCounters.doctrineDone.Add(1)
@@ -119,7 +138,11 @@ func (sc *Scheduler) fireEdgeWake() {
 				map[string]any{"task_id": run.TaskID, "stop_reason": db.StopReasonDoctrine})
 			continue
 		case edgeWakeSkip:
-			schedCounters.watermarkSkips.Add(1)
+			if controllerBusy {
+				schedCounters.controllerSkips.Add(1)
+			} else {
+				schedCounters.watermarkSkips.Add(1)
+			}
 			continue
 		case edgeWakeBreak:
 			schedCounters.circuitBreaks.Add(1)
@@ -136,6 +159,11 @@ func (sc *Scheduler) fireEdgeWake() {
 		// ③ 放行：记水位 → 推进停滞对账（推进即落库，0.13.2 修复语义）。
 		_ = sc.pg.SetSchedState(edgeWakeKey(run.TaskID), strconv.FormatInt(now, 10))
 		st.StallRounds = stallAdvance(st.StallLastHash, hash, st.StallRounds)
+		if workInFlight {
+			// 在飞窗口不积账：验证落定必有回写（终态钩子写 criterion_state）
+			// ⇒ 哈希终会动，此刻计数只会制造「验证还没回来就被熔断」的误杀。
+			st.StallRounds = 0
+		}
 		st.StallLastHash = hash
 		sc.s.saveEdgeBreaker(run.TaskID, st)
 		// ④ 唤醒 edge_exec 跑一轮总控（mergeable=true：同任务突发合并进一个会话）。
@@ -148,10 +176,14 @@ func (sc *Scheduler) fireEdgeWake() {
 }
 
 // edgeCellHashes 把格点聚成 CriterionHash 的输入形状（复用两处，避免重复）。
+//
+// 0.15.53 起吃三件：判据状态 + 格点状态 + 尝试数——下发（attempts+1、
+// state→dispatched）与终态回写都算推进。此前只吃 criterion_state：dispatch
+// 不动哈希、建完格就冻结，criterion_stalled 必然误杀（实测 3 条运行全灭）。
 func edgeCellHashes(cells []*db.EdgeCell) map[string]any {
 	agg := map[string]any{}
 	for _, c := range cells {
-		agg[c.CellID] = json.RawMessage(c.CriterionState)
+		agg[c.CellID] = fmt.Sprintf("%s|%d|%s", c.State, c.Attempts, string(c.CriterionState))
 	}
 	return agg
 }
@@ -167,4 +199,99 @@ func stallAdvance(lastHash, hash string, rounds int) int {
 		return rounds + 1
 	}
 	return 0
+}
+
+// settleEdgeCellOnIntentDone 意图终态回写偏锋格点（0.15.53：判据推进的落点）。
+//
+// 此前 edge_dispatch 的「判据进度随其终态更新」只是一句回执文案——回写路径
+// 不存在：UpdateEdgeCellCriterion 零调用者、格点永远停在 dispatched、判据
+// 哈希建完格就冻结 ⇒ criterion_stalled 必然误杀（实测 3 条运行全灭，re-open
+// 的 task 6 运行在验证未归的空窗期被收）。
+//
+// 回写口径（与 settleGapOnIntentDone 同源的预测兑现判定）：
+//   - done + 预测兑现（产出 finding 命中 predicted_vulnclass）⇒ confirmed（终态）；
+//   - done + 未兑现 ⇒ disproven（终态，负空间结论也是结论）；
+//   - exhausted/stopped/blocked ⇒ 回 open 待复投（尝试封顶由 dispatch 记账把关）。
+//
+// 无论哪个分支都写 criterion_state（判据哈希动 = 有推进）。best-effort：失败
+// 只记日志，不影响意图终态本身。
+func (e *Engine) settleEdgeCellOnIntentDone(t *Task, intentID int64, state string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[edge] task %s 意图 #%d 格点回写 panic（忽略）: %v", taskIDForLog(t), intentID, r)
+		}
+	}()
+	if e == nil || e.m == nil || e.m.pg == nil || t == nil || t.Store == nil {
+		return
+	}
+	taskID, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || taskID <= 0 {
+		return
+	}
+	node, err := t.Store.GetNode(intentID)
+	if err != nil || node == nil {
+		return
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(node.Payload, &payload)
+	rawCell, _ := payload["edge_cell"].(string)
+	cellID := strings.TrimSpace(rawCell)
+	if cellID == "" {
+		return // 非偏锋假设意图
+	}
+	note := map[string]any{"intent_id": intentID, "outcome": state, "ts": time.Now().Unix()}
+	switch state {
+	case "done":
+		// 预测兑现判定与 settleGapOnIntentDone 同源。预测取 intent_predictions；
+		// 0.15.53 前下发的偏锋假设没登记过预测——回退读意图载荷的
+		// predicted_vulnclass（AddIntentInScope 的载荷里一直有）。
+		terminal := db.EdgeCellDisproven
+		note["verdict"] = "disproven"
+		want := ""
+		if pred, perr := e.m.pg.GetIntentPrediction(intentID); perr == nil && pred != nil {
+			want = strings.ToLower(strings.TrimSpace(pred.PredictedVulnclass))
+		}
+		if want == "" {
+			if rawPred, _ := payload["predicted_vulnclass"].(string); strings.TrimSpace(rawPred) != "" {
+				want = strings.ToLower(strings.TrimSpace(rawPred))
+			}
+		}
+		if want != "" {
+			if findings, ferr := e.m.pg.YieldedFindingVulnclasses(t.ExpID, intentID); ferr == nil {
+				for _, f := range findings {
+					if strings.ToLower(strings.TrimSpace(f.Vulnclass)) == want {
+						terminal = db.EdgeCellConfirmed
+						note["verdict"] = "confirmed"
+						break
+					}
+				}
+			}
+		}
+		if err := e.m.pg.UpdateEdgeCellCriterion(taskID, cellID, note); err != nil {
+			log.Printf("[edge] task %s 格点 %s 判据状态写失败（忽略）: %v", t.ID, cellID, err)
+		}
+		if err := e.m.pg.FoldEdgeCell(taskID, cellID, terminal); err != nil {
+			log.Printf("[edge] task %s 格点 %s 终态写失败（忽略）: %v", t.ID, cellID, err)
+		}
+	default:
+		// exhausted/stopped/blocked ⇒ 本轮尝试未确证：格点回 open 待复投。
+		if err := e.m.pg.UpdateEdgeCellCriterion(taskID, cellID, note); err != nil {
+			log.Printf("[edge] task %s 格点 %s 判据状态写失败（忽略）: %v", t.ID, cellID, err)
+		}
+		if err := e.m.pg.ReopenEdgeCell(taskID, cellID); err != nil {
+			log.Printf("[edge] task %s 格点 %s 重开失败（忽略）: %v", t.ID, cellID, err)
+		}
+	}
+}
+
+// edgeControllerBusy 报偏锋控制轮（edge_exec）是否有在跑/排队的触发运行
+//（0.15.53：停滞熔断的排队守卫）。触发队列是进程内状态；查不到按不忙处理
+//（照旧唤醒——最坏是多一条合并消息，不会误杀运行）。
+func (s *Server) edgeControllerBusy() bool {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	if s.triggerActive["edge_exec"] > 0 {
+		return true
+	}
+	return len(s.triggerQ["edge_exec"]) > 0
 }

@@ -564,6 +564,11 @@ func (s *Server) toolEdgeDispatch() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			// 0.15.53：预测落 intent_predictions（F1 登记面此前只接了 add_intent
+			// 路径——偏锋假设不登记 ⇒ 兑现判定/矛盾对照拿不到预测全靠瞎猜）。
+			if _, perr := s.m.pg.InsertIntentPrediction(id, a.PredictedVulnclass, []string{a.Prediction}, nil); perr != nil {
+				log.Printf("[edge] task %d 意图 #%d 预测登记失败（忽略）: %v", a.TaskID, id, perr)
+			}
 			note := ""
 			if autoCreated {
 				note = "（格点不存在已自动建格）"
