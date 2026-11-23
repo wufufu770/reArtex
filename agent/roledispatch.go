@@ -101,11 +101,12 @@ var edgeToolAllow = map[string]bool{
 	"Skill":              true,
 }
 
-// edgeExecToolAllow 是偏锋探索执行体的允许集（EDGE）：总控轮四件事——查进度、
-// 下发、收尾、换方法论；跨任务读组让它能看到目标任务的图。
+// edgeExecToolAllow 是偏锋探索执行体的允许集（EDGE）：总控轮五件事——查进度、
+// 建格、下发、收尾、换方法论；跨任务读组让它能看到目标任务的图。
 var edgeExecToolAllow = map[string]bool{
 	"edge_methodologies":    true,
 	"edge_coverage":         true,
+	"edge_init_cells":       true,
 	"edge_dispatch":         true,
 	"edge_conclude":         true,
 	"edge_switch":           true,

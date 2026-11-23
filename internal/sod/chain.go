@@ -964,7 +964,13 @@ func (c *Chain) evaluate(ctx context.Context, call chainCall, normalized Normali
 		ScopeDigest:       call.scopeDigest,
 		Normalized:        normalized,
 		FindingID:         findingIDFromInput(call.payload),
-		TaskInternalWrite: TaskInternalWrite(call.toolName),
+		// 0.15.52：任务内识别按【解包后的内层名】过闸（与 enforceGate 的
+		// effName 同一口径）。此前这里按外层名查表 ⇒ 延迟形态（ExecuteExtraTool
+		// 载荷 tool_name=record_cell 等）虽然跳过了规整，却在闸门侧判不成
+		// TaskInternalWrite，空 normalized 的 TargetHint 落到「无可判定目标」
+		// fail-closed——0.15.50 修了规整跳过面、闸门面漏了同一步（生产实锤：
+		// worker 经 ExecuteExtraTool 调 edge_consult/update_finding_report 被拒）。
+		TaskInternalWrite: TaskInternalWrite(deferredInnerName(call.toolName, call.payload)),
 		LocalTaskDir: (call.toolName == "Bash" && BashLocalTaskDir(call.taskID, call.payload)) ||
 			FileToolLocalWrite(call.taskID, call.toolName, call.payload),
 		HostLocalAction: c.hostLocalAction(call.taskID, call.toolName, call.payload),
@@ -1124,6 +1130,22 @@ var taskInternalWriteTools = map[string]bool{
 	"get_task_node_detail": true, "get_task_worker_trace": true,
 	"list_worker_traces": true,
 	"bind_finding_traffic": true, "arbiter_resolve": true,
+	// 0.15.52 偏锋数据面 + finding 报告写侧：同一家族——目标是任务/图/账本
+	// 引用而非主机。实测（生产 sod_decisions 实锤）：worker 经 ExecuteExtraTool
+	// 调 edge_consult（params 只有 task_id）被「无可判定目标」拒绝 ×2；
+	// update_finding_report（report_finding 的孪生写侧）同样被拒后靠载荷里
+	// 恰好出现目标主机名才通过——规整器从报告正文里抓出 mcp.mcd.cn 当目标，
+	// 纯属侥幸。
+	//   - 偏锋读侧：edge_consult / edge_coverage / edge_methodologies；
+	//   - 偏锋记账写侧：edge_init_cells / edge_dispatch / edge_switch（格点与
+	//     假设的写目标在本任务格点/意图图；假设落图仍走 AddIntentInScope 的
+	//     既有范围校验，dispatch 自带溯因门禁/去重/封顶）；
+	//   - update_finding_report：写本任务 finding 的报告正文（report_finding 同族）。
+	// ⚠️ edge_conclude / edge_run / edge_activate 依然不入表——收尾与建任务/
+	// 切模式是生命周期动作，照旧进规整过闸（worker 不得直收运行、不得建任务）。
+	"edge_consult": true, "edge_coverage": true, "edge_methodologies": true,
+	"edge_init_cells": true, "edge_dispatch": true, "edge_switch": true,
+	"update_finding_report": true,
 }
 
 // TaskInternalWrite 报告该工具是否为任务内结构化写（跳过规整、scope 按构造通过）。

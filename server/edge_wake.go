@@ -142,7 +142,7 @@ func (sc *Scheduler) fireEdgeWake() {
 		schedCounters.wakeFired.Add(1)
 		_, methodologyID, _ := sc.pg.TaskEdgeFields(run.TaskID)
 		sc.s.StartTriggeredRun("edge_exec", "偏锋总控轮",
-			fmt.Sprintf("【偏锋总控轮】任务 #%d（方法论=%s）。请走总控循环：edge_coverage 查进度 → 选格点 → edge_dispatch 下发假设 → 对账判据；判据成立时 edge_conclude 收尾。", run.TaskID, methodologyID),
+			fmt.Sprintf("【偏锋总控轮】任务 #%d（方法论=%s）。请走总控循环：edge_coverage 查进度 → 选格点 → edge_dispatch 下发假设 → 对账判据；格点坐标系未建立（cells_total=0）时先用 edge_init_cells 建格再下发；判据成立时 edge_conclude 收尾。", run.TaskID, methodologyID),
 			run.TaskID, true, t.Description, t.Goal)
 	}
 }

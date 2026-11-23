@@ -10,6 +10,12 @@ package server
 //                                      任务内角色不建新任务——职责边界见方案二
 //                                      §1.5；需要时在工具页显式勾选）
 //   edge_activate                    → mainagent
+//   edge_init_cells                  → edge_exec, auto, mainagent
+//                                      （0.15.52 建格缺口修复：edge_exec 的总控
+//                                      循环此前没有任何建格入口——edge_activate
+//                                      只绑 mainagent，edge_dispatch 要求格点已
+//                                      存在，坐标系永远建不起来，3 条运行全部
+//                                      criterion_stalled 收场）
 //   edge_dispatch/conclude/switch    → edge_exec
 //
 // 「识别者能力边界」的落点：auto（平台操作助手）能建新任务（edge_run）；
@@ -82,6 +88,7 @@ func (s *Server) edgeTools() []actool.CoreTool {
 		s.toolEdgeConsult(),
 		s.toolEdgeRun(),
 		s.toolEdgeActivate(),
+		s.toolEdgeInitCells(),
 		s.toolEdgeDispatch(),
 		s.toolEdgeConclude(),
 		s.toolEdgeSwitch(),
@@ -98,6 +105,7 @@ func (s *Server) seedEdgeTools() {
 		"edge_consult":       {"edge", "auto", "mainagent"},
 		"edge_run":           {"edge", "auto"},
 		"edge_activate":      {"mainagent"},
+		"edge_init_cells":    {"edge_exec", "auto", "mainagent"},
 		"edge_dispatch":      {"edge_exec"},
 		"edge_conclude":      {"edge_exec"},
 		"edge_switch":        {"edge_exec"},
@@ -270,7 +278,7 @@ func (s *Server) StartEdgeExploration(goal, description, methodologyID string, c
 	s.launchTask(t, description+" "+goal, false)
 	// 拉起执行体：per-agent FIFO 队列（serial+by_task），首轮总控。
 	s.StartTriggeredRun("edge_exec", "偏锋探索启动",
-		fmt.Sprintf("【偏锋探索】任务 #%d 已启动，方法论=%s。请开始总控：读 edge_coverage 建立格点坐标系，下发第一批偏锋假设（edge_dispatch），并持续对账判据进度。", taskID, methodologyID),
+		fmt.Sprintf("【偏锋探索】任务 #%d 已启动，方法论=%s。请开始总控：先用 edge_init_cells 按方法论建立格点坐标系（edge_dispatch 对不存在的格点也会自动建格），下发第一批偏锋假设（edge_dispatch），并持续对账判据进度。", taskID, methodologyID),
 		taskID, true, description, goal)
 	s.appendEdgeAudit("edge-run", "edge_run",
 		fmt.Sprintf("task=%d methodology=%s run=%d", taskID, methodologyID, runID),
@@ -371,6 +379,78 @@ func (s *Server) toolEdgeActivate() actool.CoreTool {
 		})
 }
 
+// toolEdgeInitCells 初始化/扩充格点坐标系（0.15.52：建格缺口修复）。
+//
+// 为什么存在：StartEdgeExploration 的启动词一直让 edge_exec「建立格点坐标系」，
+// 但它的工具箱里没有任何建格入口——edge_activate（带 cells 参数）只绑
+// mainagent，edge_dispatch 要求格点已存在。实测 3 条偏锋运行全部卡死在
+// cells_total=0（判据哈希恒定 ⇒ criterion_stalled 熔断收场，worker 判据轨迹
+// 里留下「尝试通过现有工具初始化或获取初始化入口」的失败记录）。
+//
+// 语义刻意收窄：**只建格不下发、不动模式不动运行行**——建格本身不产生探索
+// 动作（假设下发仍是 edge_dispatch 的事，带溯因门禁）；模式切换是 edge_activate
+// 的事；运行行由 edge_run/edge_activate 开。重复调用幂等（已存在格点不覆盖）。
+func (s *Server) toolEdgeInitCells() actool.CoreTool {
+	return wrTool("edge_init_cells",
+		"初始化/扩充偏锋格点坐标系（幂等，已存在的格点不覆盖）：格点是判据记账的单位，坐标系建好后 edge_dispatch 逐格下发假设、判据进度随格点终态推进。只建格不下发——命名随方法论（如 auth:uca-1、neg:3），也可只建本批要下发的格点（edge_dispatch 对不存在的格点也会自动建格）。",
+		objSchema(map[string]any{
+			"task_id":        map[string]any{"type": "integer", "description": "任务 id（必填）"},
+			"cells":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "格点 id 清单（必填，如 [\"auth:uca-1\",\"auth:uca-2\"]）"},
+			"methodology_id": strParam("方法论 id（可选；不传用任务当前生效的方法论）"),
+		}, "task_id", "cells"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				TaskID        int64    `json:"task_id"`
+				Cells         []string `json:"cells"`
+				MethodologyID string   `json:"methodology_id"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if a.TaskID <= 0 {
+				return actool.Errorf("task_id 必填"), nil
+			}
+			if _, ok := s.m.Task(strconv.FormatInt(a.TaskID, 10)); !ok {
+				return actool.Errorf("task 不存在: " + strconv.FormatInt(a.TaskID, 10)), nil
+			}
+			// 方法论解析：显式 > 任务存量 > 轮换表首位（与 edge_activate 同款）。
+			methID := a.MethodologyID
+			if methID == "" {
+				if _, cur, ok := s.m.pg.TaskEdgeFields(a.TaskID); ok && cur != "" {
+					methID = cur
+				}
+			}
+			if methID != "" {
+				if m, ok := edge.Get(methID); !ok || !m.Enabled {
+					return actool.Errorf(fmt.Sprintf("方法论 %q 未注册或未启用", methID)), nil
+				}
+			} else if enabled := edge.ListEnabled(); len(enabled) > 0 {
+				methID = enabled[0].ID
+			}
+			before, _ := s.m.pg.ListEdgeCells(a.TaskID)
+			existed := map[string]bool{}
+			for _, e := range before {
+				existed[e.CellID] = true
+			}
+			created := 0
+			for _, c := range a.Cells {
+				cellID := strings.TrimSpace(c)
+				if cellID == "" {
+					continue
+				}
+				if err := s.m.pg.UpsertEdgeCell(a.TaskID, cellID, methID, map[string]any{}); err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				if !existed[cellID] {
+					created++
+				}
+			}
+			s.appendEdgeAudit("edge-run", "edge_init_cells",
+				fmt.Sprintf("task=%d methodology=%s 新建 %d 格", a.TaskID, methID, created),
+				map[string]any{"task_id": a.TaskID, "methodology_id": methID, "cells": a.Cells})
+			after, _ := s.m.pg.ListEdgeCells(a.TaskID)
+			return actool.Text(fmt.Sprintf("格点坐标系已更新：本次新建 %d 个、任务共 %d 个格点（方法论=%s）。下一步用 edge_dispatch 逐格下发假设。", created, len(after), methID)), nil
+		})
+}
+
 // ---------- 执行体（edge_exec）工具 ----------
 
 // toolEdgeDispatch 下发一条偏锋假设到指定格点（先过溯因门禁）。
@@ -379,7 +459,7 @@ func (s *Server) toolEdgeDispatch() actool.CoreTool {
 		"下发一条偏锋假设：先过溯因门禁（确定性判定，零 LLM）——observation_basis 为空、引用已证伪事实、prediction 与 falsifier 不可判定，都算退化；连续 3 条退化会触发假设退化熔断（运行被终止，转人工确认）。通过后假设落成探索图意图（带可证伪预测，created_by=edge），格点尝试数 +1；同格点满 2 次强制封格（cell_exhausted）。",
 		objSchema(map[string]any{
 			"task_id":            map[string]any{"type": "integer", "description": "任务 id（必填）"},
-			"cell_id":            strParam("格点 id（必填，须已初始化）"),
+			"cell_id":            strParam("格点 id（必填；不存在时自动建格——建全坐标系仍推荐先用 edge_init_cells）"),
 			"summary":            strParam("假设一句话：探索什么+为什么（必填）"),
 			"observation_basis":  strParam("观察依据：来自哪些已有事实/输出（必填；空=自提自证，直接判退化）"),
 			"predicted_vulnclass": strParam("预测的漏洞类别（必填，可证伪）"),
@@ -446,8 +526,21 @@ func (s *Server) toolEdgeDispatch() actool.CoreTool {
 			}
 			// ③ 格点记账先行：尝试数 +1；达上限即封格并拒绝继续下发。
 			attempts, err := s.m.pg.RecordEdgeDispatch(a.TaskID, a.CellID)
+			autoCreated := false
 			if err != nil {
-				return actool.Errorf(fmt.Sprintf("格点 %q 不存在（先用 edge_activate 的 cells 参数初始化坐标系）: %v", a.CellID, err)), nil
+				// 0.15.52 建格缺口：格点不存在时自动建格（坐标系随下发逐步建立）。
+				// 此前这里直接报「先用 edge_activate 的 cells 参数初始化坐标系」——
+				// 但 edge_activate 只绑 mainagent，edge_exec 的工具箱里没有任何建格
+				// 入口，坐标系永远建不起来（实测 3 条运行全部 criterion_stalled 收场）。
+				_, methID, _ := s.m.pg.TaskEdgeFields(a.TaskID)
+				if uerr := s.m.pg.UpsertEdgeCell(a.TaskID, a.CellID, methID, map[string]any{}); uerr != nil {
+					return actool.Errorf(fmt.Sprintf("格点 %q 不存在且自动建格失败: %v", a.CellID, uerr)), nil
+				}
+				attempts, err = s.m.pg.RecordEdgeDispatch(a.TaskID, a.CellID)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				autoCreated = true
 			}
 			if attempts > db.EdgeCellMaxAttempts {
 				_ = s.m.pg.FoldEdgeCell(a.TaskID, a.CellID, db.EdgeCellDisproven)
@@ -471,7 +564,11 @@ func (s *Server) toolEdgeDispatch() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			return actool.Text(fmt.Sprintf("假设已下发为 intent #%d（格点 %s，尝试 %d/%d）。worker 领走后判据进度随其终态更新。", id, a.CellID, attempts, db.EdgeCellMaxAttempts)), nil
+			note := ""
+			if autoCreated {
+				note = "（格点不存在已自动建格）"
+			}
+			return actool.Text(fmt.Sprintf("假设已下发为 intent #%d（格点 %s，尝试 %d/%d）%s。worker 领走后判据进度随其终态更新。", id, a.CellID, attempts, db.EdgeCellMaxAttempts, note)), nil
 		})
 }
 

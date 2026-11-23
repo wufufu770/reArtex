@@ -5,6 +5,44 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.52] - 2026-11-23
+
+### 修复（偏锋探索三处缺口：建格死锁 + 延迟形态闸门漏判 + 偏锋工具家族空目标误拒）
+
+- **缺口一（建格死锁，核心）**：`StartEdgeExploration` 的启动词让 edge_exec
+  「读 edge_coverage 建立格点坐标系」，但它的工具箱里**没有任何建格入口**
+  ——`edge_activate`（带 cells 参数）只绑 mainagent，`edge_dispatch` 要求格点
+  已存在（不存在直接报「先用 edge_activate 初始化坐标系」）。实测 3 条偏锋
+  运行（task 3/4/6）全部卡死在 cells_total=0：判据哈希恒定 ⇒ 连续 4 个对账
+  周期无推进 ⇒ `criterion_stalled` 熔断收场，edge_exec 不再唤醒；worker 判据
+  轨迹里留下「尝试通过现有工具初始化或获取初始化入口」的失败记录。
+- **修复**：
+  - 新工具 `edge_init_cells`（绑定 edge_exec/auto/mainagent）：幂等建格/扩格，
+    只建格不下发、不动模式不动运行行；
+  - `edge_dispatch` 对不存在的格点**自动建格**（坐标系随下发逐步建立，死锁
+    不可能复发；回执如实标注「格点不存在已自动建格」）；
+  - 启动词/总控轮唤醒词同步指向 edge_init_cells。
+- **缺口二（0.15.50 修了一半）**：任务内表的**规整跳过面**按解包内层名识别，
+  但**闸门入参**仍按外层名判 TaskInternalWrite ⇒ 延迟形态（ExecuteExtraTool
+  载荷 tool_name=record_cell 等）跳过了规整却在闸门侧落到「无可判定目标」
+  fail-closed。生产实锤（sod_decisions）：worker 经 ExecuteExtraTool 调
+  edge_consult（params 只有 task_id）被拒 ×2、update_finding_report 靠载荷里
+  恰好出现目标主机名（规整器从报告正文里抓出 mcp.mcd.cn 当目标）才侥幸通过。
+  - 修复：evaluate 的 TaskInternalWrite 与 enforceGate 同一口径按解包内层名
+    判定（deferredInnerName），端到端用例钉住正反两面。
+- **缺口三（偏锋工具家族空目标误拒）**：edge_consult/edge_coverage/
+  edge_methodologies（读侧）与 edge_init_cells/edge_dispatch/edge_switch
+  （格点与假设记账，写目标在本任务格点/意图图）目标是任务/图/账本引用而非
+  主机，规整器产不出目标线索 ⇒ 成批误拒。全部入任务内表；`update_finding_report`
+  （report_finding 的孪生写侧）同族入表。**边界不变**：edge_conclude/edge_run/
+  edge_activate 是生命周期动作（收尾/建任务/切模式）照旧进规整过闸，worker
+  不得经延迟转发直收运行、建任务；假设落图仍走 AddIntentInScope 的既有范围
+  校验，dispatch 自带溯因门禁/去重/封顶。
+- **测试**：TestEdgeInitCellsAndDispatchAutoCreate（建格幂等/自动建格/封顶
+  记账）、TestDeferredTaskInternalWritePassesGate + TestDeferredHostTargetStillGated
+  （延迟形态闸门正反面）、task_internal 矩阵扩边（偏锋家族命中、生命周期
+  工具不命中）。
+
 ## [0.15.51] - 2026-11-23
 
 ### 修复（过早收尾连发两起：task_conclude 三门不查 goal 状态——补「open goal 门」）
