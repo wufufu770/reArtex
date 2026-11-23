@@ -5,6 +5,38 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.50] - 2026-11-23
+
+### 修复（实战实锤：平台内部工具被「无可判定目标」成批误拒——任务内表解包识别 + 空目标面补齐）
+
+- **问题（08:49 escalation 实锤）**：闸门空目标 fail-closed 分支
+  （「没有可判定的目标线索 ⇒ 不放行」）误伤**目标不是主机**的平台内部工具：
+  - `sleep`（{"seconds":45} 被拒——等待工具天然无目标）；
+  - `ExecuteExtraTool` 内层 `record_cell` / `graph_overview` / `list_facts`
+    （业务图/事实账本操作，task 3 建模线连拒 3 次触发 escalation，gap 详情
+    实锤「本次动作没有可判定的目标线索（工具=ExecuteExtraTool）」）；
+  - `TaskOutput`（{"task_id":"task_8"}——任务引用被当网络主机做 scope 裁决，
+    host 口径对任务引用是范畴错误；连合法任务引用也会被拒）。
+  根因两条：① 任务内表按**外层名**查——延迟工具外层是 ExecuteExtraTool，
+  内层名没解包；② 内建等待/跨任务读与事实图面工具不在任务内表，空目标
+  fail-closed 对「目标=任务/图/账本引用」的工具是误拒。
+- **修复**：
+  - 任务内识别改按 **deferredInnerName 解包后的内层名**（与桌面识别、
+    intercept.UnwrapDeferredName 同一语义；外层 ExecuteExtraTool 本身不命中
+    ——内层可能是网络工具，解包后逐名判定）；
+  - 任务内表补齐平台内部数据面工具（目标是任务/图/账本引用，不触网）：
+    sleep / TaskOutput / add_task_hint / add_intent / record_cell /
+    graph_overview / list_facts / bizmodeler 全家 12 名（read/upsert/record/
+    propose/adjudicate/list/get）/ bind_finding_traffic / arbiter_resolve；
+  - **边界不变**：扩权工具（insert_assets/add_task_scope/add_company_scope/
+    create_mcp/create_custom_tool/create_skill）与以主机为真实目标的工具
+    （delete_assets_by_host/Bash/WebFetch/…）照旧进规整过 scope。
+  - 放行语义沿 B2：跳过规整、scope 按构造通过（pass(task_internal_write)），
+    熔断/额度/tier2 检查照跑，审计带 bypassed_normalizer 标记。
+- **测试**：TestTaskInternalWriteUnwrapsDeferred（解包识别/内建命中/内层网络
+  工具不命中/扩权工具不命中 15 例）+ 既有 gate 级 bypass 钉子回归。
+- 验证：go vet + sod/sodpolicy 全包绿。
+
 ## [0.15.49] - 2026-11-22
 
 ### 修复（0.15.48 判别粒度实测修正——混合复合命令本地子段被连坐 + 输出件扩展名漏白名单）

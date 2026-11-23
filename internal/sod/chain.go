@@ -611,12 +611,15 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 	// scope 按构造通过；审计带 bypassed_normalizer + bypass_reason）。
 	fileLocal := FileToolLocalWrite(call.taskID, name, payload)
 	taskLocal := localBash || fileLocal
-	taskInternal := TaskInternalWrite(call.toolName)
-	fastPath, fastHit := DeterministicFastPath(name, payload)
-	// 桌面识别按【解包后的内层名】——延迟桌面工具的外层名是 ExecuteExtraTool，
-	// 载荷 tool_name 才是实际执行的工具（与 guard 侧 intercept.UnwrapDeferredName
-	// 同一语义；一致性由 sod 测试与 intercept 包互验钉死）。
+	// 任务内识别按【解包后的内层名】（0.15.50）——延迟工具的外层名是
+	// ExecuteExtraTool，载荷 tool_name 才是实际执行的工具（与桌面识别、guard 侧
+	// intercept.UnwrapDeferredName 同一语义）。0.15.50 实测：此前按外层名查表 ⇒
+	// 延迟形态的平台内部数据面工具（record_cell/graph_overview/list_facts/…）
+	// 全部落到「无可判定目标」fail-closed 被成批拒绝（task 3 建模线连拒 3 次
+	// 触发 escalation）。
 	effName := deferredInnerName(name, payload)
+	taskInternal := TaskInternalWrite(effName)
+	fastPath, fastHit := DeterministicFastPath(name, payload)
 	desktopHost := db.IsDesktopToolName(effName)
 	hostTargets, htErr := c.desktopHostTargets(call.taskID)
 	if desktopHost && (htErr != nil || len(hostTargets) == 0) {
@@ -1092,6 +1095,35 @@ var taskInternalWriteTools = map[string]bool{
 	// tier2）照跑；账本写入的正确性由 findings 域自身的校验管（资产绑定/证据
 	// 去重），不由 SoD 的网络范围管。
 	"report_finding": true,
+	// 0.15.50 空目标误拒修复：平台内部数据面工具的目标是任务/图/账本引用
+	// 而非主机，规整器产不出目标线索 ⇒ 空目标 fail-closed 会成批误拒
+	//（实测：sleep 被拒、ExecuteExtraTool 内层 record_cell/graph_overview/
+	// list_facts 被拒、TaskOutput 的任务引用被当主机裁决）。
+	//
+	//   - 等待/跨任务读（norma 内建）：sleep / TaskOutput——TaskOutput 的
+	//     target 是任务引用（task_N），host 口径的 scope 检查是范畴错误；
+	//   - 任务账本写（add_hint 同族）：add_task_hint / add_intent；
+	//   - 事实/业务图面：record_cell / graph_overview / list_facts 及
+	//     bizmodeler 全家（read/upsert/record/propose/adjudicate/list/get——
+	//     全部是本地图与账本操作，不触网）；
+	//   - 发现/流量绑定与仲裁裁决：bind_finding_traffic / arbiter_resolve。
+	//
+	// ⚠️ 扩权工具依然不在此列（insert_assets / add_task_scope /
+	// add_company_scope / create_mcp / create_custom_tool / create_skill）——
+	// delete_assets_by_host 等以主机为真实目标的工具也照旧进规整（target
+	// 就是主机，host 口径适用）。
+	"sleep": true, "TaskOutput": true,
+	"add_task_hint": true, "add_intent": true,
+	"record_cell": true, "graph_overview": true, "list_facts": true,
+	"read_biz_graph": true, "read_design_artifacts": true,
+	"upsert_biz_node": true, "upsert_biz_edge": true,
+	"record_biz_diff": true, "propose_biz_intent": true,
+	"biz_refuted_facts": true, "biz_adjudicate": true,
+	"list_assets": true, "list_companies": true,
+	"get_task_graph": true, "list_task_findings": true,
+	"get_task_node_detail": true, "get_task_worker_trace": true,
+	"list_worker_traces": true,
+	"bind_finding_traffic": true, "arbiter_resolve": true,
 }
 
 // TaskInternalWrite 报告该工具是否为任务内结构化写（跳过规整、scope 按构造通过）。
