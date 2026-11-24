@@ -175,3 +175,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_capability_executions_idem
 CREATE INDEX IF NOT EXISTS idx_cap_exec_task ON capability_executions(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cap_exec_capability ON capability_executions(capability_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cap_exec_correlation ON capability_executions(correlation_id) WHERE correlation_id <> '';
+
+-- ---------- domain_events：统一事件 outbox（§0.6，0.15.64 批次 TI-06） ----------
+--
+-- §0.6 口径：事件先落库，再异步派发；事件处理必须幂等、可重试、可观测。
+-- 基础设施用 PostgreSQL outbox（单体期不引入 Kafka/NATS）。
+--   - event_id 唯一索引 = 生产端幂等键（重复投递同一事件是 no-op）；
+--   - 派发是 at-least-once：消费端必须幂等（domain_event_consumers 表是
+--     进程内消费的第一道幂等闸，业务 handler 自身幂等是第二道）；
+--   - payload 禁放凭据/Cookie/Authorization/原始敏感正文（§0.12；确定性
+--     消毒在 events.SanitizePayload，TI-12 接入 EnqueueEvent）。
+CREATE TABLE IF NOT EXISTS domain_events (
+    id              BIGSERIAL PRIMARY KEY,
+    event_id        TEXT NOT NULL,                  -- envelope.ID（uuid）
+    type            TEXT NOT NULL,                  -- events.EventType*（§0.6 十一类）
+    schema_version  INT NOT NULL DEFAULT 1,
+    task_id         BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+    company_id      BIGINT REFERENCES companies(id) ON DELETE SET NULL, -- envelope.TenantID 投影
+    execution_id    TEXT NOT NULL DEFAULT '',
+    correlation_id  TEXT NOT NULL DEFAULT '',
+    causation_id    TEXT NOT NULL DEFAULT '',
+    scope_version   BIGINT NOT NULL DEFAULT 0,      -- envelope.ScopeVersion（水位 bigint）
+    payload         JSONB NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','dispatched','failed','dead')),
+    attempts        INT NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error      TEXT NOT NULL DEFAULT '',
+    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_domain_events_event_id ON domain_events(event_id);
+CREATE INDEX IF NOT EXISTS idx_domain_events_due ON domain_events(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_domain_events_task ON domain_events(task_id, occurred_at DESC);
+
+-- 消费幂等台账：同一 event_id 同一 consumer 只记一行（主键）；重复投递的事件
+-- 在派发前查此表跳过已处理消费者。
+CREATE TABLE IF NOT EXISTS domain_event_consumers (
+    event_id     TEXT NOT NULL,
+    consumer     TEXT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_id, consumer)
+);

@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.64] - 2026-11-24
+
+### 新增（TI-06：统一事件流与反馈闭环）
+
+- `events/event.go`（新增）：§0.6 统一事件契约——`DomainEvent` envelope（方案字段一字对应，TenantID/ScopeVersion 与仓库 company_id/水位 bigint 的投影语义写在字段注释）+ 方案表格全部 12 个事件类型常量（finding.created/updated 拆两值）+ `ValidateEvent` 入口契约门（缺 ID/Type、schema_version≠当前契约、nil payload 拒绝）。包注释载明三铁律：先落库再派发 / 幂等可重试可观测 / 事件连接而非硬编码。
+- `db/schema_task_intelligence.sql`（追加）：`domain_events` outbox 表（event_id 唯一=生产端幂等键、status pending/dispatched/failed/dead、attempts/next_attempt_at/last_error 可观测列）+ `domain_event_consumers` 消费幂等台账（event_id+consumer 主键）。
+- `db/events.go`（新增）：outbox 存储层——EnqueueEvent（ON CONFLICT 去重返回既有行）、ClaimDueEvents（事务内 FOR UPDATE SKIP LOCKED 多实例安全，崩溃遗留行保持可认领=at-least-once）、MarkEventDispatched/MarkEventFailed（退避时间由派发器算，存储层不算策略）、MarkConsumerProcessed/HasConsumerProcessed。
+- `events/dispatcher.go`（新增）：派发器——窄接口 OutboxStore（*db.DB 结构性满足）、RegisterConsumer（同名唯一=幂等键，类型过滤，稳定执行序）、PollOnce/Start 轮询循环、逐消费者隔离（panic recover 按失败处理）、失败指数退避（30s×2^n 封顶 10m）、超 MaxEventAttempts=5 入 dead；`ToRecord`/`envelope` 双向投影。接线边界：生产方与 server 启动装配归 TI-11 及后续。
+- 测试：`events/dispatcher_test.go` 7 用例（happy+类型过滤/重投幂等跳过/重试到 dead/panic 隔离/注册规则/无消费者事件照常收尾/双向投影+契约门）全绿含 -race；`db/events_test.go` 2 用例（真实 PG：入队去重/认领字段/退避不可认领/dead 死信/消费台账）全绿。
+
 ## [0.15.63] - 2026-11-24
 
 ### 新增（TI-05：统一领域对象与数据关系）
