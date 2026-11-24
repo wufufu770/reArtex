@@ -135,7 +135,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
 	return id, err
 }
 
-
 // CreateDecidedIntercept inserts an intercept_pending row ALREADY in a final state
 // (status = 'allowed' | 'denied'), decided_at stamped now. Used to log allow/deny
 // rule matches for observability — they don't block and need no user action, so unlike
@@ -322,8 +321,8 @@ func (d *DB) ListAllIntercepts(limit int) ([]InterceptApprovalRow, error) {
 // 「待人工审批」的请求。
 //
 // 只数「真正问过人」的请求：decision_source='shortcircuit'（代码常量短路表
-// 发起的那一档）且状态不是 denied（被拒的行从没问过人）。DB 规则发起的 ask
-// 不计入 —— 那是管理员自己配的面，治理不该越界去改它。
+// 发起的那一档）且状态不是 denied（被拒的行从没问过人）。本函数是 A-08 之前的
+// 单来源口径，保留给既有调用方；三档口径见 CountRecentInterceptAsksBySource。
 //
 // 数据源就是 intercept_pending 本身：进程重启不丢，且与审批历史页是同一份数据。
 func (d *DB) CountRecentInterceptAsks(agentName, toolName string, since time.Time) (int, error) {
@@ -332,6 +331,19 @@ func (d *DB) CountRecentInterceptAsks(agentName, toolName string, since time.Tim
 		WHERE agent_name=$1 AND tool_name=$2 AND created_at >= $3
 		  AND decision_source='shortcircuit' AND status <> 'denied'`,
 		agentName, toolName, since).Scan(&n)
+	return n, err
+}
+
+// CountRecentInterceptAsksBySource 是 A-08 的三档口径：按 decision_source 分别
+// 计数（shortcircuit=短路表 / rule=DB 规则 / model=模型判官），取值以
+// intercept_pending 表现有值为准（interceptSource 的产出），不新增魔法值。
+// 原单来源函数保留——既有调用方语义不变。
+func (d *DB) CountRecentInterceptAsksBySource(agentName, toolName, source string, since time.Time) (int, error) {
+	var n int
+	err := d.QueryRow(`SELECT COUNT(*) FROM intercept_pending
+		WHERE agent_name=$1 AND tool_name=$2 AND created_at >= $3
+		  AND decision_source=$4 AND status <> 'denied'`,
+		agentName, toolName, since, source).Scan(&n)
 	return n, err
 }
 

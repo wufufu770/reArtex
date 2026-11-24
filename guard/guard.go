@@ -112,7 +112,9 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		case "ask":
 			// 审批防疲劳：同一 agent 在窗口内反复对同一高危面请求审批，
 			// 达阈值后直接拒绝，不再打扰人（也堵住「疲劳点 allow」的循环）。
-			if g.interceptor != nil && g.interceptor.AskBurstExceeded(ctx, ev.ToolName) {
+			// A-08（0.15.75）：显式走三档统一口径的短路表档；DB 规则/判官两档
+			// 由 intercept.HandleAsk 入口按各自来源检查。
+			if g.interceptor != nil && g.interceptor.AskBurstExceededFor(ctx, ev.ToolName, intercept.AskSourceShortCircuit) {
 				esc := *dec
 				esc.Action = "deny"
 				esc.RuleName = "[代码常量] 审批请求超阈值（同一 agent 重复请求）"

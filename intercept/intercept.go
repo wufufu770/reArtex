@@ -182,6 +182,13 @@ var defaultEnabledTools = []string{
 func New(d *db.DB) *Interceptor {
 	i := &Interceptor{db: d, pending: newPendingManager()}
 	i.migrateJudgeFailAction()
+	if d != nil {
+		// A-08：防疲劳覆盖面在启动时显式留痕（阈值/窗口是可热改的可用性参数，
+		// 这里打的是【当前值】，运行期以 settings 现读为准）。
+		log.Printf("[intercept] 审批防疲劳覆盖三档来源（shortcircuit/rule/model），阈值 %d、窗口 %ds",
+			i.getSettingInt(settingAskBurstThreshold, defaultAskBurstThreshold),
+			i.getSettingInt(settingAskBurstWindowSecs, defaultAskBurstWindowSecs))
+	}
 	return i
 }
 
@@ -646,7 +653,17 @@ const (
 // 只对【有 agent 归属】的请求计数：会话侧没有 agent 归属，计了会误伤人。
 // 计数失败时返回 false（不升级）：这个计数是防疲劳措施、不是安全边界，
 // 误拒的代价（正常任务被卡死）高于漏拒的代价（人多点一次 allow）。
+//
+// A-08（0.15.75）：这是短路表单来源口径（guard 短路 ask 分支沿用）；三档统一
+// 口径见 AskBurstExceededFor。
 func (i *Interceptor) AskBurstExceeded(ctx context.Context, toolName string) bool {
+	return i.AskBurstExceededFor(ctx, toolName, AskSourceShortCircuit)
+}
+
+// AskBurstExceededFor 是 A-08 的三档统一口径：按来源分档计数（短路表 ask /
+// DB 规则 ask / 判官 ask），同一 agent 在窗口内对同一工具的【同档】审批请求达
+// 阈值即拒绝。不同档互不挤占——判官 ask 的反复不该把短路表的预算吃掉。
+func (i *Interceptor) AskBurstExceededFor(ctx context.Context, toolName, source string) bool {
 	_, agentName, _ := taskInfoFromCtx(ctx)
 	if agentName == "" {
 		return false
@@ -660,11 +677,32 @@ func (i *Interceptor) AskBurstExceeded(ctx context.Context, toolName string) boo
 		window = defaultAskBurstWindowSecs
 	}
 	since := time.Now().Add(-time.Duration(window) * time.Second)
-	n, err := i.db.CountRecentInterceptAsks(agentName, toolName, since)
+	n, err := i.db.CountRecentInterceptAsksBySource(agentName, toolName, source, since)
 	if err != nil {
 		return false
 	}
 	return n >= threshold
+}
+
+// 审批 ask 的三档来源：取值与 intercept_pending.decision_source 的既有产出
+// （db.interceptSource）一致，不新增魔法值。
+const (
+	AskSourceShortCircuit = "shortcircuit" // 代码常量短路表发起
+	AskSourceRule         = "rule"         // DB 规则发起
+	AskSourceModel        = "model"        // LLM 兜底判官发起
+)
+
+// decisionSourceOf 从 Decision 推导它落库后会带的 decision_source——与
+// db.interceptSource 的推导口径一致（ruleID → rule；[模型] 前缀/ModelFallback →
+// model；其余按短路表）。防疲劳按这个来源分档计数，保证计数与落库同口径。
+func decisionSourceOf(dec Decision) string {
+	if dec.RuleID != 0 {
+		return AskSourceRule
+	}
+	if dec.ModelFallback || strings.HasPrefix(dec.Message, "[模型]") {
+		return AskSourceModel
+	}
+	return AskSourceShortCircuit
 }
 
 // defaultAskTimeoutSecs 是 DB 规则 ask 类的默认审批超时。
@@ -884,6 +922,24 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	ruleID := dec.RuleID
 	taskID, agentName, sodKey := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)
+
+	// A-08 审批防疲劳三档（0.15.75）：DB 规则 ask 与判官 ask 共用本入口，落
+	// pending 前按来源分档检查。短路表 ask 不在这里重复拦——guard 的短路 ask
+	// 分支已按同档口径检查过（两处都拦会写出两条 denied 行）。防疲劳拒绝在
+	// CreateInterceptPending 之前返回：不产生新的 pending 行、不进入等待分支。
+	if src := decisionSourceOf(dec); src != AskSourceShortCircuit && i.AskBurstExceededFor(ctx, toolName, src) {
+		esc := dec
+		esc.Action = "deny"
+		esc.Message = "同一 agent 在时间窗内对本工具的审批请求已超阈值，按防疲劳策略直接拒绝。"
+		i.Log(ctx, convID, esc, toolName, input, "denied")
+		emit := db.Activity{Kind: "intercept_result", Summary: "工具 " + toolName + " 的审批请求触发防疲劳拒绝（来源 " + src + "）", IsError: true}
+		if convID != 0 {
+			_, _ = i.db.AppendConvActivity(convID, emit)
+		} else if taskEmit != nil {
+			taskEmit(emit)
+		}
+		return false
+	}
 
 	audit := auditFor(ctx, dec, input, "pending")
 	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, pendingAgentName(agentName, sodKey), toolName, input, dec.Message, audit)
