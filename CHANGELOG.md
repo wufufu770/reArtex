@@ -5,6 +5,43 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.56] - 2026-11-24
+
+### 修复（out_of_scope 拒绝风暴：发现被自锁 + 升级提示把 agent 往死路上指）
+
+- **实测现象**：task 9（ali-1124）范围只有一条精确子域行 `www.lingguang.com`
+  （agent 只能自行沉淀精确行），worker 每碰一个兄弟子域（cognihome/render/
+  agi-static/aabbcc…）就 out_of_scope 拒一次：深夜 03:49-03:56 每分钟一次
+  「连续拒绝 3 次，需人工处理」，人工逐域复核苦不堪言。
+- **自锁根因**：平台本来就「发现即纳范围」（insert_assets 自动加精确子域行），
+  但发现这些主机需要的解析探测被 scope 拒在前面——不许探测就登记不了、
+  不登记就不许探测。
+- **修复①（同根域 DNS 发现切面）**：纯解析形命令（dig/nslookup/whois/host
+  单命令，复用快路径的严格形态白名单）且被查名字与任务范围中某条域名行同
+  eTLD+1（db.RootDomain/publicsuffix，多段后缀不会算错）⇒ 解析随已授权根域
+  放行，审计理由如实可回放（`pass(sibling_domain_dns(<基域>))`）。**触碰**
+  （curl/nmap 等）兄弟子域仍按越界拒绝——发现随根域放行，触碰必须有人工的
+  根域授权行。复合命令进不了解析形态判定，切面不放宽；资产库未装配/查询失败
+  一律 fail-closed。
+- **修复②（升级提示如实 + 一次沉淀指令）**：旧提示让 agent 「用 add_task_scope
+  走扩权」——但 root_domain/company 刻意不在 agent 扩权白名单里
+  （db/task_scope_expansion.go：整域授权=边界整体推翻，必须人工确认），agent
+  照做只会被拒，然后逐子域硬撞。静态文案改写为如实分面（解析已放行/触碰要
+  人工根域授权/agent 只能加精确行）；被拒目标与已授权域同根域时升级播报改为
+  动态生成，点名那条「一次沉淀」的人工授权：登记 `root_domain=<基域>` 一次，
+  全子域放行、不再逐域询问。
+- **边界不动**：root_domain/company 仍不在 agent 扩权白名单（v6 用户拍板「授权
+  边界变更由人工拍板」）；闸门五道检查顺序不变；合并闸三态不变（本次切面走
+  旧链 scopePassOverride 既有机制，gateDeps 方法集零变更）。
+- **操作沉淀（同日人工授权）**：task 9 登记人工行 `root_domain=lingguang.com`
+  （source=manual，理由引用用户 2026-11-24 裁决「除删除动作和行为静止外均可」），
+  原.www 精确行保留。
+- **测试**：TestScopeSiblingBase（同根域判定/多段后缀/跨任务隔离）、
+  TestDNSResolveOnly（解析形白名单 15 形态）、TestSiblingDNSBaseFailClosed、
+  TestSiblingDNSDiscoveryAllowedForResolve（真实路径：dig 兄弟子域 → approve
+  + 审计回放 + 凭证消费）、TestSiblingDNSTouchStillDenied（curl 兄弟子域照拒）、
+  TestOutOfScopeHintNamesRootDomainSettle / TestOutOfScopeHintFallbacks。
+
 ## [0.15.55] - 2026-11-23
 
 ### 完善（0.15.52-54 修复面的收尾补齐——无新语义，只补一致性与可观察性）

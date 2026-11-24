@@ -113,6 +113,13 @@ func (s *Server) onToolDenial(taskID, toolName, denialMessage string) {
 	summary := fmt.Sprintf("%s 被 %s 连续拒绝 %d 次（reason_code=%s），需人工处理",
 		toolName, "平台", denialEscalationThreshold, reasonCode)
 	hint := denialHintFor(reasonCode)
+	if reasonCode == "out_of_scope" {
+		// 0.15.56：out_of_scope 的提示按被拒目标动态生成——与已授权域同根域时
+		// 点名那条「一次沉淀」的根域授权；取不到同根域再回落静态文案。
+		if dyn := s.outOfScopeHint(numeric, denialMessage); dyn != "" {
+			hint = dyn
+		}
+	}
 	blockedReason := trunc(denialMessage, 300)
 	// v0.10.1 用户拍板「一条一条事件出来，不是合到一起」：升级与每个意图转
 	// blocked 各自独立成一条事件/播报，不再把意图清单拼进同一行摘要。
@@ -159,7 +166,10 @@ func suffixHint(hint string) string {
 func denialHintFor(reasonCode string) string {
 	switch reasonCode {
 	case "out_of_scope":
-		return "目标不在任务范围内——请用 add_task_scope/add_company_scope 走扩权请求，或调整任务范围后重跑；若本次是文件操作：相对路径会按解析后的绝对路径判定出界，请先 cd 到目标目录再操作，或直接使用绝对路径（方案 v9.2 §3.5-F6 hint 案）"
+		// 0.15.56 文案如实化：旧文案让 agent 「用 add_task_scope 走扩权」——但
+		// root_domain/company 刻意不在 agent 扩权白名单里（db/task_scope_expansion.go，
+		// 边界整体推翻必须人工确认），agent 照做只会被拒，然后逐个子域硬撞。
+		return "目标不在任务范围内。DNS 解析类探测（dig/nslookup/host/whois 单命令）对已授权根域的兄弟子域会自动放行；要触碰（HTTP/扫描/利用）范围外主机，需要操作者的授权行：agent 侧只能 add_task_scope 加精确子域/IP（预算内），root_domain/company 属人工授权——请在升级播报里向操作者点名目标根域，由操作者登记后重跑。若本次是文件操作：相对路径会按解析后的绝对路径判定出界，请先 cd 到目标目录再操作，或直接使用绝对路径（方案 v9.2 §3.5-F6 hint 案）"
 	case "destructive_action":
 		return "删除/破坏类动作被锁定基线硬拦且不可放行——请改用非破坏方式达成目的（例如查询代替删除）"
 	case "auditor_deny":
@@ -174,4 +184,33 @@ func denialHintFor(reasonCode string) string {
 		return "该类动作的本任务配额已用尽——收拢同类动作或请求人工扩额"
 	}
 	return ""
+}
+
+// deniedHostRe 从拒绝消息里抠被拒目标：`目标 "X" 不在本任务的授权范围内`
+// （gate.go 的 Note 文案）。
+var deniedHostRe = regexp.MustCompile(`目标 "([^"]+)"`)
+
+// deniedTargetHost 从拒绝消息提取被拒目标 host；取不到 ⇒ ""。
+func deniedTargetHost(msg string) string {
+	if m := deniedHostRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// outOfScopeHint 是 out_of_scope 的动态提示：被拒目标与任务范围中某条域名行
+// 同根域时，点名那条「一次沉淀」的人工授权——操作者登记 root_domain=<基域>
+// 一次，全子域放行、不再逐域询问。取不到同根域 / 资产库不可用 ⇒ 空串（调用
+// 方回落 denialHintFor 的静态文案）。任何数据库失败都回落，不改变升级动作本身。
+func (s *Server) outOfScopeHint(taskID int64, denialMessage string) string {
+	host := deniedTargetHost(denialMessage)
+	if host == "" || taskID <= 0 || s.m == nil || s.m.pg == nil {
+		return ""
+	}
+	base, err := s.m.pg.Assets().ScopeSiblingBase(taskID, host)
+	if err != nil || base == "" {
+		return ""
+	}
+	return fmt.Sprintf("被拒目标 %s 与已授权根域 %s 同域：DNS 解析类探测（dig/nslookup/host/whois 单命令）已自动放行，可直接枚举；要触碰（HTTP/扫描/利用）同级子域，请操作者做一次根域沉淀——登记 root_domain=%s（任务页范围登记或会话批准），一次授权后全子域放行、不再逐域询问。agent 可先 insert_assets 登记发现的主机（自动纳范围）后再探测",
+		host, base, base)
 }

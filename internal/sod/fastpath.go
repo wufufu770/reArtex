@@ -743,6 +743,35 @@ func hostFastPathTarget(fields []string) (string, bool) {
 	return dnsHint(name, server)
 }
 
+// dnsResolveOnly 报告 Bash 载荷是快路径白名单里的【纯解析】形（dig / nslookup /
+// whois / host）。形态判定全部复用 bashFastPathTarget 的严格白名单（复合、替换、
+// 重定向、未知旗本来就进不了快路径）——本函数只把「解析类」从「curl GET /
+// nmap」里摘出来。
+//
+// 为什么要有它：「同根域 DNS 发现」切面（chain.go siblingDNSBase）的形状前提。
+// 解析类查询不接触目标主机本体（应答方是权威 DNS / 注册局），是资产发现的最低
+// 侵入形态；curl / nmap 是真的在碰那台机器 —— 发现可以随已授权根域自动放行，
+// 触碰必须有人工的根域授权行。
+func dnsResolveOnly(toolName string, payload []byte) bool {
+	if toolName != "Bash" || len(payload) == 0 {
+		return false
+	}
+	cmd, ok := bashCommandField(payload)
+	if !ok || fastPathDenied(cmd) {
+		return false
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "dig", "nslookup", "whois", "host":
+		_, ok := bashFastPathTarget(cmd)
+		return ok
+	}
+	return false
+}
+
 // hasAnyPrefix 报告 s 是否以 prefixes 中任一为前缀。
 func hasAnyPrefix(s string, prefixes []string) bool {
 	for _, p := range prefixes {

@@ -722,6 +722,18 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		// 裁决，本地分析命令成批误拒（真实渗透首日实测）。前置条件见
 		// scopePassFileTarget：非快路径 + 载荷无出网能力 + 文件形目标。
 		scopePass = "local_file_target"
+	} else if base, ok := c.siblingDNSBase(call, normalized); ok {
+		// 「同根域 DNS 发现」切面（0.15.56）：纯解析形命令（dig/nslookup/whois/
+		// host 单命令）且被查名字与任务范围中某条域名行同 eTLD+1 ⇒ 发现随已
+		// 授权根域放行。为什么：范围行是精确子域时，worker 每碰一个兄弟子域就
+		// 越界一次（实测 task 9 ali-1124 深夜连拒风暴，每分钟一次升级）；而
+		// 平台本来就「发现即纳范围」（insert_assets 自动加精确行）——发现不许
+		// 探测、探测了才能登记，是自锁。基域命中即可放解析；【触碰】（HTTP/
+		// 扫描/利用）兄弟子域仍要人工的根域授权行（root_domain 走 AddManualScope，
+		// agent 白名单刻意不含 root_domain）。复合命令进不了解析形态判定
+		// （fastPathDenied 一票否决），故复合子段不走本切面。理由进审计
+		// （pass(sibling_domain_dns(<base>))），可回放。
+		scopePass = "sibling_domain_dns(" + base + ")"
 	}
 	out := c.evaluate(ctx, call, normalized, degradeOn, scopePass)
 	if mode == sodpolicy.MergedGateShadow {
@@ -1022,6 +1034,27 @@ func (c *Chain) hostLocalAction(taskID int64, tool string, payload []byte) bool 
 		return false
 	}
 	return true
+}
+
+// siblingDNSBase 是「同根域 DNS 发现」切面的链侧判定：纯解析形命令（复用快
+// 路径的严格形态白名单）+ 被查名字与任务有效范围中某条域名行同 eTLD+1 ⇒ 返回
+// 该基域。任一前提不成立（非解析形 / 目标线索缺失 / 资产库未装配 / 查询失败 /
+// 无同根行）⇒ false —— fail-closed，照旧走 scope 判定，切面绝不放宽失败形态。
+func (c *Chain) siblingDNSBase(call chainCall, normalized NormalizerResult) (string, bool) {
+	if normalized.StructuredIntent.TargetHint == "" {
+		return "", false
+	}
+	if !dnsResolveOnly(call.toolName, call.payload) {
+		return "", false
+	}
+	if c.deps.Assets == nil {
+		return "", false
+	}
+	base, err := c.deps.Assets.ScopeSiblingBase(call.taskID, normalized.StructuredIntent.TargetHint)
+	if err != nil || base == "" {
+		return "", false
+	}
+	return base, true
 }
 
 // deny 记一次拒绝并返回拒绝消息。

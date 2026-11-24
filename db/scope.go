@@ -170,6 +170,45 @@ func (s *AssetStore) ScopeHostInScope(taskID int64, host string) (bool, error) {
 	return len(inScope) > 0, nil
 }
 
+// ScopeSiblingBase 报告 host 与任务【有效范围】中某条域名行的同根域（eTLD+1）。
+//
+// 用途：「同根域 DNS 发现」切面（internal/sod 链侧）——被拒目标的解析类探测
+// 是否属于已授权域的资产发现。命中 ⇒ 返回该基域（如范围行 www.x.com、被查
+// a.x.com ⇒ "x.com"）；与任何范围行都不同根域 ⇒ ("", nil)（不是错误）；查询
+// 失败 ⇒ ("", err)（调用方按 fail-closed 处理，切面不放行）。
+//
+// 口径：与 scopeHostDirectHit 同一份 context_tasks（本任务 + 直接来源任务）；
+// 只看 root_domain / subdomain 两类行——ip/cidr/keyword 与域名没有同根关系。
+// eTLD+1 用 RootDomain（publicsuffix），多段后缀（co.uk / com.cn）不会算错。
+func (s *AssetStore) ScopeSiblingBase(taskID int64, host string) (string, error) {
+	hostBase, _ := RootDomain(normalizeScopeHost(host))
+	if hostBase == "" {
+		return "", nil
+	}
+	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`
+SELECT COALESCE(ts.domain,'')
+FROM task_scope ts
+JOIN context_tasks ctx ON ctx.task_id = ts.task_id
+WHERE ts.kind IN ('root_domain','subdomain')`, taskID)
+	if err != nil {
+		return "", fmt.Errorf("查询任务范围行失败: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return "", fmt.Errorf("读取任务范围行失败: %w", err)
+		}
+		if domain == "" {
+			continue
+		}
+		if rowBase, _ := RootDomain(domain); rowBase == hostBase {
+			return hostBase, nil
+		}
+	}
+	return "", rows.Err()
+}
+
 // ScopeDigestForTask 返回任务【有效范围】的稳定摘要。
 //
 // 用途：规整器缓存键的 scope 分量 ⇒ **范围一变，缓存必失效**。少了它，一个

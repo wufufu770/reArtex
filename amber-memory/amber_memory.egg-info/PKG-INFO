@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: amber-memory
+Version: 0.5.0
+Summary: Governed, tamper-evident external persistent memory store for AI agents
+Requires-Python: >=3.10
+Provides-Extra: server
+Requires-Dist: fastapi>=0.111.0; extra == "server"
+Requires-Dist: uvicorn[standard]>=0.30.0; extra == "server"
+Requires-Dist: pydantic>=2.7.0; extra == "server"
+Provides-Extra: fast
+Requires-Dist: cryptography>=42; extra == "fast"

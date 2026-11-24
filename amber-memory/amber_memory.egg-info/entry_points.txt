@@ -1,0 +1,3 @@
+[console_scripts]
+amber-mcp = amber.mcp_server:main
+amber-server = amber.server:main
