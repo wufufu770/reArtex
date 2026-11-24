@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.57] - 2026-11-24
+
+### 文档（BASE-00：实施基线与差异清单）
+
+- 新增 `docs/实施基线-v2.1差异清单.md`：对 `feature/biz-edge-modeling` @ `4196442`（0.15.56）做只读核对，把 v2.1 全量总方案 118 项 + TI/AUTO/CRSI 章节逐项标注 已实现/部分实现/未实现/不适用，全部结论带文件+符号证据。
+- 关键结论：仓库已先于方案落地单循环、loopguard、四审计 skill、偏锋探索/业务建模、execution profile、cve-mcp、amber/veto/peaksearch/sidequestion、IM 推送、DOCX/PDF/SARIF 报告等（H/I/K/L/F/B 类大半）；方案排序最高的 A 类安全修复 16 项中 A-01/02/03/05/06/09/10/12/15 明确未实现；TI/CRSI 统一层未建。
+- 登记需人工决策事项 5 条（A 类是否插队、算力 Difficulty 与用户难度术语分离、goal_met 语义与 task_conclude 治理线合并、rsi_guard 强制化时机、行号漂移以符号定位）。
+
 ## [0.15.56] - 2026-11-24
 
 ### 修复（out_of_scope 拒绝风暴：发现被自锁 + 升级提示把 agent 往死路上指）
