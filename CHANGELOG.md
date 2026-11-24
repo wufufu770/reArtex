@@ -5,6 +5,12 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.67] - 2026-11-24
+
+### 新增（TI-09：Knowledge Engine 与 SIM/CRSI 的边界）
+
+- `docs/知识引擎与SIM-CRSI-0.9-边界契约.md`（新增）：三系统×现状载体映射（KE=edge_methodologies+策略库+PeakSearch；BizModel=biz_* 五表双维度隔离；SIM/CRSI 本体不存在，eval/ 仅黄金基线前身）；§0.9 五条禁止事项逐条落位到现有确定性防线（rsi_guard Tier-0、fact_kind observed/inferred、TI-04 差异转假设门槛）；SIM/CRSI 接入的 4 条硬约束（数据最小化走受控引用、经验复用边界、事件口径、Tier-0 红线）。SIM/CRSI 本体实施显式标记为 §0.13 TI-6 阶段后续。
+
 ## [0.15.66] - 2026-11-24
 
 ### 新增（TI-08：统一任务工作台·前端信息架构审计与映射）
