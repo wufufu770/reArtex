@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.75] - 2026-11-24
+
+### 变更（A-08：审批防疲劳扩大到三档 ask 来源）
+
+- `intercept/intercept.go`：`AskBurstExceededFor`（三档统一口径，按 `decision_source` 分档计数、互不挤占）；`HandleAsk` 入口对 DB 规则/判官 ask 在落 pending 前检查（拒绝不产生新 pending 行、不进入等待分支，落注明防疲劳的 denied 观测行）；`decisionSourceOf` 与 `db.interceptSource` 同口径；`New` 启动日志打印阈值与覆盖三档。
+- `db/intercept.go`：`CountRecentInterceptAsksBySource`（按来源计数；原单来源函数保留，陈旧的「DB 规则不计入」设计注释按 A-08 决策更正）。
+- `guard/guard.go`：短路 ask 分支显式走三档口径的 shortcircuit 档。
+- `docs/SECURITY-HARDENING.md`：G-09 覆盖面更新为三档。
+- `intercept/askburst_sources_test.go`（新增）：三档独立计数 / 旧口径不变 / 入口拒绝不等待 / 工具隔离 / 来源推导同口径。
+- 测试：intercept 防疲劳面 23.2s + guard 回归 12.1s + db 拦截面 18.8s 全绿。
+
 ## [0.15.74] - 2026-11-24
 
 ### 变更（A-04：Audit #42 两项移植）
