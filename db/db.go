@@ -442,6 +442,11 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureTaskInterceptSchema(); err != nil {
 			return fmt.Errorf("apply task intercept schema: %w", err)
 		}
+		// A-10（0.15.76）：intercept_rules.tool_scope 列（按工具限定规则作用域）。
+		// 幂等 ALTER + GIN 索引，启动期补一次即可。
+		if err := schemaDB.EnsureInterceptToolScopeSchema(); err != nil {
+			return fmt.Errorf("apply intercept tool scope schema: %w", err)
+		}
 		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
 		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用
 		// 有 DDL 权限的连接建好：受限运行角色建不了表。

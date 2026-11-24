@@ -116,7 +116,7 @@ func TestAskBurstLegacySingleSourceUnchanged(t *testing.T) {
 // （防疲劳拒绝不无限等待）。
 func TestHandleAskDeniesRuleAskWhenBurstExceeded(t *testing.T) {
 	d, ic, ctx := setupBurstTest(t, "worker-rule", "update_custom_tool")
-	rule, err := d.CreateInterceptRule("burst-rule", "tool_input", "regex", `rm\s+-rf`, "ask", "高危命令需人工确认", 100, true, false, 0, "deny")
+	rule, err := d.CreateInterceptRule("burst-rule", "tool_input", "regex", `rm\s+-rf`, "ask", "高危命令需人工确认", 100, true, false, 0, "deny", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

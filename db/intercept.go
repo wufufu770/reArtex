@@ -9,6 +9,10 @@ import (
 )
 
 // InterceptRule is one row of intercept_rules.
+//
+// ToolScope（A-10，0.15.76）：非空 = 规则只对列出的工具生效；空 = 全局（存量
+// 语义不变）。条目支持组前缀约定 "前缀:*"。取值范围不校验——工具集随 MCP
+// 注册动态变化，scope 里留有暂未注册的工具名不算错误（匹配时对不上即跳过）。
 type InterceptRule struct {
 	ID             int64     `json:"id"`
 	Name           string    `json:"name"`
@@ -22,6 +26,7 @@ type InterceptRule struct {
 	TimeoutEnabled bool      `json:"timeout_enabled"`
 	TimeoutSeconds int       `json:"timeout_seconds"`
 	TimeoutAction  string    `json:"timeout_action"`
+	ToolScope      []string  `json:"tool_scope"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -42,15 +47,41 @@ type InterceptPending struct {
 	CreatedAt      time.Time       `json:"created_at"`
 }
 
-const interceptRuleCols = `id, name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, created_at, updated_at`
+// interceptRuleCols 的 tool_scope 列经 array_to_json 转 JSON 文本读出：pgx
+// stdlib 的 database/sql 层把 TEXT[] 当字符串给，直接 Scan 进 []string 不支持；
+// JSON 形态对含逗号/引号的工具名也安全（转义由 JSON 语义保证）。别名在
+// SELECT 与 RETURNING 两处都合法。
+const interceptRuleCols = `id, name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, array_to_json(tool_scope)::text AS tool_scope, created_at, updated_at`
 
 func scanInterceptRule(row interface{ Scan(...any) error }) (InterceptRule, error) {
 	var r InterceptRule
+	var scopeJSON []byte
 	err := row.Scan(&r.ID, &r.Name, &r.Enabled, &r.Priority,
 		&r.MatchTarget, &r.MatchType, &r.Pattern, &r.Action, &r.Message,
-		&r.TimeoutEnabled, &r.TimeoutSeconds, &r.TimeoutAction,
+		&r.TimeoutEnabled, &r.TimeoutSeconds, &r.TimeoutAction, &scopeJSON,
 		&r.CreatedAt, &r.UpdatedAt)
+	if err == nil && len(scopeJSON) > 0 {
+		if uerr := json.Unmarshal(scopeJSON, &r.ToolScope); uerr != nil {
+			return r, fmt.Errorf("解析 tool_scope 失败: %w", uerr)
+		}
+	}
 	return r, err
+}
+
+// normalizeToolScope 保证 tool_scope 非 nil（nil slice 会被驱动编码成 SQL NULL，
+// 违反 NOT NULL 约束）、去空串、去重。条目顺序保持原样（展示与测试的确定性）。
+func normalizeToolScope(scope []string) []string {
+	out := make([]string, 0, len(scope))
+	seen := make(map[string]bool, len(scope))
+	for _, s := range scope {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // ListInterceptRules returns all rules ordered by priority DESC then id.
@@ -72,25 +103,27 @@ func (d *DB) ListInterceptRules() ([]InterceptRule, error) {
 }
 
 // CreateInterceptRule inserts a new rule.
-func (d *DB) CreateInterceptRule(name, matchTarget, matchType, pattern, action, message string, priority int, enabled bool, timeoutEnabled bool, timeoutSeconds int, timeoutAction string) (InterceptRule, error) {
+// toolScope 非空 = 只对列出的工具生效（A-10）；nil/空 = 全局。
+func (d *DB) CreateInterceptRule(name, matchTarget, matchType, pattern, action, message string, priority int, enabled bool, timeoutEnabled bool, timeoutSeconds int, timeoutAction string, toolScope []string) (InterceptRule, error) {
 	row := d.QueryRow(`
-INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, tool_scope)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING `+interceptRuleCols,
-		name, enabled, priority, matchTarget, matchType, pattern, action, message, timeoutEnabled, timeoutSeconds, timeoutAction)
+		name, enabled, priority, matchTarget, matchType, pattern, action, message, timeoutEnabled, timeoutSeconds, timeoutAction, normalizeToolScope(toolScope))
 	return scanInterceptRule(row)
 }
 
 // UpdateInterceptRule replaces all editable fields of an existing rule.
-func (d *DB) UpdateInterceptRule(id int64, name, matchTarget, matchType, pattern, action, message string, priority int, enabled bool, timeoutEnabled bool, timeoutSeconds int, timeoutAction string) (InterceptRule, error) {
+// toolScope 非空 = 只对列出的工具生效（A-10）；nil/空 = 全局。
+func (d *DB) UpdateInterceptRule(id int64, name, matchTarget, matchType, pattern, action, message string, priority int, enabled bool, timeoutEnabled bool, timeoutSeconds int, timeoutAction string, toolScope []string) (InterceptRule, error) {
 	row := d.QueryRow(`
 UPDATE intercept_rules
    SET name=$2, enabled=$3, priority=$4, match_target=$5,
        match_type=$6, pattern=$7, action=$8, message=$9,
-       timeout_enabled=$10, timeout_seconds=$11, timeout_action=$12
+       timeout_enabled=$10, timeout_seconds=$11, timeout_action=$12, tool_scope=$13
 WHERE id=$1
 RETURNING `+interceptRuleCols,
-		id, name, enabled, priority, matchTarget, matchType, pattern, action, message, timeoutEnabled, timeoutSeconds, timeoutAction)
+		id, name, enabled, priority, matchTarget, matchType, pattern, action, message, timeoutEnabled, timeoutSeconds, timeoutAction, normalizeToolScope(toolScope))
 	return scanInterceptRule(row)
 }
 

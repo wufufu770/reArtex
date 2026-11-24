@@ -129,7 +129,7 @@ func (s *Server) interceptCreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeAskTimeout(&req)
-	rule, err := pg.CreateInterceptRule(req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction)
+	rule, err := pg.CreateInterceptRule(req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction, req.ToolScope)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -158,7 +158,7 @@ func (s *Server) interceptUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeAskTimeout(&req)
-	rule, err := pg.UpdateInterceptRule(id, req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction)
+	rule, err := pg.UpdateInterceptRule(id, req.Name, req.MatchTarget, req.MatchType, req.Pattern, req.Action, req.Message, req.Priority, req.Enabled, req.TimeoutEnabled, req.TimeoutSeconds, req.TimeoutAction, req.ToolScope)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -523,17 +523,18 @@ func (s *Server) interceptJudgeUsage(w http.ResponseWriter, r *http.Request) {
 // --- helpers ---
 
 type interceptRuleReq struct {
-	Name           string `json:"name"`
-	Enabled        bool   `json:"enabled"`
-	Priority       int    `json:"priority"`
-	MatchTarget    string `json:"match_target"`
-	MatchType      string `json:"match_type"`
-	Pattern        string `json:"pattern"`
-	Action         string `json:"action"`
-	Message        string `json:"message"`
-	TimeoutEnabled bool   `json:"timeout_enabled"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	TimeoutAction  string `json:"timeout_action"`
+	Name           string   `json:"name"`
+	Enabled        bool     `json:"enabled"`
+	Priority       int      `json:"priority"`
+	MatchTarget    string   `json:"match_target"`
+	MatchType      string   `json:"match_type"`
+	Pattern        string   `json:"pattern"`
+	Action         string   `json:"action"`
+	Message        string   `json:"message"`
+	TimeoutEnabled bool     `json:"timeout_enabled"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	TimeoutAction  string   `json:"timeout_action"`
+	ToolScope      []string `json:"tool_scope"` // A-10：空 = 全局；非空 = 仅对列出的工具生效
 }
 
 func validateInterceptRuleReq(req interceptRuleReq) error {

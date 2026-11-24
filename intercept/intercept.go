@@ -705,6 +705,29 @@ func decisionSourceOf(dec Decision) string {
 	return AskSourceShortCircuit
 }
 
+// toolInScope 判定工具名是否落在规则的 tool_scope 内（A-10）。
+//
+// 两种条目形态：精确工具名（"Bash"）与组前缀（"shell:*" 命中 "shell_exec"、
+// "mcp:*" 命中 "mcp__foo"——同前缀且后随分隔符 _ - .）。边界检查防误伤：
+// "shellx" 不命中 "shell:*"。
+func toolInScope(tool string, scope []string) bool {
+	for _, s := range scope {
+		if s == tool {
+			return true
+		}
+		if strings.HasSuffix(s, ":*") {
+			prefix := strings.TrimSuffix(s, ":*")
+			if len(tool) > len(prefix) && strings.HasPrefix(tool, prefix) {
+				switch tool[len(prefix)] {
+				case '_', '-', '.':
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // defaultAskTimeoutSecs 是 DB 规则 ask 类的默认审批超时。
 //
 // 种子规则照抄了 timeout_enabled=false，照抄即「审批无限等待」——审批挂着
@@ -756,7 +779,15 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	return Decision{}, false
 }
 
+// ruleMatches 先判 tool_scope（A-10），再做既有匹配。
+//
+// scope 判定在 MatchTarget 之前：scope 不含当前工具的规则【整体跳过】——不論
+// 匹配面是工具名还是入参，作用域之外的调用与这条规则无关。空 scope = 全局
+// （存量规则语义不变）。
 func ruleMatches(r compiledRule, toolName string, input []byte, normalized string) bool {
+	if len(r.ToolScope) > 0 && !toolInScope(toolName, r.ToolScope) {
+		return false
+	}
 	var subjects []string
 	switch r.MatchTarget {
 	case "tool_name":

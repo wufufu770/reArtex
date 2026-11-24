@@ -94,7 +94,7 @@ func evidenceInstallGlobalFixture(t *testing.T, pg *db.DB, patterns []string) (*
 	ids := map[int64]string{}
 	for _, p := range patterns {
 		name, message := evidencePatternOfTemplate(t, p)
-		rule, err := pg.CreateInterceptRule(name, "tool_input", "regex", p, "deny", message, 200, true, false, 60, "deny")
+		rule, err := pg.CreateInterceptRule(name, "tool_input", "regex", p, "deny", message, 200, true, false, 60, "deny", nil)
 		if err != nil {
 			t.Fatalf("安装全局规则夹具失败: %v", err)
 		}

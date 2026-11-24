@@ -300,4 +300,7 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	// 的 DDL 启动期已由迁移连接应用，运行期免建表。
 	tiSchemaReady.Store(pool, struct{}{})
 	experienceWeightSchemaReady.Store(pool, struct{}{})
+	// A-10（0.15.76）：intercept_rules.tool_scope 列（db/intercept_scope.go）——
+	// 启动期已应用，运行期免 DDL。
+	interceptScopeSchemaReady.Store(pool, struct{}{})
 }

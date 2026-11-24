@@ -152,7 +152,7 @@ func (s *Server) trustRuleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	rule, err := pg.CreateInterceptRule(name, "tool_input", "regex", pattern, "allow",
 		fmt.Sprintf("信任规则：%s（by %s，%s）", req.Tool, req.Operator, strings.TrimSpace(req.Reason)),
-		40, req.Confirm, false, 0, "")
+		40, req.Confirm, false, 0, "", nil)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
