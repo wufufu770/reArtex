@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -146,6 +147,9 @@ type Interceptor struct {
 	// 例：飞书桥把审批推到手机）。nil = 不广播。回调自行兜底：不得阻塞、不得
 	// panic（拦截主链不为增值面买单）。
 	askListener func(pendingID int64, convID int64, taskID, agentName, toolName string, input []byte, reason string)
+	// failOpenWarnOnce 保证 Audit #42 的「存量 allow 未确认」警告每个进程只打
+	// 一次（judgeConfig 在每次兜底裁决与 GET 时都会走这条路径）。
+	failOpenWarnOnce sync.Once
 }
 
 // SetAskListener 注册 ask pending 广播回调（0.15.19 外部通道；nil=卸载）。回调
@@ -176,7 +180,31 @@ var defaultEnabledTools = []string{
 // New creates an Interceptor backed by d. The rule cache is lazy-loaded on
 // first use.
 func New(d *db.DB) *Interceptor {
-	return &Interceptor{db: d, pending: newPendingManager()}
+	i := &Interceptor{db: d, pending: newPendingManager()}
+	i.migrateJudgeFailAction()
+	return i
+}
+
+// migrateJudgeFailAction 是 Audit #42 的启动期迁移检查：存量
+// llm_judge_fail_action=allow 在 operator 显式确认前运行时按 deny 执行（不改库内
+// 值），启动时记一条警告——是否保留 allow 由 operator 在「系统 → 命令拦截」页
+// 带 confirm_fail_open=true 显式确认。
+func (i *Interceptor) migrateJudgeFailAction() {
+	if i.db == nil {
+		return
+	}
+	stored, ok, _ := i.db.GetSetting(settingJudgeFailAction)
+	confirmed, _, _ := i.db.GetSetting(settingJudgeFailOpenConfirmed)
+	if _, unconfirmed := judgeFailActionEffective(stored, confirmed); ok && unconfirmed {
+		i.warnUnconfirmedFailOpen()
+	}
+}
+
+func (i *Interceptor) warnUnconfirmedFailOpen() {
+	i.failOpenWarnOnce.Do(func() {
+		log.Printf("[intercept] 警告：存量 llm_judge_fail_action=allow 未显式确认，按 Audit #42 运行时视为 deny；" +
+			"如确需判官失败放行，请在拦截设置页带 confirm_fail_open=true 显式确认")
+	})
 }
 
 // Invalidate clears the in-memory rule cache and the enabled-tools cache.
@@ -335,6 +363,10 @@ const (
 	settingJudgeFailAction       = "llm_judge_fail_action"
 	settingJudgeAskTimeoutSecs   = "llm_judge_ask_timeout_seconds"
 	settingJudgeAskTimeoutAction = "llm_judge_ask_timeout_action"
+	// settingJudgeFailOpenConfirmed 是 Audit #42 的放行确认标记：llm_judge_fail_action
+	// 的存量 allow 值在 operator 显式确认（confirm_fail_open=true 写入一次）之前，
+	// 运行时一律按 deny 执行——存量配置不能悄悄把判官失败默认带回 allow。
+	settingJudgeFailOpenConfirmed = "llm_judge_fail_open_confirmed"
 )
 
 // Judge default values.
@@ -351,14 +383,40 @@ const (
 
 // JudgeConfig is the resolved LLM-fallback-judge configuration. Prompt is always
 // non-empty (falls back to DefaultJudgePrompt).
+//
+// Audit #42（0.15.74）：
+//   - ConfirmFailOpen 是【写入口径】：把 fail_action 写成 allow 必须显式带
+//     confirm_fail_open=true，否则拒绝写入；
+//   - FailActionEffective / FailOpenUnconfirmed 是【读出口径】：存量 allow 在未
+//     确认前运行时按 deny 执行，GET 返回生效值与未确认标记，UI 据此提示。
 type JudgeConfig struct {
-	Enabled           bool   `json:"enabled"`
-	ProfileID         int64  `json:"profile_id"` // 0 = follow active/default
-	Prompt            string `json:"prompt"`
-	TimeoutSeconds    int    `json:"timeout_seconds"`
-	FailAction        string `json:"fail_action"` // allow|ask|deny
-	AskTimeoutSeconds int    `json:"ask_timeout_seconds"`
-	AskTimeoutAction  string `json:"ask_timeout_action"` // allow|deny
+	Enabled             bool   `json:"enabled"`
+	ProfileID           int64  `json:"profile_id"` // 0 = follow active/default
+	Prompt              string `json:"prompt"`
+	TimeoutSeconds      int    `json:"timeout_seconds"`
+	FailAction          string `json:"fail_action"`                 // allow|ask|deny（运行时生效值）
+	FailActionEffective string `json:"fail_action_effective"`       // 同 FailAction；显式给出便于 UI 区分存量与生效
+	FailOpenUnconfirmed bool   `json:"fail_open_unconfirmed"`       // 存量 allow 未确认 → 运行时按 deny
+	ConfirmFailOpen     bool   `json:"confirm_fail_open,omitempty"` // 仅写入：显式确认放行默认
+	AskTimeoutSeconds   int    `json:"ask_timeout_seconds"`
+	AskTimeoutAction    string `json:"ask_timeout_action"` // allow|deny
+}
+
+// ErrFailOpenConfirmRequired 是「把 fail_action 写成 allow 但没带显式确认」的
+// 错误。API 层据此返回 400（而不是当 500 处理）。
+var ErrFailOpenConfirmRequired = errors.New("fail_action=allow 需显式确认：请求需带 confirm_fail_open=true（Audit #42：存量配置不得悄悄恢复放行默认）")
+
+// judgeFailActionEffective 把存量 fail_action 值换算成运行时生效值。
+//
+// Audit #42 口径：存量（或绕过 API 直接改库）的 allow 在确认标记缺失时按 deny
+// 执行；deny/ask 不受影响；缺失或非法值回落默认（defaultJudgeFailAction=deny）。
+// 抽成纯函数是为了能在没有数据库的环境里确定性地测这条锁死逻辑。
+func judgeFailActionEffective(stored, confirmed string) (effective string, unconfirmed bool) {
+	raw := judgeFailAction(stored)
+	if raw == "allow" && strings.TrimSpace(confirmed) != "1" {
+		return defaultJudgeFailAction, true
+	}
+	return raw, false
 }
 
 // judgeFailAction 解析 llm_judge_fail_action：缺失或非法值回落到
@@ -379,13 +437,20 @@ func judgeFailAction(stored string) string {
 // follows dwarfs a few KV reads, and freshness avoids a cache-invalidation path.
 func (i *Interceptor) judgeConfig() JudgeConfig {
 	failStored, _, _ := i.db.GetSetting(settingJudgeFailAction)
+	confirmed, _, _ := i.db.GetSetting(settingJudgeFailOpenConfirmed)
+	effective, unconfirmed := judgeFailActionEffective(failStored, confirmed)
+	if unconfirmed {
+		i.warnUnconfirmedFailOpen()
+	}
 	c := JudgeConfig{
-		Enabled:           i.db.GetBool(settingJudgeEnabled, false),
-		ProfileID:         int64(i.getSettingInt(settingJudgeProfileID, 0)),
-		TimeoutSeconds:    i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
-		FailAction:        judgeFailAction(failStored),
-		AskTimeoutSeconds: i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
-		AskTimeoutAction:  i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
+		Enabled:             i.db.GetBool(settingJudgeEnabled, false),
+		ProfileID:           int64(i.getSettingInt(settingJudgeProfileID, 0)),
+		TimeoutSeconds:      i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
+		FailAction:          effective,
+		FailActionEffective: effective,
+		FailOpenUnconfirmed: unconfirmed,
+		AskTimeoutSeconds:   i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
+		AskTimeoutAction:    i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
 	}
 	// Prompt: stored value if non-empty, else the built-in template.
 	if v, ok, _ := i.db.GetSetting(settingJudgePrompt); ok && strings.TrimSpace(v) != "" {
@@ -434,7 +499,22 @@ func (i *Interceptor) GetJudgeConfig() JudgeConfig { return i.judgeConfig() }
 
 // SetJudgeConfig persists the judge configuration. An empty Prompt clears the
 // override (the built-in template is used again).
+//
+// Audit #42（0.15.74）：把 fail_action 写成 allow 必须显式带 ConfirmFailOpen，
+// 否则拒绝写入；确认写入时落确认标记，离开 allow 时清掉标记。
 func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
+	if c.FailAction == "allow" && !c.ConfirmFailOpen {
+		return ErrFailOpenConfirmRequired
+	}
+	if c.FailAction == "allow" {
+		if err := i.db.SetSetting(settingJudgeFailOpenConfirmed, "1"); err != nil {
+			return err
+		}
+	} else if _, ok, _ := i.db.GetSetting(settingJudgeFailOpenConfirmed); ok {
+		if err := i.db.SetSetting(settingJudgeFailOpenConfirmed, ""); err != nil {
+			return err
+		}
+	}
 	if err := i.db.SetBool(settingJudgeEnabled, c.Enabled); err != nil {
 		return err
 	}
@@ -549,7 +629,7 @@ func judgeActionLabel(action string) string {
 
 // 审批防疲劳（可用性参数，故可热改；安全边界不在这里）。
 const (
-	settingAskBurstThreshold = "intercept_ask_burst_threshold"
+	settingAskBurstThreshold  = "intercept_ask_burst_threshold"
 	settingAskBurstWindowSecs = "intercept_ask_burst_window_seconds"
 )
 
@@ -674,6 +754,10 @@ func ruleMatches(r compiledRule, toolName string, input []byte, normalized strin
 // 同样需要在解码后的文本上匹配，一层转义形态不再漏）。norma 流式路径原样透传入参、
 // 不解码不重序列化，故 {"command":"\u0072m -rf /tmp"} 的字节里不存在字符
 // 'r'，词表正则永不命中。返回空串表示非 JSON 对象，调用方应只匹配 raw。
+//
+// Audit #42（0.15.74）：收集面从 9 个已知顶层字段改为全量递归 walk（decode.go）——
+// 未知键名下的字符串、键名本身、字符串内再嵌的 JSON 文本全部进匹配面；解码失败
+// 回落原文匹配，存量规则语义只加宽不收窄。
 func NormalizeToolInput(input []byte) string {
 	if len(input) == 0 || input[0] != '{' {
 		return ""
@@ -682,28 +766,9 @@ func NormalizeToolInput(input []byte) string {
 	if err := json.Unmarshal(input, &m); err != nil {
 		return ""
 	}
-	fields := []string{"command", "text", "pattern", "file_path", "path", "query", "description", "content", "args"}
-	var b strings.Builder
-	for _, k := range fields {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		switch v.(type) {
-		case string:
-			if t, ok := v.(string); ok {
-				b.WriteString(decodeEscapedString(t))
-				b.WriteByte('\n')
-			}
-		default:
-			enc, err := json.Marshal(decodeValue(v))
-			if err == nil {
-				b.Write(enc)
-				b.WriteByte('\n')
-			}
-		}
-	}
-	return b.String()
+	var strs []string
+	decodeStringsRecursive(m, 0, &strs)
+	return strings.Join(strs, "\n")
 }
 
 // maxDecodeLayers 是字符串递归解码的层数上限。真实 payload 的嵌套转义两三层

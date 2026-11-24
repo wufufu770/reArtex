@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/llm"
 )
@@ -492,6 +492,11 @@ func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.m.interceptor.SetJudgeConfig(req); err != nil {
+		// Audit #42：未带显式确认写 allow 是客户端错误（400），不是服务端错误。
+		if errors.Is(err, intercept.ErrFailOpenConfirmRequired) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}

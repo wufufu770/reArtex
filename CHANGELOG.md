@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.74] - 2026-11-24
+
+### 变更（A-04：Audit #42 两项移植）
+
+- `intercept/decode.go`（新增）：入参匹配面全量递归解码——全部字符串值（含未知键嵌套、键名、字符串内再嵌 JSON 文本的双重编码）进规范化文本；结构深度上限 8，超限子树停止展开（raw 原文始终兜底匹配，解码只加宽不收窄；标量沿用历史 re-marshal 口径避免存量规则匹配面收窄）。
+- `intercept/intercept.go`：`NormalizeToolInput` 从 9 个已知顶层字段改为全量递归 walk；判官失败默认锁死（Audit #42 第二条）——`judgeFailActionEffective` 把存量 `llm_judge_fail_action=allow` 在确认标记缺失时运行时按 deny 执行（不自动改库），`New` 启动期迁移检查记警告（进程内一次）；`SetJudgeConfig` 写 allow 需显式 `confirm_fail_open=true`（`ErrFailOpenConfirmRequired`），确认落标记、离开 allow 清标记；`JudgeConfig` 增 `fail_action_effective`/`fail_open_unconfirmed`/`confirm_fail_open` 三个字段（读出/写入口径）。
+- `server/intercept.go`：未确认写 allow 按 400 返回（`errors.Is(ErrFailOpenConfirmRequired)`）。
+- `intercept/audit42_test.go`（新增）：转义绕过矩阵（`\u0063url`/未知键嵌套/键名/双重编码/非法 JSON 回落/深度帽）+ 判官三态（出错/超时/不可解析 × FailAction 默认）+ 存量 allow 运行时翻转 + 确认门。与 XIB-Artex CHANGELOG Audit #42 两条逐条对齐。
+- 测试：`go test ./intercept/` 全包 22.2s 通过；`go test ./guard/` 回归 12.4s 通过。
+
 ## [0.15.73] - 2026-11-24
 
 ### 新增（TI-15：本次优化的完成定义·九条件验收清单）
