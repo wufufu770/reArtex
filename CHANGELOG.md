@@ -5,6 +5,13 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.59] - 2026-11-24
+
+### 文档（TI-01：Task Intelligence 割裂审计与四条件映射）
+
+- 新增 `docs/任务智能层-0.1-割裂审计与四条件映射.md`：对 0.1 节四个孤岛逐条核对现状（偏锋探索任务化但无事件回写、biz_layer_diffs 与假设/证据无引用关联、全库无 correlation/causation/execution_id 与 scope 版本快照、前端 10 张独立功能卡）；四条件（同一身份/同一上下文/同一结果契约/同一反馈闭环）逐条映射到归属任务卡（TI-02/03/04 本轮、TI-05/06/07/08/11 后续）。
+- 关联 ID 审计结论：`correlation_id`/`causation_id`/`execution_id` 全库零落库，任务身份现仅 task_id + chat 群绑 RunInfo（`server/conversations.go:570`）。
+
 ## [0.15.58] - 2026-11-24
 
 ### 文档（BASE-01：全局安全不变量清单）
