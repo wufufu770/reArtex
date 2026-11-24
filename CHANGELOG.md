@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.61] - 2026-11-24
+
+### 新增（TI-03：统一能力注册表）
+
+- `internal/taskintelligence/capability.go`：`CapabilityDescriptor`（§0.3 字段口径：ID/Version/Input-OutputSchema/RequiredContext/RequiredScopes/RiskClass/CostClass/DefaultPolicy）+ 并发安全 `Registry`（Register 拒重/Lookup/ListEnabled/Disable/Enable/Replace 显式换版）。
+- 五个标准能力按方案表格一字注册：`testing.standard` / `exploration.edge` / `modeling.business` / `validation.deep` / `reporting.result`，各自映射仓库现有工具族（BoundTools 登记映射，非调用接线）。
+- 注册项校验：ID 点分小写格式、version 必填、风险/成本档枚举、RequiredContext 必须引用 `TaskContextSnapshot` 真实分节名——登记项引用不存在的上下文面直接拒绝。
+- 测试：`capability_test.go` 7 用例（标准能力齐全性/登记查询/重复拒绝+显式换版/5 种非法登记项/开关往返）全绿；接线与 Specialist 委派按卡边界归 TI-11/TI-07。
+
 ## [0.15.60] - 2026-11-24
 
 ### 新增（TI-02：Task Intelligence 上下文快照层）
