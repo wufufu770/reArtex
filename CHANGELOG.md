@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.60] - 2026-11-24
+
+### 新增（TI-02：Task Intelligence 上下文快照层）
+
+- 新增 `internal/taskintelligence` 包：`TaskContextSnapshot` 只读聚合视图（契约号 `ti.context.v1`）+ 8 个窄 Provider 接口（scope/assets/exploration/biz_model/facts/evidence/findings/history）+ `SnapshotBuilder.Build`。
+- 边界即契约：包注释明示 TI 层只读聚合与建议——不执行工具、不替代 scope/SoD/审批/审计、不拥有第二套状态机、不让 LLM 裁决安全策略（对齐 `docs/安全不变量清单.md` INV-10）。
+- 失败语义：单分节失败不拖垮整份快照，未接线分节显式标记 Unavailable（不伪造空数据）；`taskID<=0` 与已取消 ctx 拒绝构建。
+- 测试：`context_test.go` 5 用例（主路径/单分节失败隔离/nil provider 显式可见/非法输入/cancel 传播）全绿。
+- server 侧 Provider 接线与 API 暴露按任务卡边界**明确归 TI-11**，本版不含。
+
 ## [0.15.59] - 2026-11-24
 
 ### 文档（TI-01：Task Intelligence 割裂审计与四条件映射）
