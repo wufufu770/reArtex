@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.65] - 2026-11-24
+
+### 新增（TI-07：AUTO 与 Single-Agent 的统一调度规则）
+
+- `internal/taskintelligence/scheduling.go`（新增）：§0.7 调度规则的**确定性决策层**（纯函数，零 IO/零工具/零 LLM）——`AutoDecision`（方案字段一字对应）+ `DecideAuto` 按快照八分节信号产出建议：目标规模→难度（easy/expert 双硬信号）、业务缺口→建议补建模（复用 TI-04 `EdgeNeedsBusinessModel`）、证据覆盖比<0.2→建议 exploration.edge、假设积压>10→建议 validation.deep+深度抬升、发现清零→建议 reporting.result、历史执行量>100→预算收紧只降不升；`NormalizeAutoDecision` 收口（能力×原因同步排序保持一一对应，剔除未注册/停用能力并留尾注）；`ClampDepthMax` 风险上调时的**唯一下调入口**（刻意没有上调函数）。
+- 安全结构化：原则 5「AUTO 不能修改授权范围/审批/策略」落在结构体上——`AutoDecision` 无 Scope/Approval/Policy 字段，测试用反射字段白名单守卫设计回退。术语边界：本层 Difficulty 是调度目标难度，非 execution_profile 算力档，两档映射归接线任务（TI-14 D-13 登记项）。
+- 测试：`scheduling_test.go` 6 用例（信号映射七态/降级三态/注册表过滤/只降不升/字段白名单）全绿含 -race；修复 Normalize 排序拆散能力-原因配对的真实 bug。
+
 ## [0.15.64] - 2026-11-24
 
 ### 新增（TI-06：统一事件流与反馈闭环）
