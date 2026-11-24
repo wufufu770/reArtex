@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.70] - 2026-11-24
+
+### 新增（TI-12：安全与数据隔离·事件 payload 消毒 + 不变量扩展）
+
+- `db/sanitize.go`（新增）：§0.12「事件 outbox 不得写入凭据/Cookie/Authorization/原始敏感正文」的**确定性消毒门**——凭据类键清单（`EventCredentialKeys`，白名单非启发式）叶子值改写 `[redacted:use evidence_ref]` 占位符（键名保留、改写路径可观测）；payload 超 64 KiB 或非 JSON 整体拒绝（大内容走 evidence_refs 受控引用）。执法点选在**存储单点** `db.EnqueueEvent`——生产方无法绕过，且避开 events↔db import 环。
+- `db/events.go`：EnqueueEvent 接入消毒门（空 payload 默认 {} 后消毒）。
+- `docs/安全不变量清单.md`：追加 INV-12（事件 payload 消毒，含执法点/回归入口/键清单评审边界）与 INV-13（能力执行 scope 水位取证面——at_start/end 双水位 + ScopeDrifted；运行时拦截点随 TI-11 第二阶段接入，如实标注当前只覆盖取证）。
+- 测试：`db/sanitize_test.go` 4 用例（凭据改写三处+标记块/干净直通不加壳+数组嵌套命中/非 JSON+超限拒绝/EnqueueEvent 落库单点强制）全绿。
+
 ## [0.15.69] - 2026-11-24
 
 ### 新增（TI-11：API 与工具契约·第一阶段 task-scoped API）

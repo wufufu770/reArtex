@@ -67,6 +67,14 @@ func (d *DB) EnqueueEvent(ev *DomainEventRecord) (id int64, deduped bool, err er
 	if len(ev.Payload) == 0 {
 		ev.Payload = json.RawMessage("{}")
 	}
+	// §0.12 消毒门（TI-12，0.15.70）：存储单点强制，生产方无法绕过。
+	// 凭据类键值改写占位符；超限/非 JSON 整体拒绝。
+	clean, redacted, err := SanitizeEventPayload(ev.Payload)
+	if err != nil {
+		return 0, false, fmt.Errorf("事件 %s 消毒拒绝: %w", ev.EventID, err)
+	}
+	ev.Payload = clean
+	_ = redacted // 键路径已记录进 payload 的 _sanitized 标记块（可观测面）
 	if ev.SchemaVersion == 0 {
 		ev.SchemaVersion = 1
 	}
