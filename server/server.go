@@ -1336,6 +1336,9 @@ func (s *Server) Handler() http.Handler {
 
 	// 业务建模 × 偏锋探索（合并施工）：业务图/差异/人工裁决/edge 覆盖度路由。
 	s.bizRoutes(mux)
+	// Task Intelligence task-scoped API（§0.11 第一阶段，0.15.69 批次 TI-11）：
+	// intelligence/hypotheses/model-deltas/capability-runs/timeline 六端点。
+	s.tiRoutes(mux)
 	// 小程序渗透（0.12.0）：token 池 CRUD + 解包产物浏览。
 	s.mpRoutes(mux)
 	// 意图冲突仲裁（0.14.1）：冲突清单 + 人工重开。

@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.69] - 2026-11-24
+
+### 新增（TI-11：API 与工具契约·第一阶段 task-scoped API）
+
+- `server/ti_api.go`（新增）：§0.11 按卡自带的分阶段口径落地第一阶段——六个 task-scoped 端点：`GET /api/tasks/{id}/intelligence`（ti.context.v1 契约形状，Provider 未接线时分节显式 unavailable + `providers_wired=false` 如实声明，不伪造空态）、`GET/POST /api/tasks/{id}/hypotheses`（写操作服务器端重载：任务存在性校验→服务器算指纹→服务器取 scope 水位，请求体不携带不信任任何 scope 字段；指纹命中返回既有 id）、`GET /api/tasks/{id}/model-deltas`（复用 biz_layer_diffs 任务维度查询，不另建库）、`GET /api/tasks/{id}/capability-runs`、`GET /api/tasks/{id}/timeline`（假设/能力执行/证据/事实四类对象按时间合并，封顶 200）。
+- `server/server.go`：tiRoutes 注册（bizRoutes 之后一行）。
+- 契约边界（文件头成文）：task identity 只来自路径；`capability_run` 等执行类端点与 9 个 Agent 工具（task_context_get/capability_list/…）**本阶段不开放**——执行必须走统一工具安全管道，接线归 TI-11 第二阶段，宁缺毋假；删除类动作不进本 API。
+- 测试：`server/ti_api_test.go` 2 用例（六端点往返+去重语义+时间线读回 / 404 先于 400 的重载校验顺序+缺 statement 400）全绿。
+
 ## [0.15.68] - 2026-11-24
 
 ### 新增（TI-10：建议的 Go 模块边界·现状映射）
