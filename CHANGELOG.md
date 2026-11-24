@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.62] - 2026-11-24
+
+### 新增（TI-04：偏锋探索与业务建模双向协作控制面）
+
+- `internal/taskintelligence/collaboration.go`：§0.4 双向协作的**确定性规则层**（纯函数+进程内台账，零 IO、零工具执行）：
+  - 偏锋→建模：`EdgeNeedsBusinessModel` 按快照判新鲜度/覆盖（无模型、分节失败、超 24h 过期、未收敛差异>20 → 建议补建模，宁补勿猜）；
+  - 建模→偏锋：`DeltaShouldBecomeHypothesis` 仅范围内且 severity≥high 的 `biz_layer_diffs` 差异建议转**待验证假设**（范围外直接拒绝，对齐 INV-1；建议 ≠ 漏洞结论）；
+  - 去重：`HypothesisFingerprint` 规范化指纹（任务隔离，空白/标点无关）；
+  - 防循环：`CollabLedger.AllowAutoFeedback` 以 causation×目标能力为幂等键，`MaxAutoFeedbackPerKey=2` 硬上限，拒绝不占预算，新 causation 重置；`CollabRecord` 承载触发原因/耗时/Token/结果状态（落库归 TI-05）。
+- 测试：`collaboration_test.go` 8 用例（新鲜度四态/差异转假设四态/指纹稳定性/循环上限/新预算/环形容量/-race 并发冒烟）全绿。
+- 验证链：`gofmt`/`go vet` 干净；`go test -race ./internal/taskintelligence/` 通过；安全六包回归（guard/intercept/sod/sodpolicy/pathguard/netguard）全绿。事件闭环归 TI-06，server 接线归 TI-11。
+
 ## [0.15.61] - 2026-11-24
 
 ### 新增（TI-03：统一能力注册表）
