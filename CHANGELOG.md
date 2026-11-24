@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.76] - 2026-11-24
+
+### 新增（A-10 后端：intercept 规则加 tool_scope）
+
+- `db/schema_intercept_scope.sql`（新增）+ `db/intercept_scope.go`（新增）：`intercept_rules.tool_scope TEXT[] NOT NULL DEFAULT '{}'`（空数组=全局，存量规则语义不变）+ GIN 索引；幂等 DDL 走启动迁移（`EnsureInterceptToolScopeSchema`，迁移块 + `markRuntimeSchemasReady` 就位标记，v0.9.16 模式）。
+- `db/intercept.go`：`InterceptRule.ToolScope` 字段；`CreateInterceptRule`/`UpdateInterceptRule` 增 `toolScope` 参数（`normalizeToolScope` 归一：非 nil/去空串/去重）；TEXT[] 经 `array_to_json` 读出（pgx stdlib 兼容）。
+- `intercept/intercept.go`：`ruleMatches` 先判 scope（非空且工具不在 scope 内整体跳过）；`toolInScope` 支持精确名与组前缀 `前缀:*`（同前缀且后随 `_ - .` 分隔符，防 `shellx` 误命中）。
+- `server/intercept.go`：`interceptRuleReq.ToolScope` 透传 CRUD；`server/trust_rules.go`、`server/task_scope_rules_test.go` 调用点补参数。
+- `intercept/toolscope_test.go`（新增）：scope 收窄不误伤 / 空 scope 全局 / 组前缀边界 / db 往返与归一 / 端到端 Match / scope 含未注册工具名不报错。
+- 测试：intercept 31.9s + db 全包 399s + guard 14.4s + server（Intercept/Trust/TaskScope/Evidence 面）21.4s 全绿。前端编辑器（tool_scope 多选）为下一小版本 0.15.77。
+
 ## [0.15.75] - 2026-11-24
 
 ### 变更（A-08：审批防疲劳扩大到三档 ask 来源）
