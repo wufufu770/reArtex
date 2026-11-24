@@ -5,6 +5,12 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.68] - 2026-11-24
+
+### 新增（TI-10：建议的 Go 模块边界·现状映射）
+
+- `docs/Go模块边界-0.10-现状映射.md`（新增）：§0.10 建议树逐行落位表（context/capability/events/db 四处一致；envelope 语义拆 collaboration+domain；coordinator/adapter 标记接线期再建）；边界纪律成文化（依赖方向 events→db、SQL 全留 db 包、taskintelligence 零 db 依赖、不预建空目录、Tier-0 不涉）。不建 domain/、exploration/、businessmodel/ 空包，不迁移现有包。
+
 ## [0.15.67] - 2026-11-24
 
 ### 新增（TI-09：Knowledge Engine 与 SIM/CRSI 的边界）
