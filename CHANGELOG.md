@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.63] - 2026-11-24
+
+### 新增（TI-05：统一领域对象与数据关系）
+
+- `db/schema_task_intelligence.sql`（新增，幂等）：§0.5 四类缺失领域对象——`hypotheses`（(task_id,fingerprint) 唯一去重=跨能力合并的库层兑现）/`facts`（observed/inferred 分kind，无来源不算事实）/`evidence_refs`（只存受控引用+hash，正文留 traffic）/`capability_executions`（execution_id 回指锚点+idempotency_key 幂等+scope_version_at_start/end 取证面）；另按 §0.13 阶段 TI-1「统一身份与引用」给 `edge_runs`/`biz_layer_diffs` 补 correlation_id/causation_id/capability_id/scope_version 列与索引（全加法，可回滚=DROP）。ModelDelta 不另建表（biz_layer_diffs 已是事实源），Finding 复用 findings 表（不建平行漏洞实体）。
+- `db/task_intelligence.go`（新增）：EnsureTaskIntelligenceSchema（启动期接入 db.go 迁移块+role.go 运行期免建表双登记）+ 访问层——ScopeVersionForTask 范围水位（task_scope MAX(id)，任何范围插入抬升）、InsertHypothesis（指纹冲突返回既有行 deduped=true）、状态白名单推进、InsertFact/InsertEvidenceRef 必填守卫、StartCapabilityExecution（幂等键命中复用既有执行）/CompleteCapabilityExecution（终态白名单）/三个 List。
+- `internal/taskintelligence/domain.go`（新增）：§0.5 领域契约与确定性规则——Hypothesis/Fact/EvidenceRef/CapabilityExecution 契约+校验、假设状态机（proposed→validating→validated/refuted/dropped，禁止跳步、终态不可离开）、ScopeDrifted 水位漂移判定、`CollabRecordToExecution` 桥（TI-04 台账 → §0.5 执行对象）。方案建议的 domain/ 目录不单独建包（落位理由见文件头）。
+- 接线边界：本层只有 schema+访问+契约，无 server/db 生产调用方——Provider 接线与 API 归 TI-11，事件闭环归 TI-06。
+- 测试：`db/task_intelligence_test.go` 3 用例（四对象往返/守卫路径去重与拒绝/scope 水位抬升）全绿；`domain_test.go` 6 用例（契约校验/状态机/漂移/台账桥）全绿；全 db 包套件 382s 全绿。
+
 ## [0.15.62] - 2026-11-24
 
 ### 新增（TI-04：偏锋探索与业务建模双向协作控制面）

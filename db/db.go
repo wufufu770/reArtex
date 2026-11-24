@@ -480,6 +480,14 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureEdgeSchema(); err != nil {
 			return fmt.Errorf("apply edge schema: %w", err)
 		}
+		// Task Intelligence 统一领域对象的 DDL：hypotheses / facts /
+		// evidence_refs / capability_executions 四表 + edge_runs、
+		// biz_layer_diffs 的统一身份引用列（db/schema_task_intelligence.sql，
+		// 0.15.63 批次 TI-05）。启动期建好的理由同上各层：受限运行角色建不了
+		// 表，懒执行会在 TI 层第一次写对象时报 42P01。
+		if err := schemaDB.EnsureTaskIntelligenceSchema(); err != nil {
+			return fmt.Errorf("apply task intelligence schema: %w", err)
+		}
 		// 小程序渗透的 DDL：miniprogram_tokens 一表（db/schema_miniprogram.sql）。
 		// 同上——token 池的表要在启动期建好，受限运行角色建不了表。
 		if err := schemaDB.EnsureMiniprogramSchema(); err != nil {

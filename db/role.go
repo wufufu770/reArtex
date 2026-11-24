@@ -296,5 +296,8 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	loopTrackSchemaReady.Store(pool, struct{}{})
 	// 报告中心（db/reports.go）：同上，启动期由迁移连接应用，运行期免建表。
 	reportsSchemaReady.Store(pool, struct{}{})
+	// Task Intelligence 统一领域对象（db/task_intelligence.go）：同上——TI 层
+	// 的 DDL 启动期已由迁移连接应用，运行期免建表。
+	tiSchemaReady.Store(pool, struct{}{})
 	experienceWeightSchemaReady.Store(pool, struct{}{})
 }
