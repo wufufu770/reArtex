@@ -74,7 +74,9 @@ func TestMgmtAPI(t *testing.T) {
 	// mcp create → visible to planner → resource-side sees planner → delete clears it
 	// Remove any leftover from prior run to keep the test idempotent.
 	m.pg.Exec(`DELETE FROM mcp_servers WHERE name = 't-itest'`)
-	code, out = do("POST", "/api/mcp", map[string]any{"name": "t-itest", "transport": "stdio", "command": "x", "enabled": true})
+	// A-07（0.15.81）起登记接口按真实路径校验 stdio 命令，测试命令必须可解析
+	//（本用例只验登记→可见性→删除的管线，命令从不执行）。
+	code, out = do("POST", "/api/mcp", map[string]any{"name": "t-itest", "transport": "stdio", "command": "/bin/echo", "enabled": true})
 	if code != 200 {
 		t.Fatalf("create mcp: %d", code)
 	}
