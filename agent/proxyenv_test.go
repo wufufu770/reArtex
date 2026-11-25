@@ -110,3 +110,83 @@ func TestProxyEnvKeepsSocks5ProxyIntact(t *testing.T) {
 		t.Fatalf("socks5 代理地址被改动了: %s", raw)
 	}
 }
+
+// TestValidateProxyEnvAcceptsWellFormedEnv pins the happy path: proxyEnv 自己
+// 装配的 env 必须原样通过校验——装配与校验互为表里，校验失败即装配回归。
+func TestValidateProxyEnvAcceptsWellFormedEnv(t *testing.T) {
+	if err := validateProxyEnv(nil, "", 0); err != nil {
+		t.Fatalf("直连模式（无代理）无事可查，不应报错: %v", err)
+	}
+	env := proxyEnv("http://127.0.0.1:8788", "", 42)
+	if err := validateProxyEnv(env, "http://127.0.0.1:8788", 42); err != nil {
+		t.Fatalf("装配正确的带任务 env 必须通过校验: %v", err)
+	}
+	env = proxyEnv("http://127.0.0.1:8788", "")
+	if err := validateProxyEnv(env, "http://127.0.0.1:8788", 0); err != nil {
+		t.Fatalf("装配正确的无任务 env 必须通过校验: %v", err)
+	}
+}
+
+// TestValidateProxyEnvRejectsClearedOrRewritten pins the A-01 phase-1 contract:
+// 代理在用而代理变量被清空/改写 ⇒ 校验必须失败并点名变量——宁可这个 run 不启动，
+// 也不能让一次改道/无身份的出网溜出去。
+func TestValidateProxyEnvRejectsClearedOrRewritten(t *testing.T) {
+	addr := "http://127.0.0.1:8788"
+	good := proxyEnv(addr, "", 42)
+
+	// 清空一个变量 → 拒，报文点名变量。
+	cleared := make([]string, 0, len(good))
+	for _, kv := range good {
+		if strings.HasPrefix(kv, "HTTP_PROXY=") {
+			continue
+		}
+		cleared = append(cleared, kv)
+	}
+	err := validateProxyEnv(cleared, addr, 42)
+	if err == nil {
+		t.Fatal("代理变量被清空必须校验失败")
+	}
+	if !strings.Contains(err.Error(), "HTTP_PROXY") {
+		t.Fatalf("失败原因必须点名缺失的变量: %v", err)
+	}
+
+	// 改写一个变量 → 拒，报文点名变量与实际值。
+	rewritten := make([]string, 0, len(good))
+	for _, kv := range good {
+		if strings.HasPrefix(kv, "HTTPS_PROXY=") {
+			kv = "HTTPS_PROXY=http://evil.example.com:3128"
+		}
+		rewritten = append(rewritten, kv)
+	}
+	err = validateProxyEnv(rewritten, addr, 42)
+	if err == nil {
+		t.Fatal("代理变量被改写必须校验失败")
+	}
+	if !strings.Contains(err.Error(), "HTTPS_PROXY") || !strings.Contains(err.Error(), "evil.example.com") {
+		t.Fatalf("失败原因必须点名被改写的变量与实际值: %v", err)
+	}
+
+	// 换成别的任务的令牌 → 拒（身份必须属于本任务）。
+	wrongTask := make([]string, 0, len(good))
+	for _, kv := range good {
+		if strings.HasPrefix(kv, "ALL_PROXY=") {
+			kv = "ALL_PROXY=" + egressProxyURL(addr, 43)
+		}
+		wrongTask = append(wrongTask, kv)
+	}
+	if err := validateProxyEnv(wrongTask, addr, 42); err == nil {
+		t.Fatal("携带别的任务令牌必须校验失败")
+	}
+
+	// NODE_USE_ENV_PROXY 丢了 → 拒（Node 系工具会无视代理变量直连）。
+	noNode := make([]string, 0, len(good))
+	for _, kv := range good {
+		if strings.HasPrefix(kv, "NODE_USE_ENV_PROXY=") {
+			continue
+		}
+		noNode = append(noNode, kv)
+	}
+	if err := validateProxyEnv(noNode, addr, 42); err == nil || !strings.Contains(err.Error(), "NODE_USE_ENV_PROXY") {
+		t.Fatalf("NODE_USE_ENV_PROXY 缺失必须校验失败并点名: %v", err)
+	}
+}

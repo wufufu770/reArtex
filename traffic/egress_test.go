@@ -149,20 +149,66 @@ func TestEgressDecideFailsClosedWhenScopeNotWired(t *testing.T) {
 	}
 }
 
-// TestEgressDecideUnattributedIsExplicit pins the unattributed state：没有任务
-// 身份的请求放行，但必须明确标记为「未经范围校验」，不许悄悄当成放行。
-func TestEgressDecideUnattributedIsExplicit(t *testing.T) {
+// TestEgressDecideUnattributedDeniesByDefault pins the A-01 flip：没有任务身份
+// 的请求默认拒绝（fail-closed）。旧语义「放行但标记」等于给 agent 留了一条
+// 「不带身份就绕过范围校验」的后门，治理被这个口子架空。
+func TestEgressDecideUnattributedDeniesByDefault(t *testing.T) {
 	tr := &Traffic{}
 	tr.SetEgressScope(&egressScopeStub{hosts: map[int64][]string{5: {"a.example.com"}}})
 	d := tr.egressDecide(context.Background(), egressRequest(t, 0, "http://b.example.com/x"), 0, false)
-	if !d.Allowed {
-		t.Fatalf("未归属请求按设计放行（平台自身流量无任务身份），实际被拒：%s", d.Reason)
+	if d.Allowed {
+		t.Fatalf("未归属请求默认必须拒绝，实际放行：%s", d.Reason)
 	}
 	if d.Attributed {
 		t.Fatal("未归属请求不得声称有身份")
 	}
 	if !strings.Contains(d.Reason, "未携带任务身份") {
-		t.Fatalf("未归属必须显式标记，实际：%s", d.Reason)
+		t.Fatalf("拒绝原因必须显式点名「未携带任务身份」，实际：%s", d.Reason)
+	}
+}
+
+// TestEgressDecideUnattributedPlatformChannel pins the only exception path
+// （平台通道白名单）：登记通道 + 主机命中 = 放行且理由点名通道（留痕）；通道
+// 对但主机不在表内 = 拒；通道名未登记 = 拒；空白名单 = 全拒。通道身份头只是
+// 「声明」，主机表才是「裁决」。
+func TestEgressDecideUnattributedPlatformChannel(t *testing.T) {
+	tr := &Traffic{}
+	tr.SetPlatformChannels(mustParseChannels(t, `[{"name":"enrich","hosts":[".assets.example.com"]}]`))
+
+	// 命中：通道名 + 后缀主机（含子域）。
+	req := egressRequest(t, 0, "http://mirror.assets.example.com/x")
+	req.Header.Set(platformChannelHeader, "enrich")
+	d := tr.egressDecide(context.Background(), req, 0, false)
+	if !d.Allowed {
+		t.Fatalf("登记通道内的未归属出网必须放行：%s", d.Reason)
+	}
+	if !strings.Contains(d.Reason, "平台通道放行") || !strings.Contains(d.Reason, "enrich") {
+		t.Fatalf("放行理由必须点名通道（留痕），实际：%s", d.Reason)
+	}
+	if d.Attributed {
+		t.Fatal("白名单放行不改变归属状态：仍是无任务出网")
+	}
+
+	// 通道对、目的地不在主机表 → 拒。
+	req = egressRequest(t, 0, "http://other.example.com/x")
+	req.Header.Set(platformChannelHeader, "enrich")
+	if d := tr.egressDecide(context.Background(), req, 0, false); d.Allowed {
+		t.Fatal("通道主机表之外的目的地必须被拒")
+	}
+
+	// 通道名未登记 → 拒（声明不等于授权）。
+	req = egressRequest(t, 0, "http://mirror.assets.example.com/x")
+	req.Header.Set(platformChannelHeader, "rogue")
+	if d := tr.egressDecide(context.Background(), req, 0, false); d.Allowed {
+		t.Fatal("未登记的通道名不得放行")
+	}
+
+	// 空白名单（默认装配）→ 即使头声明了在册名字也拒。
+	tr2 := &Traffic{}
+	req = egressRequest(t, 0, "http://mirror.assets.example.com/x")
+	req.Header.Set(platformChannelHeader, "enrich")
+	if d := tr2.egressDecide(context.Background(), req, 0, false); d.Allowed {
+		t.Fatal("空白名单时未归属出网必须全拒")
 	}
 }
 
@@ -294,6 +340,112 @@ func TestRecordingProxyEnforcesTaskScope(t *testing.T) {
 	}
 	if host != "out-of-scope.invalid" || taskID != 5 {
 		t.Fatalf("留痕内容不对: host=%q task=%d", host, taskID)
+	}
+}
+
+// TestEgressGateChannelAllowRecordsChannelDecision drives the whitelist path
+// end to end: 无任务身份 + 通道声明 + 主机命中 ⇒ 放行且 exchange 记 decision=
+// channel（白名单的每一条放行都要能从流量索引里认出来）。
+func TestEgressGateChannelAllowRecordsChannelDecision(t *testing.T) {
+	t.Setenv("ARTEX_TRAFFIC_EGRESS_ALLOW_LOOPBACK", "1")
+	dir := t.TempDir()
+	tr, err := Open(dir, proxyTestAddr(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	tr.SetEgressScope(&egressScopeStub{hosts: map[int64][]string{5: {"127.0.0.1"}}})
+	tr.SetPlatformChannels(mustParseChannels(t, `[{"name":"enrich","hosts":["127.0.0.1"]}]`))
+	go func() { _ = tr.Start() }()
+	waitProxyReady(t, tr.ProxyAddr())
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 通道内部头绝不能跟着请求转给目标：转到了就是泄漏。
+		if r.Header.Get(platformChannelHeader) != "" || r.Header.Get(platformChannelDecidedHeader) != "" {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte("channel headers leaked"))
+			return
+		}
+		_, _ = w.Write([]byte("channel-ok"))
+	}))
+	defer target.Close()
+
+	proxyURL, err := url.Parse(tr.ProxyAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	req, err := http.NewRequest(http.MethodGet, target.URL+"/ch", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 无任务身份，只声明通道。
+	req.Header.Set(platformChannelHeader, "enrich")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("白名单通道内的未归属出网必须能通: %v", err)
+	}
+	body, _ := readAll(resp)
+	resp.Body.Close()
+	if !strings.Contains(body, "channel-ok") {
+		t.Fatalf("通道放行的响应不对（内部头若泄漏会拿到 418）: %q", body)
+	}
+
+	// 流量索引：这条放行必须记成 channel（不是 allow——没有任务；也不是
+	// unattributed——翻转后那意味着泄漏或历史数据）。
+	var decision string
+	err = tr.DB().QueryRow(`SELECT egress_decision FROM exchanges WHERE host=? LIMIT 1`, "127.0.0.1").
+		Scan(&decision)
+	if err != nil {
+		t.Fatalf("通道放行必须留痕: %v", err)
+	}
+	if decision != egressDecisionChannel {
+		t.Fatalf("通道放行的判定应记 %q，实际 %q", egressDecisionChannel, decision)
+	}
+}
+
+// TestEgressGateDeniesUnattributedWithTrace pins the A-01 acceptance at the
+// gate level（卡片验收）：不带身份令牌的请求经 egressGate 回 403，且
+// recordEgressDenial 留痕（目的地、无任务、判定=deny、原因点名未携带身份）。
+func TestEgressGateDeniesUnattributedWithTrace(t *testing.T) {
+	dir := t.TempDir()
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	scope := &egressScopeStub{hosts: map[int64][]string{5: {"a.example.com"}}}
+	tr.SetEgressScope(scope)
+
+	// 无令牌（egressRequest 传 0 = 不带身份头）。
+	rec := httptest.NewRecorder()
+	ok, err := tr.egressGate(rec, egressRequest(t, 0, "http://a.example.com/x"))
+	if ok || err == nil {
+		t.Fatal("未归属请求必须被闸门拦下")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("被拦下的未归属请求应回 403，实际 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "未携带任务身份") {
+		t.Fatalf("拒绝文案必须点名未携带任务身份，实际：%s", rec.Body.String())
+	}
+	// 留痕：流量索引里查得到，任务为 0、判定为 deny。
+	var taskID int64
+	var decision string
+	err = tr.DB().QueryRow(`SELECT egress_task_id,egress_decision FROM exchanges LIMIT 1`).
+		Scan(&taskID, &decision)
+	if err != nil {
+		t.Fatalf("被拦下的未归属出网必须留痕: %v", err)
+	}
+	if taskID != 0 || decision != egressDecisionDeny {
+		t.Fatalf("留痕内容不对: task=%d decision=%q", taskID, decision)
+	}
+	// 审计链同样留痕。
+	if len(scope.decisions) != 1 {
+		t.Fatalf("应有 1 条审计判定，实际 %d", len(scope.decisions))
+	}
+	if ev := scope.decisions[0]; ev.TaskID != 0 || ev.Allowed || ev.Attributed {
+		t.Fatalf("审计判定内容不对: %+v", ev)
 	}
 }
 

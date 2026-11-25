@@ -261,6 +261,11 @@ func stripEgressIdentity(req *http.Request) {
 	}
 	req.Header.Del(egressTaskTokenHeader)
 	req.Header.Del("Proxy-Authorization")
+	// 平台通道的两个内部头一并摘除：通道声明头（X-Artex-Channel）不该跟着请求
+	// 转给目标；判定传递头（X-Artex-Channel-Decided）摘除前已被 Requestheaders
+	// 读走 —— 顺序在 Requestheaders 里保证（先读后摘）。
+	req.Header.Del(platformChannelHeader)
+	req.Header.Del(platformChannelDecidedHeader)
 }
 
 // egressDestinationHost 取一次出网请求的目的地主机（不含端口）。
@@ -395,11 +400,16 @@ func (t *Traffic) egressHosts(ctx context.Context, scope EgressScope, taskID int
 
 // egressDecide 判定一次出网请求：能不能去、属于谁、为什么。
 //
-// 「未归属」（请求没带任务身份）的处置：放行，但明确标记为未经范围校验。理由：
-// 录制代理是平台级的，浏览器 MCP、web_fetch、平台的资产补全探测都走它，这些
-// 请求没有任务身份；把它们一并拦掉等于把平台自己关掉，而不是治理它。代价是
-// 明确的：未归属的出网不受任务范围校验 —— 这条限制写在平台的出网治理状态里
-// （未覆盖通道清单），不是藏起来的。
+// 「未归属」（请求没带任务身份）的处置（A-01 翻转）：**默认拒绝**。旧语义
+// 「放行但标记」的代价是 agent 可以靠「不带身份」绕过任务范围校验——治理的
+// 意义被这个口子架空。例外只有一条路：登记进启动期平台通道白名单
+// （platform_channels.go，operator 配置、不进热改面）的通道按其主机表放行，
+// 且每一条放行都随判定理由留痕（走哪条通道一目了然）。白名单为空（默认）
+// 时未归属请求全部拒绝。
+//
+// 由此带来的行为变化（如实记录）：纯聊天会话（未绑任务）的 WebFetch 走的是
+// 本代理且不带身份 ⇒ 被拒。要恢复联网能力，把会话绑定任务（群聊成员自动带
+// 任务身份）或建任务。这条能力变化同时写在出网治理状态里。
 func (t *Traffic) egressDecide(ctx context.Context, req *http.Request, taskID int64, attributed bool) EgressDecision {
 	d := EgressDecision{
 		TaskID:     taskID,
@@ -415,8 +425,16 @@ func (t *Traffic) egressDecide(ctx context.Context, req *http.Request, taskID in
 		return d
 	}
 	if !attributed {
-		d.Allowed = true
-		d.Reason = "未携带任务身份：本次出网未经任务范围校验"
+		// 平台通道例外单独判定（白名单），不在这里开后门。
+		if ch, ok := t.platformChannelAllowed(req); ok {
+			d.Allowed = true
+			d.Reason = "平台通道放行：" + ch.Name + "（未归属白名单，A-01，仍留痕）"
+			// 留痕管线：通道名随请求带进录制管线（Requestheaders 摘下并记
+			// decision=channel）；写的就是闸门刚判过的这个请求对象。
+			req.Header.Set(platformChannelDecidedHeader, ch.Name)
+			return d
+		}
+		d.Reason = "未携带任务身份，拒绝出网（fail-closed；无任务平台通道须在启动期白名单登记）"
 		return d
 	}
 	if err := t.egressPolicy().CheckHost(withEgressTask(ctx, taskID), d.Host); err != nil {
@@ -520,8 +538,11 @@ func egressTaskLabel(taskID int64) string {
 	return "task " + strconv.FormatInt(taskID, 10)
 }
 
-// stripEgressIdentityHeader 从一份头部副本里摘掉身份头。
+// stripEgressIdentityHeader 从一份头部副本里摘掉身份头（含平台通道的两个内部头，
+// 与 stripEgressIdentity 同一口径）。
 func stripEgressIdentityHeader(h http.Header) {
 	h.Del(egressTaskTokenHeader)
 	h.Del("Proxy-Authorization")
+	h.Del(platformChannelHeader)
+	h.Del(platformChannelDecidedHeader)
 }

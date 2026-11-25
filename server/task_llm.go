@@ -700,6 +700,18 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	// A-01 一期：worker 代理环境校验失败 → 审计链留痕（拒绝本身已在 worker 侧
+	// 生效，这里补「哪个任务、为什么」的对账记录；审计失败不回传——拒绝不依赖审计）。
+	wk.SetEgressAudit(func(taskID int64, action, reason string) {
+		payload, _ := json.Marshal(map[string]any{"task_id": taskID})
+		if _, err := s.m.pg.AppendAuditEvent(db.AuditEvent{
+			Actor: "worker", ToolName: "worker", Action: action,
+			Reason:  reason,
+			Payload: payload,
+		}); err != nil {
+			log.Printf("[audit] 代理环境违规审计写入失败（拒绝已生效，忽略）task=%d: %v", taskID, err)
+		}
+	})
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker)          // 操作约束注入 worker(可配置,默认开)
 	wk.SetCategoryDiscipline(s.workerCategoryDisciplineOf(t)) // 任务类别纪律段(资产收集类追加,每轮读)

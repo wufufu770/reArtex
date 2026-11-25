@@ -58,7 +58,11 @@ func TestEgressGovernanceStateListsRequiredChannels(t *testing.T) {
 		{"MCP 的外部通道", "MCP 的外部通道"},
 		{"宿主侧出网", "宿主侧出网"},
 		{"全局出网代理路径", "全局出网代理路径"},
-		{"未归属的出网", "未归属的出网"},
+		// A-01 翻转后：旧条目「未归属按放行处理」已换成平台通道白名单的例外条目
+		// ——例外也要如实列出来（不经任务范围校验，靠主机表圈死）。
+		{"平台通道白名单例外", "平台通道白名单"},
+		{"白名单按主机表放行", "按主机表放行"},
+		{"白名单不经任务范围校验", "不经任务范围校验"},
 		{"内置 deny 规则只挡破坏性命令", "只挡破坏性命令"},
 		{"内置 deny 规则不挡范围外出网", "不挡范围外出网"},
 		{"数据外泄管道规则出厂即 disabled", "数据外泄管道"},
@@ -74,6 +78,11 @@ func TestEgressGovernanceStateListsRequiredChannels(t *testing.T) {
 	// 不得回来（它会让 UI 谎报覆盖状态）。
 	if strings.Contains(joined, "web_fetch / web_search") {
 		t.Fatalf("清单不得再把 web_fetch 与 web_search 合并列为未覆盖:\n%s", joined)
+	}
+	// A-01 翻转后，旧的「未归属放行」说法必须消失：它描述的处置已经不存在，
+	// 留在清单里等于向 UI 谎报未归属出网会被放行。
+	if strings.Contains(joined, "按「未经范围校验」放行") {
+		t.Fatalf("清单不得再声称未归属出网被放行（A-01 已翻转为默认拒绝）:\n%s", joined)
 	}
 }
 

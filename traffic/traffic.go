@@ -53,8 +53,14 @@ var egressColumns = []struct {
 const (
 	// egressDecisionAllow 是「在任务范围内放行」。
 	egressDecisionAllow = "allow"
-	// egressDecisionUnattributed 是「放行但未经范围校验」（请求没带任务身份）。
+	// egressDecisionUnattributed 是「无任务身份的放行」。A-01 翻转后这个值不应
+	// 再由正常路径产生（未归属默认拒绝、白名单放行单独记 channel）；新记录里
+	// 出现它值得警惕——要么历史数据，要么是绕过闸门的异常路径。
 	egressDecisionUnattributed = "unattributed"
+	// egressDecisionChannel 是「经平台通道白名单放行」（未归属但命中启动期登记
+	// 的平台通道，A-01 的唯一例外面；通道名在判定理由里，主机→通道的对应关系
+	// 在启动配置里可对）。
+	egressDecisionChannel = "channel"
 	// egressDecisionDeny 是「被任务范围拦下」。
 	egressDecisionDeny = "deny"
 )
@@ -225,6 +231,9 @@ type Traffic struct {
 	egressPorts atomic.Pointer[egressPortsHolder]
 	// egressCache 是「任务 → 目的地允许集」的短期缓存，避免每个请求打一次库。
 	egressCache egressHostsCache
+	// platformChannels 是「未归属」出网的平台通道白名单（A-01，启动期装配，
+	// 进程内不再变）。未注入（nil）时按空白名单处理 = 未归属请求全部拒绝。
+	platformChannels atomic.Pointer[platformChannelSet]
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -483,7 +492,7 @@ func (t *Traffic) DB() *sql.DB { return t.db }
 type sink struct {
 	mproxy.BaseAddon
 	t *Traffic
-	// mu 保护下面两张表：请求与响应可能在不同 goroutine 上碰到。
+	// mu 保护下面几张表：请求与响应可能在不同 goroutine 上碰到。
 	mu sync.Mutex
 	// tasks 记本次请求携带的任务身份（按 flow 索引，响应回来时取用）。
 	tasks map[*mproxy.Flow]int64
@@ -491,6 +500,12 @@ type sink struct {
 	// 靠它继承 —— 否则 HTTPS 流量的记录全是「未归属」，等于 HTTPS 流量没有归属。
 	// 按连接 id 索引：连接断开时（ClientDisconnected）才拿得到同一个键。
 	tunnels map[uuid.UUID]int64
+	// channels/tasksChannels 记平台通道白名单的放行（A-01）：gate 判定通道放行后
+	// 把通道名写到请求头（写的就是闸门判过的那个请求对象，通道名不经 agent 之手），
+	// Requestheaders 摘下并按 flow/隧道记下，Response 据此把 exchange 记成
+	// decision=channel —— 白名单的每一次放行都要能从流量索引里认出来。
+	channelsTasks   map[*mproxy.Flow]string
+	channelsTunnels map[uuid.UUID]string
 }
 
 // Requestheaders 在请求进入代理时就解出任务身份，并把身份头摘掉。
@@ -517,6 +532,21 @@ func (s *sink) Requestheaders(f *mproxy.Flow) {
 		if raw.Method == http.MethodConnect {
 			s.setTunnelTask(f.ConnContext, taskID)
 		}
+	} else {
+		// A-01：平台通道放行的留痕。通道名是 egressGate 判定放行时写在请求上的
+		//（Requestheaders 拿到的就是闸门判过的同一个请求对象），未归属请求只有
+		// 闸门放行才能走到这里；隧道内请求按连接继承。如实边界：agent 伪造这个
+		// 头拿不到任何放行（判定在闸门、只认白名单），至多影响已放行流量的标签。
+		ch := s.tunnelChannel(f.ConnContext)
+		if ch == "" {
+			ch = raw.Header.Get(platformChannelDecidedHeader)
+		}
+		if ch != "" {
+			s.setFlowChannel(f, ch)
+			if raw.Method == http.MethodConnect {
+				s.setTunnelChannel(f.ConnContext, ch)
+			}
+		}
 	}
 	stripEgressIdentity(raw)
 }
@@ -529,6 +559,7 @@ func (s *sink) ClientDisconnected(c *mproxy.ClientConn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.tunnels, c.Id)
+	delete(s.channelsTunnels, c.Id)
 }
 
 func (s *sink) setFlowTask(f *mproxy.Flow, taskID int64) {
@@ -569,6 +600,44 @@ func (s *sink) tunnelTask(c *mproxy.ConnContext) int64 {
 	return s.tunnels[c.ClientConn.Id]
 }
 
+func (s *sink) setFlowChannel(f *mproxy.Flow, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channelsTasks == nil {
+		s.channelsTasks = map[*mproxy.Flow]string{}
+	}
+	s.channelsTasks[f] = name
+}
+
+func (s *sink) takeFlowChannel(f *mproxy.Flow) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := s.channelsTasks[f]
+	delete(s.channelsTasks, f)
+	return name
+}
+
+func (s *sink) setTunnelChannel(c *mproxy.ConnContext, name string) {
+	if c == nil || c.ClientConn == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channelsTunnels == nil {
+		s.channelsTunnels = map[uuid.UUID]string{}
+	}
+	s.channelsTunnels[c.ClientConn.Id] = name
+}
+
+func (s *sink) tunnelChannel(c *mproxy.ConnContext) string {
+	if c == nil || c.ClientConn == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.channelsTunnels[c.ClientConn.Id]
+}
+
 func (s *sink) Response(f *mproxy.Flow) {
 	if f.Request == nil || f.Response == nil {
 		return
@@ -577,6 +646,11 @@ func (s *sink) Response(f *mproxy.Flow) {
 	decision := egressDecisionUnattributed
 	if taskID > 0 {
 		decision = egressDecisionAllow
+	} else if ch := s.takeFlowChannel(f); ch != "" {
+		// A-01：白名单通道的放行单独记 channel——未归属出网翻转后，任何「有响应
+		// 的无归属 exchange」都必须能从索引里认出是哪条通道放的；decision 仍是
+		// unattributed 的话，泄漏和放行就没法区分了。
+		decision = egressDecisionChannel
 	}
 	s.t.recordExchange(f, exchangeMeta{TaskID: taskID, Decision: decision})
 }

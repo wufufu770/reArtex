@@ -201,8 +201,12 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
 		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   egressProxyURL(c.proxyAddr, egressTaskID(ctx, 0)),
-		WebFetchCACert:  c.proxyCACert,
+		// egressTaskID(ctx,0)：会话未绑定任务 ⇒ 无任务身份。A-01 翻转后这样的
+		// WebFetch 会被代理按「未携带任务身份」拒绝（例外只有启动期平台通道白
+		// 名单，且 WebFetch 是 agent 发起的、不属于平台通道）——要联网就把会话
+		// 绑定任务（egressTaskID 取绑定的任务号）。
+		WebFetchProxy:  egressProxyURL(c.proxyAddr, egressTaskID(ctx, 0)),
+		WebFetchCACert: c.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
 		EnableWebSearch:       ws.Enabled,

@@ -94,7 +94,13 @@ type Worker struct {
 	// Read per run so a mid-task category change takes effect on the next intent;
 	// nil/empty = no extra block (通用渗透纪律，现状不变).
 	categoryDisciplineFn func() string
+	// egressAuditFn 由宿主(server)注入：A-01 一期代理环境校验失败时落审计链。
+	// nil = 只记日志不落库（测试构造的裸 Worker 就没有宿主 DB）。
+	egressAuditFn func(taskID int64, action, reason string)
 }
+
+// SetEgressAudit wires the audit sink for proxy-env violations (A-01 phase 1).
+func (w *Worker) SetEgressAudit(fn func(taskID int64, action, reason string)) { w.egressAuditFn = fn }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
 // Worker slots are reusable, so the intent id (rather than work#N) is the
@@ -276,6 +282,53 @@ func proxyEnv(proxyAddr, caCert string, taskID ...int64) []string {
 		)
 	}
 	return env
+}
+
+// validateProxyEnv 是 A-01 一期的启动期校验：录制代理在用（proxyAddr 非空）时，
+// Bash 子进程环境里的代理变量必须逐个等于「带任务身份令牌」的代理 URL——既不许
+// 被清空（出网会直连、完全脱离录制与范围判定），也不许被改写（流量被引去别的
+// 代理，同样脱离判定）。装配错误是平台自己的 bug：宁可这个 run 拒绝启动
+// （fail-closed），也不能让一次改道/无身份的出网溜出去。proxyAddr 为空（直连
+// 模式）时无事可查。注意这是对「平台自己装配的 env」的钉子 + 对装配代码回归的
+// 防线；agent 在命令里临时 unset/覆盖变量不经此校验——unset 后【直连】的流量
+// 一期尚不能被平台看见（这正是卡片二期 per-task netns 要封的口，部署可行性待
+// 核，本版暂缓）；凡是仍走到代理的请求，则由 egress gate 按 A-01（未归属拒绝/
+// 范围外拒绝）判定。
+func validateProxyEnv(env []string, proxyAddr string, taskID int64) error {
+	if proxyAddr == "" {
+		return nil
+	}
+	want := egressProxyURL(proxyAddr, taskID)
+	required := []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"}
+	have := map[string]string{}
+	for _, kv := range env {
+		if i := strings.Index(kv, "="); i > 0 {
+			have[kv[:i]] = kv[i+1:]
+		}
+	}
+	for _, k := range required {
+		got, ok := have[k]
+		if !ok {
+			return fmt.Errorf("代理环境变量 %s 缺失（应为录制代理 %s）", k, want)
+		}
+		if got != want {
+			return fmt.Errorf("代理环境变量 %s 被改写：%q ≠ 预期 %s", k, got, want)
+		}
+	}
+	if have["NODE_USE_ENV_PROXY"] != "1" {
+		return fmt.Errorf("NODE_USE_ENV_PROXY 缺失或非 1：Node 系工具会无视代理变量直连")
+	}
+	return nil
+}
+
+// auditProxyEnvViolation 把代理环境校验失败落审计链（A-01 一期：拒绝已在
+// execute 里生效，审计是留痕不是闸门，失败只记日志）。
+func (w *Worker) auditProxyEnvViolation(taskID int64, err error) {
+	log.Printf("[worker] A-01 代理环境校验失败，run 拒绝启动: task=%d: %v", taskID, err)
+	if w.egressAuditFn == nil {
+		return
+	}
+	w.egressAuditFn(taskID, "egress.proxy_env_violation", err.Error())
 }
 
 // workerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the worker system
@@ -520,6 +573,13 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
 	}
+	// A-01 一期启动期校验：代理变量被清空/改写 ⇒ 本次 run 拒绝启动 + 审计留痕，
+	// 绝不带病出网（一次改道/无身份的出网就是一次脱离判定的越界）。
+	bashEnv := proxyEnv(w.proxyAddr, w.proxyCACert, taskID)
+	if err := validateProxyEnv(bashEnv, w.proxyAddr, taskID); err != nil {
+		w.auditProxyEnvViolation(taskID, err)
+		return "", WriteCounts{}, fmt.Errorf("worker 拒绝启动：出网代理环境校验失败（%v）——A-01 fail-closed，请检查平台代理装配", err)
+	}
 	opts := agentcore.Options{
 		Provider:        w.prov,
 		SystemPrompt:    system,
@@ -544,7 +604,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert, taskID),
+		BashEnv:    bashEnv,
 		WorkingDir: runDir,
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,

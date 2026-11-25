@@ -426,6 +426,18 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			// 缓存：CONNECT 高频，逐条打库会拖垮代理；读失败沿用上次结果（首次
 			// 失败按空表，即只默认白名单——fail-closed 不因配置故障而放宽）。
 			tr.SetEgressPortsSource(egressAllowedPortsSource(pg))
+			// A-01：平台通道白名单——「未归属」出网翻转为默认拒绝后的唯一例外面。
+			// 启动期从 ARTEX_PLATFORM_CHANNELS 指向的 JSON 文件装载（operator 配置，
+			// 不进热改面：绕过范围校验的口子不能靠点鼠标开）；文件不存在或解析失败
+			// 都按空白名单处理 ⇒ 未归属出网全部拒绝（fail-closed：坏配置只会更严，
+			// 不会更松）。
+			chSet, chErr := traffic.LoadPlatformChannels(os.Getenv(traffic.EnvPlatformChannels))
+			tr.SetPlatformChannels(chSet)
+			if chErr != nil {
+				log.Printf("[traffic] 平台通道白名单装载失败，按空白名单处理（未归属出网将全部拒绝）: %v", chErr)
+			}
+			log.Printf("[traffic] 平台通道白名单：%d 条在册通道（%s 指向 JSON 文件；空白名单=未归属出网全拒）",
+				chSet.Count(), traffic.EnvPlatformChannels)
 
 			err = tr.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
 				if taskID <= 0 {
