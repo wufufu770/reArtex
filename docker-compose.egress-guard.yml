@@ -1,0 +1,31 @@
+# A-01C 二期强制层 overlay（opt-in，不改变默认 compose 行为）：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.egress-guard.yml up -d
+#
+# egress-guard 与 artex 共享 network namespace（network_mode: service:artex），
+# 在该 netns 里写 iptables：只有平台主进程 UID（root）能新建出网连接；
+# agent 子进程（privdrop 降权到 65534）只能经 loopback:8788 走进程内录制代理
+# ——unset 代理变量/直连 IP/自带 DNS 的绕过路径全部被内核拒绝。
+#
+# 前置（必须逐条满足，见 docs/egress-guard.md）：
+#   1. 平台以 root 运行（默认镜像如此）——非 root 部署的子进程不降权，UID 分界
+#      不存在，本守卫不可启用；
+#   2. 依赖直连的 MCP stdio 服务器需在 ARTEX_EGRESS_ALLOW_CIDRS 逐条登记 CIDR。
+#
+# 回滚：去掉本 overlay 重新 up，或对共享 netns 执行 teardown（见文档）。
+services:
+  egress-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile.egress-guard
+    network_mode: "service:artex"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      ARTEX_EGRESS_GUARD_PLATFORM_UID: ${ARTEX_EGRESS_GUARD_PLATFORM_UID:-0}
+      ARTEX_EGRESS_PROXY_PORT: ${ARTEX_EGRESS_PROXY_PORT:-8788}
+      ARTEX_EGRESS_ALLOW_CIDRS: ${ARTEX_EGRESS_ALLOW_CIDRS:-}
+      ARTEX_EGRESS_GUARD_LOG: ${ARTEX_EGRESS_GUARD_LOG:-0}
+    depends_on:
+      - artex
+    restart: unless-stopped

@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+#
+# A-01C 二期强制层的守卫边车镜像：与 artex 容器共享 network namespace
+# （compose overlay 里 network_mode: "service:artex"），在里面写 iptables——
+# 只有平台主进程 UID 能新建出网连接，agent 子进程的一切直连被内核拒绝。
+# 规则本身见 scripts/egress-guard-rules.sh；启用方式见 docs/egress-guard.md。
+FROM alpine:3.20
+RUN apk add --no-cache iptables ip6tables
+COPY scripts/egress-guard-rules.sh /usr/local/bin/egress-guard-rules.sh
+RUN chmod +x /usr/local/bin/egress-guard-rules.sh
+# 周期性重放（幂等）：规则活在 artex 的 netns 里，边车死了规则仍在；
+# 重放兜住「netns 内规则被意外清空」的情况。apply 失败立即退出，让
+# restart 策略接管——宁可边车崩溃重启，也不要一个静默失效的守卫。
+CMD ["sh", "-c", "while true; do /usr/local/bin/egress-guard-rules.sh apply || exit 1; sleep 30; done"]
