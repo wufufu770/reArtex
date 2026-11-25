@@ -278,7 +278,9 @@ func (b *whereBuilder) build(node *astNode) (string, error) {
 			}
 			parts = append(parts, "("+clause+")")
 		}
-		return strings.Join(parts, " AND "), nil
+		// A-12 双保险：子节点已各自包括号，join 结果再整体包一层——
+		// 解析、编译、拼接三处各有一道括号保证，任一处单点失效仍有后手。
+		return "(" + strings.Join(parts, " AND ") + ")", nil
 	case "or":
 		parts := make([]string, 0, len(node.children))
 		for _, child := range node.children {
@@ -288,7 +290,7 @@ func (b *whereBuilder) build(node *astNode) (string, error) {
 			}
 			parts = append(parts, "("+clause+")")
 		}
-		return strings.Join(parts, " OR "), nil
+		return "(" + strings.Join(parts, " OR ") + ")", nil
 	case "leaf":
 		return b.buildLeaf(*node.expr)
 	}
@@ -385,6 +387,11 @@ func buildDSLWhere(node *astNode) (string, []any, error) {
 // buildDSLWhereBase is buildDSLWhere with a placeholder offset: emitted args are
 // numbered base+1 onward, leaving $1..$base free for the caller (e.g. a scope CTE
 // that reserves $1 for the task id).
+//
+// A-12（0.15.78）：顶层片段一律包括号。之前的裸返回在顶层是 OR 时（如
+// "domain=a OR domain=b"）与调用方的范围条件拼接（AND type=$n AND 范围谓词）
+// 会因优先级错位变成 "X OR (Y AND 约束…)"——X 分支脱离 type/范围约束。
+// 括号化后本包产出的任何片段拼进外层 WHERE 都是一个原子条件。
 func buildDSLWhereBase(node *astNode, base int) (string, []any, error) {
 	if node == nil {
 		return "1=1", nil, nil
@@ -394,7 +401,7 @@ func buildDSLWhereBase(node *astNode, base int) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return clause, b.args, nil
+	return "(" + clause + ")", b.args, nil
 }
 
 // ── helpers (shared with parser) ─────────────────────────────────────────────
@@ -557,11 +564,14 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) 
 // QueryDSLInScope is QueryDSL restricted to the assets the caller may REACH.
 //
 // taskID > 0  → the task's (and its direct source tasks') declared scope —
-//                membership, not literal value: a root_domain scope returns every
-//                subdomain / service / endpoint under it.
+//
+//	membership, not literal value: a root_domain scope returns every
+//	subdomain / service / endpoint under it.
+//
 // taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
-//                the global asset pool: without a task there is no authorization
-//                edge, so the default is to see nothing.
+//
+//	the global asset pool: without a task there is no authorization
+//	edge, so the default is to see nothing.
 //
 // This is the agent-facing list_assets path, so an agent queries the task's
 // relevant assets instead of the whole shared库. Rows carry the same per-task
@@ -618,7 +628,8 @@ func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offse
 //
 // taskID > 0  → the task's (and its direct source tasks') declared scope.
 // taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
-//                the global asset pool.
+//
+//	the global asset pool.
 //
 // Out-of-scope ids are silently dropped from the result (not an error).
 func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error) {
@@ -656,7 +667,8 @@ func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error
 //
 // taskID > 0  → the task's (and its direct source tasks') declared scope.
 // taskID <= 0 → the platform scope (scopepolicy.Policy.PlatformScopeMode), never
-//                the global asset pool.
+//
+//	the global asset pool.
 //
 // Out-of-scope ids are dropped from the result (not an error): the caller only
 // needs to know which of the ids it may keep.
