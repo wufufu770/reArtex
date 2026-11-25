@@ -5,7 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.89] - 2026-11-25
+## [0.15.90] - 2026-11-25
+
+### 变更（A-02 第一批：skill 信任绑定从单文件哈希改为目录树哈希，判定翻转）
+
+- `server/skill_trust.go`：`skillContentHash`（只读 SKILL.md）升级为 `skillTreeHash`——`filepath.WalkDir` 按字典序遍历 `skills/<name>/` 整棵目录树，每个文件以「相对路径 + 长度 + 内容」进 SHA-256；忽略 `.git` 目录与临时文件（`*~`/`*.tmp`）；目录不存在、遍历失败、目录为空（只有 .git/临时文件也算空）一律返回错误——没有可复核的内容就不得产出「可信」的哈希记录。**判定翻转**：树哈希失配不再默认 trusted。旧口径的前提是「ARTEX 之外的改动 = operator 亲手编辑」，但同 UID 部署里 agent 与平台共享文件系统，agent 用 Write 工具直改文件与 operator 宿主机编辑在文件系统层面无法区分——失配默认可信等于把「谁能改文件」升级成「谁能授信」。新语义：失配 ⇒ 降级 `untrusted` + 审计事件（`skill.demoted`，actor/source=`platform`，0.15.89 起进 HMAC 链），等 operator 显式复核；失配状态重钉为 `cur|untrusted`——同一次改动的后续注入走稳定路径，审计链只在内容真变时多一条，不按注入次数刷屏。无库可查/无目录/无记录/记录格式坏一律 `untrusted`（fail-closed）。
+- `server/skill_trust.go`：`recordSkillTrust` 增加**写入方身份**参数（`operator`/`agent`）：operator 侧（管理接口/信任端点/启动 reconcile）按传入 tier 落记录；agent 身份写入 tier 一律强制 `untrusted`——「信任记录只能由 operator 侧写入」落在函数里，不靠调用方自觉。
+- `server/platform_tools.go`：`update_skill_file` 写**任何**文件（不只 SKILL.md）都重钉信任记录——树哈希把 `scripts/*.py` 等引用文件也算进摘要，「只绑定 SKILL.md」的缺口（agent 用工具加引用脚本、SKILL.md 哈希不变而记录不动）就此消除；`create_skill` 落 `agent` 身份（固定 untrusted 不变）。`create_skill` 的短路表显式 allow 保留（新建不覆盖既有文件，行为由动作层护栏兜住；内容信任由本机制收口）。
+- `server/server_mgmt.go`：operator 管理接口三处写入面（改前言 / 装 zip / 写文件）重钉 `trusted`；其中写文件从「仅 SKILL.md」扩到任意文件——树哈希下 operator 写 `scripts/` 不重钉会被平台自己的写路径打成不可信；operator 显式动作 = 复核过的新基线。
+- `server/skill_trust_test.go`：按新语义重写（原「无记录默认 trusted」「宿主机编辑变 trusted」两条用例钉的是被推翻的旧语义，改为钉 fail-closed 与失配降级）。新增：`TestSkillTrustTreeHashSensitivity`（验收四路：改 SKILL.md / 改 scripts/*.py / 新增文件 / 删文件，树哈希全变、档位全落 untrusted、重钉后稳定）、`TestSkillTrustTierMismatchDemotesAndAudits`（攻击复现：绕开 ARTEX 写入路径直改 SKILL.md ⇒ 下一次判定 untrusted（降权注入由 `skill_demote.go` 触发）+ 恰好一条审计事件；同一次改动不重复审计；内容再变再记一条）、`TestSkillTrustTierAgentWriterNeverTrusted`（agent 传 trusted 落库仍 untrusted）、`TestSkillTreeHashEmptyDirErrors`（空目录/缺目录/仅 .git+临时文件都拒绝）。
+- 验证：`go test ./server/ -run 'TestSkillTrust|TestSkillTreeHash'` 8 用例全绿；`TestSkill|TestDemote|TestPlatformTool` 关联面全绿；`go build` + `go vet` 干净。遗留（第二批 0.15.91）：operator 信任端点 `POST /api/skills/{name}/trust`、启动 reconcile（存量单文件哈希记录静默迁移 + 无记录 skill 补标记，无静默翻转）、批量创建速率告警。
+
 
 ### 变更（A-05：审计链从无密钥 SHA-256 升级为 HMAC-SHA256，配套外部锚点第二介质）
 
