@@ -403,6 +403,23 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	} else if n > 0 {
 		log.Printf("[security] 已把 %d 行 LLM key 迁移为密文", n)
 	}
+	// A-05：审计链 HMAC——密钥=主密钥的审计域派生值（DeriveAuditKey），构造后
+	// 注入一次：只进进程内存，不落库、不进 settings、不进日志。未配主密钥是合法
+	// 过渡态（与 LLM key 加密同口径）：新写入暂用旧无密钥 SHA-256 并告警——无密钥
+	// 链挡得住改行、挡不住持写权限者整条重算，HMAC 才是本项的目的。
+	if mk, err := config.MasterKey(); err != nil {
+		log.Printf("[audit] 主密钥读取失败，审计链暂用无密钥 SHA-256: %v", err)
+	} else if len(mk) == 0 {
+		log.Printf("[audit] 未配置 %s：审计链暂用无密钥 SHA-256（可被持 DB 写权限者重算）；配置主密钥后重启即升级为 HMAC", config.MasterKeyFileEnv)
+	} else {
+		pg.WithAuditKey(pgdb.DeriveAuditKey(mk))
+		if err := pg.MigrateAuditChainToHMAC(); err != nil {
+			// 旧链已断等迁移失败：不阻塞启动（追加照常），但必须显眼——这是要人工看的结论。
+			log.Printf("[audit][error] 审计链 HMAC 迁移未完成，请人工核查: %v", err)
+		} else {
+			log.Printf("[audit] 审计链已启用 HMAC-SHA256（密钥来源：%s；存量链已验证并写创世锚点）", config.MasterKeyFileEnv)
+		}
+	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
 	wireToolDenialRecorder(m.interceptor)
 	if proxyAddr != "" {

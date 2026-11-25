@@ -1345,6 +1345,9 @@ func (s *Server) Handler() http.Handler {
 
 	// 审计链校验：追加有入口，校验也该有 —— 操作者要能自查链有没有被改过。
 	mux.HandleFunc("GET /api/audit/chain", s.auditChainVerify)
+	// A-05：审计链最近锚点——链尾截断/重写与锚点对不上时，操作者与外部对账
+	// 脚本能查到结论（只读；写锚点走启动迁移与 scripts/audit-anchor.sh）。
+	mux.HandleFunc("GET /api/audit/anchor", s.auditAnchor)
 
 	// 业务建模 × 偏锋探索（合并施工）：业务图/差异/人工裁决/edge 覆盖度路由。
 	s.bizRoutes(mux)

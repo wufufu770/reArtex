@@ -1512,6 +1512,23 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_seq ON audit_events(seq);
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+-- A-05（0.15.89）：行口径标记——''=旧无密钥 SHA-256（存量行），'hmac-v1'=HMAC 行
+--（source 纳入摘要）。逐行选口径复算，新旧行在边界处自然衔接。
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT '';
+
+-- A-05：审计链外部锚点。锚点=「某时刻链尾 seq+digest」的独立记录：持 DB 写权限
+-- 者即使整段删除/重写链尾，锚点位也会与链对不上（VerifyAuditChain 报锚点不一致）。
+-- 写入方：启动迁移（创世锚点，key_id='' 标记新旧口径边界）与运维脚本
+-- scripts/audit-anchor.sh（定期把链头同步写到备份目录之外的第二介质）。
+CREATE TABLE IF NOT EXISTS audit_anchors (
+    id          BIGSERIAL PRIMARY KEY,
+    seq         BIGINT NOT NULL,          -- 锚定时链尾 seq
+    digest      TEXT NOT NULL,            -- 该 seq 行的 digest
+    key_id      TEXT NOT NULL DEFAULT '', -- 锚点位的行口径（密钥轮换预留，本项可空）
+    anchored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_anchors_seq ON audit_anchors(seq);
 
 -- ---------- P4 fact 三态（candidate / verified / refuted）----------
 -- 幂等约束迁移：老库的 ck_node_state 已含旧 fact 状态集，重建一次补新态。

@@ -15,15 +15,20 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer d.Close()
-
 	suffix := time.Now().UnixNano()
 	// 链是全局的：只对本次追加的尾部做校验，避免受同库其它用例影响。
-	base, err := d.auditChainTail()
+	base, err := d.AuditChainTail()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM audit_events WHERE seq > $1`, base) })
+	// 清理必须先于 Close：t.Cleanup 在用例函数的 defer 之后才跑，把 Close 折进
+	// cleanup 里（先删行再关池）。此前 defer Close 在前 ⇒ 清理的 DELETE 跑在已
+	// 关闭的池上，`_, _ =` 吞掉「sql: database is closed」⇒ 被改过的行留在库里，
+	// 同一轮进程里排在后面的整链校验用例全部误报「断裂在 seq=1」。
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM audit_events WHERE seq > $1`, base)
+		_ = d.Close()
+	})
 
 	for i := 0; i < 3; i++ {
 		if _, err := d.AppendAuditEvent(AuditEvent{
@@ -65,7 +70,7 @@ func TestAuditChainEmptyIsIntact(t *testing.T) {
 	}
 	defer d.Close()
 
-	base, err := d.auditChainTail()
+	base, err := d.AuditChainTail()
 	if err != nil {
 		t.Fatal(err)
 	}

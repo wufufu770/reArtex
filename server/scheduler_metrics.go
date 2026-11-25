@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+
+	"github.com/Autumn-27/artex/intercept"
 )
 
 // schedMetrics 是调度面的全部计数器。零值可用；采集方只读。
@@ -37,4 +39,6 @@ func renderSchedMetrics(w http.ResponseWriter) {
 	row("artex_edge_circuit_breaks_total", "Criterion-stalled circuit breaks concluded by the scheduler.", schedCounters.circuitBreaks.Load())
 	row("artex_edge_doctrine_concludes_total", "Doctrine-complete mechanical conclusions (all cells terminal).", schedCounters.doctrineDone.Load())
 	row("artex_edge_task_missing_total", "Open edge runs whose task is absent from the manager (archived/deleted) — skipped, run left for manual close.", schedCounters.taskMissingSkip.Load())
+	// A-05：审计链缺口可观测——追加失败不再只留一行日志。
+	row("artex_audit_append_failures_total", "Audit-chain append failures since process start (best-effort writes; each one is a visible chain gap).", intercept.AuditAppendFailures())
 }

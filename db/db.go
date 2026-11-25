@@ -219,6 +219,11 @@ type DB struct {
 	// listTools 读工具表，默认用 d.ListTools。抽成字段是为了让「工具表不可读
 	// 时拒绝创建 run」这道闸能在没有数据库的情况下被测试。
 	listTools func() ([]*Tool, error)
+	// auditKey 是审计链 HMAC 密钥（A-05，主密钥派生值，见 DeriveAuditKey）。
+	// 构造后经 WithAuditKey 注入一次：只进进程内存，不落库、不进 settings、
+	// 不进日志。nil/空 = 未配置 ⇒ 新写入沿用旧无密钥 SHA-256 口径（server
+	// 装配时告警）。进程生命周期内不变。
+	auditKey []byte
 }
 
 // Close 关掉连接池。

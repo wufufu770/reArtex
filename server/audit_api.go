@@ -9,6 +9,7 @@ package server
 // 【只读】校验不改链：一个 GET 绝不能顺手把断链「修好」。
 
 import (
+	"fmt"
 	"net/http"
 )
 
@@ -39,4 +40,48 @@ func (s *Server) auditChainVerify(w http.ResponseWriter, r *http.Request) {
 		"intact":        true,
 		"broken_at_seq": int64(0),
 	})
+}
+
+// auditAnchor 返回最近的审计链锚点与核对结论（A-05，0.15.89）。
+//
+// 锚点是「某时刻链尾 seq+digest」的独立记录（audit_anchors 表 + 运维脚本把链头
+// 同步写到备份目录之外的第二介质）：链尾被整段删除/重写时，链本身仍可能逐行
+// 验通，但与锚点对不上——本接口把这一对比暴露给操作者与外部对账脚本。
+//
+// 【只读】与 chain 校验同一纪律：GET 绝不写锚点、绝不「修复」任何东西。
+// consistent 语义：有锚点 ⇒ 锚点 seq 在链上、digest 一致且链尾不早于锚点；
+// 无锚点 ⇒ null（不算不一致，但部署应尽快配置锚点脚本）。
+func (s *Server) auditAnchor(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	anchor, ok, err := pg.LatestAuditAnchor()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	tail, err := pg.AuditChainTail()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	resp := map[string]any{
+		"chain_tail_seq": tail,
+		"anchor":         nil,
+		"consistent":     true,
+	}
+	if ok {
+		verr := pg.VerifyAuditAnchor(anchor)
+		consistent := verr == nil && tail >= anchor.Seq
+		resp["anchor"] = anchor
+		resp["consistent"] = consistent
+		if !consistent {
+			if verr == nil {
+				verr = fmt.Errorf("链尾 seq=%d 早于锚点 seq=%d（尾部被截断）", tail, anchor.Seq)
+			}
+			resp["error"] = verr.Error()
+		}
+	}
+	writeJSON(w, 200, resp)
 }
