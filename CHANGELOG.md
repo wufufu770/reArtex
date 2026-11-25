@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.94] - 2026-11-25
+
+### 文档（TI-05 第二轮核对：删除/归档语义与数据保留方案补档）
+
+- 背景：`02-task-intelligence-next` 提示词包要求对 TI-05 做第二轮差异核对（先读原卡、以当前代码为准）。核对结论：**0.15.63（b0fa426）已实现本卡唯一目标**——hypotheses/facts/evidence_refs/capability_executions 四领域对象落库、ModelDelta 复用 biz_layer_diffs、Finding 复用 findings、统一身份引用列（correlation_id/causation_id/capability_id/scope_version）、假设状态机、`CollabRecordToExecution` 桥（TI-04 台账→执行对象，测试钉住），且 TI-11 第一阶段（`server/ti_api.go`）已在消费该 DAO。
+- 唯一缺口（卡面实施步骤 3「删除/归档语义」的归档面 + 步骤 5「数据保留方案」）：本轮以**纯注释**补进 `db/schema_task_intelligence.sql` 头部，无运行时改动——归档 = 假设终态（validated/refuted/dropped，状态机禁止离开）+ append-only 观测面退出活跃查询，不改写历史；保留方案 = 保留期属取证/审计合规决策必须人工拍板、最小领域模型不定 TTL、清理/分区/冷归档留后续运维卡，且须与审计链保留口径对齐（provenance 链不得比 `audit_events` 先消失）。
+- 【核对时如实记录的差异说明（不改代码）】`CollabRecordToExecution` 以台账 correlation id 兼作 `execution_id`——契约层 1:1 映射（每条台账记录 correlation 唯一）且测试钉住；§0.11 的 uuid envelope 执行标识由 TI-11 第二阶段接线引入，届时桥应改为显式接收 executionID 参数。现在改无人消费的契约属投机，留报告记录。
+- 验证：`go test ./db/ -run TaskIntelligence -count=1` 真库 13.2s 全绿（注释改动 embed SQL 应用无损）；`go test -race ./internal/taskintelligence/` 全绿；`go vet` 干净；gofmt 仅既有漂移（本卡未触碰 Go 文件）；`rsi_guard --staged --enforce --tier 2` 通过（0.15.93 修正后的门）。
+
 ## [0.15.93] - 2026-11-25
 
 ### 修复（A-16 门禁参数缺陷：`--tier 1` 误拦全部 Tier-2 常规提交）
