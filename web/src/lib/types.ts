@@ -1248,6 +1248,18 @@ export interface LLMPoolStatus {
   chain: LLMPoolMember[];
   // 各 profile 的端点探活/切换状态（G1）。后端未发版时缺省，UI 优雅降级不渲染。
   endpoints?: LLMEndpointStatus[];
+  // 凭据熔断状态（A-13）。键 = profile + host，连续 2 次 401/403 断路 30 分钟。
+  // 后端未发版时缺省，UI 优雅降级不渲染。
+  cred_breakers?: LLMCredBreaker[];
+}
+
+// 一个处于断路窗口内的凭据键（A-13）。
+export interface LLMCredBreaker {
+  profile_id: string;
+  host: string;
+  consecutive: number;
+  last_reason: string;
+  open_until: string; // RFC3339
 }
 
 // ---- Agents ----

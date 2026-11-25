@@ -12,6 +12,7 @@ package server
 // 前端暂无页面（F 线后续）；接口供脚本与 curl 使用，与 v3.1 §4「快照 JSON 齐全」对齐。
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -29,6 +30,27 @@ func (s *Server) registerMetricsRoutes(mux *http.ServeMux) {
 func (s *Server) metricsPrometheus(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	renderSchedMetrics(w)
+	s.renderCredBreakerMetrics(w)
+}
+
+// renderCredBreakerMetrics 输出凭据熔断器的即时状态（A-13，0.15.83）：
+// credbreaker_open{profile_id,host} 1 = 该凭据对该 host 处于断路窗口内。
+// 标签值是数字 id 与小写 host（不含转义序列），按 Prometheus 文本格式直出。
+func (s *Server) renderCredBreakerMetrics(w http.ResponseWriter) {
+	if s.credBreaker == nil {
+		return
+	}
+	open := 0
+	for k, st := range s.credBreaker.Snapshot() {
+		if !st.Open() {
+			continue
+		}
+		if open == 0 {
+			fmt.Fprint(w, "# HELP credbreaker_open Credential breaker windows currently open (2 consecutive 401/403 → 30min).\n# TYPE credbreaker_open gauge\n")
+		}
+		fmt.Fprintf(w, "credbreaker_open{profile_id=%d,host=%q} 1\n", k.ProfileID, k.Host)
+		open++
+	}
 }
 
 func (s *Server) metricsRun(w http.ResponseWriter, r *http.Request) {

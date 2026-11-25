@@ -249,6 +249,24 @@ func (s *Server) llmPoolStatus() map[string]any {
 	}
 	sortPoolStatus(chain)
 	out["chain"] = chain
+	// A-13（0.15.83）：凭据维度的断路状态——前端 LLM 页据此对断路中的 profile
+	// 显示「已熔断至 HH:MM」横幅。只列窗口内的键；自然过期的键下次快照自动消失。
+	cb := []map[string]any{}
+	if s.credBreaker != nil {
+		for k, st := range s.credBreaker.Snapshot() {
+			if !st.Open() {
+				continue
+			}
+			cb = append(cb, map[string]any{
+				"profile_id":  i64s(k.ProfileID),
+				"host":        k.Host,
+				"consecutive": st.Consecutive,
+				"last_reason": st.LastReason,
+				"open_until":  st.OpenUntil.Format(time.RFC3339),
+			})
+		}
+	}
+	out["cred_breakers"] = cb
 	return out
 }
 

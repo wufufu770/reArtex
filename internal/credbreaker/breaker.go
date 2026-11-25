@@ -55,6 +55,16 @@ type Breaker struct {
 	forget  func(Key)
 	// onOpen 在断路瞬间调用（锁外），宿主据此记审计事件与 activity。nil = 跳过。
 	onOpen func(Key, State)
+	// onRecover 在「断路窗口内凭据凭一次成功调用提前恢复」时调用（锁外）。
+	// 冷却自然到期不是事件（到期时刻没有代码在跑），宿主侧不另发通知。
+	onRecover func(Key, State)
+}
+
+// OnRecover 注册「窗口内提前恢复」回调（构造期调用一次）。
+func (b *Breaker) OnRecover(fn func(Key, State)) {
+	b.mu.Lock()
+	b.onRecover = fn
+	b.mu.Unlock()
 }
 
 // New 构造熔断器。persist/forget/onOpen 均可为 nil（纯内存模式，测试用）。
@@ -124,11 +134,16 @@ func (b *Breaker) Record(k Key, statusCode int) (tripped bool) {
 			tripped = true
 		}
 	case statusCode >= 200 && statusCode < 300:
+		wasOpen := st.Open()
+		snap := *st
 		delete(b.states, k)
-		forget := b.forget
+		forget, onRecover := b.forget, b.onRecover
 		b.mu.Unlock()
 		if forget != nil {
 			forget(k)
+		}
+		if wasOpen && onRecover != nil {
+			onRecover(k, snap) // 断路窗口内凭据自行恢复——宿主记恢复事件
 		}
 		return false
 	default:

@@ -5,6 +5,7 @@ package server
 // （审计/activity 留痕在后续版本接 onOpen，见 A-13 第二批）。
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 )
 
 // newCredBreakerRegistry builds the process-wide credential breaker with DB
-// mirroring. pg 为 nil 时退化为纯内存模式（测试/无库环境）。
+// mirroring. pg 为 nil 时退化为纯内存模式（测试/无库环境）。断路/恢复各记一条
+// 审计事件（audit_chain）与一条治理留痕（llm_records，后端日志页可见）——
+// A-13 第二批（0.15.83）。
 func newCredBreakerRegistry(pg *db.DB) *credbreaker.Breaker {
 	if pg == nil {
 		return credbreaker.New(nil, nil, nil)
@@ -38,11 +41,31 @@ func newCredBreakerRegistry(pg *db.DB) *credbreaker.Breaker {
 			}
 		}()
 	}
+	record := func(action, status, msg string, k credbreaker.Key, st credbreaker.State) {
+		payload := mustJSONValue(map[string]any{
+			"profile_id": k.ProfileID, "host": k.Host,
+			"consecutive": st.Consecutive, "last_reason": st.LastReason,
+			"open_until": st.OpenUntil.Format(time.RFC3339),
+		})
+		_, _ = pg.AppendAuditEvent(db.AuditEvent{
+			Actor: "platform", ToolName: "llm", Action: action, Reason: msg,
+			Payload: payload, Source: "credbreaker",
+		})
+		_ = pg.InsertLLMRecord(&db.LLMRecord{Worker: "governance", Model: fmt.Sprintf("profile #%d → %s", k.ProfileID, k.Host), Status: status, Error: msg})
+	}
 	onOpen := func(k credbreaker.Key, st credbreaker.State) {
-		log.Printf("[credbreaker] 凭据熔断：profile #%d 对 %s（%s ×%d），断路至 %s",
-			k.ProfileID, k.Host, st.LastReason, st.Consecutive, st.OpenUntil.Format("15:04"))
+		msg := fmt.Sprintf("凭据熔断：profile #%d 对 %s 连续 %d 次 401/403，断路至 %s（更换凭据或等待后自动恢复）",
+			k.ProfileID, k.Host, st.Consecutive, st.OpenUntil.Format("15:04"))
+		log.Printf("[credbreaker] %s", msg)
+		record("cred_breaker.open", "error", msg, k, st)
+	}
+	onRecover := func(k credbreaker.Key, st credbreaker.State) {
+		msg := fmt.Sprintf("凭据恢复：profile #%d 对 %s 的断路窗口因成功调用提前结束", k.ProfileID, k.Host)
+		log.Printf("[credbreaker] %s", msg)
+		record("cred_breaker.recover", "ok", msg, k, st)
 	}
 	b := credbreaker.New(persist, forget, onOpen)
+	b.OnRecover(onRecover)
 	// 只恢复未过期窗口（LoadCredBreakerState 已过滤），冷却完毕的凭据重启后视为健康。
 	if rows, err := pg.LoadCredBreakerState(); err == nil {
 		for _, r := range rows {

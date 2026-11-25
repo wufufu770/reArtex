@@ -30,6 +30,7 @@ import (
 	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/mcphttp"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
@@ -207,6 +208,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		llmHealth:   newLLMHealthRegistry(m.pg),
 		credBreaker: newCredBreakerRegistry(m.pg),
 		taskAgents:  map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	// A-13（0.15.83）：MCP HTTP 客户端（含 SSE 握手与 ScopeSentry 同步）共享同一
+	// 凭据熔断器——进程级单例，nil 安全（mcphttp 未注入时行为与旧版一致）。
+	mcphttp.SetCredBreaker(s.credBreaker)
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
 	s.engine.ClaimMirror = s.onEngineIntentClaim

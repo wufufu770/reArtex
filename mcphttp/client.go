@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/artex/internal/credbreaker"
 	"github.com/Autumn-27/artex/netguard"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
@@ -89,6 +90,57 @@ func doRequest(hc *http.Client, req *http.Request) (*http.Response, error) {
 	return hc.Do(req)
 }
 
+// --- 凭据熔断（A-13，0.15.83）---
+
+// credBreaker 是进程级凭据熔断器（键 = profile + 目标 host，2×连续 401/403 →
+// 断路 30 分钟）。server 启动期经 SetCredBreaker 注入；nil = 未接（单测/降级），
+// 行为与未接时完全一致。断路期内的请求在拨号前就被拒绝——不再重试撞锁。
+var credBreaker *credbreaker.Breaker
+
+// SetCredBreaker 注入进程级凭据熔断器（启动期调用一次）。
+func SetCredBreaker(b *credbreaker.Breaker) { credBreaker = b }
+
+// Option 定制 Client（New/NewSSE 的可选参数，缺省行为不变）。
+type Option func(*Client)
+
+// WithCredProfile 声明本客户端凭据所属的配置行 id（mcp_servers.id）——凭据熔断
+// 按（profile + host）计；不设则以 0 计（同 host 的无主凭据共享一个熔断桶）。
+func WithCredProfile(id int64) Option {
+	return func(c *Client) { c.credProfile = id }
+}
+
+// credKey 是本客户端的凭据熔断键。legacy SSE 的凭据 POST 送去 messageURL，
+// 但端点经 sameOriginEndpoint 强制与 SSE URL 同源——按 c.url 的 host 计即等价。
+func (c *Client) credKey() credbreaker.Key {
+	host := ""
+	if u, err := url.Parse(c.url); err == nil {
+		host = strings.ToLower(u.Host)
+	}
+	return credbreaker.Key{ProfileID: c.credProfile, Host: host}
+}
+
+func (c *Client) credAllow() bool {
+	return credBreaker == nil || credBreaker.Allow(c.credKey())
+}
+
+func (c *Client) credRecord(statusCode int) {
+	if credBreaker != nil {
+		credBreaker.Record(c.credKey(), statusCode)
+	}
+}
+
+// credDenied 给出可操作的拒绝信息：何时自动恢复、或换凭据。
+func (c *Client) credDenied() error {
+	until := "约 30 分钟"
+	if credBreaker != nil {
+		if t := credBreaker.OpenUntil(c.credKey()); !t.IsZero() {
+			until = t.Format("15:04")
+		}
+	}
+	return fmt.Errorf("凭据已熔断（连续 %d 次 401/403），%s 后重试或更换凭据",
+		credbreaker.MaxConsecutiveAuthFailures, until)
+}
+
 // ToolName mirrors mcp.ToolName so remote tools share the mcp__server__tool scheme.
 func ToolName(server, name string) string { return "mcp__" + server + "__" + name }
 
@@ -125,6 +177,9 @@ type Client struct {
 	nextID    int
 	sessionID string
 
+	// credProfile 是凭据熔断的 profile 维度（WithCredProfile，A-13）。
+	credProfile int64
+
 	// legacySSE is the pre-2025 MCP SSE transport used by servers such as GSL5.
 	legacySSE    bool
 	messageURL   string
@@ -154,7 +209,7 @@ func normalizeHeaders(headers map[string]string) (map[string]string, error) {
 // headers are sent on every request (Authorization, custom API keys, …).
 // When insecure is true, TLS certificate verification is skipped so servers that
 // present a self-signed certificate can still be reached (issue #108).
-func New(ctx context.Context, server, url string, headers map[string]string, insecure bool) (*Client, error) {
+func New(ctx context.Context, server, url string, headers map[string]string, insecure bool, opts ...Option) (*Client, error) {
 	cleanHeaders, err := normalizeHeaders(headers)
 	if err != nil {
 		return nil, err
@@ -166,6 +221,9 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 		headers:  cleanHeaders,
 		http:     hc,
 		protocol: protocolVersion,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	// initialize 在握手预算内（此前只有 120s Client.Timeout 兜底，规整为同一预算）。
 	initCtx, initCancel := context.WithTimeout(ctx, handshakeTimeout)
@@ -186,12 +244,18 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 // TCP）会把 GET /sse / 端点公告 / initialize 全部挂死，装配路径不返回就永远进
 // 不了失败冷却。握手成功后解除转发与看门狗——若看门狗恰在完成瞬间触发，用
 // streamCtx.Err() 复核并按失败处理（连接丢弃可重试，好过交付一条将死的流）。
-func NewSSE(ctx context.Context, server, sseURL string, headers map[string]string, insecure bool) (*Client, error) {
+func NewSSE(ctx context.Context, server, sseURL string, headers map[string]string, insecure bool, opts ...Option) (*Client, error) {
 	cleanHeaders, err := normalizeHeaders(headers)
 	if err != nil {
 		return nil, err
 	}
 	hc := newHTTPClient(0, insecure) // the SSE stream is intentionally long-lived.
+	// 先把 profile 收出来：握手 GET 的凭据熔断判定发生在 Client 构造之前（A-13）。
+	probe := &Client{}
+	for _, opt := range opts {
+		opt(probe)
+	}
+	credProfile := probe.credProfile
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stopRelay := context.AfterFunc(ctx, cancel) // 仅握手期：调用方取消 → 中止握手
 	timer := time.AfterFunc(handshakeTimeout, cancel)
@@ -211,9 +275,28 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	for k, v := range cleanHeaders {
 		req.Header.Set(k, v)
 	}
+	// 握手 GET 同样带凭据（A-13）：断路期直接拒绝，响应状态码计入熔断。
+	handshakeKey := credbreaker.Key{ProfileID: credProfile}
+	if u, perr := url.Parse(sseURL); perr == nil {
+		handshakeKey.Host = strings.ToLower(u.Host)
+	}
+	if credBreaker != nil && !credBreaker.Allow(handshakeKey) {
+		cancel()
+		return nil, func() error {
+			until := "约 30 分钟"
+			if t := credBreaker.OpenUntil(handshakeKey); !t.IsZero() {
+				until = t.Format("15:04")
+			}
+			return fmt.Errorf("凭据已熔断（连续 %d 次 401/403），%s 后重试或更换凭据",
+				credbreaker.MaxConsecutiveAuthFailures, until)
+		}()
+	}
 	resp, err := doRequest(hc, req)
 	if err != nil {
 		return nil, err
+	}
+	if credBreaker != nil {
+		credBreaker.Record(handshakeKey, resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
@@ -544,10 +627,16 @@ func (c *Client) roundTrip(ctx context.Context, body rpcRequest, expectResp bool
 		req.Header.Set("Mcp-Session-Id", sid)
 	}
 
+	// A-13：凭据断路期在拨号前拒绝——不重试撞锁；响应状态码计入熔断
+	// （401/403 累计、2xx 复位、其余码不改）。
+	if !c.credAllow() {
+		return nil, c.credDenied()
+	}
 	resp, err := doRequest(c.http, req)
 	if err != nil {
 		return nil, err
 	}
+	c.credRecord(resp.StatusCode)
 	defer resp.Body.Close()
 
 	// Capture the session id the server assigns on initialize.
@@ -608,10 +697,15 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
+	// A-13：凭据断路期在拨号前拒绝（同 Streamable HTTP 路径）。
+	if !c.credAllow() {
+		return nil, c.credDenied()
+	}
 	resp, err := doRequest(c.http, req)
 	if err != nil {
 		return nil, err
 	}
+	c.credRecord(resp.StatusCode)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("mcp sse http %d: %s", resp.StatusCode, readSnippet(resp.Body))

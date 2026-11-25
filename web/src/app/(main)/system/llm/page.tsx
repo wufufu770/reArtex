@@ -94,6 +94,13 @@ function cooldownText(secs: number) {
   return `${Math.ceil(secs / 60)}min`;
 }
 
+// A-13：凭据熔断窗口的到期时刻（RFC3339 → 本地 HH:MM），供「已熔断至 HH:MM」文案。
+function untilText(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 // 一个配置在卡片上显示的「是否正常」。没填 Key 的配置根本发不出请求，比熔断更该先说；
 // 其余状态来自轮询的熔断记录（轮询关着时不会产生新记录，此时「正常」= 没有已知故障）。
 type Health = { label: string; cls: string; hint?: string };
@@ -1126,6 +1133,16 @@ export default function LLMPage() {
     return m;
   }, [pool]);
 
+  // A-13：凭据维度的断路（对同一 host 连续 401/403 → 30 分钟断路窗）。卡片徽标
+  // 只反映轮询 health 维度，凭据熔断单独在顶部横幅直陈，便于「换凭据还是等恢复」
+  // 的判断；窗口自然过期后下次快照自动消失。
+  const credTripped = React.useMemo(() => {
+    return (pool?.cred_breakers ?? []).map((cb) => ({
+      ...cb,
+      profileName: profiles.find((p) => p.id === cb.profile_id)?.name ?? `配置 #${cb.profile_id}`,
+    }));
+  }, [pool, profiles]);
+
   async function activate(id: string, name: string) {
     try {
       await api.activateLLMProfile(id);
@@ -1189,6 +1206,20 @@ export default function LLMPage() {
           <TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <p className="text-sm leading-relaxed">
             {"当前无备用 LLM（或轮询未开启），主配置故障时全部通道停摆——添加第二个配置并开启 LLM 轮询。"}
+          </p>
+        </div>
+      )}
+
+      {credTripped.length > 0 && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-400/50 bg-amber-400/5 px-3.5 py-3">
+          <TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <p className="text-sm leading-relaxed">
+            {`凭据已熔断：${credTripped
+              .map(
+                (cb) =>
+                  `${cb.profileName} → ${cb.host}（${cb.last_reason} ×${cb.consecutive}，已熔断至 ${untilText(cb.open_until)}）`,
+              )
+              .join("；")}——更换凭据可立即恢复，或等待窗口到期自动恢复。`}
           </p>
         </div>
       )}
