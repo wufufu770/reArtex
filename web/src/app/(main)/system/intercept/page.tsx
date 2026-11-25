@@ -127,6 +127,7 @@ type RuleForm = {
   timeout_enabled: boolean;
   timeout_seconds: number;
   timeout_action: "deny" | "allow";
+  tool_scope: string[]; // A-10：空 = 全局
 };
 
 const defaultForm = (): RuleForm => ({
@@ -141,6 +142,7 @@ const defaultForm = (): RuleForm => ({
   timeout_enabled: true,
   timeout_seconds: 60,
   timeout_action: "deny",
+  tool_scope: [],
 });
 
 // ---- small components ----
@@ -442,6 +444,8 @@ export default function InterceptPage() {
   const [saving, setSaving] = React.useState(false);
   const [regexErr, setRegexErr] = React.useState("");
   const [regexWarn, setRegexWarn] = React.useState(false); // true = JS 无法解析但可能是合法 Go 语法
+  // A-10：规则作用工具的自定义条目输入（可填尚未注册的工具名/MCP 名）。
+  const [customScope, setCustomScope] = React.useState("");
 
   // ---- tool scope dialog ----
   const [scopeOpen, setScopeOpen] = React.useState(false);
@@ -506,6 +510,7 @@ export default function InterceptPage() {
     setEditing(null);
     setForm(defaultForm());
     setRegexErr("");
+    setCustomScope("");
     setOpen(true);
   }
 
@@ -523,8 +528,10 @@ export default function InterceptPage() {
       timeout_enabled: rule.timeout_enabled,
       timeout_seconds: rule.timeout_seconds,
       timeout_action: rule.timeout_action,
+      tool_scope: rule.tool_scope ?? [],
     });
     setRegexErr("");
+    setCustomScope("");
     setOpen(true);
   }
 
@@ -618,6 +625,14 @@ export default function InterceptPage() {
   }
 
   const toolGroups = React.useMemo(() => groupTools(allTools), [allTools]);
+  // A-10：规则作用工具候选 = 全部已知工具 ∪ 拦截范围内工具（去重）。
+  const toolScopeCandidates = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const g of toolGroups) for (const t of g.tools) set.add(t.key);
+    for (const t of allTools) set.add(t.key);
+    for (const t of scopeTools) set.add(t);
+    return [...set];
+  }, [toolGroups, allTools, scopeTools]);
 
   // ---- render ----
 
@@ -709,6 +724,7 @@ export default function InterceptPage() {
                         <TableHead className="w-[90px]">目标</TableHead>
                         <TableHead className="w-[80px]">类型</TableHead>
                         <TableHead>模式</TableHead>
+                        <TableHead className="w-[92px]">作用域</TableHead>
                         <TableHead className="w-[72px]">策略</TableHead>
                         <TableHead className="w-[64px] text-center">启用</TableHead>
                         <TableHead className="w-[80px]" />
@@ -735,6 +751,18 @@ export default function InterceptPage() {
                             <code className="block truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
                               {rule.pattern}
                             </code>
+                          </TableCell>
+                          <TableCell>
+                            {(rule.tool_scope?.length ?? 0) === 0 ? (
+                              <Badge variant="secondary">全局</Badge>
+                            ) : (
+                              <span
+                                className="text-muted-foreground text-xs"
+                                title={rule.tool_scope?.join("、")}
+                              >
+                                {rule.tool_scope!.length} 个工具
+                              </span>
+                            )}
                           </TableCell>
                           <TableCell>
                             <ActionBadge action={rule.action} />
@@ -834,6 +862,69 @@ export default function InterceptPage() {
                 <p className="mt-1 text-amber-600 text-xs">
                   包含 Go RE2 扩展语法（如 <code className="font-mono">(?i)</code>），浏览器无法预览，提交后由服务端验证
                 </p>
+              )}
+            </Field>
+
+            <Field label="作用工具（留空 = 全局生效）">
+              <div className="flex flex-wrap gap-1.5">
+                {toolScopeCandidates.length === 0 && (
+                  <p className="text-muted-foreground text-xs">暂无已知工具，可用下方输入框手填</p>
+                )}
+                {toolScopeCandidates.map((t) => {
+                  const on = form.tool_scope.includes(t);
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() =>
+                        set({
+                          tool_scope: on
+                            ? form.tool_scope.filter((x) => x !== t)
+                            : [...form.tool_scope, t],
+                        })
+                      }
+                      className={`rounded-md border px-2 py-0.5 font-mono text-xs transition-colors ${
+                        on
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "bg-muted/40 text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  placeholder="自定义工具名（如未注册的 MCP 工具）"
+                  value={customScope}
+                  onChange={(e) => setCustomScope(e.target.value)}
+                  className="h-8 text-xs"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0"
+                  onClick={() => {
+                    const v = customScope.trim();
+                    if (!v || form.tool_scope.includes(v)) return;
+                    set({ tool_scope: [...form.tool_scope, v] });
+                    setCustomScope("");
+                  }}
+                >
+                  添加
+                </Button>
+              </div>
+              {form.tool_scope.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                  <span className="text-muted-foreground text-xs">已选 {form.tool_scope.length} 个：</span>
+                  {form.tool_scope.map((t) => (
+                    <span key={t} className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px]">
+                      {t}
+                    </span>
+                  ))}
+                </div>
               )}
             </Field>
 

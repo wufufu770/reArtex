@@ -1625,6 +1625,8 @@ export interface InterceptRule {
   timeout_enabled: boolean;
   timeout_seconds: number;
   timeout_action: "deny" | "allow";
+  /** A-10：作用工具；空数组 = 全局（存量语义）。 */
+  tool_scope?: string[];
   created_at: string;
   updated_at: string;
 }
