@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.92] - 2026-11-25
+
+### 变更（A-16：Tier-0 不可变安全边界锁死——先修完 A 类、再锁死）
+
+- `scripts/rsi_guard.py`：**强制面收口**。`--tier` 支持最严档 `0`——Tier-1/2 触碰也一律违规（0.15.18 的观察模式允许按层级放行，锁死后最严档下任何清单内文件都不可改）。新增 **`--allow-tier0 <理由>`** 例外通道：仅 `--enforce` 下可用且理由必须非空（人工改 Tier-0 也必须显式留痕——「谁来改」在文件系统层面无法区分，唯一可区分的是改动是否留痕、是否经过显式人类裁决）；例外放行逐条列明并提示登记 `docs/SECURITY-HARDENING.md`。**例外留痕校验**：`--base`（CI/push）模式下校验理由确实出现在区间提交信息里（`git log base..HEAD`，区间不可得退回最新一条——校验从宽但绝不静默跳过）；理由只出现在命令行参数上不算留痕——留痕在提交信息里，任何人 `git log` 可查。
+- `.github/workflows/ci.yml`：新增独立 **`rsi-guard` job**（push/PR/workflow_call 全触发，`fetch-depth: 0`，`python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --enforce --tier 1`，命中即失败；`event.before` 为空/全零——首推或历史缺失——跳过并明示），取代 secret-scan job 里 0.15.18 的观察模式步骤——**观察期结束，A-01…A-15 修复批次落地后锁死生效**（卡面执行约束第 5 条的时点要求）。
+- `scripts/precommit-test.sh`：新增 **[1/6] RSI 门禁步**（`--staged --enforce --tier 1`，与 CI 同款，先本地拦再 CI 拦）；例外通道走环境变量 `RSI_ALLOW_TIER0="理由"`；其余步骤顺延为 2/6–6/6。
+- `docs/SECURITY-HARDENING.md`：新增 **「Tier-0 例外登记」** 节——例外流程四步（PR 描述写明原因 + `tier0-exception` 标签 + 第二人复核/无第二人时由维护者显式确认 + append-only 登记表）；基线整批登记 0.15.74–0.15.91 A 类卡面明载改动的 23 个 Tier-0 清单内文件（**不追溯拦截**——锁死前的修复批次是任务本身，不是例外）；并注明锁死提交所在首推区间会让 rsi-guard 首跑红，人工以登记原句 `--allow-tier0` 放行一次后常规推送自动回绿。
+- 【与卡面差异（如实说明）】① CI 命令未带 `--require-evo-id`：本仓全部提交均为主导人工的常规提交（无一处带 EVO 编号），CI 强制校验会让每次推送都失败——evo-id 校验保留给自主改进流水线显式启用（guard 的 `--require-evo-id` 随时可用）；② 卡面称 rsi_guard.py「不存在」已过时（0.15.18 批次 C 已落地观察模式），本项在其基础上收口强制面而非新建。
+- 自证：guard 对本提交自身即 Tier-0 命中（`scripts/rsi_guard.py` 在 TIER_0_EXACT 清单内），本次提交经例外通道落地（理由已含于提交信息，`--base` 留痕校验可匹配），锁死自此生效。
+- 验证：`bash -n scripts/precommit-test.sh` 语法通过；ci.yml YAML 解析通过；guard 狗粮自测——暂存区 `--staged --enforce --tier 1` 对本批次正确报 Tier-0 命中（退出码 1），带 `--allow-tier0` 后放行（退出码 0，例外逐条列明）。
+
 ## [0.15.91] - 2026-11-25
 
 ### 变更（A-02 第二批：operator 授信端点 + 启动对账 + 批量创建速率告警）
