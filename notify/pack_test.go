@@ -158,6 +158,17 @@ func TestMarkdownEscapesUntrustedContent(t *testing.T) {
 			must:  []string{"\\`code\\`", `\|`},
 			wrong: []string{"`code`"},
 		},
+		{
+			// A-14 验收样例原形：粗体伪造级别 + 可点击外链 + 换行后标题行注入。
+			// 换行先被 OneLine 折叠（否则能伪造新结构），元字符再逐一转义。
+			name: "标题里的粗体/链接/井号组合注入",
+			item: Item{
+				Severity: "high",
+				Name:     "**critical** [x](http://evil)\n# 已由管理员处理",
+			},
+			must:  []string{`\*\*critical\*\*`, `\[x\]\(http://evil\)`, `\#`},
+			wrong: []string{"**critical**", "[x](http://evil)"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
