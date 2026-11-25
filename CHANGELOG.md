@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.91] - 2026-11-25
+
+### 变更（A-02 第二批：operator 授信端点 + 启动对账 + 批量创建速率告警）
+
+- `server/skill_trust_admin.go`（新增）：**`POST /api/skills/{name}/trust`**——树哈希失配降级后唯一能把档位升回 trusted 的显式入口。走全局 `requireAuth`；body `{"tier":"trusted"|"untrusted","reason":...}`；先重算树哈希落 operator 记录，再写审计链（`skill.trust`，actor/source=`operator`，理由与 tier 可查）；非法 tier 400、skill 不存在/目录空 404、被拒绝的请求不改档位。
+- `server/skill_trust_admin.go`：**`reconcileSkillTrust` 启动期一次性对账**（`server/server.go` 装配在 seedPrompts 之后）。三分支：①无记录 skill 补钉 `treeHash|trusted`——升级前「无记录 = 随镜像分发 = operator 布置」按 trusted 展示，补钉保持列表页展示一致（**无静默翻转**），树同时被钉住，此后记录之外的改动照常失配降级（迁移是加固不是放水）；②存量单文件哈希记录（值恰等于 `sha256(SKILL.md)`）静默换算为树哈希、**档位原样保留**——格式迁移不是重新裁决；③已是树哈希/未知格式的记录一律不动——reconcile 不掩盖任何已发生的改动，失配交给判定路径降级+审计。幂等（迁移后不再命中 legacy 口径，重复启动零开销）；失败不阻断启动（判定路径对无记录 fail-closed，最坏按不可信注入而非放水）。
+- `server/skill_trust_admin.go` + `server/platform_tools.go`：**create_skill 批量创建速率告警**——滑动 1 小时窗口进程内计数（重启归零是该口径已知边界，与调度面计数器一致）；阈值 settings 热改（`skill_trust.create_alert_threshold`，默认 10 次/小时；非法值回落默认并在日志说明——配置错误不得变成「关掉告警」）；超阈值第一次记审计事件 `skill.create_rate_alert` + 告警日志，同窗口不重复记链，滑回阈值内重新武装——批量自撰 skill 是 prompt-injection 面的量变信号，值得一条显式留痕。【实现披露】卡片原文「复用 A-08 的计数口径」：本任务包的 A-08（0.15.75）是 config.json 入秘密清单，仓内无可复用的计数机制，故取与调度面计数器同款「进程内窗口 + 重启归零」口径并如实注明。
+- 测试（`server/skill_trust_admin_test.go` 新增）：`TestSkillTrustEndpoint`（降级 → 端点授信 → 恢复 trusted + 审计留痕的完整闭环；非法 tier 拒绝且不改档位）、`TestReconcileSkillTrust`（三分支 + 幂等复跑零变化）、`TestSkillCreateRateAlert`（阈值内不告警 / 超阈恰好一条 / 同窗口不刷链 / 非法阈值回落默认）、`TestSkillTreeHashIgnoresGitAndTemp`（`.git` 与临时文件不进摘要——它们的出现与改动不构成 skill 内容变化）。
+- 验证：skill 信任/目录树/端点/对账/告警 12 用例 + 平台工具与降权注入关联面全绿（24.9s）；`go build` + `go vet` 干净。
+
 ## [0.15.90] - 2026-11-25
 
 ### 变更（A-02 第一批：skill 信任绑定从单文件哈希改为目录树哈希，判定翻转）
@@ -16,6 +26,7 @@
 - `server/skill_trust_test.go`：按新语义重写（原「无记录默认 trusted」「宿主机编辑变 trusted」两条用例钉的是被推翻的旧语义，改为钉 fail-closed 与失配降级）。新增：`TestSkillTrustTreeHashSensitivity`（验收四路：改 SKILL.md / 改 scripts/*.py / 新增文件 / 删文件，树哈希全变、档位全落 untrusted、重钉后稳定）、`TestSkillTrustTierMismatchDemotesAndAudits`（攻击复现：绕开 ARTEX 写入路径直改 SKILL.md ⇒ 下一次判定 untrusted（降权注入由 `skill_demote.go` 触发）+ 恰好一条审计事件；同一次改动不重复审计；内容再变再记一条）、`TestSkillTrustTierAgentWriterNeverTrusted`（agent 传 trusted 落库仍 untrusted）、`TestSkillTreeHashEmptyDirErrors`（空目录/缺目录/仅 .git+临时文件都拒绝）。
 - 验证：`go test ./server/ -run 'TestSkillTrust|TestSkillTreeHash'` 8 用例全绿；`TestSkill|TestDemote|TestPlatformTool` 关联面全绿；`go build` + `go vet` 干净。遗留（第二批 0.15.91）：operator 信任端点 `POST /api/skills/{name}/trust`、启动 reconcile（存量单文件哈希记录静默迁移 + 无记录 skill 补标记，无静默翻转）、批量创建速率告警。
 
+## [0.15.89] - 2026-11-25
 
 ### 变更（A-05：审计链从无密钥 SHA-256 升级为 HMAC-SHA256，配套外部锚点第二介质）
 
