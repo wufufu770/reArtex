@@ -102,8 +102,9 @@ func joinWithBase(p, base string) string {
 // 两段判定：
 //  1. 字符串层：把候选路径按工作目录展开并 Clean 后，直接比对秘密清单。
 //     命中即拒 —— 这一段不碰文件系统，所以大内容块上也不产生 syscall。
-//  2. 真实路径层：只对【确实存在】的候选解析真实路径（EvalSymlinks），
-//     抓「软链指向密钥」与「父目录是软链」这两种字符串层看不出来的形态。
+//  2. 真实路径层：统一走 resolveReal（A-11），抓「软链指向密钥」「父目录是软链」
+//     「悬空符号链接」这几种字符串层看不出来的形态；不存在路径按最深已存在
+//     父目录解析后判定，不再「不存在就跳过」。
 func CheckInputPaths(toolName string, input []byte, workingDir string) error {
 	var v any
 	if err := json.Unmarshal(input, &v); err != nil {
@@ -118,7 +119,7 @@ func CheckInputPaths(toolName string, input []byte, workingDir string) error {
 		for _, tok := range strings.FieldsFunc(s, func(r rune) bool {
 			return strings.ContainsRune(tokenSplitter, r)
 		}) {
-			for _, cand := range pathCandidates(tok) {
+			for _, cand := range tokenCandidates(tok) {
 				if seen[cand] {
 					continue
 				}
@@ -128,12 +129,9 @@ func CheckInputPaths(toolName string, input []byte, workingDir string) error {
 				if err := denyReason(cleaned); err != nil {
 					return fmt.Errorf("拒绝 %s 的路径 %q: %w", toolName, cand, err)
 				}
-				if _, err := os.Lstat(cleaned); err != nil {
-					continue // 不存在的东西读不出秘密
-				}
-				real, err := filepath.EvalSymlinks(cleaned)
+				real, err := resolveReal(cand, workingDir)
 				if err != nil {
-					continue
+					return fmt.Errorf("拒绝 %s 的路径 %q: %w", toolName, cand, err)
 				}
 				if err := denyReason(real); err != nil {
 					return fmt.Errorf("拒绝 %s 的路径 %q（真实路径 %s）: %w", toolName, cand, real, err)
@@ -142,4 +140,22 @@ func CheckInputPaths(toolName string, input []byte, workingDir string) error {
 		}
 	}
 	return nil
+}
+
+// tokenCandidates 给出单个 token 的全部路径候选。
+//
+// 有路径起点（/ ~/ ../ ..）的 token 按后缀切出候选（见 pathCandidates）；
+// 完全没有路径起点的裸 token 整体作为一个候选（A-11）：`cd /app && cat jwt.key`
+// 里的 jwt.key 单独成 token，此前整段被漏掉。裸候选收紧上限——它本质是文件名，
+// 超长 token 是压缩文本之类的杂物，不值得为它逐层爬文件系统。
+func tokenCandidates(tok string) []string {
+	cands := pathCandidates(tok)
+	if len(cands) > 0 {
+		return cands
+	}
+	bare := strings.TrimRight(tok, ".,;:!?)]}'\"")
+	if bare == "" || len(bare) > 96 || strings.ContainsRune(bare, '/') {
+		return nil
+	}
+	return []string{bare}
 }

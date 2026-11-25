@@ -32,7 +32,7 @@ func (p *policyTool) CheckPermissions(ctx context.Context, input json.RawMessage
 			return acperm.Denied(reason)
 		}
 	}
-	if err := pathguard.Check(p.Name(), input); err != nil {
+	if err := pathguard.Check(p.Name(), input, pc.WorkingDir); err != nil {
 		recordToolDenial(ctx, p.Name(), err.Error(), input)
 		return acperm.Denied(err.Error())
 	}

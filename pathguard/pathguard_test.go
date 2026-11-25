@@ -20,11 +20,17 @@ func withSecretRoots(t *testing.T, roots ...string) {
 
 func call(t *testing.T, tool, pathParam, path string) error {
 	t.Helper()
+	return callWd(t, tool, pathParam, path, "")
+}
+
+// callWd 以指定工作目录发起一次 Check（A-11：相对路径按 workingDir 解析）。
+func callWd(t *testing.T, tool, pathParam, path, workingDir string) error {
+	t.Helper()
 	raw, err := json.Marshal(map[string]string{pathParam: path})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Check(tool, raw)
+	return Check(tool, raw, workingDir)
 }
 
 func TestBlocksDirectSecretPaths(t *testing.T) {
@@ -140,14 +146,14 @@ func TestIgnoresNonPathTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Check("Bash", raw); err != nil {
+	if err := Check("Bash", raw, ""); err != nil {
 		t.Fatalf("Bash 不由本包判定（命令串路径要经 shell 展开，交给短路表）: %v", err)
 	}
 }
 
 func TestMalformedInputNotFatal(t *testing.T) {
 	withSecretRoots(t)
-	if err := Check("Read", []byte("{not json")); err != nil {
+	if err := Check("Read", []byte("{not json"), ""); err != nil {
 		t.Fatalf("畸形输入应放行并交工具自己报错: %v", err)
 	}
 }

@@ -74,7 +74,11 @@ var pathParams = map[string][]string{
 // 只覆盖路径类工具：Bash 的命令串里路径要经 shell 展开才现形，字符串层判不准，
 // 那部分仍由 guard/shortcircuit.go 的短路表按 best-effort 处理；WebFetch 的 url
 // 属出网策略，由 netguard 在拨号期判定，不在这里。
-func Check(toolName string, input []byte) error {
+//
+// workingDir 是工具进程的工作目录（norma permission.Context.WorkingDir，A-11）：
+// 入参里的相对路径按它而不是进程 CWD 解析——工具真正打开文件时用的就是它。
+// 为空时回落进程 CWD（与旧版一致）。
+func Check(toolName string, input []byte, workingDir string) error {
 	params, ok := pathParams[toolName]
 	if !ok {
 		return nil
@@ -88,10 +92,11 @@ func Check(toolName string, input []byte) error {
 		if !ok || raw == "" {
 			continue // 参数缺省时工具回落到 WorkingDir，不构成越界
 		}
-		resolved, err := resolveExisting(raw)
+		resolved, err := resolveReal(raw, workingDir)
 		if err != nil {
-			// 解析不出真实路径时不猜，按拒绝处理更安全；代价是极少数畸形路径会误伤。
-			return fmt.Errorf("拒绝 %s %s=%q: 无法解析真实路径: %w", toolName, key, raw, err)
+			// 解析不出真实路径（含悬空符号链接）时不猜，按拒绝处理更安全；
+			// 代价是极少数畸形路径会误伤。
+			return fmt.Errorf("拒绝 %s %s=%q: %w", toolName, key, raw, err)
 		}
 		if err := denyReason(resolved); err != nil {
 			return fmt.Errorf("拒绝 %s %s=%q: %w", toolName, key, raw, err)
@@ -138,35 +143,49 @@ func procSecretMatch(real string) bool {
 	return false
 }
 
-// resolveExisting 返回 p 的真实路径。p 不存在时（写入新文件的常见情形）改为解析
-// 最深的已存在祖先再拼回剩余段——否则对新文件会解析失败而误伤正常写入。
-func resolveExisting(p string) (string, error) {
+// resolveReal 返回 p 的真实路径（A-11，0.15.80）。语义：
+//   - 相对路径按 workingDir 拼全（为空回落进程 CWD）；~ 先展开；
+//   - 路径存在 → EvalSymlinks 直解（整条链接链都算进去）；
+//   - 路径不存在（写新文件的常态）→ 沿父目录向上找已存在的锚点，把剩余段拼回；
+//   - 悬空符号链接（Lstat 能看到链接本身、跟随目标不存在/成环）→ 直接报错拒绝，
+//     不尝试跟随：读它必然失败，写它会在链接目标处落盘，绕开工作目录判定。
+//
+// 全包的路径解析统一走这里（Check 与 tokens.go 的真实路径层共用），不再各写各的。
+func resolveReal(p, workingDir string) (string, error) {
 	if strings.HasPrefix(p, "~") {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
 	}
+	if !filepath.IsAbs(p) && workingDir != "" {
+		p = filepath.Join(workingDir, p)
+	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
 	}
-	if r, err := filepath.EvalSymlinks(abs); err == nil {
-		return r, nil
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
 	}
-	dir, tail := abs, ""
+	// 路径不存在或链接链断掉：自 abs 起逐层向上，Lstat 抓悬空符号链接，
+	// EvalSymlinks 找已存在的锚点。每一层都被 Lstat 查过，锚点以下的剩余段
+	// 不含未决符号链接，拼回即得真实落点。
+	cur := abs
 	for {
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return abs, nil // 一路到根都没解析出可用的祖先
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("无法解析真实路径 %q（已走到根）", abs)
 		}
-		if tail == "" {
-			tail = filepath.Base(dir)
-		} else {
-			tail = filepath.Join(filepath.Base(dir), tail)
+		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("悬空符号链接 %q（跟随目标不存在或成环）——按拒绝处理", cur)
 		}
-		dir = parent
-		if r, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(r, tail), nil
+		if real, err := filepath.EvalSymlinks(parent); err == nil {
+			rel, err := filepath.Rel(parent, abs)
+			if err != nil {
+				rel = strings.TrimPrefix(abs, parent+"/")
+			}
+			return filepath.Join(real, rel), nil
 		}
+		cur = parent
 	}
 }
