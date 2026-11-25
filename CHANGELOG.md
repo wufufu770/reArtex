@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.82] - 2026-11-25
+
+### 新增（A-13 第一批：凭据熔断器核心 + DB 持久化 + LLM 链挂接）
+
+- `internal/credbreaker`（新包）：凭据维度熔断器，键 = `profile + host`（host 归一化小写，空 host = profile 全局维度）。策略为代码常量（不进 settings，安全阈值不热改——pathguard `secretRoots` 同款原则）：**连续 2 次 401/403 → 断路 30 分钟**；一次 2xx 即复位；429/5xx 不推进也不清零（只有「连续」的凭据失败才累积）。`Record` 返回 `tripped`（断路瞬间恰好由这次触发）；`onOpen` 回调供宿主记审计/activity；`persist`/`forget` 回调复用 llmpool/health.go 模式（进程内状态权威，DB 镜像）。
+- `db/schema_credbreaker.sql` + `db/credbreaker.go`（新增）：`cred_breaker_state` 表（profile+host 主键）+ `SaveCredBreakerState`/`ClearCredBreakerState`/`LoadCredBreakerState`（只取未过期窗口——冷却完毕的凭据重启后视为健康，与 `LoadLLMHealth` 同口径）；幂等 DDL 走启动迁移块（`EnsureCredBreakerSchema`）+ `markRuntimeSchemasReady` 就位标记。
+- `llmpool`：`Member.Host`（`HostOf` 从 BaseURL 提取，空 = SDK 默认端点退化为 profile 全局维度）；`Pool.cred`（`New` 增第三参，nil 安全）；`order()` 跳过凭据断路中的成员；成功 `Record(200)` 复位、failover 失败按 `statusOf` 计数（401/403 累计，其余码不改）；断路瞬间进程日志。与池 health 互补：health 管「profile 还能用吗」（首败即硬熔断+冷却阶梯），cred 管「这份凭据对这个端点还要不要撞」（跨冷却探测累计、固定 30min、重启存活）。
+- `server`：`Server.credBreaker` 字段 + `newCredBreakerRegistry`（DB 镜像 + 启动 Restore；`m.pg=nil` 退化纯内存）；断路审计/activity 留痕与第二批挂接点（mcphttp / sync_scopesentry）、`credbreaker_open` 指标、LLM 页横幅在 0.15.83 落地。
+- 测试：core 四用例（两次 401 断路/成功复位/键独立+大小写归一/重启 Restore 后仍拒绝且过期放行）；pool 集成两用例（`health.Reset` 模拟冷却到期——401 硬失败第一次即池熔断，凭据维度的增量正是跨冷却累计；成功复位后恰好两次 401 断路）。llmpool/internal/credbreaker/sidequestion/db 全绿；`go build ./...` 通过。
+
 ## [0.15.81] - 2026-11-25
 
 ### 新增（A-07：stdio MCP 执行器黑名单改真实路径比对）
