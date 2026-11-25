@@ -5,6 +5,13 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.87] - 2026-11-25
+
+### 修复（A-07 遗留补丁：TestMgmtAPI 的 stdio 命令适配真实路径校验）
+
+- `server/mgmt_test.go`：`TestMgmtAPI` 的 `command: "x"` 在 0.15.81（A-07 真实路径校验）落地后被 `pgSaveMCP` 400 拒绝——该用例自 A-07 起未随全量 server 套件重跑，坏到本次 A-01（0.15.86）全包验证才现形。本用例只验「登记 → planner 可见性 → 资源侧查询 → 删除」管线、命令从不执行，改用 `/bin/echo`（LookPath + EvalSymlinks 可解析、非包执行器）并加注释说明校验口径；单测恢复绿（14.6s）。
+- 【如实记录】全量 server 套件首跑同时发现 `TestDeliverAgentReplyInlinesQuotedMessage` 的 `TempDir RemoveAll cleanup: directory not empty` 偶发竞态——单测复跑即绿，属测试环境 flake（异步 goroutine 落盘与清理竞争），不在本卡处理，留待后续专门收敛。
+
 ## [0.15.86] - 2026-11-25
 
 ### 变更（A-01：未携带任务身份的出网翻默认拒绝 + 启动期平台通道白名单 + worker 代理环境启动期校验）
