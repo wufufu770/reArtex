@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
@@ -116,6 +119,36 @@ func (p *Planner) SetProxy(addr, caCert string) { p.proxyAddr, p.proxyCACert = a
 
 // SetWebSearch selects the web_search backend for the planner (off by default).
 func (p *Planner) SetWebSearch(o WebSearchOpts) { p.webSearch = o }
+
+// webAccessFor 是 planner 联网能力的执行层强制门（A-15）：代理地址与任务身份
+// 缺一不可——任一缺失，WebFetch 直接不装配（而不是「开着但没人管」）；联网搜索
+// 的独立出口代理缺失即禁用（「空则直连」是本项要堵的第二条直连旁路：搜索流量
+// 不经录制代理，范围判定与留痕都看不见）。三者齐全时行为与原先一致：WebFetch
+// 经录制代理 + 任务身份。
+func (p *Planner) webAccessFor(taskID int64) (fetch, search bool) {
+	if p.proxyAddr == "" || taskID <= 0 {
+		return false, false
+	}
+	fetch = true
+	search = p.webSearch.Enabled && p.webSearch.Proxy != ""
+	return fetch, search
+}
+
+// checkProxyReachable 对录制代理地址做一次 TCP 探测（短超时）：A-15 的启动期
+// fail-closed——代理挂了就拒本轮规划，不让任务进入「看似在跑、实际无网」的
+// 状态。只探 TCP 可达，不做 HTTP 往返（代理忙时的慢响应不该拖垮规划轮）。
+func checkProxyReachable(proxyAddr string) error {
+	addr := strings.TrimPrefix(strings.TrimPrefix(proxyAddr, "http://"), "https://")
+	if addr == "" {
+		return fmt.Errorf("代理地址为空")
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
 
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the planner system prompt. Read per round so the
@@ -435,6 +468,18 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	// A-15 联网门（执行层强制，与 A-01 联动）：代理地址与任务身份缺一不可——
+	// 任一缺失，WebFetch/搜索直接不装配（不再「开着但没人管」）；代理配置了但
+	// 不可达 ⇒ 本轮规划拒绝启动并给可读错误（fail-closed 到轮次启动期，不给
+	// 「看似在跑、实际无网」的状态）。
+	fetchOK, searchOK := p.webAccessFor(taskID)
+	if fetchOK {
+		if err := checkProxyReachable(p.proxyAddr); err != nil {
+			return false, "", fmt.Errorf("planner 拒绝启动：录制代理不可达（%v）——A-15 fail-closed，出网判定与联网都不可用，请检查平台代理", err)
+		}
+	} else {
+		log.Printf("[planner] A-15 本轮联网禁用：录制代理缺失或无任务身份（proxy=%q task=%d）——WebFetch/搜索不装配", p.proxyAddr, taskID)
+	}
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. The synchronous part does the cold-graph incremental maintenance
@@ -523,12 +568,17 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   egressProxyURL(p.proxyAddr, egressTaskID(ctx, taskID)),
-		WebFetchCACert:  p.proxyCACert,
+		// A-15 联网门：EnableWebFetch 不再写死 true——代理缺失或无任务身份即不装
+		// WebFetch（执行层强制，不再只靠提示词约束）；齐全时与原行为一致：走记录
+		// 代理留痕 + 载入代理 CA 验证 MITM 重签的 HTTPS 证书。
+		EnableWebFetch: fetchOK,
+		WebFetchProxy:  egressProxyURL(p.proxyAddr, egressTaskID(ctx, taskID)),
+		WebFetchCACert: p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
-		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       p.webSearch.Enabled,
+		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理
+		// 无关；A-15 起缺失即禁用（「空则直连」是要堵的第二条直连旁路：搜索流量
+		// 不经录制代理，范围判定与留痕都看不见）。
+		EnableWebSearch:       searchOK,
 		WebSearchBackend:      p.webSearch.Backend,
 		BraveSearchAPIKey:     p.webSearch.BraveKey,
 		TavilySearchAPIKey:    p.webSearch.TavilyKey,
