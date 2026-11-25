@@ -100,6 +100,9 @@ var platformAllowTools = map[string]bool{
 //	/app/.env                        —— 若日后挂载平台环境文件
 //	/run/secrets/...                        —— docker secret（数据库连接串等）
 //	/app/data/traffic/_ca/*.pem|key|crt —— mitmproxy MITM CA 私钥/证书
+//	/app/config.json、/app/data/config.json、../../config.json
+//	                                 —— A-09：可能含明文 DSN；ARTEX_CONFIG 指到
+//	                                    别处的部署由 pathguard 启动期注入兜底
 //
 // /proc 族：worker 的 Bash 是 server 子进程、同 UID，可读 server 原始环境块，
 // 其中含 ANTHROPIC_API_KEY / ARTEX_PG_DSN。env 白名单（G-02①-b）挡不住这条，
@@ -115,6 +118,13 @@ var platformCredentialRe = regexp.MustCompile(
 		`/app/jwt\.key` +
 		`|/app/\.env\b` +
 		`|/run/secrets/` +
+		// A-09（0.15.79）：config.json 可能含明文 DSN。字面只列容器的两个规范
+		// 位置（cwd=/app 与 BaseDir=/app/data）；ARTEX_CONFIG 指到别处的部署由
+		// pathguard 的启动期注入（SetSecretConfigPath）在真实路径层兜底——
+		// 本表是字符串预筛，不是路径解析级强制（见下方固有上限）。
+		`|/app/config\.json\b` +
+		`|/app/data/config\.json\b` +
+		`|(?:\.\./){2,}config\.json\b` +
 		// MITM CA 私钥/证书
 		`|/app/data/traffic/_ca/[^\s"']*\.(?:pem|key|crt)` +
 		// 相对路径回溯到 /app/jwt.key（cwd 为 /app/data/sessions/<key>，
@@ -129,8 +139,10 @@ var platformCredentialRe = regexp.MustCompile(
 		// -exec cat {} \;）字符串预筛挡不住。真正的闭合靠供给侧 —— 凭据根本
 		// 不进进程环境块（ARTEX_PG_DSN_FILE + 启动即读入即删除）。
 		`|/proc/[^\s"']*envi[^\s"']*` +
-		`|/proc/\d+/cmdline` +
-		`|/proc/\d+/mem` +
+		// A-09：cmdline/mem 补 self 段（worker 的 Bash 是 server 子进程、同 UID，
+		// cat /proc/self/mem 读的就是 server 自己的内存）。原来只认 \d+。
+		`|/proc/(?:\d+|self)/cmdline` +
+		`|/proc/(?:\d+|self)/mem` +
 		`)`,
 )
 

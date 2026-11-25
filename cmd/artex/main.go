@@ -21,6 +21,7 @@ import (
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/internal/procguard"
 	"github.com/Autumn-27/artex/internal/sod"
+	"github.com/Autumn-27/artex/pathguard"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
 )
@@ -116,6 +117,10 @@ func run() int {
 	}
 	if _, e := os.Stat(cfgPath); e == nil {
 		log.Printf("[config] 配置文件: %s", cfgPath)
+		// A-09（0.15.79）：config.json 可能含明文 DSN，登记进 pathguard 的
+		// 平台秘密清单（agent 的文件工具一律不得读写）。只在文件真实存在时
+		// 登记——Path() 对不存在的配置返回候选路径，无秘密可守。
+		pathguard.SetSecretConfigPath(cfgPath)
 	} else {
 		log.Printf("[config] 配置文件: %s (不存在 — 将仅尝试环境变量 ARTEX_PG_DSN)", cfgPath)
 	}

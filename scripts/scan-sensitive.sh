@@ -49,9 +49,14 @@ cd "$REPO_ROOT" || exit 1
 #
 # 家目录那两条用负向断言排除通用占位用户名（测试夹具里的 /home/analyst 之类
 # 不该被当成泄露）。上游基线上这些模式 0 命中。
+#
+# A-09（0.15.79）：dsn 值含 @（userinfo@host）即含口令的连接串——config.json
+# 若被误提交即命中。不用 database.dsn 字面量：代码注释与设计文档里合法引用该
+# 字段名，字面规则会把基线打红（闸门不能拦自己）。
 FORBIDDEN_CONTENT='Bearer [0-9a-f]{32,}
 /home/(?!analyst|user|nobody|root|opt|tmp)[a-z0-9._-]+/
-/Users/(?!analyst|user|nobody|root|opt|tmp)[a-z0-9._-]+/'
+/Users/(?!analyst|user|nobody|root|opt|tmp)[a-z0-9._-]+/
+"dsn"\s*:\s*"[^"]*@'
 
 # 禁止出现在版本库里的路径（相对仓库根；逐行一条，shell case 语义）。
 # 仅通用规则；本机私有路径在 secrets/scan-paths.local。

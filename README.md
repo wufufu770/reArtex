@@ -68,7 +68,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 - 首次进入 `/setup` 设置管理员密码，之后访问 http://localhost:8787 。
 - 左侧功能：仪表盘、任务列表、执行过程、发现、资产、流量录制、对话、Agent 管理、LLM 配置、拦截审批、审批记录、后端日志、系统配置。
 - 每个任务：planner 派意图、worker 执行并写回；任务详情的「复测」页签可分页选择本任务的漏洞、查看历次结论与证据，并手动发起复测（结论会同步更新漏洞处置状态）。
-- 配置：数据库走 `config.json` 或环境变量 `ARTEX_PG_DSN`；LLM 可用环境变量或在「LLM 配置」页填写；每个任务的 work agent 数在「系统设置」里配置（默认 3）。
+- 配置：数据库走 `config.json` 或环境变量 `ARTEX_PG_DSN`；LLM 可用环境变量或在「LLM 配置」页填写；每个任务的 work agent 数在「系统设置」里配置（默认 3）。**不要把数据库连接串写进 config 文件**（`database.dsn` 明文落盘即待治理秘密）：优先用环境变量 `ARTEX_PG_DSN`，或 `ARTEX_PG_DSN_FILE` 指向一次性文件（读入即清零删除）；config.json 若含明文 dsn，会被列入平台秘密清单（agent 工具禁读）且部署检查脚本会告警，迁移用 `scripts/migrate-dsn-to-file.sh`。
 - 常用参数：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。
 - 反向代理：只开放 443、8787 留内网；SSE 必须关缓冲（`proxy_buffering off;`）并给长超时，否则浏览器连得上却收不到事件。
 - 远程 MCP：在系统设置里选 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。

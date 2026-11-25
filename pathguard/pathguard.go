@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // secretRoots 是 ARTEX 自身的控制面秘密，agent 工具一律不得读写。
@@ -30,6 +31,32 @@ var secretRoots = []string{
 // procSecrets 是 /proc 下会泄露宿主/容器进程环境的入口。形态特殊（PID 段可变），
 // 单独判定而非放进 secretRoots。
 var procSecrets = []string{"environ", "cmdline", "mem", "maps", "mounts"}
+
+// secretConfigPath 是本实例 config.json 的解析后绝对路径（A-09，0.15.79）。
+//
+// config.json 可能含 database.dsn 明文连接串（含口令），按控制面秘密对待：
+// agent 的 Read/Grep 读到即等于泄密。路径不在编译期写死——config.Path() 有三个
+// 候选位置（cwd / BaseDir / 可执行文件旁，ARTEX_CONFIG 可显式覆盖），字面清单
+// 只会漏掉部署者自定义的位置。启动期由 main 用 config.Path() 注入一次。
+//
+// 并发口径：启动期写一次、此后只读；RWMutex 兜住理论上「启动早期并发工具调用」
+// 的窗口，代价可忽略。
+var (
+	secretConfigMu   sync.RWMutex
+	secretConfigPath string
+)
+
+// SetSecretConfigPath 登记本实例 config.json 的绝对路径（启动期调用一次；空串
+// 忽略——config.json 不存在时 Path() 返回的候选路径无秘密可守，不登记）。
+func SetSecretConfigPath(p string) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return
+	}
+	secretConfigMu.Lock()
+	secretConfigPath = p
+	secretConfigMu.Unlock()
+}
 
 // pathParams 给出各内置文件工具承载路径的参数名。取自 norma v0.4.3 的 Spec.Schema。
 var pathParams = map[string][]string{
@@ -78,6 +105,14 @@ func denyReason(real string) error {
 		if real == root || strings.HasPrefix(real, root+"/") {
 			return fmt.Errorf("目标是 ARTEX 平台自身的凭据/控制面文件 (%s)", root)
 		}
+	}
+	// A-09：config.json（可能含明文 DSN）。路径启动期注入；未登记（测试环境/
+	// 无配置文件）时不拦，行为与旧版一致。
+	secretConfigMu.RLock()
+	cfg := secretConfigPath
+	secretConfigMu.RUnlock()
+	if cfg != "" && (real == cfg || strings.HasPrefix(real, cfg+"/")) {
+		return fmt.Errorf("目标是 ARTEX 平台自身的配置文件（可能含明文数据库口令）(%s)", cfg)
 	}
 	if procSecretMatch(real) {
 		return fmt.Errorf("目标是进程环境入口 %s（可读到 ARTEX_PG_DSN 与 LLM key）", real)

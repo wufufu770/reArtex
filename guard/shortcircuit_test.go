@@ -63,6 +63,12 @@ func TestShortCircuitPlatformCredentialsDeny(t *testing.T) {
 		{"proc environ", `{"command":"cat /proc/1/environ"}`},
 		{"proc cmdline", `{"file_path":"/proc/1234/cmdline"}`},
 		{"proc mem", `{"command":"cat /proc/9/mem"}`},
+		// A-09（0.15.79）：cmdline/mem 补 self 段；config.json 明文 DSN。
+		{"proc self cmdline", `{"command":"cat /proc/self/cmdline"}`},
+		{"proc self mem", `{"command":"cat /proc/self/mem"}`},
+		{"容器内 config.json（cwd）", `{"command":"cat /app/config.json"}`},
+		{"容器内 config.json（BaseDir）", `{"file_path":"/app/data/config.json"}`},
+		{"相对路径回溯到 config.json", `{"command":"cat ../../config.json"}`},
 		{"proc self environ", `{"command":"cat /proc/self/environ"}`},
 		{"proc environ glob", `{"command":"cat /proc/*/environ"}`},
 		{"proc environ 变量展开", `{"command":"cat /proc/$$/environ"}`},
@@ -94,6 +100,7 @@ func TestShortCircuitMustNotBlockPentestWork(t *testing.T) {
 		{"读目标 .key", `{"command":"cat /app/data/sessions/conv-1/server.key"}`},
 		{"读目标 jwt.key", `{"command":"cat /app/data/sessions/conv-1/jwt.key"}`},
 		{"读目标 pem", `{"command":"cat /app/data/sessions/conv-1/private.pem"}`},
+		{"读目标 config.json（会话工作区内）", `{"command":"cat /app/data/sessions/conv-1/target/config.json"` + `}`},
 		{"本机侦察 /proc/net/tcp", `{"command":"cat /proc/net/tcp"}`},
 		// cmdline 维持现状：字面数字形态（/proc/1234/cmdline）仍被拦，
 		// 只有 glob 形态放过。负向用例只能用 glob 形态，否则断言会失败。

@@ -160,3 +160,48 @@ func TestBlocksDockerSecretDir(t *testing.T) {
 		t.Fatal("docker secret 目录内的文件应被拒绝")
 	}
 }
+
+// A-09（0.15.79）：config.json 可能含明文 DSN——启动期注入的路径按平台秘密拦。
+// pathguard 只认路径不读内容，夹具放 {} 即可；不放 dsn 字面量，避免打红
+// scripts/scan-sensitive.sh 的连接串规则（闸门与测试不能互相命中）。
+func TestBlocksInjectedConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	SetSecretConfigPath(cfg)
+	t.Cleanup(func() {
+		secretConfigMu.Lock()
+		secretConfigPath = ""
+		secretConfigMu.Unlock()
+	})
+
+	if err := call(t, "Read", "file_path", cfg); err == nil {
+		t.Fatal("直读注入的 config.json 应被拒绝")
+	}
+	if err := call(t, "Grep", "path", cfg); err == nil {
+		t.Fatal("Grep 注入的 config.json 应被拒绝")
+	}
+
+	// 软链现形同样要拦：真实路径解析后的落点在清单里。
+	link := filepath.Join(dir, "innocent.txt")
+	if err := os.Symlink(cfg, link); err != nil {
+		t.Skipf("无法创建软链: %v", err)
+	}
+	if err := call(t, "Read", "file_path", link); err == nil {
+		t.Fatal("软链指向 config.json 应被拒绝")
+	}
+
+	// 未登记（config.json 不存在）时行为不变：同路径名不构成拒绝。
+	secretConfigMu.Lock()
+	secretConfigPath = ""
+	secretConfigMu.Unlock()
+	other := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(t, "Read", "file_path", other); err != nil {
+		t.Fatalf("未登记 config 路径不应拒绝: %v", err)
+	}
+}
