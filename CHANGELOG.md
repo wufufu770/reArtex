@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.84] - 2026-11-25
+
+### 变更（A-14：notify 拨号阶段 SSRF 防护 + 凭据脱敏——现状核实为「大部分已存在」，本次补钉测试）
+
+- **现状核实（已实现，证据在库）**：三层 SSRF 防护齐备——`validateHTTPURL`（协议白名单 + 字面 IP 保存期拦截，dingtalk/webhook 同用）、`blockInternalDial`（Dialer `Control` 钩子按**连接时刻** IP 判定，HTTP 系与 `emailDial` 共挂）、`httpClient` 拒跨主机重定向（5 次上限；钉钉 access_token / 企微 key / Telegram bot token 都在 URL 里，跨主机跳转等于交出凭据）；飞书/企微/Telegram 全部走共用 `doJSON`→`httpClient`，无自建 client 绕守卫。错误脱敏比卡片骨架更收敛：4xx/5xx 错误文案**根本不含 URL**（只带状态码 + 响应体 200 字节 snippet），传输层错误经 `redactTransportError` 剥 URL 保底层原因，兜底 `redactURLsInText`；`redactRequestTarget`（= 卡片的 `redactURL`，落在 http.go 而非新建 redact.go——规则一致：只留 scheme://host）。markdown 渲染出口单规则已成立：`writeItem` 全部不可信字段过 `markdownText`（单行化 + 转义），Telegram/HTML 各自输出端转义。
+- **本次补缺口（钉测试）**：`notify/rebind_test.go`（新）——① `TestBlockInternalDialJudgesConnectTimeAddress` 直钉 Control 钩子收到连接时刻地址：`127.0.0.1:2379`、`169.254.169.254:80`、`[::1]`、IPv4-mapped 环回、非 IP 地址全拒；公网放行；逃生口 `ARTEX_NOTIFY_ALLOW_LOCAL=1` 在连接层同样生效。② `TestDNSRebindingCaughtAtDialStage`：A-14 验收主体——配置阶段域名目标畅通（字面 IP 判定天然不覆盖域名 = 重绑定的打点），DialContext 夹具把「解析结果」改写到 127.0.0.1，Control 钩子必须在 TCP 握手前以「拒绝投递到本机」真实拒绝（改写只替代 DNS 解析这一步，判定走生产同一路径）。③ `TestRebindFixturePositiveControl` 反向对照：同改写手法 + 显式放开 → 可达，证明拒绝出自守卫判定而非夹具堵路。`pack_test.go` 补 A-14 验收样例的组合注入行：`**critical** [x](http://evil)\n# …` → 粗体/链接/井号全转义、换行折叠，渲染结果无新 markdown 结构。
+- 【覆盖口径如实说明】卡片验收「last_error/服务端日志/投递历史三处 grep 零出现」：凭据不外泄的不变量在**错误文本源头**钉住（`redact_test.go` 逐渠道真发必然失败请求 + 本次连接层用例）——last_error、日志、投递历史接口存的都是这同一串错误文本，源头干净则三处全干净；server 侧不另起 DB 级用例。
+- 测试：`go test ./notify/ -count=1` 全绿（1.234s，含既有 ssrf/redact/render/pack/channels/email/filter/mask/sign/webhook_template 全量回归）；`go vet ./notify/` 干净。
+
 ## [0.15.83] - 2026-11-25
 
 ### 新增（A-13 第二批：凭据熔断接 mcphttp/ScopeSentry + 审计/恢复事件 + metrics + 前端横幅）
