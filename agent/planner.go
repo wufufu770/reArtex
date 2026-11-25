@@ -130,7 +130,7 @@ func (p *Planner) webAccessFor(taskID int64) (fetch, search bool) {
 		return false, false
 	}
 	fetch = true
-	search = p.webSearch.Enabled && p.webSearch.Proxy != ""
+	search = WebSearchReady(p.webSearch) // R1：与其余三路同口径（shared 判定）
 	return fetch, search
 }
 

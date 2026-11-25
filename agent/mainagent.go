@@ -170,8 +170,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		WebFetchProxy:   egressProxyURL(m.proxyAddr, egressTaskID(ctx, taskID)),
 		WebFetchCACert:  m.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
-		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       m.webSearch.Enabled,
+		// R1（A-15B 收口）：与 planner 同口径——独立出口代理缺失即禁用（「空则
+		// 直连」的旁路就此封死，四路共用 WebSearchReady 一个判定）。
+		EnableWebSearch:       WebSearchReady(m.webSearch),
 		WebSearchBackend:      m.webSearch.Backend,
 		BraveSearchAPIKey:     m.webSearch.BraveKey,
 		TavilySearchAPIKey:    m.webSearch.TavilyKey,

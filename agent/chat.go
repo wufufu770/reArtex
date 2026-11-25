@@ -219,8 +219,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		WebFetchProxy:  egressProxyURL(c.proxyAddr, egressTaskID(ctx, 0)),
 		WebFetchCACert: c.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
-		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       ws.Enabled,
+		// R1（A-15B 收口）：与 planner/worker/mainagent 同口径——独立出口代理缺失
+		// 即禁用（「空则直连」的旁路就此封死，四路共用 WebSearchReady 一个判定）。
+		EnableWebSearch:       WebSearchReady(ws),
 		WebSearchBackend:      ws.Backend,
 		BraveSearchAPIKey:     ws.BraveKey,
 		TavilySearchAPIKey:    ws.TavilyKey,
@@ -230,7 +231,9 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		WebSearchProxy:        ws.Proxy,
 		// 任务身份从 ctx 的 RunInfo 取：群聊成员会话带着 TaskID（群绑一个任务），
 		// 纯独立聊天会话没有任务（TaskID=0）⇒ 不带令牌 ⇒ 属「未归属的出网」，
-		// 按既有语义放行并留痕，而不是伪装成有任务范围。
+		// A-01 翻转后这类请求在代理侧被拒绝并留 traffic 记录（平台通道白名单是
+		// 唯一例外，WebFetch/Bash 属 agent 发起、不在白名单语义内）——要联网就把
+		// 会话绑定任务，而不是伪装成有任务范围。
 		BashEnv:     proxyEnv(c.proxyAddr, c.proxyCACert, egressTaskID(ctx, 0)), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:  sessionWorkDir,
 		MaxTurns:    maxTurns,

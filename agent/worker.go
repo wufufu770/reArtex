@@ -594,8 +594,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		WebFetchProxy:  egressProxyURL(w.proxyAddr, taskID),
 		WebFetchCACert: w.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
-		// WebSearchProxy 是独立的出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
-		EnableWebSearch:       w.webSearch.Enabled,
+		// R1（A-15B 收口）：与 planner 同口径——独立出口代理缺失即禁用（「空则
+		// 直连」的旁路就此封死，四路共用 WebSearchReady 一个判定）。
+		EnableWebSearch:       WebSearchReady(w.webSearch),
 		WebSearchBackend:      w.webSearch.Backend,
 		BraveSearchAPIKey:     w.webSearch.BraveKey,
 		TavilySearchAPIKey:    w.webSearch.TavilyKey,
