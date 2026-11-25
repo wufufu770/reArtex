@@ -165,12 +165,27 @@ jobs:
           fetch-depth: 0
       - name: 扫描敏感信息（整棵树 + 全部历史）
         run: bash scripts/scan-sensitive.sh all
-      # RSI 治理门禁（0.15.18 批次 C）：观察模式——只打印分层基线报告，不阻断。
-      # 当前变更由人主导，门禁先跑出基线；启用 RSI 时脚本加 --enforce 切强制
-      # （标准见 docs/RSI修改标准.md）。event.before 为空/零值（首推）时跳过。
-      - name: RSI 修改标准门禁（观察模式）
+
+  # A-16（0.15.92）：Tier-0 不可变安全边界的 CI 门——每次提交（人工或自动化）都校验，
+  # 触碰 Tier-0 清单即失败。例外流程：--allow-tier0 <理由>（理由必须已记入区间提交
+  # 信息，guard 会校验）+ PR 描述写明原因 + tier0-exception 标签 + 第二人复核 +
+  # docs/SECURITY-HARDENING.md「Tier-0 例外登记」。
+  # 时点说明：A-01…A-15 修复批次（0.15.74–0.15.91）本身动过 Tier-0 清单文件（卡面
+  # 明载改动），本项按卡面要求最后落地——先修完、再锁死，锁死前的基线触碰已整批
+  # 登记进例外清单，不再追溯拦截。
+  # 与卡面差异（如实说明）：CI 命令未带 --require-evo-id——本仓全部提交均为人工
+  # 主导的常规提交（无一处带 EVO 编号），在 CI 强制校验会让每次推送都失败；evo-id
+  # 校验保留给自主改进流水线显式启用（guard 的 --require-evo-id 随时可用）。
+  rsi-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # diff 基线要取到 event.before，浅克隆取不到。
+          fetch-depth: 0
+      - name: Tier-0 硬锁（强制）
         if: github.event.before != '' && github.event.before != '0000000000000000000000000000000000000000'
-        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --tier 1
+        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --enforce --tier 1
 
   # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
   # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend

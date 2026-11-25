@@ -315,3 +315,37 @@ services:
 
 ---
 
+## Tier-0 例外登记（A-16，0.15.92 起）
+
+Tier-0 清单（`scripts/rsi_guard.py` 的 `TIER_0_PREFIXES` / `TIER_0_EXACT`：guard/、netguard/、
+pathguard/、internal/sod/、internal/sodpolicy/、third_party/norma/、patches/、selfupdate/、
+intercept/（唯 prompt.go 例外）及 agent/server/db/config 下的 SoD/治理/审计/密钥单文件）
+是**不可变安全边界**：`rsi-guard` CI job 在每次提交上强制校验，触碰即失败——人工提交也不例外。
+这是刻意的：「谁来改」在文件系统层面无法区分（同 UID 共享文件系统），唯一可区分的是
+**改动是否留痕、是否经过显式的人类裁决**。
+
+### 例外流程（确需修改时，全步骤缺一不可）
+
+1. 人显式操作：`git commit` 的理由原样写进提交信息，本地验证用
+   `RSI_ALLOW_TIER0="<同一段理由>" ./scripts/precommit-test.sh`；
+2. PR 描述写明改动原因与影响面，并加 `tier0-exception` 标签；
+3. 合并需第二人复核（仓库无第二人时由 Marie 显式确认）；
+4. 在本节登记（追加一行，不删旧行）。
+
+CI 的 guard 会校验 `--allow-tier0` 的理由确实出现在区间提交信息里——理由只出现在
+命令行参数上不算留痕，留痕必须在 `git log` 里任何人可查。
+
+### 登记清单（append-only）
+
+| 日期 | 版本/提交 | 文件 | 理由 | 批准 |
+|---|---|---|---|---|
+| 2026-11-25 | 0.15.74–0.15.91（A-01…A-15 修复批次） | guard/guard.go、guard/shortcircuit.go、intercept/decode.go、intercept/intercept.go、intercept/audit_chain.go、internal/sod/chain.go、internal/sod/mergedgate.go、pathguard/pathguard.go、pathguard/tokens.go、agent/toolpolicy.go、server/sod_chain.go、server/egress_governance.go、server/trust_rules.go、db/audit_chain.go 及配套测试（整批 23 个 Tier-0 清单内文件） | 任务卡明载的安全修复（A-04 判官入参匹配/失败锁死、A-05 审计链 HMAC、A-06 降级开关收口、A-11 pathguard 悬空链接、A-13 SoD 握手、A-01/15 出网治理），锁死生效前的最后一次批量合法触碰——本项按卡面要求最后落地（先修完 A 类、再锁死），基线触碰整批登记，不追溯拦截 | 任务包 02-original-118（A 类卡片即批准依据）；本次提交（0.15.92）为锁死生效点 |
+
+以后新增例外按上表格式追加。清单一经登记不得删除——撤销某次例外等于要求把文件改回去，
+那本身又是一次例外，走同样的流程。
+
+注：锁死生效提交（0.15.92）所在的那次推送，其 CI 区间会包含上表的基线触碰 ⇒
+`rsi-guard` 首跑会红。处置：人工复核后以 `--allow-tier0`（理由用表中登记的原句，
+确保能在区间提交信息中匹配到）放行一次；此后的常规推送区间不含 Tier-0 触碰，门自动回绿。
+
+
