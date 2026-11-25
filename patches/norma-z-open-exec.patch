@@ -1,0 +1,121 @@
+norma v0.4.4 —— MCP stdio fd-exec：执行对象身份校验（A-07B）
+
+问题：MCP stdio 服务器的 spawn 走 exec.Command(command, args...)——路径在
+Start 时被**再次解析**。装配前的校验（server 侧 validateStdioCommand 的绝对
+路径/存在性/常规文件判定）与真正 exec 之间是两步：中间把文件换掉（写覆盖、
+rename 换入、符号链接调包），跑起来的就是换入的对象。校验在检查 A、内核在
+执行 B——validate-then-exec 的 TOCTOU。
+
+做法：打开 command（O_NOFOLLOW：符号链接在这里一次性解析，拿到的句柄就是
+最终对象）→ 句柄与路径按 dev+inode 比对（不一致即拒绝）→ 子进程经
+/proc/self/fd/3 exec（ExtraFiles 首个文件落在子进程 fd 3，内核 execve 时
+解析的就是这个已打开对象本身）。校验对象=执行对象，窗口关闭。任何不一致
+一律失败关闭，**绝不回退按路径 spawn**。cmd.Args[0] 保留原命令名，子进程
+argv[0] 观感不变。
+
+已知边界（如实）：本层钉死的是「身份」（哪个 inode）而非「内容」——打开
+之后、exec 之前的同 inode 原地改写（copy/hardlink 式替换）不在本层判定内，
+内容完整性留待后续哈希层；非 Linux 平台保留原路径 spawn（O_NOFOLLOW 与
+/proc/<pid>/fd 是 Linux 约定），身份校验按 Linux 加固层文档化，不宣称可
+移植保证。
+
+应用方式（作用在 norma 模块根目录，即 go.mod 所在目录）：
+    git apply -p1 patches/norma-z-open-exec.patch
+    # 或
+    patch -p1 < patches/norma-z-open-exec.patch
+
+文件名以 z- 开头且排在 z-backfill-drift 之后：prepare-norma.sh 按文件名排序
+应用，本补丁的 hunk 上下文假定 z-backfill-drift.patch 已应用（import 块里的
+"time" 来自握手预算那组 hunk）。
+
+目标版本：github.com/Autumn-27/norma v0.4.4。模块缓存是只读共享的，本补丁不
+改动它；仓库里由 scripts/prepare-norma.sh 复制到 third_party/norma 后再应用，
+third_party/ 是生成物，可评审的产物是这份补丁本身。
+diff --git a/mcp/stdio.go b/mcp/stdio.go
+index 5117db0..8f2e2b7 100644
+--- a/mcp/stdio.go
++++ b/mcp/stdio.go
+@@ -2,9 +2,12 @@
+
+ import (
+ 	"context"
++	"fmt"
+ 	"io"
+ 	"os"
+ 	"os/exec"
++	"runtime"
++	"syscall"
+ 	"time"
+
+ 	"github.com/Autumn-27/norma/tool/privdrop"
+@@ -33,7 +36,16 @@
+ // env holds extra environment variables (e.g. API tokens an MCP server needs)
+ // applied on top of the parent process environment; pass nil for none.
+ func NewStdioClient(ctx context.Context, server, command string, env map[string]string, args ...string) (*Client, error) {
+-	cmd := exec.Command(command, args...)
++	// A-07B fd-exec: spawn through an opened, identity-verified descriptor so the
++	// object that passed validation is the object that runs. A plain path spawn
++	// re-resolves the path at start time, so a binary swapped between validate and
++	// Start would silently take effect (TOCTOU). Any identity mismatch fails
++	// closed — there is deliberately no fallback to spawning by path.
++	cmd, closeExec, err := openVerifiedCommand(command, args)
++	if err != nil {
++		return nil, err
++	}
++	defer closeExec()
+ 	// Drop to the agent identity: with a root platform process the MCP server
+ 	// would inherit root and could read the platform's 0600 credential files.
+ 	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
+@@ -82,3 +94,52 @@
+ 	}
+ 	return c, nil
+ }
++
++// openVerifiedCommand pins the exec target to an opened, identity-verified file
++// handle (A-07B fd-exec). exec.Command(command) resolves the path again at start
++// time, so a binary swapped between validation and Start would silently take
++// effect — the classic validate-then-exec TOCTOU. Here the command is opened
++// with O_NOFOLLOW (a symlink resolves once, here), the opened handle is compared
++// against the path by device+inode, and the child executes /proc/self/fd/N —
++// the kernel runs the exact object that was inspected. Any mismatch fails
++// closed; there is deliberately no fallback to spawning by path.
++//
++// Linux-only: O_NOFOLLOW and /proc/<pid>/fd are Linux conventions. Other
++// platforms keep the plain path spawn — the identity check is a Linux
++// hardening layer, not a portable guarantee.
++func openVerifiedCommand(command string, args []string) (*exec.Cmd, func(), error) {
++	noop := func() {}
++	if runtime.GOOS != "linux" {
++		return exec.Command(command, args...), noop, nil
++	}
++	// O_NOFOLLOW: a symlinked command path resolves here or not at all, so the
++	// handle we verify is the final object — not an intermediate link.
++	f, err := os.OpenFile(command, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
++	if err != nil {
++		return nil, noop, err
++	}
++	closer := func() { _ = f.Close() }
++	hstat, err := f.Stat()
++	if err != nil {
++		closer()
++		return nil, noop, err
++	}
++	pstat, err := os.Stat(command)
++	if err != nil {
++		closer()
++		return nil, noop, err
++	}
++	hs, ok1 := hstat.Sys().(*syscall.Stat_t)
++	ps, ok2 := pstat.Sys().(*syscall.Stat_t)
++	if !ok1 || !ok2 || hs.Dev != ps.Dev || hs.Ino != ps.Ino {
++		closer()
++		return nil, noop, fmt.Errorf("mcp: %q changed between validation and open (identity mismatch); refusing to exec", command)
++	}
++	// /proc/self/fd/3: the first ExtraFile is placed at fd 3 in the child, and
++	// the kernel resolves the execve target through it at start time. The child
++	// still sees the real command name as argv[0] via cmd.Args[0].
++	cmd := exec.Command("/proc/self/fd/3", args...)
++	cmd.Args[0] = command
++	cmd.ExtraFiles = []*os.File{f}
++	return cmd, closer, nil
++}
