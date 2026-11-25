@@ -5,6 +5,14 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.77] - 2026-11-24
+
+### 新增（A-10 前端：拦截规则编辑页 tool_scope）
+
+- `web/src/lib/types.ts`：`InterceptRule.tool_scope?: string[]`。
+- `web/src/app/(main)/system/intercept/page.tsx`：规则编辑器「作用工具」多选（候选 = 全部已知工具 ∪ 拦截范围工具，支持手填未注册的 MCP 工具名，留空 = 全局）；规则表新增「作用域」列（全局 / N 个工具，悬停看全量）；`openNew`/`openEdit` 表单口径补 `tool_scope`。
+- 验证链：`tsc --noEmit` 通过；`build:static` 通过。biome check 因仓内配置 schema（2.5.1）与本地 biome 二进制（2.6.8）版本不匹配报配置错误——既有环境差异，非本次改动引入，未顺手改 biome.json（属无关重构）。
+
 ## [0.15.76] - 2026-11-24
 
 ### 新增（A-10 后端：intercept 规则加 tool_scope）
