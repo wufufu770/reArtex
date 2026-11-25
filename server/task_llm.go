@@ -734,9 +734,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetFindingRecorder(s.evidenceStore())
 	// 0.15.13：主 agent 补挂任务 guard hook——基线预检/短路表/拦截规则/审计链
 	// 此前只盖 worker 与 chat，主 agent 带 Bash/Write 却全部绕过（SoD 覆盖边界
-	// 文档留档的最大缺口）。SoD 链仍只挂 worker。
+	// 文档留档的最大缺口）。
+	// SEC-01（A-03 第一批，0.15.95）：guard 外再套 SoD 链（WrapHookRunner；链未
+	// 安装时原样返回）——mainagent 的工具调用与 worker 同链同凭证口径。
 	if t.Guard != nil {
-		main.SetGuardProvider(func(int64) harness.HookRunner { return t.Guard.Hooks() })
+		main.SetGuardProvider(func(int64) harness.HookRunner { return WrapHookRunner(t.Guard.Hooks()) })
 	}
 	// P4 fact 三态：mainagent lane 是复核槽位（异层——facts 由 worker 产出，复核
 	// 决不落在产出者手里）。转移本体是 db.SetFactState 的确定性层。

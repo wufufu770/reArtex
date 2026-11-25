@@ -13,6 +13,7 @@ import (
 	"github.com/Autumn-27/artex/internal/agentcred"
 	"github.com/Autumn-27/artex/internal/edge"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -34,12 +35,13 @@ type ChatAgent struct {
 	proxyAddr      string
 	proxyCACert    string
 	webSearch      WebSearchOpts
-	guard          *guard.Guard // optional; nil disables intercept hooks for chat
-	nonStreamingFn func() bool  // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn   func() bool  // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn    func() int   // resolver: per-reply output cap (nil/0 = send no cap)
-	groupMailbox   GroupMailbox // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
-	memoryDB       *db.DB       // 记忆层句柄（方案 v10 W5/W3）；nil = 本 runner 不注入记忆
+	guard          *guard.Guard                                // optional; nil disables intercept hooks for chat
+	nonStreamingFn func() bool                                 // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn   func() bool                                 // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn    func() int                                  // resolver: per-reply output cap (nil/0 = send no cap)
+	groupMailbox   GroupMailbox                                // 群内消息箱句柄；nil = 回退到包级 DefaultGroupMailbox
+	memoryDB       *db.DB                                      // 记忆层句柄（方案 v10 W5/W3）；nil = 本 runner 不注入记忆
+	hookWrapper    func(harness.HookRunner) harness.HookRunner // SEC-01：宿主注入的 SoD 链包装器；nil = 不包装
 }
 
 func NewChatAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window int) *ChatAgent {
@@ -83,6 +85,15 @@ func (c *ChatAgent) SetWebSearch(o WebSearchOpts) { c.webSearch = o }
 // SetGuard attaches a guard (with user-configured intercept rules) to this chat
 // agent. Must be called before Chat; safe to call multiple times.
 func (c *ChatAgent) SetGuard(g *guard.Guard) { c.guard = g }
+
+// SetHookWrapper 注入 hook 装饰器（SEC-01，A-03 第一批，0.15.95）：chat 不能
+// import server（反向依赖），由 server 装配段把 WrapHookRunner 传进来，
+// buildOptions 在挂 guard hooks 时经它包装——chat 的工具调用从本项起与 worker
+// 走同一条 SoD 链（无任务上下文的 gated 调用被链 fail-closed 拒绝并留审计；
+// NotGatedTools 只读直通，行为不变）。nil = 不包装（无链部署行为不变）。
+func (c *ChatAgent) SetHookWrapper(fn func(harness.HookRunner) harness.HookRunner) {
+	c.hookWrapper = fn
+}
 
 // SetGroupMailbox wires the group mailbox reader used to collect unread group
 // messages each turn. A nil handle disables group collection for this runner.
@@ -250,7 +261,15 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// 随每次请求生效（""=跟随 profile 默认）。
 	applyThinkingOverride(&opts, agentKey)
 	if c.guard != nil {
-		opts.Hooks = c.guard.Hooks()
+		// SEC-01（A-03 第一批，0.15.95）：宿主注入了链包装器则先包一层——顺序
+		// 与 worker 一致（guard 短路在前、SoD 链在后，链看到的入参是 guard 可能
+		// 改写后的最终字节）。接口类型声明：Guard.Hooks() 返回具体类型
+		// *hook.Registry，包装器返回 harness.HookRunner 接口。
+		var h harness.HookRunner = c.guard.Hooks()
+		if c.hookWrapper != nil {
+			h = c.hookWrapper(h)
+		}
+		opts.Hooks = h
 	}
 	if c.tx != nil { // persist raw human↔AI conversation; one accumulating file per thread
 		opts.Transcript = c.tx

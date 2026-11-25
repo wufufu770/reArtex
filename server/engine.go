@@ -1343,6 +1343,10 @@ func (e *Engine) wireStrategyContext(pl *agent.Planner) {
 
 // taskGuardHooks 是 SetGuardProvider 的实现：按任务号取任务 guard 的 hook
 // registry。任务不在册/无 guard（离线测试场景）返回 nil = 不挂。
+//
+// SEC-01（A-03 第一批，0.15.95）：返回前套 SoD 链（WrapHookRunner，链未安装时
+// 原样返回）——planner 的工具调用从本项起与 worker 走同一条
+// 规整器提议→代码裁决→一次性凭证→执行器验凭证链；无链部署行为不变。
 func (e *Engine) taskGuardHooks(taskID int64) harness.HookRunner {
 	if e == nil || e.m == nil || taskID <= 0 {
 		return nil
@@ -1351,7 +1355,7 @@ func (e *Engine) taskGuardHooks(taskID int64) harness.HookRunner {
 	if !ok || t == nil || t.Guard == nil {
 		return nil
 	}
-	return t.Guard.Hooks()
+	return WrapHookRunner(t.Guard.Hooks())
 }
 
 // attributeSubTaskOutcome 给这个任务跑一轮子任务级归因，并把结论路由成待裁决的提议。

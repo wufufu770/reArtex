@@ -345,7 +345,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// 为什么装不上就 log.Fatalf 而不是打日志跳过：链装不上 = 确定性闸门不存在
 		// = 所有工具调用都不受管 ⇒ 那是**比没有这个特性更危险**的状态（制造虚假
 		// 安全感）。宁可启动失败，让部署方看到明确原因。
-		sod.SetContextReader(agent.SodContextReader)
+		// SEC-01（A-03 第一批，0.15.95）：读法升级为统一受管判据——worker 主张
+		// 须过意图↔任务绑定校验（伪造/跨任务 fail-closed），planner/mainagent/
+		// 群聊（带任务）受管进链，纯 chat 无任务显式空上下文（链拒绝面接管）。
+		// agent.SodContextReader（Tier-0）本身未动，worker 语义经它原样继承。
+		sod.SetContextReader(s.sodContextReader())
 		if err := s.installSoDChain(); err != nil {
 			log.Fatalf("[sod] 安装 SoD 链失败: %v", err)
 		}
@@ -635,6 +639,9 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
 	s.chatAgent.SetGuard(s.chatGuard())
+	// SEC-01（A-03 第一批，0.15.95）：chat 工具调用挂 SoD 链（guard 外包装，与
+	// worker 同序）——无任务上下文的 gated 调用被链 fail-closed 拒绝并留审计。
+	s.chatAgent.SetHookWrapper(WrapHookRunner)
 	s.chatAgent.SetGroupMailbox(s.m.pg) // W1：显式持信箱句柄（nil 时 chat 侧回退 DefaultGroupMailbox，同源同值）
 	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
 	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
@@ -935,7 +942,8 @@ func (s *Server) chatAgentForProfileModel(id int64, model string) *agent.ChatAge
 	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	ca.SetWebSearch(s.m.WebSearchOpts())
 	ca.SetGuard(s.chatGuard())
-	ca.SetGroupMailbox(s.m.pg) // W1：与全局 chat runner 同款显式信箱接线
+	ca.SetHookWrapper(WrapHookRunner) // SEC-01：与全局 chat runner 同款 SoD 链包装
+	ca.SetGroupMailbox(s.m.pg)        // W1：与全局 chat runner 同款显式信箱接线
 	ca.SetNonStreaming(nonStreamingResolver(cfg))
 	ca.SetMaxTokens(maxTokensResolver(cfg))
 	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
