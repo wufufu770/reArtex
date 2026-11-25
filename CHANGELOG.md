@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.95] - 2026-11-25
+
+### 新增（SEC-01：A-03 第一批——统一受管执行判据与三路 SoD 接线）
+
+- 背景：A-03 是 A-01…A-16 唯一停摆卡（实际改动面 10–13 文件超 ≤5 约束）；`01-security-closeout` 任务包将其拆为 SEC-01（判据+接线）/ SEC-02（decision_source+UI）两批。
+- **统一判据**（`server/sod_context_reader.go` 新增，绑定点 `server.go` Tier-2，**零 Tier-0 改动**）：旧判据「`RunInfo.IntentID>0` 即受管」升级为三分支——① worker 主张必须过「意图节点↔任务」绑定校验（`exploration_nodes` 存在 + `kind='intent'` + 经 `tasks.exploration_id` 归属该任务；伪造/跨任务/已删意图/pg 不可用一律空上下文 ⇒ 链的 `taskID<=0` 分支 **fail-closed 拒绝并留审计**——校验失败绝不等于放行），通过则经 `agent.SodContextReader`（Tier-0 原样继承、字节一致）；② planner/mainagent/群聊成员（TaskID>0、无意图）受管，身份取 ctx 运行 key（与执行器查凭证同一 ctx 同一原值，四元组天然对齐）；③ 纯 chat 无任务显式空上下文——不是后门：`NotGatedTools` 只读直通与 worker 同口径，gated 调用一律被链按「任务上下文缺失」拒绝并记账。
+- **三路接线**（同一进程级链实例，guard 短路在前、SoD 链在后，与 worker 同序）：planner = `engine.taskGuardHooks` 返回前 `WrapHookRunner`；mainagent = `task_llm.go` 的 `SetGuardProvider` 闭包包一层；chat = `ChatAgent.SetHookWrapper`（chat 不能 import server，宿主注入 `WrapHookRunner`），`server.go` 两处装配点接线。无链部署（`WrapHookRunner` 未安装时原样返回）行为不变。
+- 执行器语义核实：`WrapExecutor` 对 `gated=false`（NotGatedTools）工具**根本不挂装饰器**——三路受管后只读行为不变；gated 工具从「不受管直通」（A-03 要消除的链外执行）变为「同链同凭证」。
+- 测试：`TestSodReader*` 6 用例（worker 验证+字节一致 / 伪造四路 / 跨任务正反对照 / 三路角色+取消后 ctx 一致 / 无任务三分支 / nil 依赖不 fail-open）；既有 SoD 链用例全绿（worker 路径不变）；guard/intercept/sod/sodpolicy/pathguard/netguard/agent 七包回归全绿；`-race`（server 判据 + internal/sod）全绿。
+- 【与卡面差异（如实说明）】① 原卡 `internal/sod/no_task.go` 骨架不落地：放行面复用既有 `sodpolicy.NotGatedTools`（Tier-0 政策面，重复造会漂移），拒绝理由沿用链既有文案（Tier-0 `chain.go` 不改）；② decision_source 区分与 UI 筛选归 SEC-02（`sod_decisions.source_agent` 已自然带角色 key）；③ `planner.go`/`mainagent.go` 内「SoD 链仍只挂 worker」注释已过时，为守 ≤5 生产文件约束未顺手改，留 SEC-02 清理。
+
 ## [0.15.94] - 2026-11-25
 
 ### 文档（TI-05 第二轮核对：删除/归档语义与数据保留方案补档）
