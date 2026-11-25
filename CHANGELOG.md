@@ -5,6 +5,15 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.78] - 2026-11-25
+
+### 修复（A-12：guard DSL OR 括号化）
+
+- `db/asset_dsl.go`：`buildDSLWhereBase` 顶层片段一律包括号（此前裸返回的顶层 OR 与调用方范围条件拼接会因优先级错位变成 `X OR (Y AND 约束…)`，X 分支脱离 type/scope 约束）；`whereBuilder.build` 的 and/or 分支 join 结果再整体包一层（双保险：解析/编译/拼接三处各一道括号，单点失效仍有后手）。
+- 拼接点核实：四处 `ParseDSL` 调用——`ValidateDSL`（只编译）、`CountDSL`/`QueryDSL`（`AND type=`、`AND $n=ANY(task_ids)`）、`QueryDSLInScope`（`AND` 范围谓词）；括号化后均为原子拼接，无需调用点改动。
+- `db/asset_dsl_brackets_test.go`（新增）：确定性用例（顶层 OR 不得脱离约束）+ 属性对照测试（200 组随机 AND/OR/括号表达式，SQL 求值 == 内存 AST 求值，含类型与范围过滤）。
+- 测试：db 包 DSL/Query/Asset/Scope 面 43.5s 全绿。仓库内唯一 AND/OR DSL 已 grep 核实为资产 DSL（guard/ 内无第二套）。
+
 ## [0.15.77] - 2026-11-24
 
 ### 新增（A-10 前端：拦截规则编辑页 tool_scope）
