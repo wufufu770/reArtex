@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.88] - 2026-11-25
+
+### 变更（A-15：planner 联网收口——执行层强制取代「默认开启 + 提示词约束」，与 A-01 联动）
+
+- `agent/planner.go`：新增 `webAccessFor(taskID)` 联网门与 `checkProxyReachable` 启动探测。**联网门**：录制代理地址与任务身份缺一不可——任一缺失，`EnableWebFetch=false`（WebFetch 不装配，不再「开着但没人管」）；联网搜索的独立出口代理（`WebSearchProxy`）缺失即禁用 `EnableWebSearch`——「空则直连」是本项要堵的第二条直连旁路：搜索流量不经录制代理，任务范围判定与留痕都看不见。三者齐全时行为与原先一致（WebFetch 经录制代理 + 任务身份）。**启动期 preflight**：代理配置了但不可达（TCP 探测 2 秒，只探可达、不做 HTTP 往返）⇒ 本轮规划拒绝启动并返回可读错误——fail-closed 到轮次启动期，不给「看似在跑、实际无网」的状态；禁用态每轮记一条 A-15 日志（说明缺代理还是缺身份）。
+- `agent/runinfo.go`：`egressTaskID` 的陈旧注释随 A-01 翻转修正——「未归属 ⇒ 放行、不受范围校验」改为「未归属 ⇒ 拒绝（例外仅启动期平台通道白名单）」。
+- `README.md`：配置节补「出网治理」实况一行（带任务身份 = 经录制代理按任务范围判定；未携带身份默认拒绝、仅启动期白名单的平台通道例外；planner/worker 的 WebFetch 与 Bash 出网 = 经录制代理 + 任务身份，代理缺失或不可达即禁用/拒绝启动，不直连）。【如实说明】原 README 并没有「本地隔离」的功能性声明——只有合规用语（「仅限在本地隔离环境中进行技术原理验证」），该表述本就与实际行为一致；本次补的是行为描述而非纠正错误声明。
+- 【与卡片骨架的差异（如实）】① `webAccessFor` 略去未使用的 `ctx` 参数；② 卡片示例里 `BashEnv: proxyEnv(...)` 本就带任务身份，未改；③ `chat.go` / `mainagent.go` 的 `EnableWebFetch: true` 按卡片范围（仅 planner）不动——chat 的无身份出网已由 A-01 在代理侧拒绝（调用点已加注释），mainagent 属任务道、恒带任务身份。
+- 测试：`TestPlannerWebAccessGate`（六矩阵：无代理 / 无任务身份 / 负任务号 / 代理+任务但搜索关 / 搜索开但无独立代理 / 三者齐全）、`TestCheckProxyReachable`（监听地址与 `http://` 前缀形态可达、空地址与不可解析地址报错）。`go test ./agent/ -run TestPlannerWeb` 绿（0.9s）、agent 全包绿（113.4s）；`go build ./...` + vet 干净。【验收口径】卡片「停掉录制代理后新建任务，planner 轮次拒绝启动」的机制已实现（Plan 头 `fetchOK → checkProxyReachable → 可读错误`），单测钉在探测函数与门矩阵上；平台级手动场景（整平台起停代理）留人工验收。
+
 ## [0.15.87] - 2026-11-25
 
 ### 修复（A-07 遗留补丁：TestMgmtAPI 的 stdio 命令适配真实路径校验）
