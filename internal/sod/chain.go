@@ -134,8 +134,9 @@ type degradeTracker struct {
 var degrade degradeTracker
 
 // isActive 报告当前是否处于降级态（开关关闭 ⇒ 恒 false）。
-func (t *degradeTracker) isActive(enabled func() bool) bool {
-	if enabled == nil || !enabled() {
+// enabled 是**启动期快照**（A-06）：装配时读一次，进程生命周期内不变。
+func (t *degradeTracker) isActive(enabled bool) bool {
+	if !enabled {
 		return false
 	}
 	t.mu.Lock()
@@ -144,8 +145,8 @@ func (t *degradeTracker) isActive(enabled func() bool) bool {
 }
 
 // recordUnavailable 记一次规整失败；达到阈值进降级。
-func (t *degradeTracker) recordUnavailable(enabled func() bool, onChange func(bool)) {
-	if enabled == nil || !enabled() {
+func (t *degradeTracker) recordUnavailable(enabled bool, onChange func(bool)) {
+	if !enabled {
 		return
 	}
 	t.mu.Lock()
@@ -163,13 +164,13 @@ func (t *degradeTracker) recordUnavailable(enabled func() bool, onChange func(bo
 }
 
 // recordAvailable 记一次规整成功；退出降级并清零。
-func (t *degradeTracker) recordAvailable(enabled func() bool, onChange func(bool)) {
+func (t *degradeTracker) recordAvailable(enabled bool, onChange func(bool)) {
 	t.mu.Lock()
 	wasActive := t.active
 	t.consecutive = 0
 	t.active = false
 	t.mu.Unlock()
-	if wasActive && enabled != nil && enabled() {
+	if wasActive && enabled {
 		log.Printf("[sod] 规整器恢复，退出降级档")
 		if onChange != nil {
 			onChange(false)
@@ -339,16 +340,17 @@ type ChainDeps struct {
 	NotifyReview func(ctx context.Context, item *db.AdversarialReviewItem)
 	// AgentKeyOf 从 ctx 里取当前 agent key。
 	//
-	// ⚠️ 它为 nil ⇒ 这条链**没有接到受管路径上** ⇒ 不 gate（放行）。这不是
-	// 「查不出来所以放行」，而是「这条链根本没被装到 worker 的工具入口上」：
-	// 宿主（server/sod_chain.go）必须保证受管路径上它非 nil，装配测试要钉住
-	// 这一条。反过来，链一旦被装上（AgentKeyOf 非 nil），其余任何部件缺失都
-	// 走 fail-closed 拒绝。
+	// ⚠️ 它为 nil ⇒ 装配缺失 ⇒ **拒绝**（fail-closed，A-06 翻转：旧语义是放行，
+	// 等于「链没接好就全放」，与整套 fail-closed 方向相反）。生产路径由
+	// RegisterSoDChain 的装配校验兜住（nil 装不上、启动失败）；这里的运行期
+	// 分支是防御性兜底（测试直构 ChainDeps{}、或将来有人绕过注册函数）。
 	AgentKeyOf func(ctx context.Context) string
 
-	// DegradeEnabled 读降级开关（方案 v3 缺陷 B4，settings sod.degrade_enabled，
-	// 默认 false）。nil = 永不降级（fail-closed 原样）。
-	DegradeEnabled func() bool
+	// DegradeEnabled 是降级开关的**启动期快照**（方案 v3 缺陷 B4 + A-06：
+	// 装配时读一次 ARTEX_SOD_DEGRADE_ENABLED，进程生命周期内不变；false =
+	// 永不降级，fail-closed 原样）。安全语义的开关不进热改面——settings 键
+	// sod.degrade_enabled 已废弃为只读展示位。
+	DegradeEnabled bool
 	// EngagementProfileOf 读任务的授权面档位（EngagementPolicy，0.15.26）：
 	// "authorized_active"（默认）/ "passive_recon" / "strict_manual"。
 	// nil 或空串 = 不收紧 = 默认档现状行为。档位收紧发生在合并闸【即将自动
@@ -462,9 +464,12 @@ func (c *Chain) PreToolUse(ctx context.Context, name string, input []byte) (bool
 		}
 	}
 
-	// ② 链没被装到受管路径上 ⇒ 不 gate。
+	// ② 装配缺失（AgentKeyOf 为 nil）⇒ 拒绝（fail-closed，A-06 翻转：旧语义
+	// 放行 = 「链没接好就全放」，方向错误）。生产路径装不出 nil 链
+	// （RegisterSoDChain 校验），这里兜住直构 ChainDeps 的场景。
 	if c.deps.AgentKeyOf == nil {
-		return false, "", updated
+		log.Printf("[sod] 拒绝：ChainDeps.AgentKeyOf 为 nil，链未正确装配（fail-closed）")
+		return true, "SoD 链未装配 agent key，拒绝执行（fail-closed）", nil
 	}
 
 	// ③ 放行清单里的工具不进链（本地只读 / 平台只读 / 纯记账）。

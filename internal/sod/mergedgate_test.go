@@ -119,6 +119,49 @@ func TestMergedVerdictCapExceeded(t *testing.T) {
 	}
 }
 
+// TestMergedVerdictUnreadableLedgerTreatedAsCapExceeded 钉住 A-06 的默认值翻转：
+// 配额账本不可读（CategoryUsed 未装配）⇒ 按「配额已用尽」走超限通路（auditor
+// 严格裁决 / 人工 ask / 都不成则拒），而**不是**旧语义的「视为 0 已用 = 不限」。
+//
+// 为什么必须翻：账本坏了就无配额，等于「防线失效时自动变成不设防」——方向与
+// fail-closed 相反。翻转后账本不可用最多把调用送去人工/auditor 裁决，绝不静默放宽。
+func TestMergedVerdictUnreadableLedgerTreatedAsCapExceeded(t *testing.T) {
+	cats := []sodpolicy.SodCategory{
+		{Name: "目录外写", Kind: "builtin", Pattern: sodpolicy.RecognizeOutsideWrite, Action: sodpolicy.CategoryActionAuditor, CapPerTask: 5, Fallback: "ask", Enabled: true, Priority: 60},
+	}
+	body := `{"command":"cp /app/data/tasks/19/a.md /var/www/html/x"}`
+
+	// 账本未装配（nil）+ auditor 认为可以放 ⇒ 也要带上 cap_exceeded 标记——
+	// 证明调用走的是「配额已用尽」的严格裁决通路，而不是配额内的普通裁决。
+	c := &Chain{deps: ChainDeps{
+		MergedGateMode: func() string { return sodpolicy.MergedGateEnforce },
+		Categories:     func() ([]sodpolicy.SodCategory, uint64) { return cats, 1 },
+		Adjudicator: func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {
+			if req.Reason != "cap_exceeded_strict:目录外写" {
+				t.Fatalf("账本不可读应走 cap 严格裁决，reason=%q", req.Reason)
+			}
+			return AuditorVerdict{Verdict: "pass"}, nil
+		},
+	}}
+	d := c.mergedVerdict(context.Background(), chainCallFor(19, "Bash", body), "Bash")
+	if d.markers["cap_exceeded"] != "true" {
+		t.Fatalf("账本不可读应按超限处理：markers=%v", d.markers)
+	}
+	if d.kind != "gate" {
+		t.Fatalf("auditor pass 后应放行：kind=%s", d.kind)
+	}
+
+	// 账本不可读 + 无 auditor + 无 ask 通路 ⇒ 拒（fail-closed 到底）。
+	c2 := &Chain{deps: ChainDeps{
+		MergedGateMode: func() string { return sodpolicy.MergedGateEnforce },
+		Categories:     func() ([]sodpolicy.SodCategory, uint64) { return cats, 1 },
+	}}
+	d2 := c2.mergedVerdict(context.Background(), chainCallFor(19, "Bash", body), "Bash")
+	if d2.kind != "deny" || d2.reason != sodpolicy.ReasonCategoryCapExceeded {
+		t.Fatalf("账本不可读且无人裁决时应拒：kind=%s reason=%s", d2.kind, d2.reason)
+	}
+}
+
 func TestMergedVerdictUncategorizedGoesToAuditor(t *testing.T) {
 	// 无种类表：unclear 调用 → auditor 默认裁量岗。
 	c := mergedHarness(t, sodpolicy.MergedGateEnforce, nil, func(ctx context.Context, req AuditorRequest) (AuditorVerdict, error) {

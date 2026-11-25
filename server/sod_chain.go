@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 
@@ -58,6 +59,12 @@ func RegisterSoDChain(deps sod.ChainDeps) error {
 	defer sodChainSlot.mu.Unlock()
 	if sodChainSlot.chain != nil {
 		return fmt.Errorf("SoD 链已安装，不允许重复安装")
+	}
+	// 装配校验（A-06）：AgentKeyOf 为 nil 的链装不上——fail-closed 推到启动期。
+	// 旧语义下 nil 链在运行期对一切调用放行（「链没接好就全放」）；现在装配期
+	// 直接失败，服务起不来，运维在启动日志就能看到根因。
+	if deps.AgentKeyOf == nil {
+		return fmt.Errorf("SoD 链装配失败：ChainDeps.AgentKeyOf 为 nil（链未接到受管路径上，拒绝安装）")
 	}
 	// inner 留空：宿主给的 hook runner 由 WrapHookRunner 派生视图时注入。
 	sodChainSlot.chain = sod.NewChain(nil, deps)
@@ -197,9 +204,10 @@ func (s *Server) installSoDChain() error {
 		DB:           pg,
 		NotifyReview: s.sodNotifyReview,
 		AgentKeyOf:   sod.AgentKeyFromContext,
-		// B4 降级档：开关每轮现读（热改即刻生效）；分级器只放 Tier1/2 结构化
+		// B4 降级档（A-06）：开关是**启动期快照**（装配时读一次环境变量，进程
+		// 生命周期内不变；settings 热改面已废除）；分级器只放 Tier1/2 结构化
 		// 写类（Tier3 永不豁免——§4 不变式 1）；降级态变化发一条通知事件。
-		DegradeEnabled:  s.sodDegradeEnabled,
+		DegradeEnabled:  sodDegradeEnabledAtBoot(),
 		DegradedAllow:   agent.IsTier2WriteTool,
 		OnDegradeChange: s.notifySodDegrade,
 		// F3 观测（方案 v9.2 §3.5）：规整器失败补记 llm_records（worker=normalizer）。
@@ -214,6 +222,17 @@ func (s *Server) installSoDChain() error {
 	s.wireMergedGateDeps(&deps)
 	if err := RegisterSoDChain(deps); err != nil {
 		return fmt.Errorf("SoD 链装配失败：%w", err)
+	}
+	// 启动期状态各打一行（A-06 验收：降级开关与合并闸的生效状态必须可见，
+	// 不用翻代码才知道当前跑在哪一档）。
+	degrade := sodDegradeEnabledAtBoot()
+	log.Printf("[sod] 降级档开关（启动期快照，%s=%v）：%s", envSodDegradeEnabled, degrade,
+		map[bool]string{true: "开启（规整器连续 5 次不可用进入降级）", false: "关闭（fail-closed，不可用时一律拒绝）"}[degrade])
+	log.Printf("[sod] 合并闸状态（启动期读取）：%s", s.mergedGateMode())
+	// 遗留键迁移提示：settings 里还留着 true 而启动期未开 ⇒ 提醒运维口径已换，
+	// 不静默吞掉（旧行为是热改生效，重启后会被这个差异绊一下）。
+	if !degrade && s.m != nil && s.m.pg != nil && s.m.pg.GetBool(settingSodDegradeEnabled, false) {
+		log.Printf("[sod] 注意：settings 里遗留 sod.degrade_enabled=true，该键已废弃——降级档改由 %s=1 在启动期开启", envSodDegradeEnabled)
 	}
 	return nil
 }
@@ -357,15 +376,22 @@ func (s *Server) sodProviderFunc() sod.ProviderFunc {
 	}
 }
 
-// settingSodDegradeEnabled 是 B4 降级档的 settings 键（默认 false=fail-closed）。
+// settingSodDegradeEnabled 是 B4 降级档的**旧 settings 键**（A-06 已废弃为
+// 只读展示位：GET /api/settings 仍回显当前生效值，写接口拒绝）。保留常量是
+// 为了启动期探测遗留值并给出迁移提示。
 const settingSodDegradeEnabled = "sod.degrade_enabled"
 
-// sodDegradeEnabled 读降级档开关（链每轮现读；热改即刻生效）。
-func (s *Server) sodDegradeEnabled() bool {
-	if s.m == nil || s.m.pg == nil {
-		return false
-	}
-	return s.m.pg.GetBool(settingSodDegradeEnabled, false)
+// envSodDegradeEnabled 是降级档开关的启动期配置（A-06）：仅接受 1/true，
+// 其余一律 false——安全语义的开关不给模糊解释空间。
+const envSodDegradeEnabled = "ARTEX_SOD_DEGRADE_ENABLED"
+
+// sodDegradeEnabledAtBoot 读降级档开关的启动期值。只在装配链时调用一次
+// （快照进 ChainDeps.DegradeEnabled），进程生命周期内不再变化——热改即刻
+// 生效的「灵活」对安全开关是负债：一次误点鼠标就能关掉 fail-closed 的最后
+// 一道兜底。
+func sodDegradeEnabledAtBoot() bool {
+	v := strings.TrimSpace(os.Getenv(envSodDegradeEnabled))
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // isSodDegradableTool 是注入链的降级分级器（B4）：只有 Tier2 结构化写类可以

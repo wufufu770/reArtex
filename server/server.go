@@ -3913,10 +3913,9 @@ func (s *Server) settingsPayload() map[string]any {
 		"feishu_bridge_url": s.settingValue(settingFeishuBridgeURL),
 		"feishu_bridge_set": s.settingValue(settingFeishuBridgeSecret) != "",
 		"wecom_webhook_set": s.settingValue(settingWeComWebhookURL) != "",
-		// B4 降级档总开关（方案 v3）：默认关=规整器不可用一律 fail-closed 拒绝；
-		// 开启后连续 5 次不可用进入降级（Tier1/2 确定性放行、Tier3 照拒、审计带
-		// degraded 标记），任一次规整成功自动退出。链每轮现读（热改即刻生效）。
-		"sod_degrade_enabled": s.sodDegradeEnabled(),
+		// B4 降级档总开关（A-06 起为启动期配置）：只读展示当前生效值（环境变量
+		// ARTEX_SOD_DEGRADE_ENABLED 的启动期快照）；写接口拒绝并提示迁移方式。
+		"sod_degrade_enabled": sodDegradeEnabledAtBoot(),
 		// 外置记忆库（0.15.40，批次 J）：地址明文回显（内部端点非凭据）；
 		// 令牌只回「已配置」布尔位（AMBER_*_TOKEN 是环境变量面）。
 		"amber_enabled":   s.amberEnabled(),
@@ -4002,7 +4001,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		FeishuBridgeURL    *string `json:"feishu_bridge_url"`
 		FeishuBridgeSecret *string `json:"feishu_bridge_secret"`
 		WeComWebhookURL    *string `json:"wecom_webhook_url"`
-		// B4 降级档总开关（方案 v3 缺陷 B4）。默认关；链每轮现读，热改即刻生效。
+		// B4 降级档总开关（A-06 起废弃）：启动期环境变量配置，热改面已拆除——
+		// 保留字段是为了给出明确的迁移错误而不是「未知字段」静默失败。
 		SodDegradeEnabled *bool `json:"sod_degrade_enabled"`
 		// 外置记忆库（0.15.40，批次 J）：amber_enabled 总开关（默认关）+
 		// 服务地址。worker/owner 令牌是环境变量面（AMBER_*_TOKEN），永不回显
@@ -4041,10 +4041,11 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.SodDegradeEnabled != nil {
-		if err := s.m.pg.SetBool(settingSodDegradeEnabled, *req.SodDegradeEnabled); err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
+		// A-06：降级开关已移出热改面（settings 键废弃为只读展示位）。写操作
+		// 一律拒绝并给出迁移路径——静默忽略会让前端以为改成功、运维以为
+		// 关掉了降级，实际什么都没变。
+		writeErr(w, 400, "sod.degrade_enabled 已改为启动期配置（环境变量 "+envSodDegradeEnabled+"=1），不可热改；请删除该键并在启动环境设置后重启")
+		return
 	}
 	// 外置记忆库（0.15.40，批次 J）：开关热改即刻生效（终态写入/curator 观察
 	// 每 run 现读）；地址 http(s) 校验复用外部通道同一函数。

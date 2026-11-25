@@ -2,6 +2,7 @@ package sod
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/norma/harness"
@@ -174,6 +175,30 @@ func TestSoDChainAndExecutorAgreeOnAgentKey(t *testing.T) {
 	// 执行器那侧：同一个读法、同一个原值。
 	if got := AgentKeyFromContext(ctx); got != agentKey {
 		t.Fatalf("执行器侧取到的 agent key=%q, 期望原值 %q", got, agentKey)
+	}
+}
+
+// TestSoDPreToolUseDeniesWhenAgentKeyOfNil 钉住 A-06 的默认值翻转：
+// ChainDeps.AgentKeyOf 为 nil（链未正确装配）⇒ 拒绝，而不是放行。
+//
+// 为什么钉在链层：生产路径有 RegisterSoDChain 的装配校验，nil 链装不上；
+// 但直构 ChainDeps{} 的调用方（测试、嵌入式宿主、将来绕过注册函数的代码）
+// 依然会得到一条 nil 链——运行期这个分支必须自己 fail-closed。
+func TestSoDPreToolUseDeniesWhenAgentKeyOfNil(t *testing.T) {
+	// 空 deps：所有部件都缺。任何工具调用都必须被拒。
+	c := NewChain(nil, ChainDeps{})
+	block, msg, _ := c.PreToolUse(context.Background(), "Bash", []byte(`{"command":"id"}`))
+	if !block {
+		t.Fatal("装配缺失时必须拒绝执行（fail-closed），不得放行")
+	}
+	if !strings.Contains(msg, "fail-closed") || !strings.Contains(msg, "agent key") {
+		t.Fatalf("拒绝信息应说明装配缺失，实际 %q", msg)
+	}
+	// 连放行清单里的工具（本地只读面）也一并拒——装配缺失是链级故障，
+	// 不该对任何调用保持旧语义的「不 gate」。
+	block, _, _ = c.PreToolUse(context.Background(), "read_file", []byte(`{"path":"/tmp/x"}`))
+	if !block {
+		t.Fatal("装配缺失时放行清单工具也不得放行")
 	}
 }
 

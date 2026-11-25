@@ -94,12 +94,21 @@ func (c *Chain) mergedVerdict(ctx context.Context, call chainCall, name string) 
 	}
 	cat := MatchCategory(cats, name, cls, call.payload)
 
-	used := func(catName string) int {
-		if c.deps.CategoryUsed == nil || catName == "" {
-			return 0
+	// used 查种类配额的已用次数。第二个返回值 = 账本是否可读：**不可读（未装配
+	// 或读取失败）按「配额已用尽」处理**（A-06：旧语义 nil → 0 → 视为不限，
+	// 等于「账本坏了就无配额」，方向错误）；空种类名视为可读 0（无种类无配额）。
+	used := func(catName string) (int, bool) {
+		if catName == "" {
+			return 0, true
 		}
-		n, _ := c.deps.CategoryUsed(ctx, call.taskID, catName)
-		return n
+		if c.deps.CategoryUsed == nil {
+			return 0, false
+		}
+		n, err := c.deps.CategoryUsed(ctx, call.taskID, catName)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
 	}
 
 	// --- 种类表命中 ---
@@ -157,7 +166,7 @@ func (c *Chain) mergedVerdict(ctx context.Context, call chainCall, name string) 
 
 // auditorRoute 是 action=auditor 的种类与未命中调用的共同通路：
 // cap 检查 → auditor 裁决 → pass/deny/ask；故障 → 种类兜底。
-func (c *Chain) auditorRoute(ctx context.Context, call chainCall, cat *sodpolicy.SodCategory, cls ClassResult, used func(string) int, mk func(string) mergedDecision) mergedDecision {
+func (c *Chain) auditorRoute(ctx context.Context, call chainCall, cat *sodpolicy.SodCategory, cls ClassResult, used func(string) (int, bool), mk func(string) mergedDecision) mergedDecision {
 	catName := ""
 	if cat != nil {
 		catName = cat.Name
@@ -289,8 +298,14 @@ func (c *Chain) outOfScopeRoute(ctx context.Context, call chainCall, d mergedDec
 			}
 		}
 	}
-	if capLimit > 0 && c.deps.CategoryUsed != nil {
-		if n, _ := c.deps.CategoryUsed(ctx, call.taskID, sodpolicy.RecognizeEgressNewHost); n >= capLimit {
+	if capLimit > 0 {
+		// 账本未装配 ⇒ 按「配额已用尽」拒绝（A-06：旧语义跳过检查 = 视为不限，
+		// 方向错误）；读取失败同理。
+		if c.deps.CategoryUsed == nil {
+			return c.deny(ctx, call, sodpolicy.ReasonCategoryCapExceeded,
+				"配额账本不可用，按「配额已用尽」拒绝（fail-closed）")
+		}
+		if n, err := c.deps.CategoryUsed(ctx, call.taskID, sodpolicy.RecognizeEgressNewHost); err != nil || n >= capLimit {
 			return c.deny(ctx, call, sodpolicy.ReasonCategoryCapExceeded,
 				"非目标段出网的本任务配额已用尽且人工未批准")
 		}
@@ -504,11 +519,13 @@ func (c *Chain) elevateAsk(ctx context.Context, call chainCall, reason string) b
 // 严格裁决」并返回 false（v6.1：cap 的意义是防 auditor 橡皮图章洪泛，不是把
 // 人变成审批员——auditor pass 就放、deny 就拒、ask 才升级人工；auditor 不可
 // 用再按种类兜底）。返回 false 时 *d 已是最终裁决。
-func (c *Chain) categoryCapOK(ctx context.Context, call chainCall, cat *sodpolicy.SodCategory, used func(string) int, d *mergedDecision) bool {
+func (c *Chain) categoryCapOK(ctx context.Context, call chainCall, cat *sodpolicy.SodCategory, used func(string) (int, bool), d *mergedDecision) bool {
 	if cat.CapPerTask <= 0 {
 		return true
 	}
-	if used(cat.Name) < cat.CapPerTask {
+	// 账本不可读（!ok）⇒ 按「配额已用尽」走超限通路（A-06：fail-closed，
+	// 不再视为不限）。超限不等于直接拒——auditor 严格裁决/人工 ask 仍在。
+	if n, ok := used(cat.Name); ok && n < cat.CapPerTask {
 		return true
 	}
 	d.markers["category"] = cat.Name

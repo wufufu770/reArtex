@@ -449,41 +449,44 @@ func TestBashLocalTaskDirNetworkGuard(t *testing.T) {
 }
 
 // TestDegradeTrackerLifecycle 钉住 B4 状态机：连续 unavailable 达阈值进降级、
-// 开关关闭立即退出、任一次成功退出并清零。
+// 任一次成功退出并清零。A-06 之后开关是启动期 bool 快照（装配时读一次，进程
+// 内不再变），不再是每轮回调——「热改关掉立即退出」改为「快照 false 恒不降级」。
 func TestDegradeTrackerLifecycle(t *testing.T) {
-	enabled := func() bool { return true }
 	onChangeCalls := 0
 	onChange := func(bool) { onChangeCalls++ }
 
 	var tr degradeTracker
 	for i := 0; i < degradeThreshold-1; i++ {
-		tr.recordUnavailable(enabled, onChange)
-		if tr.isActive(enabled) {
+		tr.recordUnavailable(true, onChange)
+		if tr.isActive(true) {
 			t.Fatalf("第 %d 次失败不应进降级", i+1)
 		}
 	}
-	tr.recordUnavailable(enabled, onChange)
-	if !tr.isActive(enabled) {
+	tr.recordUnavailable(true, onChange)
+	if !tr.isActive(true) {
 		t.Fatal("达到阈值应进降级")
 	}
-	// 关闭开关 ⇒ 立即退出（fail-closed 回来）。
-	off := func() bool { return false }
-	if tr.isActive(off) {
+	// 快照为 false ⇒ 恒不降级（启动期定死，进程内没有「热改重开」）。
+	if tr.isActive(false) {
 		t.Fatal("开关关闭必须立即退出降级")
 	}
-	// 再开开关（连续计数还在阈值上）⇒ 仍处降级。
-	if !tr.isActive(enabled) {
-		t.Fatal("重开开关且未恢复时应仍在降级")
-	}
 	// 成功一次 ⇒ 退出降级并清零。
-	tr.recordAvailable(enabled, onChange)
-	if tr.isActive(enabled) {
+	tr.recordAvailable(true, onChange)
+	if tr.isActive(true) {
 		t.Fatal("恢复后必须退出降级")
 	}
 	for i := 0; i < degradeThreshold-1; i++ {
-		tr.recordUnavailable(enabled, onChange)
+		tr.recordUnavailable(true, onChange)
 	}
-	if tr.isActive(enabled) {
+	if tr.isActive(true) {
 		t.Fatal("清零后重新计数，阈值前不应进降级")
+	}
+	// 开关关闭时：失败不计数（快照 false 的进程里降级计数器保持零）。
+	var trOff degradeTracker
+	for i := 0; i < degradeThreshold+2; i++ {
+		trOff.recordUnavailable(false, onChange)
+	}
+	if trOff.isActive(true) {
+		t.Fatal("开关关闭期间的失败不得推进计数")
 	}
 }

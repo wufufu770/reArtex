@@ -155,6 +155,37 @@ func TestSoDWrapHookRunnerDelegatesToInnerBeforeGating(t *testing.T) {
 	}
 }
 
+// TestSoDRegisterSoDChainRejectsNilAgentKeyOf 钉住 A-06 的装配校验：
+// AgentKeyOf 为 nil 的链装不上（fail-closed 推到启动期）。
+//
+// 为什么必须在装配期拒绝：旧语义下 nil 链在运行期对一切调用**放行**——
+// 「链没接好就全放」与整套 fail-closed 方向相反。装配期失败 ⇒ 服务起不来 ⇒
+// 运维在启动日志就能看到根因，而不是在渗透测试里收到一个不设防的平台。
+func TestSoDRegisterSoDChainRejectsNilAgentKeyOf(t *testing.T) {
+	resetSoDChainSlot(t)
+
+	err := RegisterSoDChain(sod.ChainDeps{Tokens: sod.NewTokenStore()})
+	if err == nil {
+		t.Fatal("AgentKeyOf 为 nil 时不应装配成功")
+	}
+	if !strings.Contains(err.Error(), "AgentKeyOf") {
+		t.Fatalf("错误信息应点名缺失的依赖，实际 %q", err.Error())
+	}
+	if SoDChainInstalled() {
+		t.Fatal("装配失败时不得留下已安装的链")
+	}
+	if got := sod.ExecutorTokens(); got != nil {
+		t.Fatal("装配失败时不得发布执行器凭证表")
+	}
+	// 修好依赖后同一条注册函数必须能装上（排除「校验永远失败」的假阴性）。
+	if err := RegisterSoDChain(sod.ChainDeps{
+		Tokens:     sod.NewTokenStore(),
+		AgentKeyOf: func(ctx context.Context) string { return "worker" },
+	}); err != nil {
+		t.Fatalf("补齐 AgentKeyOf 后应装配成功：%v", err)
+	}
+}
+
 // TestSoDInstallSoDChainFailsClosedWithoutDB 钉住「缺必需件 ⇒ 中文错误 + 不装链」。
 //
 // fail-closed 的口径：装配不成就不装（宿主那条路径保持原样），而不是装一条
