@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.80] - 2026-11-25
+
+### 新增（A-11：pathguard 真实路径解析收口——workingDir 口径 + 悬空符号链接拒绝）
+
+- `pathguard/pathguard.go`：新增 `resolveReal(p, workingDir)` 统一全包路径解析（取代 `resolveExisting`）——相对路径按工具 WorkingDir 拼全（此前按进程 CWD，口径与工具实际打开文件的基准不一致）；悬空符号链接（Lstat 可见链接本身、跟随目标不存在/成环）直接拒绝，不再解析成「父目录+链接名」放行；不存在路径仍沿父目录找已存在锚点拼回（写新文件常态不受影响）；workingDir 为空回落进程 CWD。`Check` 签名增 `workingDir` 参数（唯一调用方 `agent/toolpolicy.go` 传 `pc.WorkingDir`，Stage-1 语义不变）。
+- `pathguard/tokens.go`：`CheckInputPaths` 真实路径层改调统一 `resolveReal`（删去「不存在就跳过」的 Lstat 短路）；字符串层（Clean 比对）保留作第一道。新增裸文件名候选：无任何路径起点的 token 整体按 WorkingDir 相对名判定——`cd /app && cat jwt.key`、`cat .env` 这类此前整段漏掉的形态补上；超 96 字符或含 `/` 的杂物 token 不进文件系统层（控 syscall 面）。
+- `pathguard/resolve_real_test.go`（新增）：卡片四种符号链接夹具（工作区内目录软链读秘密 / 经软链父目录写新文件 / 工作区外秘密软链 / 悬空符号链接，后两种同时盖 tokens 层）+ workingDir 相对路径口径（拒绝与放行双向）+ 裸文件名误伤反例（非秘密同名、正文裸词）。
+- 【如实差异】卡片验收原文「软链指向工作区外目录→拒绝」：拒绝面保持**平台秘密清单**——指向非秘密外部路径的软链依设计放行（本包刻意不做根目录收敛，包注释与 Oracle「不要做根目录收敛」红线；收敛会打断「把证据读到本地再分析」的渗透工作流）。已按仓库现状落地并在测试注释中标注。
+- 测试：`go test ./pathguard/` 全绿（0.097s，含既有 symlink/tokens 回归）；`go test ./agent/ -run 'TestPolicy|TestAugment'` Stage-1 全绿；`go build ./...` 通过。
+
 ## [0.15.79] - 2026-11-25
 
 ### 新增（A-09：config.json 明文 DSN 纳入密钥清单）
