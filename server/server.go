@@ -327,6 +327,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// 不注入时那两个工具会返回中文错误而不是崩，但 redteam 也就永远查不到队列。
 		agent.SodReviewStore = sodReviewStore{pg: m.pg}
 		seedPrompts(m.pg) // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		// A-02：skill 信任记录启动对账——存量单文件哈希记录静默迁移为树哈希（档位
+		// 原样保留），无记录 skill 补钉 trusted（保持升级前展示，无静默翻转，同时
+		// 把树钉住）。幂等：重复启动零开销。失败不阻断启动——判定路径对无记录
+		// fail-closed，最坏是既有 skill 按不可信注入而不是放水。
+		reconcileSkillTrust(m.pg, s.skillDir)
 		// SoD 链：先绑定运行上下文读法，再装链。
 		//
 		// 为什么必须绑定读法：链铸的凭证与执行器查的凭证都靠四元组里的 agent_key
@@ -1266,6 +1271,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/skills/{name}/usage", s.fsSkillUsage) // 单个 skill 的最近调用
 	mux.HandleFunc("PUT /api/skills/{name}/meta", s.fsUpdateSkillMeta)
 	mux.HandleFunc("POST /api/skills/{name}/dirs", s.fsCreateDir)
+	// A-02：operator 显式授信端点——树哈希失配降级后唯一能把档位升回 trusted 的
+	// 入口（重算树哈希落记录 + 操作进审计链；agent 没有任何路径能自己恢复）。
+	mux.HandleFunc("POST /api/skills/{name}/trust", s.fsSkillTrust)
 	mux.HandleFunc("GET /api/skills/{name}/files", s.fsListFiles)
 	// {file...} captures path segments including slashes (e.g. scripts/extract.py)
 	mux.HandleFunc("GET /api/skills/{name}/files/{file...}", s.fsReadFile)

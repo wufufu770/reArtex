@@ -121,6 +121,8 @@ func (s *Server) toolCreateSkill() actool.CoreTool {
 			// allow 与信任机制的组合收口：新建不覆盖既有文件，但内容不因「新建」
 			// 而可信；首次注入带降权前缀，见 skill_demote.go）。
 			recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted, skillTrustWriterAgent)
+			// A-02：批量创建速率告警（阈值 settings 热改，默认 10 次/小时）。
+			recordSkillCreateAndAlert(s.db(), a.Name)
 			return actool.Text("skill created: " + a.Name), nil
 		})
 }
