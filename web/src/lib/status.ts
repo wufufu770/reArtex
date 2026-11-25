@@ -244,6 +244,46 @@ const sodCircuit: Record<string, StatusMeta> = {
   half_open: { label: "half_open · 放行一次试探", tone: "amber" },
 };
 
+// 决策来源分档（A-03B）：同一次受管执行在决策账本 / 审批记录 / 审计事件 / UI
+// 呈现同一个「这一票是谁投的」。
+//
+// 为什么是读时推导而不是 sod_decisions 新列：账本是 append-only 的审计记录
+// （Tier-0 面），不回填、不改写历史；来源标签从每行已有的 reason_code 与人工
+// 改判标记推导，历史行与新行同一口径。查不出的一律「未知」——不伪造来源。
+const sodDecisionSource: Record<string, StatusMeta> = {
+  auditor: { label: "AI 裁决", tone: "violet" },
+  human: { label: "人工裁决", tone: "amber" },
+  deterministic: { label: "确定性门", tone: "slate" },
+  unknown: { label: "来源未知", tone: "neutral" },
+};
+
+// sodDecisionSourceOf 从一行账本的既有字段推导决策来源分档。
+//
+// 映射与后端真实语义逐条对齐（internal/sodpolicy.Reason* / internal/sod）：
+//   - 人工改判标记（checks.manual_override ⇒ overridden）最优先——放行这票是
+//     人工投的，即使 reason_code 写着 all_checks_passed；
+//   - auditor_pass / auditor_deny / auditor_ask = auditor LLM 的裁决输出
+//     （auditor_gate.go: firstNonEmptyStr(raw.ReasonCode, "auditor_"+verdict)）；
+//   - auditor_unavailable = auditor LLM 不可用 ⇒ 链 fail-closed 拒绝，这不是
+//     AI 裁决，是确定性门的失败关闭（归 deterministic，不能算到 AI 头上）；
+//   - ask_declined = 人工 ask 通路拒绝（ElevateAsk → HandleAsk → 人说不）；
+//   - 空 reason_code = 账本行来源缺失 ⇒ 「未知」（不伪造）；
+//   - 其余（scope/baseline/category/quota/circuit/normalizer/token 等）全部是
+//     代码常量判定 ⇒ 确定性门。
+//
+// 已知残余（如实说明）：合并闸 ask 批准后的放行行（reason_code=all_checks_passed
+// 且无改判标记）推导为确定性门——人工批准这一票在账本行里没有独立标记（链侧
+// Tier-0，本批不动），此标签反映的是「账本行能证明的来源」，不是更多。
+export function sodDecisionSourceOf(reasonCode: string, overridden?: string): string {
+  if (overridden) return "human";
+  const rc = reasonCode.trim();
+  if (!rc) return "unknown";
+  if (rc === "auditor_pass" || rc === "auditor_deny" || rc === "auditor_ask") return "auditor";
+  if (rc === "auditor_unavailable") return "deterministic";
+  if (rc === "ask_declined") return "human";
+  return "deterministic";
+}
+
 const maps = {
   intent,
   task,
@@ -267,6 +307,7 @@ const maps = {
   sodTierCategory,
   sodReason,
   sodCircuit,
+  sodDecisionSource,
 } as const;
 
 export type StatusDomain = keyof typeof maps;

@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { SodShadowCard } from "@/components/sod-shadow-card";
 import { SodSuggestionCard } from "@/components/sod-suggestion-card";
 import { StatusBadge } from "@/components/status-badge";
+import { sodDecisionSourceOf } from "@/lib/status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -153,6 +154,8 @@ function DecisionRow({
         <TableCell>
           <div className="flex max-w-[14rem] flex-wrap items-center gap-1">
             <StatusBadge domain="sodVerdict" value={row.verdict} dot />
+            {/* A-03B：决策来源分档（读时推导，与审批记录/审计事件同一口径）。 */}
+            <StatusBadge domain="sodDecisionSource" value={sodDecisionSourceOf(row.reason_code, row.overridden)} />
             <StatusBadge domain="sodReason" value={row.reason_code} />
             {/* E1-2：改判放行行在账本页同样可见（此前只有治理 tab 与大屏有徽标）。 */}
             {row.overridden && (
@@ -351,9 +354,14 @@ export default function SodLedgerPage() {
   }, []);
 
   const rows = ledger?.decisions ?? [];
-  const approveCount = rows.filter((r) => r.verdict === "approve").length;
-  const denyCount = rows.filter((r) => r.verdict === "deny").length;
-  const reviewCount = rows.filter((r) => r.verdict === "needs_review").length;
+  // A-03B：决策来源筛选（读时推导，客户端过滤——账本行不需要回填任何字段）。
+  // "all" = 不过滤；计数卡与表格都基于过滤后集合，卡片描述里保留全量条数。
+  const [sourceFilter, setSourceFilter] = React.useState<string>("all");
+  const filteredRows =
+    sourceFilter === "all" ? rows : rows.filter((r) => sodDecisionSourceOf(r.reason_code, r.overridden) === sourceFilter);
+  const approveCount = filteredRows.filter((r) => r.verdict === "approve").length;
+  const denyCount = filteredRows.filter((r) => r.verdict === "deny").length;
+  const reviewCount = filteredRows.filter((r) => r.verdict === "needs_review").length;
 
   return (
     <div className="flex flex-1 flex-col gap-4 md:gap-6">
@@ -414,7 +422,8 @@ export default function SodLedgerPage() {
         <CardHeader>
           <CardTitle>决策账本</CardTitle>
           <CardDescription>
-            共 {rows.length} 条{taskID !== ALL_TASKS ? ` · 已按任务 ${taskID} 过滤` : ""} · 单页上限{" "}
+            共 {rows.length} 条{sourceFilter !== "all" ? ` · 已按来源「${sourceFilter}」筛选` : ""}
+            {taskID !== ALL_TASKS ? ` · 已按任务 ${taskID} 过滤` : ""} · 单页上限{" "}
             {ledger?.limit ?? limit} 条
           </CardDescription>
         </CardHeader>
@@ -457,9 +466,22 @@ export default function SodLedgerPage() {
                 ))}
               </SelectContent>
             </Select>
+            {/* A-03B：来源筛选（AI 裁决 / 人工裁决 / 确定性门 / 来源未知）。 */}
+            <Select value={sourceFilter} onValueChange={setSourceFilter}>
+              <SelectTrigger className="w-full sm:w-40">
+                <SelectValue placeholder="决策来源" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部来源</SelectItem>
+                <SelectItem value="auditor">AI 裁决</SelectItem>
+                <SelectItem value="human">人工裁决</SelectItem>
+                <SelectItem value="deterministic">确定性门</SelectItem>
+                <SelectItem value="unknown">来源未知</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <DecisionList
-            rows={rows}
+            rows={filteredRows}
             loaded={loaded}
             onReview={(row) => setReview({ decision: row, scope: "once", reason: "", operator: "sir" })}
             expandedDetails={expandedDetails}
