@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.85] - 2026-11-25
+
+### 变更（A-06：SoD 降级开关移出热改面 + 装配缺失/配额账本不可读翻默认拒绝）
+
+- `server/sod_chain.go`：降级档开关从 settings 热改项改为**启动期配置**——新增 `ARTEX_SOD_DEGRADE_ENABLED` 环境变量，`sodDegradeEnabledAtBoot()` 仅接受 `1/true`（其余一律 false，不给模糊解释空间），装配链时读一次快照进 `ChainDeps.DegradeEnabled`，进程生命周期内不变。旧 settings 键 `sod.degrade_enabled` 废弃为**只读展示位**（GET /api/settings 回显当前生效值）；`putSettings` 拒绝写入并返回 400 + 明确迁移文案（静默忽略会让前端以为改成功、运维以为关掉了降级）。启动日志新增两行：降级开关生效态、合并闸三态（off/shadow/enforce）；settings 里遗留 `true` 而启动期未开时打迁移提示（不静默吞掉口径差异）。`notifySodDegrade`（OnDegradeChange 通知）不变——降级档进/出仍发通知事件。
+- `internal/sod/chain.go`：`ChainDeps.DegradeEnabled` 从 `func() bool`（每轮现读）改为 `bool` 启动期快照；`degradeTracker` 三方法签名随翻——快照 false 恒不降级、关闭期失败不推进计数（`degradeThreshold = 5` 保持代码常量不变）。**`AgentKeyOf == nil` 分支翻转为拒绝**：旧语义「链没装到受管路径上 ⇒ 不 gate（放行）」与整套 fail-closed 方向相反；现在 `PreToolUse` 直接返回拒绝 + error 日志，且连放行清单里的工具一并拒（装配缺失是链级故障）。`RegisterSoDChain` 加装配校验：`AgentKeyOf` 为 nil 即返回错误、不装链、不发布执行器凭证表——fail-closed 推到启动期，服务起不来比不设防好。
+- `internal/sod/mergedgate.go`：配额账本不可读（`CategoryUsed == nil` 或读取失败）按「**配额已用尽**」处理——走既有的超限严格裁决通路（auditor 严格裁决 / 人工 ask / 都不成则拒），不再「视为 0 已用 = 不限」；`outOfScopeRoute` 的出网 cap 同口径（账本 nil → 拒绝并注明 fail-closed）。翻转后账本故障最多把调用送去人工/auditor 裁决，绝不静默放宽。
+- 【如实差异】卡片验收的「前端 SoD 页降级开关只读」：仓库前端**本就没有**降级开关 UI（grep 全前端无 `sod_degrade_enabled` 引用；写路径只有通用 settings API）——写接口已拒绝并返回明确文案，展示位回显生效值，无 UI 可改；不做无中生有的页面。
+- 测试：`TestSodDegradeBootEnvParsing`（12 值解析口径：1/true/TRUE/True/带空白 → 开；0/false/yes/on/2/空 → 关）、`TestSodDegradeSettingWriteRejected`（PUT 400 + 点名环境变量 + 确认不落库）、`TestSoDRegisterSoDChainRejectsNilAgentKeyOf`（nil 拒绝 + 不发布凭证表 + 补齐后可装）、`TestSoDPreToolUseDeniesWhenAgentKeyOfNil`（Bash 与放行清单工具双拒）、`TestDegradeTrackerLifecycle`（bool 化重写 + 关态不计数）、`TestMergedVerdictUnreadableLedgerTreatedAsCapExceeded`（nil 账本走 `cap_exceeded_strict` 严格裁决；无裁决岗无 ask ⇒ 拒）。`go test ./internal/sod/ -count=1` 全绿（15.8s）；server 子集（Register/Wrap/Install/Schema/Degrade）10 项全绿；`go build ./...` + vet 干净。
+
 ## [0.15.84] - 2026-11-25
 
 ### 变更（A-14：notify 拨号阶段 SSRF 防护 + 凭据脱敏——现状核实为「大部分已存在」，本次补钉测试）
