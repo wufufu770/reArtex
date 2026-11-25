@@ -185,7 +185,11 @@ jobs:
           fetch-depth: 0
       - name: Tier-0 硬锁（强制）
         if: github.event.before != '' && github.event.before != '0000000000000000000000000000000000000000'
-        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --enforce --tier 1
+        # --tier 2 = 允许层级上限 2：只有 Tier-0 清单触碰违规（0.15.93 修正）。
+        # 0.15.92 曾误写 --tier 1——tier 是「允许上限」，1 会把 Tier-2（server/db/
+        # web 等常规开发面）也判越层，实测 A 批区间 48 条误报，每次普通推送必红；
+        # Tier-0 命中在任何档位下都违规，--tier 2 才是「仅锁 Tier-0」的本意。
+        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --enforce --tier 2
 
   # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
   # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend

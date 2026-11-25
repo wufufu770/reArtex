@@ -21,7 +21,9 @@ PG_DSN="${PRECOMMIT_PG_DSN:-postgres://artex:artex@127.0.0.1:5434/artex?sslmode=
 GO_BIN="${GO:-go}"
 
 echo "── [1/6] RSI 门禁：Tier-0 硬锁（强制）"
-GUARD_ARGS=(--staged --enforce --tier 1)
+# --tier 2 = 仅锁 Tier-0（tier 是允许上限；0.15.93 修正 0.15.92 的 --tier 1——
+# 那会把 Tier-2 常规开发面也判越层，本地门会拦下每一次正常提交）。
+GUARD_ARGS=(--staged --enforce --tier 2)
 if [ -n "${RSI_ALLOW_TIER0:-}" ]; then
   GUARD_ARGS+=(--allow-tier0 "$RSI_ALLOW_TIER0")
   echo "   （Tier-0 例外通道已启用：${RSI_ALLOW_TIER0}）"
