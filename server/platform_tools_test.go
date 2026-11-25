@@ -97,7 +97,14 @@ func TestValidateMCPDefinitionAllowsNormal(t *testing.T) {
 			t.Fatalf("正常 URL %s 被误伤: %v", u, err)
 		}
 	}
-	in := mcpToolInput{Transport: "stdio", Command: "/usr/bin/playwright-mcp"}
+	// A-07（0.15.81）：校验要求命令解析出真实路径——夹具从写死的
+	// /usr/bin/playwright-mcp（多数环境不存在，旧逻辑只查形态所以碰巧过）改为
+	// 真实临时二进制；不存在的命令在登记期就该报错，而不是留到拨号期才炸。
+	bin := filepath.Join(t.TempDir(), "playwright-mcp")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	in := mcpToolInput{Transport: "stdio", Command: bin}
 	got, err := validateMCPDefinition(&in)
 	if err != nil {
 		t.Fatalf("本地绝对路径 stdio 应放行: %v", err)

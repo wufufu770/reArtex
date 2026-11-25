@@ -345,6 +345,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
 		go newNotifier(s).Run(s.ctx)
+		// A-07（0.15.81）：存量 stdio MCP 启动期重验，不过的记警告并禁用——
+		// 二进制被删/被换成解释器软链的行不能靠「拨号失败冷却」慢慢现形。
+		go s.reverifyStdioMCPsOnStartup()
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()

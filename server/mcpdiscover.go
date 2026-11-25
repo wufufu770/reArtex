@@ -6,6 +6,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,41 +17,142 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// stdioPackageRunners 从 registry 拉取代码执行，等价于任意第三方代码执行，
-// 且包名可抢注、无版本 pin 可供应链翻转。比对 base name，允许路径前缀。
-var stdioPackageRunners = map[string]bool{
-	"npx": true, "uvx": true, "bunx": true, "pnpx": true,
-	"pipx": true, "dlx": true, "docker": true, "podman": true,
-	"sh": true, "bash": true, "zsh": true, "dash": true,
-	"python": true, "python3": true, "perl": true, "ruby": true, "node": true,
+// stdioRunnerNamePatterns 是包执行器/解释器的名字模式（A-07，0.15.81）。
+// 从 registry 拉取代码执行等价于任意第三方代码执行，且包名可抢注、无版本 pin
+// 可供应链翻转。比旧版 stdioPackageRunners 名字集合多盖两类：版本化名字
+// （python3.11 / node18 / ruby3.2——改个后缀就想绕过名字黑名单）与 uv/pip/
+// conda/poetry（同为包生态入口）。
+var stdioRunnerNamePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(?:python|python3|ruby|node|perl)(?:\d+(?:\.\d+)?)?$`),
+	regexp.MustCompile(`^(?:npx|uvx|bunx|pnpx|pipx|dlx|uv|pip|conda|poetry)$`),
+	regexp.MustCompile(`^(?:sh|bash|zsh|dash|docker|podman)$`),
 }
 
-// validateStdioCommand 拒绝包执行器，且要求命令解析为绝对路径。裸命令名允许
-// （V2 字面要求绝对路径，但既有 stdio MCP 用裸名强制绝对路径会打断），
-// 但必须在 PATH 解析到真实可执行文件。
+// stdioInterpreterDirs 是解释器/包执行器的标准安装目录（真实路径比对用）。
+// 只认这些前缀、不认任意目录：自定义二进制装在别处（含 /tmp 的 PoC 工具）
+// 必须照常放行——渗透工作流不收敛。
+var stdioInterpreterDirs = []string{
+	"/bin/", "/usr/bin/", "/usr/local/bin/", "/usr/sbin/", "/usr/local/sbin/",
+	"/snap/bin/", "/opt/homebrew/bin/", "/opt/homebrew/sbin/",
+}
+
+func matchRunnerName(base string) bool {
+	for _, re := range stdioRunnerNamePatterns {
+		if re.MatchString(base) {
+			return true
+		}
+	}
+	return false
+}
+
+// isKnownInterpreterPath 判定真实路径是否落在标准解释器目录内且名字是执行器形态
+// （如 /usr/bin/python3.12——软链解析后现形的最终落点）。
+func isKnownInterpreterPath(real string) bool {
+	for _, dir := range stdioInterpreterDirs {
+		if strings.HasPrefix(real, dir) && matchRunnerName(filepath.Base(real)) {
+			return true
+		}
+	}
+	return false
+}
+
+// envAssignRe 匹配 `env` 命令的 VAR=value 赋值前缀。
+var envAssignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// stripEnvPrefix 跳过 `env` 之后的旗标（-i/-0/…）与 VAR=value 赋值，返回真正的
+// 命令字段。全部被跳过（没有真命令）时返回 nil。
+func stripEnvPrefix(fields []string) []string {
+	for i, f := range fields {
+		if strings.HasPrefix(f, "-") || envAssignRe.MatchString(f) {
+			continue
+		}
+		return fields[i:]
+	}
+	return nil
+}
+
+// validateStdioCommand 拒绝包执行器，且要求命令解析为绝对路径（A-07，0.15.81）。
+//
+// 判定改两步走：名字模式先拦版本化执行器（python3.11 不再漏网）；再
+// LookPath + EvalSymlinks 解析到真实路径比对——`ln -s $(which python3) /tmp/mypy`
+// 这类改名软链现形（最终落点还是解释器）。`env python3` 形态剥掉 env 前缀后
+// 按真命令判定。返回值是真实绝对路径，登记侧落库用它（运行期不再重复解析）。
+//
+// 已知盲区（如实记录）：对解释器二进制的【复制】（cp /usr/bin/python3 /tmp/x）
+// 无能为力——复制体的真实路径就是它自己，路径层判不出血统；那要靠文件哈希/
+// 行为层，不在本卡范围。软链形态（常见逃逸）已封。
 func validateStdioCommand(cmd string) (string, error) {
 	if strings.TrimSpace(cmd) == "" {
 		return "", fmt.Errorf("stdio 传输缺少命令")
 	}
-	base := filepath.Base(cmd)
-	if stdioPackageRunners[base] {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("stdio MCP 命令解析为空")
+	}
+	if fields[0] == "env" {
+		fields = stripEnvPrefix(fields[1:])
+	}
+	if len(fields) == 0 {
+		return "", fmt.Errorf("stdio MCP 命令解析为空（env 形态未解析出真命令）")
+	}
+	name := fields[0]
+	// 1. 名字模式先拦：裸名与路径尾段都算（/usr/bin/python3.11 的尾段即命中）。
+	if base := filepath.Base(name); matchRunnerName(base) {
 		return "", fmt.Errorf(
 			"stdio MCP 禁止使用包执行器 %q：它等价于任意第三方代码执行且包名可被抢注。"+
 				"请改用已安装的本地二进制绝对路径", base)
 	}
-	resolved := cmd
-	if !filepath.IsAbs(cmd) {
-		p, err := exec.LookPath(cmd)
+	// 2. 解析到真实绝对路径再比对：改名/软链的二进制现形。
+	resolved := name
+	if !filepath.IsAbs(resolved) {
+		p, err := exec.LookPath(resolved)
 		if err != nil {
-			return "", fmt.Errorf("stdio MCP 命令 %q 无法在 PATH 中解析: %w", cmd, err)
+			return "", fmt.Errorf("stdio MCP 命令 %q 无法在 PATH 中解析: %w", name, err)
 		}
 		resolved = p
 	}
-	if !filepath.IsAbs(resolved) {
-		return "", fmt.Errorf("stdio MCP 命令必须解析为绝对路径，得到 %q", resolved)
+	real, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stdio MCP 命令 %q 无法解析真实路径: %w", resolved, err)
 	}
-	return resolved, nil
+	if matchRunnerName(filepath.Base(real)) || isKnownInterpreterPath(real) {
+		return "", fmt.Errorf(
+			"stdio MCP 禁止使用包执行器（真实路径 %q）：软链/改名不改变它是什么。"+
+				"请改用已安装的本地二进制绝对路径", real)
+	}
+	return real, nil
 }
+
+// mcpStore 是启动重验需要的最小存储面（*db.DB 满足）；拆出来让重验逻辑可直接单测。
+type mcpStore interface {
+	ListMCP() ([]*db.MCPServer, error)
+	SaveMCP(*db.MCPServer) (int64, error)
+}
+
+// reverifyStdioMCPs 是存量 stdio MCP 的启动期重验（A-07）：登记时落库的是当时的
+// 解析结果，二进制后来被删/被换成解释器软链的存量行在此现形——记警告并禁用，
+// 不静默放行。登记侧写真实路径后，新行的重验只是确认落点仍在。
+func reverifyStdioMCPs(store mcpStore) {
+	servers, err := store.ListMCP()
+	if err != nil {
+		log.Printf("[mcp] 启动重验: 读取列表失败: %v", err)
+		return
+	}
+	for _, m := range servers {
+		if !m.Enabled || m.Transport != "stdio" {
+			continue
+		}
+		if _, err := validateStdioCommand(m.Command); err != nil {
+			log.Printf("[mcp] 存量 stdio MCP %q 重验不通过，已禁用: %v", m.Name, err)
+			m.Enabled = false
+			if _, err := store.SaveMCP(m); err != nil {
+				log.Printf("[mcp] %q 禁用落库失败: %v", m.Name, err)
+			}
+		}
+	}
+}
+
+func (s *Server) reverifyStdioMCPsOnStartup() { reverifyStdioMCPs(s.m.pg) }
 
 // mcpClient is the shared surface of a connected MCP server (stdio, Streamable HTTP,
 // or legacy SSE),

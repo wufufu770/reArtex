@@ -911,6 +911,17 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// A-07（0.15.81）：UI 登记接口与 agent 侧工具同规则——stdio 命令校验并以
+	// 解析出的真实绝对路径落库（此前 UI 路由完全不校验，执行器行能存进来，
+	// 只会在拨号期失败）。
+	if m.Transport == "stdio" && strings.TrimSpace(m.Command) != "" {
+		resolved, err := validateStdioCommand(m.Command)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		m.Command = resolved
+	}
 	isNew := m.ID == 0
 	id, err := pg.SaveMCP(&m)
 	if err != nil {
