@@ -16,6 +16,25 @@
 --      correlation_id / causation_id / capability_id / scope_version。
 --
 -- 回滚：本文件全部是加法（新表/新列/新索引），回滚即 DROP 对象，不影响既有列。
+--
+-- ---------- 删除 / 归档语义与数据保留（0.15.94，TI-05 第二轮核对补档） ----------
+--
+-- 删除（0.15.63 已实现）：四表的 task_id 均 ON DELETE CASCADE——任务删除即
+-- 清空其全部领域对象；hypotheses/facts/evidence_refs/capability_executions 的
+-- company_id/asset_id/hypothesis_id/finding_id 等引用列 ON DELETE SET NULL——
+-- 引用目标消失不连带删对象，只丢回指标记。访问层（db/task_intelligence.go）
+-- 只提供 Insert/Get/List/状态推进，无逐行 DELETE 面：观测与取证记录不提供
+-- 单行改写/删除通道。
+--
+-- 归档（本轮定义，无运行时改动）：假设的终态（validated/refuted/dropped）即
+-- 该对象的归档态——状态机禁止离开终态（internal/taskintelligence/domain.go），
+-- 人工放弃走 dropped；facts/evidence_refs/capability_executions 是 append-only
+-- 观测/取证面，「归档」= 任务关闭后退出活跃查询口径，不改写历史。
+--
+-- 数据保留（方案，非本卡实现）：保留期是取证/审计合规决策，必须人工拍板，
+-- 本最小领域模型不定 TTL；清理/分区/冷归档留给后续运维卡，实施时必须与审计链
+-- （audit_events，0.15.89 起 HMAC+锚点）保留口径对齐——领域对象可清理，
+-- 证据引用的 provenance 链不得比审计链先消失。
 
 -- ---------- 跨对象统一身份引用 ----------
 --
