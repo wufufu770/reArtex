@@ -117,7 +117,10 @@ func (s *Server) toolCreateSkill() actool.CoreTool {
 				_ = os.RemoveAll(path)
 				return actool.Errorf(err.Error()), nil
 			}
-			recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted)
+			// A-02：agent 身份写入，tier 落库必为 untrusted（create_skill 的显式
+			// allow 与信任机制的组合收口：新建不覆盖既有文件，但内容不因「新建」
+			// 而可信；首次注入带降权前缀，见 skill_demote.go）。
+			recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted, skillTrustWriterAgent)
 			return actool.Text("skill created: " + a.Name), nil
 		})
 }
@@ -155,10 +158,10 @@ func (s *Server) toolUpdateSkillFile() actool.CoreTool {
 			if err := os.WriteFile(full, []byte(a.Content), 0o644); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			// 只有 SKILL.md 会被注入对话；改 scripts/ 不改变注入内容，故不动信任档。
-			if clean == "SKILL.md" {
-				recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted)
-			}
+			// A-02：agent 写任何文件（不只 SKILL.md）都刷新信任记录——树哈希把
+			// scripts/*.py 等引用文件也算进摘要，写完不重钉的话，下次判定会因
+			// 失配走降级+审计路径。agent 身份写入，tier 落库必为 untrusted。
+			recordSkillTrust(s.db(), s.skillDir, a.Name, skillTierUntrusted, skillTrustWriterAgent)
 			return actool.Text("skill file written: " + a.Name + "/" + clean), nil
 		})
 }

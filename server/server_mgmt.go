@@ -1239,7 +1239,7 @@ func (s *Server) fsUpdateSkillMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	// G1（方案 v10 §15）：SKILL.md 前言变更（mcps/description 等）→ 装配缓存翻代。
 	agent.InvalidateAssembly()
-	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
+	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted, skillTrustWriterOperator)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1505,7 +1505,7 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "安装失败："+err.Error())
 		return
 	}
-	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
+	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted, skillTrustWriterOperator)
 	// G1（方案 v10 §15）：skill 安装/覆盖 → 装配缓存翻代（同 fsCreateSkill）。
 	agent.InvalidateAssembly()
 	writeJSON(w, 201, map[string]any{"name": name, "files": entries})
@@ -1715,9 +1715,11 @@ func (s *Server) fsWriteFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	if file == "SKILL.md" {
-		recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted)
-	}
+	// A-02：operator 管理接口写任何文件都重钉信任记录（不只 SKILL.md）——树哈希
+	// 把整个目录算进摘要，operator 写 scripts/ 后不重钉的话，下次判定会因失配
+	// 走降级+审计路径，等于平台自己的写路径把 skill 打成不可信。operator 显式
+	// 动作 = 复核过的新基线，落 trusted。
+	recordSkillTrust(s.db(), s.skillDir, name, skillTierTrusted, skillTrustWriterOperator)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
