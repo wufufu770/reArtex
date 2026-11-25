@@ -5,7 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
-## [0.15.88] - 2026-11-25
+## [0.15.89] - 2026-11-25
+
+### 变更（A-05：审计链从无密钥 SHA-256 升级为 HMAC-SHA256，配套外部锚点第二介质）
+
+- `db/audit_chain.go`：**HMAC 升级**。无密钥哈希链挡得住「改一条」（digest 依赖前一条），挡不住「持 DB 写权限者从断点起整条重算」——重算不需要密钥。升级为 HMAC-SHA256：密钥=主密钥的域分离派生值（`DeriveAuditKey`：常量后缀 + SHA-256——同一把主密钥还加密 LLM key，一把钥开两把锁不是加固，审计域拿自己的派生值，泄露互不连带），只进进程内存，不落库、不进 settings、不进日志（`WithAuditKey` 启动装配一次，进程生命周期内不变）。**新旧行共存**：存量 SHA-256 行保持原口径可验，新行 HMAC 且 `source` 纳入摘要（来源标记也是审计事实，不该有「换了来源摘要不变」的重写空间），按行 `key_id`（`''`=旧口径 / `hmac-v1`）逐行选口径复算——链在边界处自然衔接，无需搬数据。`VerifyAuditChain` 在逐行复算之外核对最近锚点：链尾被整段截断时逐行仍验得通，锚点正是为此存在；报「断裂 seq」或「锚点不一致 seq」两类告警，链断裂优先；未配钥实例链上有 HMAC 行 ⇒ 如实报「无法复算」（不是跳过）。
+- `db/audit_chain.go`：**启动期一次性重锚** `MigrateAuditChainToHMAC`——旧链逐行验通才把链尾 digest 写成创世锚点（`audit_anchors` 表，`key_id=''` 标记新旧口径边界，此后首条 HMAC 行的 prev 就是它）；幂等（已有锚点 no-op）、链空 no-op；旧链已断 ⇒ 拒绝写锚点并返回断裂位置——断裂是必须人工看的结论，锚点位选在哪都掩盖不了；新行照常追加（链的增长不被历史损坏阻塞）。
+- `db/db.go` + `db/schema.sql`：`audit_events` 加 `key_id` 列（行口径标记，存量行默认 `''`）；新表 `audit_anchors`（seq/digest/key_id/anchored_at/note，append-only）。
+- `scripts/audit-anchor.sh`（新增）：把链头（seq/digest/key_id/时间）追加写到 `ANCHOR_DIR`——必须在备份目录之外的**第二介质**（另一块盘/对象存储挂载点；空值=拒绝运行，写进备份目录等于没做外部锚定）。理由：锚点只落在同一个数据库里，防得住「改行/重写」，防不住「连同锚点表一起重写」；只有落在 DB 写权限够不到的地方，「持 DB 写权限者单方面重算/截断整条链」才会与外部介质对不上而现形。幂等（同 seq 已锚定则跳过）、链空明确跳过、库不可达非零退出（cron 留痕）。配套 `GET /api/audit/anchor` 只读对账端点（`server/audit_api.go` + `server/server.go` 路由）：无锚点 ⇒ `anchor=null` 且不算不一致（诚实回报而非报错吓人）；锚点与链对不上 ⇒ `consistent=false` + 可读 error；GET 绝不写锚点、绝不「修复」任何东西。
+- `server/manager.go`：启动装配——主密钥可用 ⇒ 派生审计钥注入 + 执行迁移；读取失败/未配置 ⇒ 沿旧无密钥口径并打告警日志（不是静默降级）。
+- `intercept/audit_chain.go` + `server/scheduler_metrics.go`：审计链追加失败不再无声——error 级日志 + `artex_audit_append_failures_total` 计数器（`/api/metrics` 暴露）。best-effort 语义不变（链写失败不改工具调用结果），但「链缺口」从一行普通日志升级为可观测指标。
+- 测试：`TestDeriveAuditKeyDomainSeparated`（确定性/域分离/派生值≠主密钥原文）、`TestAuditChainHMACMixedVerify`（新旧口径混合链自然衔接、未配钥实例验 HMAC 行如实报无法复算、改 HMAC 行的 source 必须现形）、`TestAuditAnchorLifecycle`（Record→Latest→Verify 闭环、锚点被改报不一致、链尾截断逐行验得通但锚点现形）、`TestMigrateAuditChainToHMANGenesis`（创世锚点落链尾、重复迁移幂等、首条 HMAC 行 prev=锚点位 digest 的直接衔接证据、断链拒绝迁移）、`TestAuditAnchorRouteRegistered/Endpoint`（三态：无锚点 null+一致 / 真实锚点一致带明细 / 篡改报不一致+error，全程只读）。
+- 【顺带修复（披露）】`db/audit_chain_test.go` 的 `TestAuditChainDetectsTampering`：清理 DELETE 落在 `t.Cleanup` 里而连接池关闭是 `defer`——Go 语义 defer 先于 Cleanup 执行 ⇒ 删行跑在已关闭的池上被 `_, _ =` 吞掉 ⇒ 被篡改的行残留同一测试进程 ⇒ 排在后面的整链校验用例（本次 A-05 三个新用例当场踩中）齐报「断裂在 seq=1」。把 Close 折进 cleanup（先删行再关池）修好；`TestAuditChainEmptyIsIntact` 也因此从「被残留行顶成永远 SKIP」恢复真跑。测试基建实况随记：db 包 `TestMain`（`internal/testdb`）每轮派生独立空库 `artex_test_db` 并在收尾删除——环境变量里的 `ARTEX_PG_DSN` 只作派生基准，测试数据不会出现在该变量指向的库里。
+- 验证：db 全包 397.7s 绿；server 审计链 3 用例 + 锚点 2 用例 + 调度指标渲染绿；intercept 全包 31.6s 绿；`go build` + `go vet` 干净。密钥轮换（key_id 预留）为后续项，本版未含。
+
 
 ### 变更（A-15：planner 联网收口——执行层强制取代「默认开启 + 提示词约束」，与 A-01 联动）
 
