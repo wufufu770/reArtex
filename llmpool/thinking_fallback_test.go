@@ -20,7 +20,7 @@ func TestThinkingFallbackStream(t *testing.T) {
 		errs:   []error{fmt.Errorf("anthropic: status 400: thinking is not supported"), nil},
 		reqLog: &reqs,
 	}
-	pool := New([]*Member{member(1, "A", 0, prov)}, nil)
+	pool := New([]*Member{member(1, "A", 0, prov)}, nil, nil)
 	req := llm.CompletionRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.TextBlock("hi")}}}, Thinking: "enabled", ReasoningEffort: "high"}
 
 	var gotText, gotErr string
@@ -52,7 +52,7 @@ func TestThinkingFallbackComplete(t *testing.T) {
 		errs:   []error{fmt.Errorf("openai: status 400: unknown field reasoning_effort"), nil},
 		reqLog: &reqs,
 	}
-	pool := New([]*Member{member(1, "A", 0, prov)}, nil)
+	pool := New([]*Member{member(1, "A", 0, prov)}, nil, nil)
 	req := llm.CompletionRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.TextBlock("hi")}}}, Thinking: "enabled"}
 
 	_, _, _, err := pool.Complete(context.Background(), req)
@@ -71,7 +71,7 @@ func TestThinkingFallbackComplete(t *testing.T) {
 func TestThinkingFallbackNoParamsPassesThrough(t *testing.T) {
 	var reqs []llm.CompletionRequest
 	prov := &fakeProv{errs: []error{fmt.Errorf("openai: status 400: bad request")}, reqLog: &reqs}
-	pool := New([]*Member{member(1, "A", 0, prov)}, nil)
+	pool := New([]*Member{member(1, "A", 0, prov)}, nil, nil)
 	req := llm.CompletionRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.TextBlock("hi")}}}}
 
 	var gotErr string

@@ -25,6 +25,7 @@ import (
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/credbreaker"
 	"github.com/Autumn-27/artex/internal/sod"
 	"github.com/Autumn-27/artex/internal/sodpolicy"
 	"github.com/Autumn-27/artex/llmpool"
@@ -139,6 +140,9 @@ type Server struct {
 	// (saving an unrelated profile, flipping a setting) must not erase what we
 	// learned about which backends are out of credit / rate-limited.
 	llmHealth *llmpool.Registry
+	// credBreaker 是凭据维度的熔断器（A-13，键 = profile+host，2×401/403 → 30min）。
+	// 与 llmHealth 互补：后者按 profile 计且带冷却阶梯，前者按凭据×端点计且固定策略。
+	credBreaker *credbreaker.Breaker
 
 	// Explicit task chains use one task-scoped dynamic provider shared by goals,
 	// planner, workers, and the main agent. Bundles are stable; their runtime reads
@@ -200,8 +204,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[profChatKey]*agent.ChatAgent{},
 		provByProfile:  map[provKey]*provEntry{}, profileRateLimits: map[int64]*llm.RateLimit{},
-		llmHealth:  newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+		llmHealth:   newLLMHealthRegistry(m.pg),
+		credBreaker: newCredBreakerRegistry(m.pg),
+		taskAgents:  map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
 	s.engine.ClaimMirror = s.onEngineIntentClaim
@@ -969,9 +974,9 @@ func (s *Server) Handler() http.Handler {
 	s.registerTaskDrainRoutes(mux)        // 0.15.42：人工软截止面（POST {id}/drain）
 	s.registerDiagnosticsRoutes(mux)      // 0.15.43：脱敏诊断包（GET diagnostics/bundle）
 	s.registerExecutionProfileRoutes(mux) // 0.15.17：执行档位（GET/PATCH execution-profile）
-	s.registerVetoExportRoutes(mux)      // 0.15.32：Veto 导出（GET veto-export）
-	s.registerPeakSearchRoutes(mux)      // 0.15.38：尖峰探索（人工专属蒸馏面）
-	s.registerSelfEvolveRoutes(mux)      // 0.15.41：自进化（RSI）可见面（只读）
+	s.registerVetoExportRoutes(mux)       // 0.15.32：Veto 导出（GET veto-export）
+	s.registerPeakSearchRoutes(mux)       // 0.15.38：尖峰探索（人工专属蒸馏面）
+	s.registerSelfEvolveRoutes(mux)       // 0.15.41：自进化（RSI）可见面（只读）
 
 	// 扩展路由（各单元提供注册函数，这里是唯一接线点）：
 	// 群聊组、任务大厅发布、群组预算、出网治理状态。
@@ -1197,7 +1202,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/runs", s.systemRunsList)
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.pgRenameConversation)
-	s.registerSingleLoopRoutes(mux)   // 0.15.44 #12 会话单循环硬锁
+	s.registerSingleLoopRoutes(mux)     // 0.15.44 #12 会话单循环硬锁
 	s.registerTaskEscalationRoutes(mux) // 0.15.44 #12 升级提议（list + decide）
 	mux.HandleFunc("PATCH /api/conversations/{id}/profile", s.pgUpdateConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}", s.pgDeleteConversation)

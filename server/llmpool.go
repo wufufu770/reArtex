@@ -66,7 +66,7 @@ func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
 	return &llmpool.Member{
 		ID: p.ID, Name: p.Name, Model: p.Model, Format: p.Format,
 		Priority: p.Priority, Active: p.IsDefault, Rank: rank,
-		WindowTokens: cfg.CompactionWindow(), Prov: prov,
+		WindowTokens: cfg.CompactionWindow(), Host: llmpool.HostOf(p.BaseURL), Prov: prov,
 	}
 }
 
@@ -104,7 +104,7 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 	members := []*llmpool.Member{{
 		ID: head.ID, Name: head.Name, Model: head.Model, Format: head.Format,
 		Priority: head.Priority, Active: head.IsDefault, Rank: llmpool.RankActive,
-		WindowTokens: headCfg.CompactionWindow(), Prov: headProv,
+		WindowTokens: headCfg.CompactionWindow(), Host: llmpool.HostOf(head.BaseURL), Prov: headProv,
 	}}
 	for _, p := range profs {
 		if p.ID == headID {
@@ -123,7 +123,7 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 	if len(members) < 2 {
 		return nil // nothing to fail over to
 	}
-	pool := llmpool.New(members, s.llmHealth)
+	pool := llmpool.New(members, s.llmHealth, s.credBreaker)
 	// G-B：硬熔断（401/403 key 失效）→ 群播报+治理留痕（请轮换 key）。
 	pool.OnFailover = func(fromName, toName, reason string) {
 		log.Printf("[llmpool] G-E 留痕：%s → %s（%s）", fromName, toName, reason)

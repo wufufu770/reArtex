@@ -105,7 +105,7 @@ func drain(seq iter.Seq2[llm.StreamEvent, error]) (string, error) {
 
 func TestFailoverOnNoCredit(t *testing.T) {
 	a, b := failProv("a", 402), okProv("b", "hello")
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil))
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil), nil)
 
 	got, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if err != nil {
@@ -124,7 +124,7 @@ func TestFailoverOnNoCredit(t *testing.T) {
 func TestHardFailureTripsBreakerImmediately(t *testing.T) {
 	a, b := failProv("a", 402), okProv("b", "x")
 	reg := NewRegistry(nil, nil)
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg)
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg, nil)
 
 	_, _ = drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if !reg.IsOpen(1) {
@@ -201,7 +201,7 @@ func TestNoFailoverAfterEmit(t *testing.T) {
 		errs:   []error{fmt.Errorf("anthropic: status 500: mid-stream drop")},
 	}
 	b := okProv("b", "full")
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil))
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil), nil)
 
 	got, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if err == nil {
@@ -223,7 +223,7 @@ func TestNoFailoverOnCancel(t *testing.T) {
 	a := &fakeProv{name: "a", errs: []error{context.Canceled}}
 	b := okProv("b", "x")
 	reg := NewRegistry(nil, nil)
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg)
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg, nil)
 
 	_, err := drain(p.Stream(ctx, llm.CompletionRequest{}))
 	if !errors.Is(err, context.Canceled) {
@@ -306,7 +306,7 @@ func TestSkipsMembersTooSmallForRequest(t *testing.T) {
 	ms.WindowTokens = 1000
 	mb := member(2, "big", 5, big)
 	mb.WindowTokens = 1_000_000
-	p := New([]*Member{ms, mb}, NewRegistry(nil, nil))
+	p := New([]*Member{ms, mb}, NewRegistry(nil, nil), nil)
 
 	req := llm.CompletionRequest{Messages: []llm.Message{llm.UserText(strings.Repeat("x", 100_000))}}
 	got, err := drain(p.Stream(context.Background(), req))
@@ -327,7 +327,7 @@ func TestAllTrippedStillProbesHead(t *testing.T) {
 	reg := NewRegistry(nil, nil)
 	reg.Trip(1, "402", true)
 	reg.Trip(2, "402", true)
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg)
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, reg, nil)
 
 	got, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if err != nil {
@@ -340,7 +340,7 @@ func TestAllTrippedStillProbesHead(t *testing.T) {
 
 func TestExhaustedChainReportsClearly(t *testing.T) {
 	a, b := failProv("a", 402), failProv("b", 402)
-	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil))
+	p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil), nil)
 
 	_, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if !errors.Is(err, ErrExhausted) {
@@ -352,7 +352,7 @@ func TestExhaustedChainReportsClearly(t *testing.T) {
 func TestEqualRankRotates(t *testing.T) {
 	a, b := okProv("a", "a"), okProv("b", "b")
 	head := member(1, "head", RankActive, failProv("head", 402))
-	p := New([]*Member{head, member(2, "a", 5, a), member(3, "b", 5, b)}, NewRegistry(nil, nil))
+	p := New([]*Member{head, member(2, "a", 5, a), member(3, "b", 5, b)}, NewRegistry(nil, nil), nil)
 
 	first := map[string]int{}
 	for range 4 {
@@ -371,7 +371,7 @@ func TestHeadAlwaysFirst(t *testing.T) {
 		member(1, "head", RankActive, head),
 		member(2, "a", 5, okProv("a", "a")),
 		member(3, "b", 5, okProv("b", "b")),
-	}, NewRegistry(nil, nil))
+	}, NewRegistry(nil, nil), nil)
 	for range 5 {
 		if txt, _ := drain(p.Stream(context.Background(), llm.CompletionRequest{})); txt != "H" {
 			t.Fatalf("head was not tried first, got %q", txt)
@@ -382,7 +382,7 @@ func TestHeadAlwaysFirst(t *testing.T) {
 // A single-member chain must behave exactly like the bare provider.
 func TestSingleMemberPassthrough(t *testing.T) {
 	a := okProv("a", "solo")
-	p := New([]*Member{member(1, "a", RankActive, a)}, NewRegistry(nil, nil))
+	p := New([]*Member{member(1, "a", RankActive, a)}, NewRegistry(nil, nil), nil)
 	got, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
 	if err != nil || got != "solo" {
 		t.Fatalf("got %q / %v, want solo / nil", got, err)
@@ -390,7 +390,7 @@ func TestSingleMemberPassthrough(t *testing.T) {
 }
 
 func TestNewEmptyChainIsNil(t *testing.T) {
-	if New(nil, nil) != nil {
+	if New(nil, nil, nil) != nil {
 		t.Fatal("empty chain should yield a nil pool so callers use the bare provider")
 	}
 }
@@ -403,7 +403,6 @@ func TestExpiredWindowIsClosed(t *testing.T) {
 		t.Fatal("expired window should read as closed")
 	}
 }
-
 
 // TestPoolStreamTwoPhase v5.3 G-C 回归钉：流式两阶段语义——
 // 首事件前失败 → 同请求内切下一成员（无感重放）；首事件后失败 → 错误

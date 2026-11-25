@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -446,6 +446,10 @@ func Open(dsn string) (*DB, error) {
 		// 幂等 ALTER + GIN 索引，启动期补一次即可。
 		if err := schemaDB.EnsureInterceptToolScopeSchema(); err != nil {
 			return fmt.Errorf("apply intercept tool scope schema: %w", err)
+		}
+		// A-13（0.15.82）：凭据熔断状态表（profile+host 维度，冷却窗跨重启）。
+		if err := schemaDB.EnsureCredBreakerSchema(); err != nil {
+			return fmt.Errorf("apply cred breaker schema: %w", err)
 		}
 		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
 		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用

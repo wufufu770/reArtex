@@ -303,4 +303,6 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	// A-10（0.15.76）：intercept_rules.tool_scope 列（db/intercept_scope.go）——
 	// 启动期已应用，运行期免 DDL。
 	interceptScopeSchemaReady.Store(pool, struct{}{})
+	// A-13（0.15.82）：凭据熔断状态表（db/credbreaker.go）——启动期已应用，运行期免 DDL。
+	credBreakerSchemaReady.Store(pool, struct{}{})
 }

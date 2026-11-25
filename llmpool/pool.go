@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/Autumn-27/artex/internal/credbreaker"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -32,7 +34,23 @@ type Member struct {
 	// WindowTokens is the profile's context window in tokens. A member whose
 	// window can't hold the request is skipped rather than made to fail on it.
 	WindowTokens int
-	Prov         llm.Provider
+	// Host 是该 profile 端点的主机名（来自 BaseURL，A-13）：凭据熔断器按
+	// （profile + host）计。空 = 端点未明（SDK 默认地址），退化为 profile 全局维度。
+	Host string
+	Prov llm.Provider
+}
+
+// HostOf 从 BaseURL 提取归一化主机名（A-13，宿主侧构造 Member 时用）。
+// 解析失败/为空返回 ""（退化为 profile 全局维度）。
+func HostOf(baseURL string) string {
+	if baseURL == "" {
+		return ""
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Host)
 }
 
 // RankActive is the Rank the caller gives the chain head (the active profile, or
@@ -49,6 +67,10 @@ type Pool struct {
 	members []*Member // in chain order (active first, then priority DESC)
 	health  *Registry
 	rr      atomic.Uint64 // rotates the starting point within an equal-priority group
+	// cred 是凭据维度熔断器（A-13，键 = profile+host）。nil = 未接（单测/降级），
+	// 行为与未接时完全一致。它与 health 互补：health 管「这个 profile 还能用吗」，
+	// cred 管「这份凭据对这个端点 host 还要不要再撞」。
+	cred *credbreaker.Breaker
 	// OnHardTrip 是硬熔断（key 失效/配额耗尽/配置缺失）的宿主回调（v5.3 G-B）：
 	// 宿主据此群播报处置指引。kind 是失败类别（HardKindAuth/Quota/Missing），
 	// 宿主按类别给准确措辞——0.15.9 修复：此前一律说「鉴权失效请轮换 Key」，
@@ -59,17 +81,38 @@ type Pool struct {
 	OnFailover func(fromName, toName, reason string)
 }
 
-// New builds a Pool over members (already in chain order). Returns nil when the
-// chain is empty. A single-member chain is still a valid Pool — it just behaves
-// exactly like the bare provider.
-func New(members []*Member, health *Registry) *Pool {
+// New builds a Pool over members (already in chain order). cred 为凭据熔断器
+// （A-13），可为 nil。Returns nil when the chain is empty. A single-member chain
+// is still a valid Pool — it just behaves exactly like the bare provider.
+func New(members []*Member, health *Registry, cred *credbreaker.Breaker) *Pool {
 	if len(members) == 0 {
 		return nil
 	}
 	if health == nil {
 		health = NewRegistry(nil, nil)
 	}
-	return &Pool{members: members, health: health}
+	return &Pool{members: members, health: health, cred: cred}
+}
+
+// credKey / credAllow / credRecord 是凭据熔断器的 nil 安全封装（A-13）。
+// record 在断路瞬间补一条进程日志——审计/activity 由 Breaker 的 onOpen 回调
+// 在宿主（server）侧记，这里不重复。
+func (p *Pool) credKey(m *Member) credbreaker.Key {
+	return credbreaker.Key{ProfileID: m.ID, Host: m.Host}
+}
+
+func (p *Pool) credAllow(m *Member) bool {
+	return p.cred == nil || p.cred.Allow(p.credKey(m))
+}
+
+func (p *Pool) credRecord(m *Member, statusCode int) {
+	if p.cred == nil {
+		return
+	}
+	if p.cred.Record(p.credKey(m), statusCode) {
+		log.Printf("[llmpool] 凭据熔断：%s 对 %s 连续 %d 次 401/403，断路 30 分钟（更换凭据或等待后自动恢复）",
+			m.Name, m.Host, credbreaker.MaxConsecutiveAuthFailures)
+	}
 }
 
 // Members returns the chain in order (read-only).
@@ -140,10 +183,12 @@ func (p *Pool) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[
 				break
 			}
 			if failed == nil {
-				p.health.Pass(m.ID) // completed (or failed in a non-failover way)
+				p.health.Pass(m.ID)  // completed (or failed in a non-failover way)
+				p.credRecord(m, 200) // 成功即复位凭据计数（A-13）
 				return
 			}
 			lastErr = failed
+			p.credRecord(m, statusOf(failed)) // 401/403 计数，其余码不改（A-13）
 			hard := isHardFailure(failed)
 			if p.health.Trip(m.ID, trimErr(failed), hard) {
 				log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(failed))
@@ -189,6 +234,7 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		}
 		if err == nil {
 			p.health.Pass(m.ID)
+			p.credRecord(m, 200) // 成功即复位凭据计数（A-13）
 			return msg, sr, usage, nil
 		}
 		if !shouldFailover(ctx, err) {
@@ -198,6 +244,7 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 			return llm.Message{}, "", llm.Usage{}, err
 		}
 		lastErr = err
+		p.credRecord(m, statusOf(err)) // 401/403 计数，其余码不改（A-13）
 		hard := isHardFailure(err)
 		if p.health.Trip(m.ID, trimErr(err), hard) {
 			log.Printf("[llmpool] 配置 %q(%s) 已熔断：%s", m.Name, m.Model, trimErr(err))
@@ -229,6 +276,9 @@ func (p *Pool) order(req llm.CompletionRequest) []*Member {
 	for _, m := range p.members {
 		if p.health.IsOpen(m.ID) {
 			continue
+		}
+		if !p.credAllow(m) {
+			continue // 凭据熔断中（A-13）：跳过该成员而不是再撞一次 401/403
 		}
 		if m.WindowTokens > 0 && est > m.WindowTokens {
 			continue // would 400 on length — not a useful failover target

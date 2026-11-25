@@ -102,7 +102,7 @@ func TestSnapshotExcludesPartialStreamAndSelectsPoolMember(t *testing.T) {
 			y(llm.StreamEvent{Type: llm.SEMessageStop}, nil)
 		}
 	}}, Model{Model: "selected"})
-	pool := llmpool.New([]*llmpool.Member{{ID: 1, Name: "failed", Rank: 2, Prov: failed}, {ID: 2, Name: "selected", Rank: 1, Prov: good}}, nil)
+	pool := llmpool.New([]*llmpool.Member{{ID: 1, Name: "failed", Rank: 2, Prov: failed}, {ID: 2, Name: "selected", Rank: 1, Prov: good}}, nil, nil)
 	ctx, deps := Attach(WithPublisher(t.Context(), func(s Snapshot) { snapshots = append(snapshots, s) }), Parent{ConversationID: 2}, harness.QueryDeps{}, pool)
 	for ev, err := range deps.CallModel(ctx, fixture()) {
 		if err != nil {
