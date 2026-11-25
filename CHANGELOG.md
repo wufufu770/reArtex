@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.83] - 2026-11-25
+
+### 新增（A-13 第二批：凭据熔断接 mcphttp/ScopeSentry + 审计/恢复事件 + metrics + 前端横幅）
+
+- `mcphttp/client.go`：凭据熔断接入 MCP 出站链——包级 `credBreaker` + `SetCredBreaker`（server 启动注入，包级单例避免逐实例接线侵入）；`Option`/`WithCredProfile(id)` 按实例携带所属 profile（`New`/`NewSSE` 增变参，未携带 = 不参与凭据记账，stdlib 退路不变）；`roundTrip`/`legacyRoundTrip`/`NewSSE` 握手 GET 三路统一 **Allow → 请求 → Record(status)**：断路中的凭据本地即拒（`credDenied`，不发请求——「先看红绿灯再上路」），响应状态码回灌记账（401/403 累计、2xx 复位、其余码不动）。
+- `server`：启动 `SetCredBreaker(s.credBreaker)`；`connectMCP` 与 `sync_scopesentry` 两处 `New`/`NewSSE` 全部携带 `WithCredProfile(m.ID)`——MCP 凭据撞墙也走同一断路口径。
+- `server/credbreaker.go`：补 `onRecover`（窗口内一次成功 2xx → 提前结束断路）与断路/恢复双事件——各记一条 `audit_chain`（`Source: "credbreaker"`，Actor=platform）+ 一条 `llm_records`（`Worker: "governance"`，后端日志页可见），对齐 A-13「断路有留痕、恢复也有留痕」。
+- `server/metrics_api.go`：`/api/metrics` 增 `credbreaker_open{profile_id,host} 1` gauge（仅窗口内键输出，HELP/TYPE 首键才写）。
+- `server/llmpool.go`：`llmPoolStatus` 增 `cred_breakers` 数组（profile_id/host/consecutive/last_reason/open_until，仅窗口内；自然过期键下次快照自动消失）。
+- 前端：`types.ts` 增 `LLMCredBreaker`；LLM 页顶部琥珀横幅（与「无备用链」同款）——`配置名 → host（401 ×2，已熔断至 HH:MM）`，让「换凭据还是等恢复」直接可判。
+- 测试：`internal/credbreaker` 四用例 + `llmpool` 两用例 + `mcphttp` 全包 + `server` 子集（`TestValidateStdioCommand|TestReverifyStdio|TestPolicy`）全绿；`go build ./...` 通过；`tsc --noEmit` 干净；`build:static` 全页面预渲染成功。
+
 ## [0.15.82] - 2026-11-25
 
 ### 新增（A-13 第一批：凭据熔断器核心 + DB 持久化 + LLM 链挂接）
