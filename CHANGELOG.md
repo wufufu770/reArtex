@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.86] - 2026-11-25
+
+### 变更（A-01：未携带任务身份的出网翻默认拒绝 + 启动期平台通道白名单 + worker 代理环境启动期校验）
+
+- `traffic/egress.go`：`egressDecide` 的「未归属」分支从「放行但标记」翻转为**默认拒绝**——旧语义等于给 agent 留了「不带身份就绕过任务范围校验」的后门，治理被这个口子架空。拒绝文案点名「未携带任务身份」，fail-closed。函数头注释如实记录由此带来的**能力变化**：纯聊天会话（未绑任务）的 WebFetch 走本代理且无身份 ⇒ 被拒，要联网就把会话绑定任务；`agent/chat.go` 调用点同步注释。
+- 新增 `traffic/platform_channels.go`：平台通道白名单——「未归属」出网的唯一例外面。`ARTEX_PLATFORM_CHANNELS` 环境变量指向 JSON 文件（`[{"name":"enrich","hosts":[".assets.example.com"]}]`），operator **启动期**配置、不进 settings 热改面（与 A-06 降级开关同一原则：绕过范围校验的口子不能靠点鼠标开）。fail-closed 口径：文件不存在 = 空白名单全拒（不回落放行）；读失败/解析失败 = 空白名单 + 错误交还启动日志。解析归一化（小写/去空白）、空 name 拒绝、重名条目后者为准。裁决规则：`X-Artex-Channel` 头只是**声明**（明文代理协议下可伪造，注释如实标注这不是防伪边界），**主机表**才是裁决——后缀条目（前导点）命中自身与任意子域，精确条目只做精确比对；通道对而主机不命中、通道名未登记、空白名单，一律拒绝。放行理由点名通道（走哪条通道一目了然）。
+- `traffic/traffic.go`：白名单放行的**留痕管线**——闸门判定通过后把通道名写进 `X-Artex-Channel-Decided` 内部头（写的就是闸门刚判过的同一请求对象，不经 agent 之手；伪造它拿不到任何放行，至多影响已放行流量的标签），`Requestheaders` 先读后摘（与身份头同口径，绝不转发给目标），按 flow / CONNECT 隧道继承，`exchanges` 表新增取值 `egress_decision=channel`。**语义钉子**：翻转后新记录里出现 `unattributed` 即为泄漏线索（正常路径要么 allow、要么 channel、要么 deny），注释写明。
+- `agent/worker.go` + `server/task_llm.go`：卡片一期——`validateProxyEnv` 启动期校验：录制代理在用时，`HTTP_PROXY/HTTPS_PROXY/http_proxy/https_proxy/ALL_PROXY/all_proxy` 六个变量必须逐个等于「带本任务身份令牌」的代理 URL 且 `NODE_USE_ENV_PROXY=1`；被清空/改写/冒用他任务令牌 ⇒ **本次 run 拒绝启动** + 审计事件 `egress.proxy_env_violation`（`SetEgressAudit` 由宿主注入审计链；审计失败只记日志，拒绝不依赖审计）。注释如实标注边界：agent 在命令里临时 `unset` 后**直连**的流量一期尚不能被平台看见——这正是二期 per-task netns 要封的口，本版按卡片分期暂缓（需 `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`，部署可行性待核实，需人工决策）。
+- `server/manager.go`：启动装配时加载白名单（`traffic.LoadPlatformChannels(os.Getenv(...))` + `SetPlatformChannels`），日志两行：装载失败按空白名单（未归属出网将全部拒绝）、在册通道数。
+- `server/egress_governance.go`：未覆盖通道清单删掉已失真的旧条目「未归属的出网按放行留痕」，换成「平台通道白名单：启动期登记的无任务平台通道按主机表放行，不经任务范围校验（A-01 预期例外，放行逐条留痕）」——按「平台必须说清哪里还没管住」的纪律，例外也如实列出。`governed` 由清单派生的不变式不变；前端横幅是清单驱动渲染，无需改动。
+- 【与卡片骨架的差异（如实）】① 白名单注入用独立的 `Traffic.SetPlatformChannels` 而非「随 SetEgressScope 一并注入」——两个配置源解耦，空白名单语义（全拒）不因是否配置过范围判定而漂移；② 通道名取自请求头而非「请求上下文」——录制代理的 auth 钩子只有 `*http.Request`，头是同一请求对象上的传递载体；③ 卡片骨架返回序 `(bool, PlatformChannel)` 调整为 `(PlatformChannel, bool)` 以配合惯用 `ch, ok :=`。
+- 测试：`traffic`——`TestEgressDecideUnattributedDeniesByDefault`（默认拒绝+点名原因）、`TestEgressDecideUnattributedPlatformChannel`（命中放行+理由点名通道/主机不命中拒/未登记通道拒/空白名单全拒）、`TestEgressGateDeniesUnattributedWithTrace`（卡片验收 gate 级：403 + `recordEgressDenial` 留痕 task=0 decision=deny + 审计链判定）、`TestEgressGateChannelAllowRecordsChannelDecision`（端到端：白名单通道放行，exchange 记 `channel`，内部头不泄漏到目标）、`TestParsePlatformChannels`/`TestLoadPlatformChannels`（fail-closed 矩阵：缺文件/坏 JSON/目录读失败）、`TestMatchPlatformHost`（七例）、`TestSetPlatformChannelsNilBecomesEmpty`；`agent`——`TestValidateProxyEnvAcceptsWellFormedEnv`/`TestValidateProxyEnvRejectsClearedOrRewritten`（清空/改写/错任务令牌/缺 NODE 变量点名拒）；`server`——治理清单新条目三断言 + 旧说法「按『未经范围校验』放行」禁回归。`go test ./traffic/ ./agent/ -count=1` 绿（10.5s/112.7s）；`go test ./server/ -run TestEgress` 绿（4 项）；`go build ./...` + vet 干净。
+
 ## [0.15.85] - 2026-11-25
 
 ### 变更（A-06：SoD 降级开关移出热改面 + 装配缺失/配额账本不可读翻默认拒绝）
