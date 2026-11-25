@@ -1,0 +1,465 @@
+norma v0.4.4 —— 生成树漂移回填补丁（backfill drift）
+
+问题：git 追踪的 third_party/norma 生成树里有一批**直接落在树上、没有对应
+补丁文件**的历史改动（0.15.9 / 0.15.12 / 0.15.13 三个批次，彼时多补丁机制
+尚未建立）。scripts/prepare-norma.sh 每次都从模块缓存原版重新生成，任何没
+进 patches/ 的树上改动都会在下一次生成时被悄悄冲掉——脚本头部注释自警告的
+正是这个失败模式，2026-11 本批重新生成时实际复现（11 文件 224 行被回退）。
+
+本补丁把这些改动按 HEAD 原样补回补丁集合，使「重新生成」的产物与已提交的
+生成树字节一致。四组内容全部是历史上已提交、已随版本发布过的行为，本补丁
+不新增任何行为：
+  ①Per-request Thinking/ReasoningEffort 覆盖 + Anthropic CacheMessages
+    （agentcore.go / harness/query.go / llm/types.go / llm/provider.go /
+    llm/anthropic.go / llm/openai.go / llm/openai_responses.go；0.15.9 方案
+    v9.2 批次 B：agent 级 thinking effort；0.15.12：消息尾 cache_control
+    断点，copy-on-write）
+  ②压缩摘要请求不再硬编码 Thinking:"disabled"（compaction/summarizer.go +
+    compaction/spec3_test.go，0.15.9：要求 adaptive thinking 的模型直接
+    400，上下文压缩整条瘫、会话越滚越肥）
+  ③MCP stdio 握手 30s 预算（mcp/stdio.go，0.15.13：卡死的子进程此前会把
+    装配路径无限挂死）
+  ④noa prompts 规则测试的 upstream 对照路径（noa/prompts_rules_test.go，
+    本机路径差异；对照缺失时测试自动跳过）
+
+应用方式（作用在 norma 模块根目录，即 go.mod 所在目录）：
+    git apply -p1 patches/norma-z-backfill-drift.patch
+    # 或
+    patch -p1 < patches/norma-z-backfill-drift.patch
+
+文件名以 z- 开头是刻意的：prepare-norma.sh 按文件名排序依次应用，本补丁的
+hunk 上下文假定其余全部补丁已应用（它是「树上现状 vs 原版+全部补丁」的差），
+排最后才能干净套上。
+
+目标版本：github.com/Autumn-27/norma v0.4.4。模块缓存是只读共享的，本补丁不
+改动它；仓库里由 scripts/prepare-norma.sh 复制到 third_party/norma 后再应用，
+third_party/ 是生成物，可评审的产物是这份补丁本身。
+diff --git a/agentcore/agentcore.go b/agentcore/agentcore.go
+index ce525ef..88d46c1 100644
+--- a/agentcore/agentcore.go
++++ b/agentcore/agentcore.go
+@@ -144,6 +144,14 @@ type Options struct {
+ 	SystemReminderFunc func() string
+
+ 	MaxTurns int
++	// Thinking, when non-empty, overrides the provider's thinking mode for every
++	// model request of this session ("" inherits Config.ThinkingType;
++	// "enabled"/"disabled" force that mode). ReasoningEffort likewise overrides
++	// the reasoning-strength parameter ("" inherits Config.ReasoningEffort).
++	// Providers are cached and shared per profile, so per-agent settings must
++	// ride on the request — these two fields are that ride.
++	Thinking        string
++	ReasoningEffort string
+ 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
+ 	// mid-stream), so a run ends cleanly rather than being aborted in flight (0 = off).
+ 	MaxDuration time.Duration
+@@ -525,6 +533,8 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
+ 		TokenBudget:        s.opts.TokenBudget,
+ 		EscalateMaxTokens:  s.opts.EscalateMaxTokens,
+ 		NonStreaming:       s.opts.NonStreaming,
++		Thinking:           s.opts.Thinking,
++		ReasoningEffort:    s.opts.ReasoningEffort,
+ 	}
+ 	if s.writer != nil {
+ 		in.Recorder = s.writer
+diff --git a/compaction/spec3_test.go b/compaction/spec3_test.go
+index f8087c9..2d8b64c 100644
+--- a/compaction/spec3_test.go
++++ b/compaction/spec3_test.go
+@@ -186,8 +186,10 @@ func TestProviderSummarizerReplaysRealMessages(t *testing.T) {
+ 		t.Fatalf("calls=%d, want 1", len(p.reqs))
+ 	}
+ 	req := p.reqs[0]
+-	if req.Thinking != "disabled" {
+-		t.Fatalf("thinking=%q, want disabled", req.Thinking)
++	// 0.15.9（reArtex）：摘要请求不再携带 Thinking:"disabled"（「必须 adaptive
++	// thinking」的模型 400）——改为断言该字段未发送。
++	if req.Thinking != "" {
++		t.Fatalf("thinking=%q, want unset (empty)", req.Thinking)
+ 	}
+ 	if req.MaxTokens != 8000 { // min(20000, 8000)
+ 		t.Fatalf("maxTokens=%d, want 8000", req.MaxTokens)
+diff --git a/compaction/summarizer.go b/compaction/summarizer.go
+index cf8ab26..1864735 100644
+--- a/compaction/summarizer.go
++++ b/compaction/summarizer.go
+@@ -65,7 +65,9 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
+ 		System:    []string{summarySystemPrompt},
+ 		Messages:  reqMsgs,
+ 		MaxTokens: maxOut,
+-		Thinking:  "disabled",
++		// 0.15.9（reArtex）：不硬编码 Thinking:"disabled"——「必须 adaptive
++		// thinking」的模型（实测 MiniMax-M3.1-Flash）直接 400 invalid params
++		// ⇒ 上下文压缩整条瘫、会话越滚越肥直到不可用。不带该字段走网关默认。
+ 	}
+ 	var lastErr error
+ 	for range maxStreamingRetries {
+diff --git a/harness/query.go b/harness/query.go
+index b628bbf..ce98ed0 100644
+--- a/harness/query.go
++++ b/harness/query.go
+@@ -104,6 +104,14 @@ type QueryInput struct {
+ 	// findings instead of ending abruptly. The run still finishes with the budget's
+ 	// reason (ReasonMaxTurns/ReasonTimeout), never ReasonCompleted. Nil = off.
+ 	Settlement *Settlement
++
++	// Thinking / ReasoningEffort are per-request overrides applied to EVERY model
++	// call of this run ("" = inherit the provider's Config value). Hosts use them
++	// to apply per-agent settings on top of a provider that is cached and shared
++	// per profile — the request-level fields are the only per-agent knob that
++	// works with a shared provider instance.
++	Thinking        string
++	ReasoningEffort string
+ }
+
+ // Settlement configures the wrap-up phase that runs when a budget is hit.
+@@ -791,6 +799,8 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
+ 		Tools:           schemas,
+ 		MaxTokens:       l.maxTokens(),
+ 		Temperature:     l.in.Temperature,
++		Thinking:        l.in.Thinking,
++		ReasoningEffort: l.in.ReasoningEffort,
+ 	}
+ 	if l.in.NonStreaming {
+ 		return l.completeAndExecute(req)
+diff --git a/llm/anthropic.go b/llm/anthropic.go
+index c3c0044..6d7005e 100644
+--- a/llm/anthropic.go
++++ b/llm/anthropic.go
+@@ -62,6 +62,12 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
+ 		thinkingType = req.Thinking
+ 		thinkingEnabled = req.Thinking == "enabled"
+ 	}
++	// Effort follows the same override precedence: a non-empty per-request
++	// value wins over Config.ReasoningEffort (mirrors req.Thinking above).
++	effort := p.cfg.ReasoningEffort
++	if req.ReasoningEffort != "" {
++		effort = req.ReasoningEffort
++	}
+ 	body := anthropicReq{
+ 		Model:         p.cfg.Model,
+ 		Messages:      mergeAdjacentSameRole(filterThinkingBlocks(req.Messages, thinkingEnabled)),
+@@ -77,12 +83,40 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
+ 	if thinkingType != "" {
+ 		body.Thinking = &anthropicThinking{Type: thinkingType}
+ 	}
+-	if p.cfg.ReasoningEffort != "" {
+-		body.OutputConfig = &anthropicOutputConfig{Effort: p.cfg.ReasoningEffort}
++	if effort != "" {
++		body.OutputConfig = &anthropicOutputConfig{Effort: effort}
++	}
++	// Config.CacheMessages（0.15.12）：消息尾 cache_control 断点——Anthropic 官方
++	// 增量缓存模式（system 前缀断点之外的第二档）。默认关；对隐式前缀缓存的上游
++	// （如 MiniMax）该字段无害（缓存键照常按前缀命中）。
++	if p.cfg.CacheMessages {
++		body.Messages = withTailCacheBreakpoint(body.Messages)
+ 	}
+ 	return json.Marshal(body)
+ }
+
++// withTailCacheBreakpoint returns the messages with a cache_control breakpoint
++// on the LAST content block of the LAST message. Copy-on-write: the caller's
++// conversation state is never mutated (same discipline as stripThoughtSignatures)
++// — the breakpoint belongs to THIS wire request only. Empty history or an empty
++// final content array returns the input unchanged; there is nothing to mark.
++func withTailCacheBreakpoint(msgs []Message) []Message {
++	if len(msgs) == 0 {
++		return msgs
++	}
++	n := len(msgs)
++	if len(msgs[n-1].Content) == 0 {
++		return msgs
++	}
++	out := make([]Message, n)
++	copy(out, msgs)
++	blocks := make([]ContentBlock, len(msgs[n-1].Content))
++	copy(blocks, msgs[n-1].Content)
++	blocks[len(blocks)-1].CacheControl = map[string]any{"type": "ephemeral"}
++	out[n-1] = Message{Role: msgs[n-1].Role, Content: blocks}
++	return out
++}
++
+ // buildAnthropicSystem splits the system prompt at DynamicBoundary, placing a
+ // cache breakpoint on the static prefix (FR-02.2).
+ func buildAnthropicSystem(req CompletionRequest) []anthropicSystemBlock {
+diff --git a/llm/anthropic_system_test.go b/llm/anthropic_system_test.go
+index 0f40cc1..2ec2374 100644
+--- a/llm/anthropic_system_test.go
++++ b/llm/anthropic_system_test.go
+@@ -1,6 +1,10 @@
+ package llm
+
+-import "testing"
++import (
++	"encoding/json"
++	"reflect"
++	"testing"
++)
+
+ func TestBuildAnthropicSystemCacheBoundary(t *testing.T) {
+ 	sys := []string{"a", "b", "c"}
+@@ -32,3 +36,102 @@ func TestBuildAnthropicSystemCacheBoundary(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// TestWithTailCacheBreakpoint（0.15.12）：CacheMessages 开启时，断点只落在最后一条
++// 消息的最后一个内容块上；copy-on-write——输入切片与消息对象绝不被原地改动
++// （同 stripThoughtSignatures 纪律：它们属于调用方会话状态）。
++func TestWithTailCacheBreakpoint(t *testing.T) {
++	msgs := []Message{
++		UserText("q1"),
++		{Role: RoleAssistant, Content: []ContentBlock{TextBlock("a1")}},
++		{Role: RoleUser, Content: []ContentBlock{TextBlock("q2"), ToolResultText("t1", "out", false)}},
++	}
++	before, err := json.Marshal(msgs)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	out := withTailCacheBreakpoint(msgs)
++	if len(out) != len(msgs) {
++		t.Fatalf("len=%d want %d", len(out), len(msgs))
++	}
++	last := out[len(out)-1]
++	for i, b := range last.Content {
++		marked := b.CacheControl != nil
++		want := i == len(last.Content)-1
++		if marked != want {
++			t.Fatalf("block %d marked=%v want %v", i, marked, want)
++		}
++	}
++	for i := range out[:len(out)-1] {
++		if len(out[i].Content) > 0 && out[i].Content[0].CacheControl != nil {
++			t.Fatalf("message %d unexpectedly marked", i)
++		}
++	}
++	// 输入未被改动：调用方会话状态必须原样存活。
++	after, err := json.Marshal(msgs)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !reflect.DeepEqual(before, after) {
++		t.Fatal("input messages were mutated")
++	}
++}
++
++func TestWithTailCacheBreakpointEmpty(t *testing.T) {
++	cases := [][]Message{
++		nil,
++		{},
++		{{Role: RoleUser, Content: nil}},
++	}
++	for i, msgs := range cases {
++		out := withTailCacheBreakpoint(msgs)
++		if !reflect.DeepEqual(out, msgs) {
++			t.Fatalf("case %d: empty history must pass through unchanged", i)
++		}
++	}
++}
++
++// TestBuildBodyCacheMessagesFlag：开关关闭时请求体不含任何消息级 cache_control；
++// 开启时恰好一个（最后一条消息的最后一个块）。system 断点不受开关影响。
++func TestBuildBodyCacheMessagesFlag(t *testing.T) {
++	req := CompletionRequest{
++		System:          []string{"static"},
++		DynamicBoundary: 1,
++		Messages:        []Message{UserText("hi")},
++	}
++	off := anthropicProvider{cfg: Config{Format: FormatAnthropic, Model: "m", APIKey: "k"}}
++	body, err := off.buildBody(req, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var decoded struct {
++		System []struct {
++			CacheControl map[string]any `json:"cache_control"`
++		} `json:"system"`
++		Messages []struct {
++			Content []map[string]any `json:"content"`
++		} `json:"messages"`
++	}
++	if err := json.Unmarshal(body, &decoded); err != nil {
++		t.Fatal(err)
++	}
++	if len(decoded.System) != 1 || decoded.System[0].CacheControl == nil {
++		t.Fatal("system breakpoint must exist regardless of CacheMessages")
++	}
++	if len(decoded.Messages) != 1 || decoded.Messages[0].Content[0]["cache_control"] != nil {
++		t.Fatal("CacheMessages off: no message-level breakpoint expected")
++	}
++
++	on := anthropicProvider{cfg: Config{Format: FormatAnthropic, Model: "m", APIKey: "k", CacheMessages: true}}
++	body, err = on.buildBody(req, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := json.Unmarshal(body, &decoded); err != nil {
++		t.Fatal(err)
++	}
++	if len(decoded.Messages) != 1 || decoded.Messages[0].Content[0]["cache_control"] == nil {
++		t.Fatal("CacheMessages on: expected a breakpoint on the last message block")
++	}
++}
+diff --git a/llm/openai.go b/llm/openai.go
+index 9470854..759236c 100644
+--- a/llm/openai.go
++++ b/llm/openai.go
+@@ -251,20 +251,32 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte,
+ 	if req.Thinking != "" {
+ 		thinkingType = req.Thinking
+ 	}
++	// Same precedence for the strength parameter: req.ReasoningEffort wins over
++	// Config.ReasoningEffort (mirrors req.Thinking above).
++	effort := p.cfg.ReasoningEffort
++	if req.ReasoningEffort != "" {
++		effort = req.ReasoningEffort
++	}
+ 	// The request is in thinking mode when either a thinking type is set (a
+ 	// `thinking` body field goes out) or a reasoning effort is configured — the
+ 	// same providers that then demand reasoning_content be echoed back.
+-	thinking := thinkingType != "" || p.cfg.ReasoningEffort != ""
++	thinking := thinkingType != "" || effort != ""
+
+ 	msgs := toOpenAIMessages(joinSystem(req.System), req.Messages)
+ 	msgs = sanitizeOpenAIMessages(msgs, thinking)
+
+ 	body := oaReq{
+-		Model:       p.cfg.Model,
+-		Messages:    msgs,
+-		Temperature: req.Temperature,
+-		Stop:        req.Stop,
+-		Stream:      stream,
++		Model:    p.cfg.Model,
++		Messages: msgs,
++		Stop:     req.Stop,
++		Stream:   stream,
++		// Temperature 不在此处无条件透传：reasoning 族（o1/o3/gpt-5 等）拒绝
++		// temperature 参数（只认默认值），发出去直接 400。判据用 profile 已有
++		// 的 MaxTokensField==max_completion_tokens（正是这族模型的配置信号），
++		// 不做模型名硬编码——常规模型仍按请求透传，行为不回归。
++	}
++	if p.cfg.MaxTokensField != MaxTokensFieldCompletion {
++		body.Temperature = req.Temperature
+ 	}
+ 	// The output cap goes into exactly one key. Reasoning models accept only
+ 	// "max_completion_tokens"; everything else still takes "max_tokens", which
+@@ -282,7 +294,7 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte,
+ 	if thinkingType != "" {
+ 		body.Thinking = &oaThinking{Type: thinkingType}
+ 	}
+-	body.ReasoningEffort = p.cfg.ReasoningEffort // omitempty drops it when unset
++	body.ReasoningEffort = effort // omitempty drops it when unset
+ 	for _, t := range req.Tools {
+ 		var ot oaTool
+ 		ot.Type = "function"
+diff --git a/llm/openai_responses.go b/llm/openai_responses.go
+index 6e965d9..02c860c 100644
+--- a/llm/openai_responses.go
++++ b/llm/openai_responses.go
+@@ -73,9 +73,14 @@ func (p *openaiResponsesProvider) buildBody(req CompletionRequest, stream bool)
+ 	}
+ 	// reasoning.effort is the Responses equivalent of reasoning_effort. A
+ 	// per-request "disabled" (compaction's summary call) suppresses it; otherwise
+-	// send it only when configured.
+-	if req.Thinking != "disabled" && p.cfg.ReasoningEffort != "" {
+-		body.Reasoning = &orReasoning{Effort: p.cfg.ReasoningEffort}
++	// send it only when configured — with the per-request override winning over
++	// the config value (mirrors the other providers).
++	effort := p.cfg.ReasoningEffort
++	if req.ReasoningEffort != "" {
++		effort = req.ReasoningEffort
++	}
++	if req.Thinking != "disabled" && effort != "" {
++		body.Reasoning = &orReasoning{Effort: effort}
+ 	}
+ 	for _, t := range req.Tools {
+ 		body.Tools = append(body.Tools, orTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.InputSchema})
+diff --git a/llm/provider.go b/llm/provider.go
+index fa4d32a..d6bf1dd 100644
+--- a/llm/provider.go
++++ b/llm/provider.go
+@@ -123,6 +123,15 @@ type Config struct {
+ 	// Ignored by the Anthropic and Responses formats, which name the field
+ 	// themselves ("max_tokens" / "max_output_tokens").
+ 	MaxTokensField string
++	// CacheMessages (Anthropic format only) adds a cache_control breakpoint on
++	// the LAST message of every request — Anthropic's incremental caching
++	// pattern: as the conversation grows, each turn re-covers everything the
++	// previous turn cached plus one append, so reads dominate writes. Default
++	// false: system-prefix caching (DynamicBoundary) stays universal, while
++	// message-tail breakpoints only pay off on providers that honor explicit
++	// breakpoints (real Anthropic; strict emulation gateways). Providers with
++	// implicit prefix caching (e.g. MiniMax) ignore the field harmlessly.
++	CacheMessages bool
+
+ 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
+ }
+diff --git a/llm/types.go b/llm/types.go
+index a885a0f..45c17b8 100644
+--- a/llm/types.go
++++ b/llm/types.go
+@@ -78,6 +78,13 @@ type ContentBlock struct {
+ 	ToolUseID string         `json:"tool_use_id,omitempty"`
+ 	Content   []ContentBlock `json:"content,omitempty"`
+ 	IsError   bool           `json:"is_error,omitempty"`
++
++	// CacheControl carries an Anthropic prompt-cache breakpoint
++	// ({"type":"ephemeral"}) on THIS content block. It is set only by the
++	// Anthropic provider itself (Config.CacheMessages) on a copy of the wire
++	// request — callers leave it nil, so it never reaches any other wire and
++	// never lands in persisted transcripts. See anthropic.go buildBody.
++	CacheControl map[string]any `json:"cache_control,omitempty"`
+ }
+
+ // TextBlock builds a text content block.
+@@ -188,4 +195,10 @@ type CompletionRequest struct {
+ 	// tokens on reasoning and never replays thinking blocks (which Anthropic
+ 	// rejects when thinking is off).
+ 	Thinking string
++	// ReasoningEffort overrides the provider's reasoning-strength parameter for
++	// THIS request only: "" inherits Config.ReasoningEffort. OpenAI maps it to
++	// the top-level reasoning_effort; Anthropic to output_config.effort. Hosts
++	// use it to apply per-agent effort on top of a provider that is cached and
++	// shared per profile (方案 v9.2 批次 B: agent-level thinking effort).
++	ReasoningEffort string
+ }
+diff --git a/mcp/stdio.go b/mcp/stdio.go
+index d3885e9..5117db0 100644
+--- a/mcp/stdio.go
++++ b/mcp/stdio.go
+@@ -5,6 +5,7 @@ import (
+ 	"io"
+ 	"os"
+ 	"os/exec"
++	"time"
+
+ 	"github.com/Autumn-27/norma/tool/privdrop"
+ )
+@@ -60,7 +61,12 @@ func NewStdioClient(ctx context.Context, server, command string, env map[string]
+ 		conn:   newConn(stdout, stdin),
+ 		closer: &stdioCloser{cmd: cmd, stdin: stdin},
+ 	}
+-	if err := c.initialize(ctx); err != nil {
++	// 握手预算（0.15.13）：卡死的 MCP 子进程（半启动/卡在初始化）此前会把装配
++	// 路径无限挂死——调用方 ctx 通常无 deadline，而 mcpFailTTL 冷却只在返回错误
++	// 后生效。30s 内 initialize 没完成即按失败收掉子进程。
++	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	if err := c.initialize(initCtx); err != nil {
+ 		c.Close()
+ 		return nil, err
+ 	}
+diff --git a/noa/prompts_rules_test.go b/noa/prompts_rules_test.go
+index 23f1199..3607c60 100644
+--- a/noa/prompts_rules_test.go
++++ b/noa/prompts_rules_test.go
+@@ -10,7 +10,7 @@ import (
+ // upstreamSource is the checked-out acp-kernel this port was taken from. The
+ // comparison is skipped when it is absent, so the suite still runs on a machine
+ // without it.
+-const upstreamSource = "/home/kali/acp-kernel/src/compression-rules.ts"
++const upstreamSource = "/home/analyst/src/compression-rules.ts"
+
+ func upstreamConst(t *testing.T, name string) (string, bool) {
+ 	t.Helper()

@@ -341,6 +341,7 @@ CI 的 guard 会校验 `--allow-tier0` 的理由确实出现在区间提交信�
 |---|---|---|---|---|
 | 2026-11-25 | 0.15.74–0.15.91（A-01…A-15 修复批次） | guard/guard.go、guard/shortcircuit.go、intercept/decode.go、intercept/intercept.go、intercept/audit_chain.go、internal/sod/chain.go、internal/sod/mergedgate.go、pathguard/pathguard.go、pathguard/tokens.go、agent/toolpolicy.go、server/sod_chain.go、server/egress_governance.go、server/trust_rules.go、db/audit_chain.go 及配套测试（整批 23 个 Tier-0 清单内文件） | 任务卡明载的安全修复（A-04 判官入参匹配/失败锁死、A-05 审计链 HMAC、A-06 降级开关收口、A-11 pathguard 悬空链接、A-13 SoD 握手、A-01/15 出网治理），锁死生效前的最后一次批量合法触碰——本项按卡面要求最后落地（先修完 A 类、再锁死），基线触碰整批登记，不追溯拦截 | 任务包 02-original-118（A 类卡片即批准依据）；本次提交（0.15.92）为锁死生效点 |
 | 2026-11-25 | 0.15.92（07cf348，锁死生效提交本身） | scripts/rsi_guard.py（强制面收口：`--tier 0` 最严档 / `--allow-tier0` 例外通道 / `--base` 留痕校验；配套 ci.yml rsi-guard job、precommit-test.sh [1/6] 门禁步） | A-16 Tier-0 不可变安全边界锁死——guard 对自己的落地也是 Tier-0 触碰，走例外通道自证锁死生效；「A-16 Tier-0 不可变安全边界锁死」一串原样出现在该提交信息首行，即 `--base` 留痕校验的放行匹配串 | 任务包 02-original-118 卡面（执行约束第 5 条：先修完 A 类、锁死最后落地）；CI 首跑红后人工按本行匹配串放行一次 |
+| 2026-11-25 | A 阶段收尾·漂移回填批次（本地提交，未发版） | patches/norma-z-backfill-drift.patch（third_party/norma 生成树 11 文件的历史改动由此补丁可再生；重新生成后生成树字节级对齐 HEAD，零行为变化） | 回填 third_party 生成树已提交未补丁的历史漂移（224 行），使重新生成与已提交行为一致——此串原样进提交信息，即 `--allow-tier0` 匹配串 | 用户「都实施，就按照你推荐的来做」显式调度本批（例外流程步骤 3 的确认替代）；patches/ 前缀 Tier-0；本批不改任何行为，仅把已提交行为落回可评审的补丁集合 |
 
 以后新增例外按上表格式追加。清单一经登记不得删除——撤销某次例外等于要求把文件改回去，
 那本身又是一次例外，走同样的流程。
