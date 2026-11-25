@@ -81,13 +81,42 @@ func newHTTPClient(timeout time.Duration, insecure bool) *http.Client {
 }
 
 // doRequest 发起一次受治理的请求：先做字面主机预检，再交给受拨号守卫保护的客户端。
+// A-01C 纵深：守卫拒绝在这里统一补审计（此前拒绝只以拨号错误浮出——工具报错/
+// 连接失败，审计链里没有「守卫判了 deny」这条判定动作，「没留痕」和「留了痕」
+// 在事后追责时长得一模一样）。
 func doRequest(hc *http.Client, req *http.Request) (*http.Response, error) {
 	if req.URL != nil {
 		if err := egressPolicy.CheckURLHost(req.URL.String()); err != nil {
+			noteEgressDenial(req.URL.String(), err)
 			return nil, err
 		}
 	}
-	return hc.Do(req)
+	resp, err := hc.Do(req)
+	if err != nil && req.URL != nil {
+		noteEgressDenial(req.URL.String(), err)
+	}
+	return resp, err
+}
+
+// egressDenialAuditor 是宿主注入的守卫拒绝审计钩子（A-01C 纵深，启动期经
+// SetEgressDenialAuditor 注入一次；nil = 不审计——无库部署/单测）。与
+// SetCredBreaker 同款包级注入。参数：目标 URL、拒绝详情（错误原文）。
+var egressDenialAuditor func(target, detail string)
+
+// SetEgressDenialAuditor 注入守卫拒绝审计钩子（server 启动期调用一次）。
+func SetEgressDenialAuditor(fn func(target, detail string)) { egressDenialAuditor = fn }
+
+// noteEgressDenial 只放行本包策略（"["+egressPolicy.Name+"]" 前缀）的拒绝错误——
+// 别家的错误不进这里，不冒充守卫判定。
+func noteEgressDenial(target string, err error) {
+	if egressDenialAuditor == nil || err == nil {
+		return
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "["+egressPolicy.Name+"]") {
+		return
+	}
+	egressDenialAuditor(target, msg)
 }
 
 // --- 凭据熔断（A-13，0.15.83）---

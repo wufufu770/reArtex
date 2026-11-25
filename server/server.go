@@ -211,6 +211,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// A-13（0.15.83）：MCP HTTP 客户端（含 SSE 握手与 ScopeSentry 同步）共享同一
 	// 凭据熔断器——进程级单例，nil 安全（mcphttp 未注入时行为与旧版一致）。
 	mcphttp.SetCredBreaker(s.credBreaker)
+	// A-01C 纵深：netguard/MCP 守卫的拒绝补进审计链——此前拒绝只以拨号错误浮出
+	// （工具报错/连接失败），审计链里没有「守卫判了 deny」这条判定动作。nil 安全
+	// （无库部署不审计，与 SetCredBreaker 同款包级注入）。
+	mcphttp.SetEgressDenialAuditor(func(target, detail string) {
+		s.auditNetguardDenial("MCP 出网", target, errors.New(detail))
+	})
 	// 总控/群聊播报：引擎活动与意图认领镜像到绑定会话（server/session_task_mirror.go）。
 	s.engine.ActivityMirror = s.onEngineTaskActivity
 	s.engine.ClaimMirror = s.onEngineIntentClaim

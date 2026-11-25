@@ -3,6 +3,7 @@ package mcphttp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,5 +147,40 @@ func TestMCPClientKeepsInsecureTLSForSelfSigned(t *testing.T) {
 	defer c.Close()
 	if _, err := c.Call(ctx, "echo", map[string]any{}); err != nil {
 		t.Fatalf("Call() 失败: %v", err)
+	}
+}
+
+// TestMCPClientEgressDenialAudited（A-01C 纵深）：守卫拒绝必须触发宿主注入的
+// 审计钩子——此前拒绝只以错误浮出，审计链没有「判了 deny」这条判定动作。
+// 三条断言：①策略拒绝（字面预检）触发钩子且详情带策略前缀（不冒充）；
+// ②前缀过滤面：别家策略与普通错误不得触发钩子。
+func TestMCPClientEgressDenialAudited(t *testing.T) {
+	srv := mcpTestServer(t, mcpHandler(nil))
+	out := strings.Replace(srv.URL, "127.0.0.1", "169.254.169.254", 1)
+
+	var calls []string
+	prev := egressDenialAuditor
+	egressDenialAuditor = func(target, detail string) { calls = append(calls, target+" | "+detail) }
+	t.Cleanup(func() { egressDenialAuditor = prev })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := New(ctx, "test", out+"/mcp", map[string]string{}, false)
+	if err == nil {
+		c.Close()
+		t.Fatal("范围外目的地必须被拒")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("守卫拒绝应触发一次审计钩子，实际 %d 次: %+v", len(calls), calls)
+	}
+	if !strings.Contains(calls[0], "["+egressPolicy.Name+"]") {
+		t.Fatalf("审计详情必须带策略前缀（不冒充），实际: %q", calls[0])
+	}
+
+	// 前缀过滤面：别家策略的错误与普通错误不得触发钩子。
+	noteEgressDenial("http://x", errors.New("[别的策略] 拒绝连接 1.2.3.4"))
+	noteEgressDenial("http://x", errors.New("普通超时"))
+	if len(calls) != 1 {
+		t.Fatalf("非守卫错误不得触发审计钩子: %+v", calls[1:])
 	}
 }

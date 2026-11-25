@@ -347,6 +347,11 @@ func (s *Server) probeFindingBaseline(ctx context.Context, findingID int64) (*bo
 	client := s.retestBaselineClient(taskID)
 	resp, err := client.Do(req)
 	if err != nil {
+		// A-01C 纵深：无代理直连路径挂了 netguard 拨号守卫，拒绝要进审计链
+		// （「[agent 出网] …」前缀才进——别家错误不冒充守卫判定）。
+		if netguardDenialByPrefix(err, "agent 出网") {
+			s.auditNetguardDenial("agent 出网", req.URL.String(), err)
+		}
 		return nil, fmt.Errorf("baseline 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
