@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.81] - 2026-11-25
+
+### 新增（A-07：stdio MCP 执行器黑名单改真实路径比对）
+
+- `server/mcpdiscover.go`：`validateStdioCommand` 从「base 名字比对 17 个执行器名」改为**名字模式 + 真实路径**双规则——名字模式先拦版本化执行器（`python3.11`/`node18`/`ruby3.2` 旧版漏网）与 `uv`/`pip`/`conda`/`poetry`；再 `LookPath` + `EvalSymlinks` 解析真实路径比对（`ln -s $(which python3) /tmp/mypy` 改名软链现形）；`env python3` 形态剥掉 env 旗标/`VAR=` 赋值后按真命令判定。返回值即真实绝对路径。
+- 【如实盲区】解释器二进制的**复制体**（`cp /usr/bin/python3 /tmp/x`）路径层判不出血统——复制体的真实路径就是它自己，需文件哈希/行为层，不在本卡范围；软链形态（常见逃逸）已封。
+- 登记接口落库真实绝对路径：agent 工具侧 `toolCreateMCP`/`toolUpdateMCP` 已有（复用 `validateMCPDefinition`）；本次补上 **UI 路由 `pgSaveMCP`**——此前完全不校验，执行器命令能存进库只在拨号期失败，现校验失败返回 400、成功以解析结果落库。
+- 启动期存量重验：`reverifyStdioMCPs`（`server.go` 启动接线，异步）对全部启用中的 stdio 行重跑校验，不过的记警告并 `enabled=false` 落库——不静默放行等拨号失败冷却。测试用 `onlyNameStore` 收窄重验视野，避免动到共享测试库的种子行。
+- 语义变化（如实记录）：登记期起**拒绝解析不到真实路径的命令**（含不存在的绝对路径）——旧逻辑只查形态，坏配置会留到拨号期才炸；`platform_tools_test` 夹具从写死的 `/usr/bin/playwright-mcp`（多数环境不存在）改为真实临时二进制。
+- 测试：`TestValidateStdioCommand`（验收四夹具：版本化裸名/绝对路径/env 前缀/改名软链 + 裸名 PATH 解析 + node-exporter 不得过宽）+ `TestReverifyStdioMCPs*`（坏行禁用/好行保持）+ MCP 面回归全绿（server 包 `TestValidateMCP|TestValidateStdioCommand|TestReverifyStdioMCPs|TestShortCircuitMCP|MCP` 16.2s）；guard 的 create_mcp 硬拦回归绿。
+
 ## [0.15.80] - 2026-11-25
 
 ### 新增（A-11：pathguard 真实路径解析收口——workingDir 口径 + 悬空符号链接拒绝）
