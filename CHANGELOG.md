@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.79] - 2026-11-25
+
+### 新增（A-09：config.json 明文 DSN 纳入密钥清单）
+
+- `pathguard`：新增 `SetSecretConfigPath`（`RWMutex` 保护，空串忽略）；`cmd/artex/main.go` 启动期检测到 config 文件存在即注入。deny 侧按真实路径比对（== config 或位于其下），拒绝理由点名「平台自身配置文件（可能含明文数据库口令）」。`TestBlocksInjectedConfigPath`：直读 / Grep / 软链现形三路拒绝，未登记（config 不存在）时行为不变。
+- `guard` 短路表：凭据形态补 config.json 三形态（`/app/config.json`、`/app/data/config.json`、`../../config.json` 相对回溯）；`/proc/\d+/cmdline|mem` 扩为 `(?:\d+|self)`。放行表回归确认：会话工作区内的目标 config.json 不受影响（渗透工作流零误伤）。
+- `scripts/verify-secret-env.sh`（新增）：部署面检查——config.json 含明文 dsn 即警告并 exit 1（CI/巡检可挂）；只检查不硬拦存量启动。
+- `scripts/migrate-dsn-to-file.sh`（新增）：python3 标准库完成「提取 dsn → 0600 一次性文件 → `os.replace` 原子删除字段」；提示 operator 设置 `ARTEX_PG_DSN_FILE`（读入即清零删除，readAndBurnDSNFile 语义；未设置则下次启动 fail-closed）。
+- `scripts/scan-sensitive.sh`：FORBIDDEN_CONTENT 增加「dsn 值含 @（userinfo@host）」形态规则。偏差说明：任务卡建议字面量 `database.dsn`，实际采用值形态——代码注释与设计文档合法引用该字段名，字面规则会把基线打红（闸门不能拦自己）。
+- `config.example.json`：占位 DSN 字面块折进 `_comment_database_dsn` 说明文字——含口令形状的样例与新规则互相打红；规则保持最大敏感度，不为样例开负向豁免。附带修正：`pathguard` 测试夹具不放 dsn 形态字面量（同一互打问题）。
+- 【如实披露】`docs/实施基线-v2.1差异清单.md`：真实家目录绝对路径改写为通用形式。该命中系 0.15.57 提交的**既有基线红**（本机路径进库，正是扫描门要拦的类别）；此前闸门只在 push/CI 触发、本地提交不跑，故一直未暴露。本次 `tree HEAD` 验证为 A-09 首次本地跑闸，顺带补漏。
+- `README.md`「使用 → 配置」：明确「不要把数据库连接串写进 config 文件」，给出 `ARTEX_PG_DSN` / `ARTEX_PG_DSN_FILE` 优先序与迁移脚本指引。
+- 测试：pathguard（含新用例）0.044s 绿、guard 绿、`go build ./...` 通过；两脚本冒烟（verify 对含明文 dsn 的真实配置警告 + exit 1；migrate 完成提取→0600 文件→字段删除）；`scan-sensitive tree HEAD` 干净（exit 0）。
+
 ## [0.15.78] - 2026-11-25
 
 ### 修复（A-12：guard DSL OR 括号化）
