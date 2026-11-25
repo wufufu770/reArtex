@@ -340,12 +340,15 @@ CI 的 guard 会校验 `--allow-tier0` 的理由确实出现在区间提交信�
 | 日期 | 版本/提交 | 文件 | 理由 | 批准 |
 |---|---|---|---|---|
 | 2026-11-25 | 0.15.74–0.15.91（A-01…A-15 修复批次） | guard/guard.go、guard/shortcircuit.go、intercept/decode.go、intercept/intercept.go、intercept/audit_chain.go、internal/sod/chain.go、internal/sod/mergedgate.go、pathguard/pathguard.go、pathguard/tokens.go、agent/toolpolicy.go、server/sod_chain.go、server/egress_governance.go、server/trust_rules.go、db/audit_chain.go 及配套测试（整批 23 个 Tier-0 清单内文件） | 任务卡明载的安全修复（A-04 判官入参匹配/失败锁死、A-05 审计链 HMAC、A-06 降级开关收口、A-11 pathguard 悬空链接、A-13 SoD 握手、A-01/15 出网治理），锁死生效前的最后一次批量合法触碰——本项按卡面要求最后落地（先修完 A 类、再锁死），基线触碰整批登记，不追溯拦截 | 任务包 02-original-118（A 类卡片即批准依据）；本次提交（0.15.92）为锁死生效点 |
+| 2026-11-25 | 0.15.92（07cf348，锁死生效提交本身） | scripts/rsi_guard.py（强制面收口：`--tier 0` 最严档 / `--allow-tier0` 例外通道 / `--base` 留痕校验；配套 ci.yml rsi-guard job、precommit-test.sh [1/6] 门禁步） | A-16 Tier-0 不可变安全边界锁死——guard 对自己的落地也是 Tier-0 触碰，走例外通道自证锁死生效；「A-16 Tier-0 不可变安全边界锁死」一串原样出现在该提交信息首行，即 `--base` 留痕校验的放行匹配串 | 任务包 02-original-118 卡面（执行约束第 5 条：先修完 A 类、锁死最后落地）；CI 首跑红后人工按本行匹配串放行一次 |
 
 以后新增例外按上表格式追加。清单一经登记不得删除——撤销某次例外等于要求把文件改回去，
 那本身又是一次例外，走同样的流程。
 
-注：锁死生效提交（0.15.92）所在的那次推送，其 CI 区间会包含上表的基线触碰 ⇒
-`rsi-guard` 首跑会红。处置：人工复核后以 `--allow-tier0`（理由用表中登记的原句，
-确保能在区间提交信息中匹配到）放行一次；此后的常规推送区间不含 Tier-0 触碰，门自动回绿。
+注：锁死生效提交（0.15.92）所在的那次推送，其 CI 区间会包含上表两行的触碰 ⇒
+`rsi-guard` 首跑会红。处置：人工复核后以 `--allow-tier0` 放行一次。**理由必须是原样出现在
+区间提交信息里的字符串**（留痕校验按子串匹配 `git log base..HEAD` 原文）——上表「理由」列
+是给人读的摘要，不是匹配串；首跑放行用「A-16 Tier-0 不可变安全边界锁死」（锁死提交信息
+首行原样含此串）。此后的常规推送区间不含 Tier-0 触碰，门自动回绿。
 
 
