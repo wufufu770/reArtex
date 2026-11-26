@@ -497,8 +497,80 @@ func (d *DB) MatchCVEToAssets(ctx context.Context, eval VersionRangeEvaluator, i
 			Reason:         reason,
 		})
 	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	// B-04D：批量回填资产→未终态任务归属（一次联查，绝不逐资产往返）。
+	ids := make([]int64, 0, len(out))
+	for i := range out {
+		ids = append(ids, out[i].AssetID)
+	}
+	taskMap, err := d.Assets().NonTerminalTasksByAssets(ids)
+	if err != nil {
+		return nil, fmt.Errorf("cve_match: 资产→任务归属查询失败: %w", err)
+	}
+	for i := range out {
+		out[i].TaskIDs = taskMap[out[i].AssetID]
+	}
 	return out, nil
 }
 
 // 编译期断言：真实 cveintel 客户端直接满足精判抽象（B-04C 经真实 sidecar 链）。
 var _ VersionRangeEvaluator = (*cveintel.Client)(nil)
+
+// ---------------------------------------------------------------------------
+// B-04D：资产→未终态任务归属（卡明文「给定资产查未终态任务」的现成查询此前
+// 不存在，本子卡新建）
+// ---------------------------------------------------------------------------
+
+// 未终态任务白名单：created/running/paused（done/failed/timeout 是终态）。
+// 终态任务不再接受 hint；软删除（deleted_at）一律排除。SQL 内联白名单而非
+// 「NOT IN 终态黑名单」：新增状态默认不收（fail-closed），卡纪律「最小 scope」。
+const cveMatchTaskStatuses = `'created','running','paused'`
+
+// NonTerminalTasksByAssets 给定资产 ID 集，返回每个资产引用的【未终态、未删除】
+// 任务 ID（assets.task_ids ↔ tasks.status/deleted_at 联查）。未终态判定走 SQL
+// 权威源（不在内存里判终态——内存 task_ids 快照与任务状态可能不同步）。
+//   - 确定性：每个资产的任务列表按 task id 升序；
+//   - 无关联任务/未知资产的资产不在返回 map 中（零伪造）；
+//   - 空/全零输入返回空 map，不发查询。
+func (s *AssetStore) NonTerminalTasksByAssets(assetIDs []int64) (map[int64][]int64, error) {
+	ids := make([]int64, 0, len(assetIDs))
+	seen := make(map[int64]bool, len(assetIDs))
+	for _, id := range assetIDs {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return map[int64][]int64{}, nil
+	}
+	rows, err := s.db.Query(`
+SELECT a.id, t.id
+FROM assets a
+JOIN tasks t ON t.id = ANY(a.task_ids)
+WHERE a.id = ANY($1::bigint[])
+  AND t.deleted_at IS NULL
+  AND t.status IN (`+cveMatchTaskStatuses+`)
+ORDER BY a.id, t.id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64][]int64, len(ids))
+	for rows.Next() {
+		var assetID, taskID int64
+		if err := rows.Scan(&assetID, &taskID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		out[assetID] = append(out[assetID], taskID)
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}

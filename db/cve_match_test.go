@@ -433,3 +433,134 @@ func TestMatchCVEToAssetsParamGuard(t *testing.T) {
 		t.Fatalf("空 token 集 (nil,nil): %v %v", got, err)
 	}
 }
+
+// ---------- B-04D：资产→未终态任务归属 ----------
+
+// 归属查询：created/running/paused 收、done/timeout 终态与软删除排除、
+// 未知资产零伪造、任务列表升序确定性。
+func TestNonTerminalTasksByAssets(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	task, err := d.CreateTask("cve-match-ownership", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	id, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveown.example.com/",
+		Technologies: []string{"log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+	if _, err := av2.AttachAssetsToTask(task.ID, []int64{id}, "B-04D 测试挂靠"); err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 新建任务（created）→ 归属在。
+	got, err := av2.NonTerminalTasksByAssets([]int64{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[id]) != 1 || got[id][0] != task.ID {
+		t.Fatalf("created 任务应归属: %v", got)
+	}
+
+	// ② 终态 done → 排除。
+	if _, err := d.Exec(`UPDATE tasks SET status='done' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = av2.NonTerminalTasksByAssets([]int64{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[id]) != 0 {
+		t.Fatalf("done 任务必须排除: %v", got)
+	}
+
+	// ③ 回到 running → 归属在；再软删除 → 排除。
+	if _, err := d.Exec(`UPDATE tasks SET status='running' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = av2.NonTerminalTasksByAssets([]int64{id})
+	if len(got[id]) != 1 {
+		t.Fatalf("running 任务应归属: %v", got)
+	}
+	if _, err := d.Exec(`UPDATE tasks SET deleted_at=now() WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = av2.NonTerminalTasksByAssets([]int64{id})
+	if len(got[id]) != 0 {
+		t.Fatalf("软删除任务必须排除: %v", got)
+	}
+
+	// ④ 未知/非法资产 ID：零伪造。
+	got, err = av2.NonTerminalTasksByAssets([]int64{999999999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("未知资产不得出现在返回: %v", got)
+	}
+	got, err = av2.NonTerminalTasksByAssets(nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("空输入应空 map: %v %v", got, err)
+	}
+}
+
+// 匹配全链 × 归属：命中资产带未终态任务 ID；任务终态后 TaskIDs 空（hint 发出
+// 层 B-04F 依此零发出）。
+func TestMatchCVEToAssetsTaskOwnership(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	task, err := d.CreateTask("cve-match-chain", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	id, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cvechain.example.com/",
+		Technologies: []string{"Apache Log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+	if _, err := av2.AttachAssetsToTask(task.ID, []int64{id}, "B-04D 链路测试"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeEvaluator{verdicts: map[string]string{"2.14.0": "affected"}}
+	in := CVEMatchInput{
+		CVEID:         "CVE-2021-44228",
+		ProductTokens: []string{"log4j"},
+		Ranges:        []cveintel.Range{{From: "2.0", To: "2.15.0"}},
+	}
+	matches, err := d.MatchCVEToAssets(context.Background(), fake, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].AssetID != id {
+		t.Fatalf("应恰命中种子资产: %+v", matches)
+	}
+	if len(matches[0].TaskIDs) != 1 || matches[0].TaskIDs[0] != task.ID {
+		t.Fatalf("命中资产应带未终态任务归属: %+v", matches[0].TaskIDs)
+	}
+
+	// 任务终态 → 同一匹配重跑：TaskIDs 空（资产行仍在，归属消失）。
+	if _, err := d.Exec(`UPDATE tasks SET status='done' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	matches, err = d.MatchCVEToAssets(context.Background(), fake, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || len(matches[0].TaskIDs) != 0 {
+		t.Fatalf("终态任务后归属必须清空: %+v", matches)
+	}
+}
