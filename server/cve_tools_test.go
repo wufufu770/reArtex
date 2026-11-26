@@ -50,10 +50,11 @@ func TestCveToolSurface(t *testing.T) {
 
 // fakeCveMCP 是最小 Streamable MCP fake（cveintel/client_test.go 同款信封纪律）。
 type fakeCveMCP struct {
-	srv    *httptest.Server
-	status int
-	body   string
-	delay  time.Duration
+	srv        *httptest.Server
+	status     int
+	body       string // 覆盖全部工具的固定响应体
+	searchBody string // 仅 cve_search 的响应体（其余工具走默认分支）
+	delay      time.Duration
 }
 
 func newFakeCveMCP(t *testing.T) *fakeCveMCP {
@@ -69,16 +70,22 @@ func newFakeCveMCP(t *testing.T) *fakeCveMCP {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if f.body != "" {
-			_, _ = w.Write([]byte(f.body))
-			return
-		}
+		// 请求体只解码一次（body 流不可重复读——searchBody 分支落在默认分支时
+		// 二次 Decode 会得到空 name，误入 "{}" 兜底）。
 		var req struct {
 			Params struct {
 				Name string `json:"name"`
 			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if f.searchBody != "" && req.Params.Name == "cve_search" {
+			_, _ = w.Write([]byte(f.searchBody))
+			return
+		}
+		if f.body != "" {
+			_, _ = w.Write([]byte(f.body))
+			return
+		}
 		var text string
 		switch req.Params.Name {
 		case "cve_lookup":

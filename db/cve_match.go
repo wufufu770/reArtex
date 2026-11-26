@@ -240,6 +240,13 @@ func techTokenQueryForm(token string) bool {
 	return true
 }
 
+// IsValidTechTokenQuery 导出 token 输入合同判定（单一真相源：server 批次生产方
+// 在组 CVEMatchInput 前用它过滤产品 token，保证不把非法 token 送进
+// MatchCVEToAssets 的 fail-closed 闸——规则与 techTokenQueryForm 完全一致）。
+func IsValidTechTokenQuery(token string) bool {
+	return techTokenQueryForm(token)
+}
+
 // candidateAssetsMaxTokens 限制单次粗筛的 token 数（多 token 逐条查询，上限防
 // 上游失控展开成查询风暴）。超限 fail-closed 报错。
 const candidateAssetsMaxTokens = 32

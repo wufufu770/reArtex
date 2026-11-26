@@ -301,6 +301,38 @@ func (c *Client) matchCall(ctx context.Context, args map[string]any) ([]MatchIte
 	return items, nil
 }
 
+// SearchRecent 按 published_after 时间窗枚举记录（B-03C 既有服务端参数，本方法
+// 只是把它暴露给单体批次消费方——B-04G「新 CVE 批次」的枚举原语）。q 为空＝无
+// 全文过滤；publishedAfter 须 RFC3339 UTC 形态（空/非法 fail-closed 报错，
+// 绝不回退全库扫描）；limit 1-100（sidecar 硬顶）。输出与 Search 同构：legacy
+// 存储形态列表，逐项校验 cve_id 非空。
+func (c *Client) SearchRecent(ctx context.Context, publishedAfter string, limit int) ([]Record, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("cveintel: limit 必须为 1-100")
+	}
+	if strings.TrimSpace(publishedAfter) == "" {
+		return nil, fmt.Errorf("cveintel: published_after 必填（绝不回退全库枚举）")
+	}
+	args := map[string]any{"published_after": publishedAfter, "limit": fmt.Sprint(limit)}
+	text, err := c.call(ctx, "cve_search", args)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(text) == "null" {
+		return []Record{}, nil
+	}
+	var recs []Record
+	if err := json.Unmarshal([]byte(text), &recs); err != nil {
+		return nil, fmt.Errorf("%w: search 输出非法: %v", ErrProtocol, err)
+	}
+	for i, r := range recs {
+		if r.CVEID == "" {
+			return nil, fmt.Errorf("%w: search[%d] 缺 cve_id", ErrProtocol, i)
+		}
+	}
+	return recs, nil
+}
+
 // MatchComponent 组件匹配（B-05 三态精判）。
 func (c *Client) MatchComponent(ctx context.Context, ecosystem, pkg, version string) ([]MatchItem, error) {
 	return c.matchCall(ctx, map[string]any{

@@ -35,6 +35,10 @@ type Scheduler struct {
 	// ⇒ 5 秒 tick 期间可能重复判定「该跑」。没有这层互斥，两轮 curator 会并发
 	// 跑全库淘汰，而裁决写必须串行（auto-permission-tiers §4.2）。
 	curatorRunning atomic.Bool
+
+	// cveMatchRunning 保证同一时刻只有一轮 CVE 反向匹配批次在跑（B-04G；
+	// curatorRunning 同款互斥语义）。
+	cveMatchRunning atomic.Bool
 }
 
 const (
@@ -44,7 +48,18 @@ const (
 	schedKeyLastToolCall   = "last_toolcall_id"   // watermark: max activity id fired for tool call
 	schedKeyLastTaskCreate = "last_taskcreate_id" // watermark: max task id fired for task create
 	schedKeyLastRevSweep   = "last_review_sweep"  // unix sec: last stale needs_review sweep
+
+	// CVE 反向匹配批次水位（B-04G）：sweep 是节流闸（上次尝试，含失败），
+	// window 是 published_after 时间窗水位（仅成功推进——失败下轮重试同窗，
+	// 绝不丢窗）。首跑种子 window=启动时刻：存量 CVE 不回扫（scheduler 水位
+	// 同款纪律，全量回扫属运维动作）。
+	schedKeyCVEMatchSweep  = "last_cve_match_sweep"  // unix sec
+	schedKeyCVEMatchWindow = "last_cve_match_window" // RFC3339 UTC
 )
+
+// cveMatchSweepInterval 批次节流间隔（15 分钟一轮；steady state 下新 CVE/轮
+// 远小于单批 100 上限，批量导入场景按 CVSS 优先吃高价值子集）。
+const cveMatchSweepInterval = 15 * time.Minute
 
 func newScheduler(s *Server) *Scheduler {
 	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second, now: time.Now}
@@ -135,6 +150,7 @@ func (sc *Scheduler) step() {
 	// 不能被这个提前返回挡掉（否则没配 trigger 时策略永远不晋级）。
 	sc.dispatchStrategyCurator()
 	sc.sweepStaleReviews()
+	sc.maybeCVEMatch()
 	// Amber curator 观察模式（0.15.40，批次 J2）：每小时水位闸内扫隔离区产
 	// 拟晋升清单——观察态不落写；amber 关闭时函数内直接返回（零开销）。
 	go sc.s.AmberCuratorObserve()
@@ -209,6 +225,55 @@ func (sc *Scheduler) sweepStaleReviews() {
 	}
 	if n > 0 {
 		log.Printf("[scheduler] needs_review 过期闸：自动结案 %d 条挂起超 %dh 的复核项", n, ttlHours)
+	}
+}
+
+// maybeCVEMatch CVE 反向匹配批次触发（B-04G）：15 分钟节流闸 + 双水位（sweep
+// 尝试闸 / window 成功推进）。批次异步跑（sweepStaleReviews 同款：不占 5 秒
+// tick 同步路径）；同一时刻只允许一轮（cveMatchRunning 互斥，curatorRunning
+// 同款）。CVE_MCP_URL 未配置时批次自身静默降级（B-01E），这里只在水位种子
+// 阶段零开销返回。
+func (sc *Scheduler) maybeCVEMatch() {
+	if sc.pg == nil {
+		return
+	}
+	last, _ := strconv.ParseInt(sc.mustState(schedKeyCVEMatchSweep), 10, 64)
+	now := sc.now().Unix()
+	if now-last < int64(cveMatchSweepInterval/time.Second) {
+		return
+	}
+	_ = sc.pg.SetSchedState(schedKeyCVEMatchSweep, strconv.FormatInt(now, 10))
+	window := sc.mustState(schedKeyCVEMatchWindow)
+	if window == "" {
+		window = sc.now().UTC().Format(time.RFC3339)
+		_ = sc.pg.SetSchedState(schedKeyCVEMatchWindow, window)
+	}
+	if sc.cveMatchRunning.CompareAndSwap(false, true) {
+		go func() {
+			defer sc.cveMatchRunning.Store(false)
+			w, err := time.Parse(time.RFC3339, window)
+			if err != nil {
+				log.Printf("[cve-batch] 水位 %q 非法，重置为当前时刻: %v", window, err)
+				_ = sc.pg.SetSchedState(schedKeyCVEMatchWindow, time.Now().UTC().Format(time.RFC3339))
+				return
+			}
+			stats, err := sc.s.RunCVEMatchBatch(context.Background(), w)
+			if err != nil {
+				// 失败不推进 window：下轮重试同一时间窗（绝不丢窗）。
+				log.Printf("[cve-batch] 批次失败（window 保持 %s）: %v", window, err)
+				return
+			}
+			if stats.Unavailable {
+				// 未配置同样不推进 window：sidecar 恢复后从旧窗继续（台账幂等）。
+				log.Printf("[cve-batch] CVE_MCP_URL 未配置，本轮静默跳过（swept=0）")
+				return
+			}
+			_ = sc.pg.SetSchedState(schedKeyCVEMatchWindow, sc.now().UTC().Format(time.RFC3339))
+			if stats.Swept > 0 || stats.Emitted > 0 {
+				log.Printf("[cve-batch] swept=%d no_tokens=%d matched_assets=%d emitted=%d deduped=%d throttled=%d skipped=%d",
+					stats.Swept, stats.NoTokens, stats.MatchedAssets, stats.Emitted, stats.Deduped, stats.Throttled, stats.Skipped)
+			}
+		}()
 	}
 }
 

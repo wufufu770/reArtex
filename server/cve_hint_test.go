@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -270,5 +271,175 @@ func TestEmitCVEHintsGuards(t *testing.T) {
 	}
 	if _, err := srv.EmitCVEHints(ctx, nil, &cveintel.Record{CVEID: "CVE-X"}); err != nil {
 		t.Fatalf("空匹配集应零工作量: %v", err)
+	}
+}
+
+// ---------- B-04G：新 CVE 批次触发 ----------
+
+// token 提取：区间包名结构化优先 + 合同过滤 + 去重保序 + 封顶；标题回落；
+// 含糊形态零产出绝不猜。
+func TestCVETokensFromRecord(t *testing.T) {
+	mk := func(ranges []cveintel.AffectedRange, title string) *cveintel.Record {
+		return &cveintel.Record{CVEID: "CVE-X", AffectedRanges: ranges, Title: title}
+	}
+	// ① 区间包名规范化 + 去重保序。
+	got := cveTokensFromRecord(mk([]cveintel.AffectedRange{
+		{Package: "Apache Log4j 2.14.0"},
+		{Package: "log4j 2.15.0"}, // 同产品 token：去重
+		{Package: "nginx/1.25.3"},
+	}, ""))
+	want := []string{"log4j", "nginx"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("token 提取错误: %v", got)
+	}
+	// ② 区间零产出 → 标题回落。
+	if got := cveTokensFromRecord(mk(nil, "Spring Boot")); len(got) != 1 || got[0] != "springboot" {
+		t.Fatalf("标题回落失败: %v", got)
+	}
+	// ③ 含糊标题：超 5 词拒绝族零产出绝不猜。（≤5 词纯字母短语会被 B-04A
+	// 规范化拼成单 token——该 token 与任何真实资产产品 token 都不会相等，粗筛
+	// 零命中，精判层兜底，无害；卡纪律的「绝不猜 affected」由三态精判保证。）
+	if got := cveTokensFromRecord(mk(nil, "multiple vulnerabilities in various products and components")); len(got) != 0 {
+		t.Fatalf("含糊标题必须零产出: %v", got)
+	}
+	if got := cveTokensFromRecord(mk(nil, "2.x")); len(got) != 0 {
+		t.Fatalf("数字残片必须零产出: %v", got)
+	}
+	// ④ 封顶 8（产品名互异且不含会被内嵌切分/去重碰撞的数字尾）。
+	many := make([]cveintel.AffectedRange, 0, 12)
+	for i := 0; i < 12; i++ {
+		many = append(many, cveintel.AffectedRange{Package: fmt.Sprintf("pkg%dtool 1.0", i)})
+	}
+	if got := cveTokensFromRecord(mk(many, "")); len(got) != cveMatchTokensMax {
+		t.Fatalf("应封顶 %d: %d", cveMatchTokensMax, len(got))
+	}
+}
+
+// 批次全链（fake sidecar MCP）：published_after 枚举 → token 提取 → 匹配（真实
+// 客户端精判）→ 发出；幂等重跑；未配置静默降级；上游故障整批报错。
+func TestRunCVEMatchBatch(t *testing.T) {
+	pg := cveTestPG(t)
+	srv := &Server{m: &Manager{pg: pg}}
+	ctx := context.Background()
+
+	task, err := pg.CreateTask("cve-batch", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pg.DeleteTask(task.ID) })
+	assetID, err := pg.Assets().UpsertHTTPService(db.UpsertHTTPServiceReq{
+		URL:          "https://cvebatch.example.com/",
+		Technologies: []string{"Apache Log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pg.Assets().DeleteByIDs([]int64{assetID}) })
+	if _, err := pg.Assets().AttachAssetsToTask(task.ID, []int64{assetID}, "B-04G 测试挂靠"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.Exec(`INSERT INTO task_scope(task_id, kind, domain, source, reason) VALUES ($1,'subdomain','cvebatch.example.com','manual','B-04G 测试范围')`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM task_scope WHERE task_id=$1 AND kind='subdomain'`, task.ID) })
+
+	cveID := fmt.Sprintf("CVE-2021-44228-B4G-%d", time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM cve_hints WHERE cve_id=$1`, cveID) })
+
+	// fake sidecar：search 返回 published 窗口内记录（信封经 json.Marshal——内层
+	// JSON 的引号自动转义）；match_component 纯求值走 fake 默认 affected。
+	f := newFakeCveMCP(t)
+	inner := fmt.Sprintf(`[{"cve_id":%q,"title":"Apache Log4j RCE","cvss_v3":10,"in_cisa_kev":true,"affected_ranges":[{"ecosystem":"maven","package":"Apache Log4j 2.14.0","from":"2.0","to":"2.15.0"}],"published":"2026-01-01T00:00:00Z"}]`, cveID)
+	env, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{"content": []map[string]any{{"type": "text", "text": inner}}},
+	})
+	f.searchBody = string(env)
+	t.Setenv("CVE_MCP_URL", f.srv.URL)
+
+	watermark := time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)
+	stats, err := srv.RunCVEMatchBatch(ctx, watermark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Unavailable || stats.Swept != 1 || stats.NoTokens != 0 {
+		t.Fatalf("批次枚举错误: %+v", stats)
+	}
+	if stats.MatchedAssets != 1 || stats.Emitted != 1 {
+		t.Fatalf("应匹配 1 资产并发出 1 hint: %+v", stats)
+	}
+	exists, err := pg.HasCVEHint(task.ID, assetID, cveID)
+	if err != nil || !exists {
+		t.Fatalf("台账应落位: %v %v", exists, err)
+	}
+	hintText := ""
+	if err := pg.QueryRow(`SELECT payload->>'text' FROM exploration_nodes WHERE exploration_id=$1 AND kind='hint' AND payload->>'cve_id'=$2`,
+		task.ExplorationID, cveID).Scan(&hintText); err != nil || !strings.Contains(hintText, "CVE 情报") {
+		t.Fatalf("hint 节点缺失或文本错: %q %v", hintText, err)
+	}
+
+	// 幂等重跑：同窗再跑 → 全部台账去重（Emitted=0）。
+	stats, err = srv.RunCVEMatchBatch(ctx, watermark)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Swept != 1 || stats.Emitted != 0 || stats.Deduped != 1 {
+		t.Fatalf("重跑必须台账去重: %+v", stats)
+	}
+
+	// 上游 5xx → 整批报错（调用方不推进水位）。
+	f.status = http.StatusInternalServerError
+	if _, err := srv.RunCVEMatchBatch(ctx, watermark); err == nil {
+		t.Fatal("上游故障必须整批报错")
+	}
+
+	// 未配置 → 静默降级零错误。
+	t.Setenv("CVE_MCP_URL", "")
+	stats, err = srv.RunCVEMatchBatch(ctx, watermark)
+	if err != nil || !stats.Unavailable {
+		t.Fatalf("未配置必须 Unavailable 零错误: %+v %v", stats, err)
+	}
+
+	// 零水位 → fail-closed 报错。
+	if _, err := srv.RunCVEMatchBatch(ctx, time.Time{}); err == nil {
+		t.Fatal("零水位必须报错（绝不全库回扫）")
+	}
+}
+
+// scheduler 触发闸：节流间隔内零动作；首跑种子 window 水位；互斥单轮。
+func TestSchedulerCVEMatchGate(t *testing.T) {
+	pg := cveTestPG(t)
+	srv := &Server{m: &Manager{pg: pg}}
+	sc := newScheduler(srv)
+	sc.now = func() time.Time { return time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC) }
+
+	t.Cleanup(func() {
+		_, _ = pg.Exec(`DELETE FROM scheduler_state WHERE key IN ('last_cve_match_sweep','last_cve_match_window')`)
+	})
+	_, _ = pg.Exec(`DELETE FROM scheduler_state WHERE key IN ('last_cve_match_sweep','last_cve_match_window')`)
+
+	// 首跑：种子两个水位键；CVE_MCP_URL 未配置 → 批次静默降级（goroutine 里跑完）。
+	t.Setenv("CVE_MCP_URL", "")
+	sc.maybeCVEMatch()
+	if sc.mustState(schedKeyCVEMatchSweep) == "" || sc.mustState(schedKeyCVEMatchWindow) == "" {
+		t.Fatal("首跑必须种子水位键")
+	}
+	// 节流间隔内：零动作（sweep 水位不变）。
+	first := sc.mustState(schedKeyCVEMatchSweep)
+	sc.now = func() time.Time { return time.Date(2026, 3, 1, 12, 5, 0, 0, time.UTC) }
+	sc.maybeCVEMatch()
+	if got := sc.mustState(schedKeyCVEMatchSweep); got != first {
+		t.Fatalf("节流间隔内不得推进 sweep 水位: %s → %s", first, got)
+	}
+	// 越过间隔：sweep 推进（批次静默降级，window 保持）。
+	sc.now = func() time.Time { return time.Date(2026, 3, 1, 12, 30, 0, 0, time.UTC) }
+	sc.maybeCVEMatch()
+	if got := sc.mustState(schedKeyCVEMatchSweep); got == first {
+		t.Fatal("越过间隔必须推进 sweep 水位")
+	}
+	// 等 goroutine 收尾，window 不被 Unavailable 批次改写。
+	time.Sleep(150 * time.Millisecond)
+	if got := sc.mustState(schedKeyCVEMatchWindow); got != "2026-03-01T12:00:00Z" {
+		t.Fatalf("window 水位不应被改写: %q", got)
 	}
 }

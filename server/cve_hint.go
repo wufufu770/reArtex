@@ -23,6 +23,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/cveintel"
 	"github.com/Autumn-27/artex/db"
@@ -30,6 +31,14 @@ import (
 
 // cveHintMaxPerTaskPerBatch 单批同步对同一任务的 hint 上限（原卡默认 20）。
 const cveHintMaxPerTaskPerBatch = 20
+
+// cveMatchBatchMax 单批枚举 CVE 上限（sidecar search 的 limit 硬顶 100）；
+// cveMatchTokensMax 单 CVE 产品 token 上限（token 风暴防线：一个 CVE 的区间包名
+// 可能一大把，取规范化后的前 8 个，顺序＝区间原始顺序）。
+const (
+	cveMatchBatchMax  = 100
+	cveMatchTokensMax = 8
+)
 
 // CVEHintEmitStats 是一次批量发出的统计（调用方记日志用）。
 type CVEHintEmitStats struct {
@@ -142,6 +151,130 @@ func (s *Server) EmitCVEHints(ctx context.Context, matches []db.AssetMatch, rec 
 			perTask[taskID]++
 			stats.Emitted++
 		}
+	}
+	return stats, nil
+}
+
+// ---------------------------------------------------------------------------
+// B-04G：新 CVE 批次触发匹配（同步批次 → 匹配器 → hint 发出的调度原语）
+// ---------------------------------------------------------------------------
+
+// CVEBatchStats 是一次批次的汇总（调用方记日志）。
+type CVEBatchStats struct {
+	Swept         int  // 枚举到的 CVE 数
+	NoTokens      int  // 规范化后无产品 token 跳过（含糊标题/无区间包名——绝不猜）
+	MatchedAssets int  // 匹配出（受影响/可能受影响）的资产次
+	Emitted       int  // 发出的 hint 数
+	Deduped       int  // 台账去重数
+	Throttled     int  // 单任务节流数
+	Skipped       int  // 任务缺失/范围拒绝等跳过数
+	Unavailable   bool // CVE_MCP_URL 未配置（B-01E 静默降级，调用方记一次日志）
+}
+
+// cveTokensFromRecord 从 CVE 情报记录提取产品 token：①区间包名（结构化优先，
+// 逐个过 NormalizeTechToken + IsValidTechTokenQuery 合同过滤）；②区间零产出时
+// 回落标题（单 token 尝试）。去重保序（区间原始顺序），封顶 cveMatchTokensMax。
+// 含糊包名/标题被规范化层拒绝（OK=false）——绝不猜产品。
+func cveTokensFromRecord(rec *cveintel.Record) []string {
+	tokens := make([]string, 0, cveMatchTokensMax)
+	seen := make(map[string]bool, cveMatchTokensMax)
+	add := func(raw string) {
+		if len(tokens) >= cveMatchTokensMax {
+			return
+		}
+		tt := db.NormalizeTechToken(raw)
+		if !tt.OK || !db.IsValidTechTokenQuery(tt.Product) || seen[tt.Product] {
+			return
+		}
+		seen[tt.Product] = true
+		tokens = append(tokens, tt.Product)
+	}
+	for _, r := range rec.AffectedRanges {
+		add(r.Package)
+	}
+	if len(tokens) == 0 {
+		add(rec.Title)
+	}
+	return tokens
+}
+
+// cveRangesFromRecord 把情报记录的受影响区间转成 B-05 精判输入（cveintel.Range；
+// Package 不进精判——纯求值只消费区间与生态；区间级 ecosystem 缺省回落顶层）。
+func cveRangesFromRecord(rec *cveintel.Record) ([]cveintel.Range, string) {
+	ranges := make([]cveintel.Range, 0, len(rec.AffectedRanges))
+	eco := ""
+	for _, a := range rec.AffectedRanges {
+		ranges = append(ranges, cveintel.Range{
+			From:      a.From,
+			To:        a.To,
+			Fixed:     a.Fixed,
+			Ecosystem: a.Ecosystem,
+		})
+		if eco == "" && strings.TrimSpace(a.Ecosystem) != "" {
+			eco = a.Ecosystem
+		}
+	}
+	return ranges, eco
+}
+
+// RunCVEMatchBatch 跑一轮「新 CVE → 反向匹配 → hint」批次（B-04G）：按
+// published_after 时间窗枚举（publishedAfter=水位，RFC3339 UTC 由调用方格式化），
+// 逐 CVE 提取产品 token → MatchCVEToAssets（真实 cveintel 客户端作精判器——
+// B-05 ranges 纯求值经 sidecar，单体零复制判定）→ EmitCVEHints。
+//   - CVE_MCP_URL 未配置 ⇒ Unavailable=true 零错误返回（B-01E 静默降级；
+//     调用方每轮至多记一次日志）；
+//   - 上游故障/协议错误 ⇒ 整批报错（调用方【不推进水位】，下轮重试同窗）；
+//   - 窗口饱和（>100 条）时按 sidecar 既有排序（CVSS 降序）优先高价值子集——
+//     legacy 面无按时间排序枚举，低 CVSS 滞留项属如实申报的已知取舍（steady
+//     state 下 15 分钟窗远小于 100，饱和只在批量导入/首扫出现）；
+//   - 批次自身幂等：台账去重在 Emit 层兜底，同窗重跑零重复 hint。
+func (s *Server) RunCVEMatchBatch(ctx context.Context, publishedAfter time.Time) (CVEBatchStats, error) {
+	var stats CVEBatchStats
+	if publishedAfter.IsZero() {
+		return stats, fmt.Errorf("cve-batch: publishedAfter 水位必填（绝不全库回扫）")
+	}
+	cl, err := cveIntelClient()
+	if err != nil {
+		if strings.Contains(err.Error(), "CVE_MCP_URL") {
+			stats.Unavailable = true
+			return stats, nil
+		}
+		return stats, fmt.Errorf("cve-batch: 客户端构造失败: %w", err)
+	}
+	if s.m == nil || s.m.pg == nil {
+		return stats, fmt.Errorf("cve-batch: 数据库未就绪")
+	}
+	recs, err := cl.SearchRecent(ctx, publishedAfter.UTC().Format(time.RFC3339), cveMatchBatchMax)
+	if err != nil {
+		return stats, fmt.Errorf("cve-batch: 时间窗枚举失败: %w", err)
+	}
+	stats.Swept = len(recs)
+	for i := range recs {
+		rec := &recs[i]
+		tokens := cveTokensFromRecord(rec)
+		if len(tokens) == 0 {
+			stats.NoTokens++ // 无产品信息：绝不猜，跳过
+			continue
+		}
+		ranges, eco := cveRangesFromRecord(rec)
+		matches, err := s.m.pg.MatchCVEToAssets(ctx, cl, db.CVEMatchInput{
+			CVEID:         rec.CVEID,
+			Ecosystem:     eco,
+			ProductTokens: tokens,
+			Ranges:        ranges,
+		})
+		if err != nil {
+			return stats, fmt.Errorf("cve-batch: CVE %s 匹配失败: %w", rec.CVEID, err)
+		}
+		stats.MatchedAssets += len(matches)
+		emit, err := s.EmitCVEHints(ctx, matches, rec)
+		if err != nil {
+			return stats, fmt.Errorf("cve-batch: CVE %s hint 发出失败: %w", rec.CVEID, err)
+		}
+		stats.Emitted += emit.Emitted
+		stats.Deduped += emit.Deduped
+		stats.Throttled += emit.Throttled
+		stats.Skipped += emit.Skipped
 	}
 	return stats, nil
 }
