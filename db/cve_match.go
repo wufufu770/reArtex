@@ -37,8 +37,11 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	_ "embed"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Autumn-27/artex/cveintel"
 )
@@ -573,4 +576,81 @@ ORDER BY a.id, t.id`, ids)
 		return nil, err
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// B-04E：CVE hint 去重持久层（cve_hints 台账，同一（任务，资产，CVE）只挂一次）
+// ---------------------------------------------------------------------------
+
+//go:embed schema_cve_match.sql
+var cveMatchSchemaSQL string
+
+// cveMatchSchemaReady 与 bizSchemaReady 同款：每个连接只应用一次 DDL。
+var cveMatchSchemaReady sync.Map
+
+// EnsureCVEMatchSchema 应用 cve_hints 的幂等 DDL（schema_cve_match.sql；
+// db/schema.sql 是 RESERVED，见该文件头注释）。
+func (d *DB) EnsureCVEMatchSchema() error {
+	if _, ok := cveMatchSchemaReady.Load(d.DB); ok {
+		return nil
+	}
+	if _, err := d.Exec(cveMatchSchemaSQL); err != nil {
+		return fmt.Errorf("应用 CVE hint 去重 schema 失败: %w", err)
+	}
+	cveMatchSchemaReady.Store(d.DB, struct{}{})
+	return nil
+}
+
+// ensureCVEMatchSchema 是访问层幂等入口：首次使用补 DDL，之后只是查表。
+func (d *DB) ensureCVEMatchSchema() error { return d.EnsureCVEMatchSchema() }
+
+// HasCVEHint 去重快速路径：该（任务，资产，CVE）是否已挂过 hint。重跑同步
+// 在发出层先查这里零成本跳过；唯一约束是最终闸。
+func (d *DB) HasCVEHint(taskID, assetID int64, cveID string) (bool, error) {
+	if taskID <= 0 || assetID <= 0 || strings.TrimSpace(cveID) == "" {
+		return false, fmt.Errorf("cve_hints: task/asset id 必须为正且 cve_id 必填")
+	}
+	if err := d.ensureCVEMatchSchema(); err != nil {
+		return false, err
+	}
+	var exists bool
+	err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM cve_hints WHERE task_id=$1 AND asset_id=$2 AND cve_id=$3)`,
+		taskID, assetID, cveID).Scan(&exists)
+	return exists, err
+}
+
+// RecordCVEHint 在 hint 发出成功后落台账。返回 inserted=false 表示该三元组
+// 已存在（重跑/并发批次收敛——行保持首见不变，绝不覆盖）。纪律：
+//   - verdict 只收 affected/maybe（not_affected 在 B-04C 已剔除，数据层 CHECK
+//     再封一道）；
+//   - nodeID 必须为正：只有真的发出了 hint 节点才落行——发出失败的批次不留
+//     占位，下批重试（绝不因台账占位而丢 hint）。
+func (d *DB) RecordCVEHint(taskID, assetID int64, cveID, verdict string, nodeID int64) (bool, error) {
+	if taskID <= 0 || assetID <= 0 || strings.TrimSpace(cveID) == "" {
+		return false, fmt.Errorf("cve_hints: task/asset id 必须为正且 cve_id 必填")
+	}
+	switch RangeVerdict(verdict) {
+	case VerdictAffected, VerdictMaybe:
+	default:
+		return false, fmt.Errorf("cve_hints: verdict %q 非法（只收 affected/maybe，not_affected 绝不落台账）", verdict)
+	}
+	if nodeID <= 0 {
+		return false, fmt.Errorf("cve_hints: node_id 必须为正（只在 hint 真实发出后落行）")
+	}
+	if err := d.ensureCVEMatchSchema(); err != nil {
+		return false, err
+	}
+	var id int64
+	err := d.QueryRow(`
+INSERT INTO cve_hints(task_id, asset_id, cve_id, verdict, node_id)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (task_id, asset_id, cve_id) DO NOTHING
+RETURNING id`, taskID, assetID, cveID, verdict, nodeID).Scan(&id)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil // 已存在：重跑/并发收敛，首见行保持不变
+	}
+	return false, err
 }

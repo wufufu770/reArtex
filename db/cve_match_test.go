@@ -564,3 +564,76 @@ func TestMatchCVEToAssetsTaskOwnership(t *testing.T) {
 		t.Fatalf("终态任务后归属必须清空: %+v", matches)
 	}
 }
+
+// ---------- B-04E：CVE hint 去重台账 ----------
+
+// 同一（任务，资产，CVE）只落一行：首见插入、重放收敛、三元组维度隔离、
+// verdict/node_id fail-closed 闸。
+func TestCVEHintDedup(t *testing.T) {
+	d, _, _ := testSetup(t)
+	defer d.Close()
+	if err := d.EnsureCVEMatchSchema(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM cve_hints WHERE cve_id LIKE 'CVE-2021-44228-TEST%' OR cve_id='CVE-2024-TEST'`)
+	})
+
+	const taskID, assetID = int64(987001), int64(987002)
+
+	// ① 首见：未挂过 → 插入成功。
+	exists, err := d.HasCVEHint(taskID, assetID, "CVE-2021-44228-TEST")
+	if err != nil || exists {
+		t.Fatalf("新三元组应不存在: %v %v", exists, err)
+	}
+	inserted, err := d.RecordCVEHint(taskID, assetID, "CVE-2021-44228-TEST", "affected", 555001)
+	if err != nil || !inserted {
+		t.Fatalf("首见应插入: %v %v", inserted, err)
+	}
+	exists, err = d.HasCVEHint(taskID, assetID, "CVE-2021-44228-TEST")
+	if err != nil || !exists {
+		t.Fatalf("落账后应命中: %v %v", exists, err)
+	}
+
+	// ② 重放：同三元组再落 → 收敛不覆盖（首见 verdict/node 保持）。
+	inserted, err = d.RecordCVEHint(taskID, assetID, "CVE-2021-44228-TEST", "maybe", 555999)
+	if err != nil || inserted {
+		t.Fatalf("重放必须收敛: %v %v", inserted, err)
+	}
+	var verdict string
+	var nodeID int64
+	if err := d.QueryRow(`SELECT verdict, node_id FROM cve_hints WHERE task_id=$1 AND asset_id=$2 AND cve_id=$3`,
+		taskID, assetID, "CVE-2021-44228-TEST").Scan(&verdict, &nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if verdict != "affected" || nodeID != 555001 {
+		t.Fatalf("重放必须保持首见行: %s %d", verdict, nodeID)
+	}
+
+	// ③ 维度隔离：换任务 / 换 CVE 各自成行。
+	inserted, err = d.RecordCVEHint(987003, assetID, "CVE-2021-44228-TEST", "maybe", 555002)
+	if err != nil || !inserted {
+		t.Fatalf("换任务应独立成行: %v %v", inserted, err)
+	}
+	inserted, err = d.RecordCVEHint(taskID, assetID, "CVE-2024-TEST", "maybe", 555003)
+	if err != nil || !inserted {
+		t.Fatalf("换 CVE 应独立成行: %v %v", inserted, err)
+	}
+
+	// ④ fail-closed：not_affected / node_id=0 / 非法 id / 空 cve_id 全拒绝。
+	if _, err := d.RecordCVEHint(taskID, assetID, "CVE-2021-44228-TEST-X1", "not_affected", 555004); err == nil {
+		t.Fatal("not_affected 绝不落台账（数据层 CHECK 同向）")
+	}
+	if _, err := d.RecordCVEHint(taskID, assetID, "CVE-2021-44228-TEST-X2", "affected", 0); err == nil {
+		t.Fatal("node_id=0 必须拒绝（只在真实发出后落行）")
+	}
+	if _, err := d.RecordCVEHint(0, assetID, "CVE-2021-44228-TEST-X3", "affected", 1); err == nil {
+		t.Fatal("task_id=0 必须拒绝")
+	}
+	if _, err := d.RecordCVEHint(taskID, assetID, "  ", "affected", 1); err == nil {
+		t.Fatal("空 cve_id 必须拒绝")
+	}
+	if _, err := d.HasCVEHint(taskID, assetID, ""); err == nil {
+		t.Fatal("HasCVEHint 空 cve_id 必须拒绝")
+	}
+}
