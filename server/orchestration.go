@@ -45,6 +45,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.edgeTools()...)     // 偏锋探索工具(EDGE；绑定矩阵见 seedEdgeTools)
 	tools = append(tools, s.mpTools()...)       // 小程序渗透工具(MP；token 池作用域工具，绑 pentest/worker/auto/mainagent)
 	tools = append(tools, s.arbiterTools()...)  // 意图仲裁工具(0.14.1；绑 arbiter，宿主落笔)
+	tools = append(tools, s.cveTools()...)      // CVE 情报只读工具(B-03G；经 cveintel 客户端走 sidecar，默认零绑定，绑定后走 deferred 披露)
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -59,6 +60,13 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	for _, t := range rows {
 		if t.Deferred && t.Enabled {
 			deferred[t.Key] = t.Agents
+		}
+	}
+	// CVE 情报四工具（B-03G）：绑定后一律走 deferred 披露（代码常量语义）——
+	// schema 不进提示词、名字进 deferred 块、按需经 SearchExtraTools 披露。
+	for name, agents := range s.cveDeferredBinds() {
+		if len(agents) > 0 {
+			deferred[name] = agents
 		}
 	}
 	return tools, deferred
@@ -636,6 +644,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.syncEdgeRegistry()           // 方法论配置写穿运行时注册表（0.15.4：启停/优先级/本体覆盖+自定义，轮换读到合并态）
 	s.seedMpTools()                // 小程序 token 池工具播种（绑 pentest/worker/auto/mainagent）
 	s.seedArbiterTools()           // 意图仲裁工具播种（0.14.1，绑 arbiter）
+	s.seedCveTools()               // CVE 情报四工具播种（B-03G，默认零绑定；绑定后 deferred 披露）
 	s.ensureMpArtifactsDir()       // 产物根目录（工作目录纪律：data_dir/artifacts/miniprogram）
 	s.seedTaskEscalationBindings() // 升级提议工具补绑 auto/mainagent（0.15.44，一次性）
 }
