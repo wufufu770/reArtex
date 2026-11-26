@@ -24,9 +24,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -215,6 +217,197 @@ func sortCveFeedItems(items []CVEFeedItem) {
 		}
 		return x.CVEID < y.CVEID
 	})
+}
+
+// ── B-07B：显式 dispatch（用户选定 (CVE, task_ids) 挂 hint）─────────────────
+//
+// 纪律：只有显式用户操作才写 hint（GET feed 永不自动 dispatch）；写路径只走
+// B-04F EmitCVEHints（其内部 AddNodeInScope = 最强授权边 + cve_hints 台账
+// 幂等）——绝不直写 exploration_nodes 或 findings；不自动创建任务（建验证
+// 任务只能走现有人工建任务接口）；已挂过幂等返回；逐项报告成功/跳过/失败，
+// 绝不把局部失败伪装成全部成功。
+
+const (
+	// cveFeedDispatchMaxTasks 单次 dispatch 任务数上限（请求体预算）。
+	cveFeedDispatchMaxTasks = 20
+	// cveFeedDispatchMaxBody 请求体大小上限（不可信输入防御）。
+	cveFeedDispatchMaxBody = 64 << 10
+)
+
+// cveFeedDispatchRe 是 dispatch 入口的 CVE ID 形态闸（fail-closed）。
+var cveFeedDispatchRe = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
+
+// CVEFeedDispatchItem 是单任务 dispatch 结果（逐项报告）。
+type CVEFeedDispatchItem struct {
+	TaskID    int64  `json:"task_id"`
+	Status    string `json:"status"` // emitted|deduped|skipped|throttled|empty|failed
+	Emitted   int    `json:"emitted"`
+	Deduped   int    `json:"deduped"`
+	Throttled int    `json:"throttled"`
+	Skipped   int    `json:"skipped"`
+	Detail    string `json:"detail,omitempty"` // 失败/跳过原因（脱敏）
+}
+
+// CVEFeedDispatchResult 是 dispatch 响应契约。
+type CVEFeedDispatchResult struct {
+	CVEID string                `json:"cve_id"`
+	OK    bool                  `json:"ok"` // 任一任务 failed ⇒ false（局部失败不伪装）
+	Items []CVEFeedDispatchItem `json:"items"`
+}
+
+// cveFeedDispatchReq 是 dispatch 请求体（用户选定 (CVE, task_ids)）。
+type cveFeedDispatchReq struct {
+	CVEID   string  `json:"cve_id"`
+	TaskIDs []int64 `json:"task_ids"`
+}
+
+// cveFeedDispatch 是 POST /api/cve/feed/dispatch 的处理体。
+func (s *Server) cveFeedDispatch(w http.ResponseWriter, r *http.Request) {
+	var req cveFeedDispatchReq
+	body := http.MaxBytesReader(w, r.Body, cveFeedDispatchMaxBody)
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		writeErr(w, 400, "请求体非法（期望 {cve_id, task_ids[]}）")
+		return
+	}
+	cveID := strings.ToUpper(strings.TrimSpace(req.CVEID))
+	if !cveFeedDispatchRe.MatchString(cveID) {
+		writeErr(w, 400, "cve_id 非法形态（期望 CVE-YYYY-NNNN…）")
+		return
+	}
+	tasks, err := cveFeedDispatchTasks(req.TaskIDs)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if s.m == nil || s.m.pg == nil {
+		writeErr(w, 500, "cve feed 存储不可用")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), cveFeedTimeout)
+	defer cancel()
+
+	out := CVEFeedDispatchResult{CVEID: cveID, OK: true, Items: []CVEFeedDispatchItem{}}
+
+	// 任务预检（任务归属：不存在/已删除的逐项 failed——不整单 400，逐项报告）。
+	alive := map[int64]bool{}
+	for _, tid := range tasks {
+		t, err := s.m.pg.GetTask(tid)
+		alive[tid] = err == nil && t != nil
+	}
+
+	cl, err := cveIntelClient()
+	if err != nil {
+		if strings.Contains(err.Error(), "CVE_MCP_URL") {
+			writeErr(w, 503, "CVE 服务未配置（CVE_MCP_URL 为空）")
+			return
+		}
+		writeErr(w, 500, "cve 客户端构造失败")
+		return
+	}
+	// 情报记录：not-found ⇒ 404 显式（绝不伪造 hint）；上游失败 ⇒ 503。
+	rec, err := cl.Lookup(ctx, cveID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[cve-feed] dispatch %s lookup 失败: %v\n", cveID, err)
+		writeErr(w, 503, "cve feed 上游不可用")
+		return
+	}
+	if rec == nil {
+		writeErr(w, 404, "CVE 不在本地情报库（先同步或换编号）")
+		return
+	}
+	// 重新匹配（B-04B/B-04C 链）：feed 视图不落库，dispatch 以当前匹配现状
+	// 为准——绝不回放陈旧匹配结果。
+	ranges, eco := cveRangesFromRecord(rec)
+	matches, err := s.m.pg.MatchCVEToAssets(ctx, cl, db.CVEMatchInput{
+		CVEID:         cveID,
+		Ecosystem:     eco,
+		ProductTokens: cveTokensFromRecord(rec),
+		Ranges:        ranges,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[cve-feed] dispatch %s 匹配链失败: %v\n", cveID, err)
+		writeErr(w, 503, "cve feed 匹配链失败")
+		return
+	}
+
+	for _, tid := range tasks {
+		item := CVEFeedDispatchItem{TaskID: tid, Status: "failed"}
+		if !alive[tid] {
+			item.Detail = "任务不存在或已删除"
+			out.Items = append(out.Items, item)
+			out.OK = false
+			continue
+		}
+		// 只保留归属该任务的命中资产（TaskIDs 含 tid）——匹配是资产级全局的，
+		// dispatch 是任务级显式操作。
+		var sub []db.AssetMatch
+		for i := range matches {
+			m := matches[i]
+			if !containsInt64(m.TaskIDs, tid) {
+				continue
+			}
+			m.TaskIDs = []int64{tid}
+			sub = append(sub, m)
+		}
+		if len(sub) == 0 {
+			item.Status = "empty"
+			item.Detail = "无命中资产（资产未挂靠该任务或指纹未命中）"
+			out.Items = append(out.Items, item)
+			continue
+		}
+		stats, err := s.EmitCVEHints(ctx, sub, rec)
+		item.Emitted, item.Deduped, item.Throttled, item.Skipped =
+			stats.Emitted, stats.Deduped, stats.Throttled, stats.Skipped
+		switch {
+		case err != nil:
+			item.Status = "failed"
+			item.Detail = err.Error()
+			out.OK = false
+		case stats.Emitted > 0:
+			item.Status = "emitted"
+		case stats.Deduped > 0:
+			item.Status = "deduped"
+		case stats.Throttled > 0:
+			item.Status = "throttled"
+		default:
+			item.Status = "skipped"
+			item.Detail = "锚点未过任务范围判定或任务无探索图"
+		}
+		out.Items = append(out.Items, item)
+	}
+	writeJSON(w, 200, out)
+}
+
+// cveFeedDispatchTasks 校验并归一 task_ids：非空、逐项正数、去重保序、
+// 封顶 cveFeedDispatchMaxTasks（fail-closed 400）。
+func cveFeedDispatchTasks(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("task_ids 不能为空（显式操作必须指明目标任务）")
+	}
+	if len(ids) > cveFeedDispatchMaxTasks {
+		return nil, fmt.Errorf("task_ids 超上限 %d", cveFeedDispatchMaxTasks)
+	}
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("task_ids 含非法值（必须正整数）")
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func containsInt64(list []int64, v int64) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func cveFeedTopCVSS(it *CVEFeedItem) float64 {

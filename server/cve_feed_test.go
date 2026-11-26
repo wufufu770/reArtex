@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,6 +211,13 @@ func TestCveFeedRouteAuth(t *testing.T) {
 	if rec.Code != 401 {
 		t.Fatalf("无 token 应 401（证明路由在 requireAuth 内）: %d %s", rec.Code, rec.Body.String())
 	}
+	// B-07B：POST dispatch 同在鉴权面内——无 token 401。
+	recD := httptest.NewRecorder()
+	h.ServeHTTP(recD, httptest.NewRequest(http.MethodPost, "/api/cve/feed/dispatch",
+		strings.NewReader(`{"cve_id":"CVE-2021-44228","task_ids":[1]}`)))
+	if recD.Code != 401 {
+		t.Fatalf("dispatch 无 token 应 401: %d %s", recD.Code, recD.Body.String())
+	}
 	// 有效 token：进处理体（未配置 → 200 显式 unavailable）。
 	req := httptest.NewRequest(http.MethodGet, "/api/cve/feed", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -225,4 +233,156 @@ func TestCveFeedRouteAuth(t *testing.T) {
 	if !out.Unavailable {
 		t.Fatalf("未配置必须显式 unavailable: %s", rec2.Body.String())
 	}
+}
+
+// ── B-07B：显式 dispatch 验收 ───────────────────────────────────────────────
+
+// dispatchPost 直调处理体并解析响应。
+func dispatchPost(t *testing.T, srv *Server, body string) (*httptest.ResponseRecorder, CVEFeedDispatchResult) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/cve/feed/dispatch", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.cveFeedDispatch(rec, req)
+	var out CVEFeedDispatchResult
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+// 请求体 fail-closed：坏 JSON/非法 CVE/空列表/超上限/非法 ID 全 400。
+func TestCveFeedDispatchValidation(t *testing.T) {
+	srv := &Server{}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"坏 JSON", `{"cve_id":`},
+		{"非法 CVE", `{"cve_id":"log4j","task_ids":[1]}`},
+		{"空列表", `{"cve_id":"CVE-2021-44228","task_ids":[]}`},
+		{"超上限", `{"cve_id":"CVE-2021-44228","task_ids":[` + twentyOneIDs + `]}`},
+		{"零 ID", `{"cve_id":"CVE-2021-44228","task_ids":[0]}`},
+		{"负 ID", `{"cve_id":"CVE-2021-44228","task_ids":[-5]}`},
+	} {
+		rec, _ := dispatchPost(t, srv, tc.body)
+		if rec.Code != 400 {
+			t.Fatalf("%s 应 400: %d %s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+const twentyOneIDs = `1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21`
+
+// 全链：显式 dispatch → B-04F EmitCVEHints → hint 落位 → findings 不变 →
+// 重复请求幂等（deduped）→ 部分失败如实（未知任务 failed，ok:false）。
+func TestCveFeedDispatchLifecycle(t *testing.T) {
+	pg := cveTestPG(t)
+	srv := &Server{m: &Manager{pg: pg}}
+
+	task, err := pg.CreateTask("cve-feed-dispatch", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pg.DeleteTask(task.ID)
+		_, _ = pg.Exec(`DELETE FROM cve_hints WHERE task_id=$1`, task.ID)
+	})
+
+	assetID, err := pg.Assets().UpsertHTTPService(db.UpsertHTTPServiceReq{
+		URL:          "https://cvedispatch.example.com/",
+		Technologies: []string{"Apache Log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pg.Assets().DeleteByIDs([]int64{assetID}) })
+	if _, err := pg.Assets().AttachAssetsToTask(task.ID, []int64{assetID}, "B-07B 测试挂靠"); err != nil {
+		t.Fatal(err)
+	}
+	// 授权边：EmitCVEHints 走 AddNodeInScope，锚点必须落在任务声明的 task_scope
+	// 内（挂靠≠scope——B-04F 既有仓库现状：root_domain 分类器不一致，直插
+	// kind='subdomain' 行精确覆盖资产 domain）。
+	if _, err := pg.Exec(`INSERT INTO task_scope(task_id, kind, domain, source, reason) VALUES ($1,'subdomain','cvedispatch.example.com','manual','B-07B 测试范围')`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM task_scope WHERE task_id=$1 AND kind='subdomain'`, task.ID) })
+
+	// fake sidecar 默认面：cve_lookup 回 CVE-2021-44228（title Log4j→token 回落、
+	// 无区间→B-04C maybe 判定链——EmitCVEHints 接受 maybe）；match_component
+	// 默认 affected（本链无区间不触发求值）。不触碰 cve_tools_test.go。
+	f := newFakeCveMCP(t)
+	t.Setenv("CVE_MCP_URL", f.srv.URL)
+
+	findingsBefore := findingsCount(t, pg)
+
+	rec, out := dispatchPost(t, srv, fmt.Sprintf(`{"cve_id":"CVE-2021-44228","task_ids":[%d]}`, task.ID))
+	if rec.Code != 200 || !out.OK || len(out.Items) != 1 {
+		t.Fatalf("dispatch 应 200 ok 恰 1 项: code=%d %+v %s", rec.Code, out, rec.Body.String())
+	}
+	if out.Items[0].Status != "emitted" || out.Items[0].Emitted != 1 {
+		t.Fatalf("应 emitted 1: %+v", out.Items[0])
+	}
+	// 台账落位（幂等源）。
+	if hinted, err := pg.HasCVEHint(task.ID, assetID, "CVE-2021-44228"); err != nil || !hinted {
+		t.Fatalf("台账应落位: %v %v", hinted, err)
+	}
+	// findings 不变（dispatch 绝不写 findings——卡验收）。
+	if after := findingsCount(t, pg); after != findingsBefore {
+		t.Fatalf("findings 必须不变: %d → %d", findingsBefore, after)
+	}
+	// 重复请求幂等：deduped。
+	rec2, out2 := dispatchPost(t, srv, fmt.Sprintf(`{"cve_id":"CVE-2021-44228","task_ids":[%d]}`, task.ID))
+	if rec2.Code != 200 || !out2.OK || out2.Items[0].Status != "deduped" || out2.Items[0].Deduped != 1 {
+		t.Fatalf("重复 dispatch 应幂等 deduped: %d %+v", rec2.Code, out2.Items[0])
+	}
+	// 部分失败如实：未知任务 failed、有效任务 deduped、ok:false。
+	rec3, out3 := dispatchPost(t, srv, fmt.Sprintf(`{"cve_id":"CVE-2021-44228","task_ids":[%d,999999999]}`, task.ID))
+	if rec3.Code != 200 || out3.OK {
+		t.Fatalf("部分失败必须 ok:false: %d %+v", rec3.Code, out3)
+	}
+	byTask := map[int64]CVEFeedDispatchItem{}
+	for _, it := range out3.Items {
+		byTask[it.TaskID] = it
+	}
+	if byTask[task.ID].Status != "deduped" {
+		t.Fatalf("有效任务应 deduped: %+v", byTask[task.ID])
+	}
+	if byTask[999999999].Status != "failed" || byTask[999999999].Detail == "" {
+		t.Fatalf("未知任务应 failed 带原因（跨租户/不存在拒绝）: %+v", byTask[999999999])
+	}
+}
+
+// 情报库无此 CVE：404 显式（绝不伪造 hint）；未配置：503。
+func TestCveFeedDispatchGuards(t *testing.T) {
+	pg := cveTestPG(t)
+	srv := &Server{m: &Manager{pg: pg}}
+
+	// 未配置：503。
+	t.Setenv("CVE_MCP_URL", "")
+	rec, _ := dispatchPost(t, srv, `{"cve_id":"CVE-2021-44228","task_ids":[1]}`)
+	if rec.Code != 503 {
+		t.Fatalf("未配置应 503: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// not-found：fake f.body 覆盖 found=false（dispatch 在 lookup 即停——match
+	// 面不被触碰）。
+	f := newFakeCveMCP(t)
+	inner := `{"schema_version":"cve_intel.v1","found":false,"cve_id":"CVE-2026-9999"}`
+	env, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{"content": []map[string]any{{"type": "text", "text": inner}}},
+	})
+	f.body = string(env)
+	t.Setenv("CVE_MCP_URL", f.srv.URL)
+	rec2, _ := dispatchPost(t, srv, `{"cve_id":"CVE-2026-9999","task_ids":[1]}`)
+	if rec2.Code != 404 {
+		t.Fatalf("情报库无此 CVE 应 404: %d %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func findingsCount(t *testing.T, pg *db.DB) int {
+	t.Helper()
+	var n int
+	if err := pg.QueryRow(`SELECT COUNT(*) FROM findings`).Scan(&n); err != nil {
+		t.Fatalf("findings 计数: %v", err)
+	}
+	return n
 }

@@ -1031,7 +1031,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)
-	mux.HandleFunc("GET /api/cve/feed", s.cveFeed) // B-07A：CVE Feed 只读聚合（requireAuth 内，GET 无隐式写入）
+	mux.HandleFunc("GET /api/cve/feed", s.cveFeed)   // B-07A：CVE Feed 只读聚合（requireAuth 内，GET 无隐式写入）
+	mux.HandleFunc("POST /api/cve/feed/dispatch", s.cveFeedDispatch) // B-07B：显式 dispatch 挂 hint（B-04E/F 安全链）
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
