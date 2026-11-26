@@ -42,8 +42,67 @@ forward() {
 }
 trap forward INT TERM
 
+# ── CVE 情报 sidecar（B-01F）────────────────────────────────────────────
+#
+# ./reartex-cve-mcp/reartex-cve-mcp 存在时随本脚本一起拉起：独立进程、独立
+# SQLite 文件（data/cve-mcp.db，不进单体 PostgreSQL）。发布 zip / Docker 镜像
+# 里没有这个二进制，缺失就跳过——CVE 服务不可用属情报功能降级（单体侧
+# B-01E/B-03G 处理），绝不妨碍 artex 启动。已显式配置外部 CVE_MCP_URL 的环境
+# 不重复拉本地实例（避免同机 8400 冲突）。
+#
+# 不为 sidecar 做独立守护循环：死亡后只随 artex 的重启节奏补拉一次（含「一键
+# 更新」换新二进制的场景），频率被 artex 自身的退避上限约束，不产生重试风暴；
+# sidecar 挂了 artex 照常跑。
+#
+# 监听收紧到 127.0.0.1:8400：只服务同机的 artex，不对局域网开放。
+CVE_BIN=./reartex-cve-mcp/reartex-cve-mcp
+CVE_ADDR=127.0.0.1:8400
+cve_pid=0
+cve_attempted=0
+
+start_cve_sidecar() {
+	cve_attempted=1
+	if [ -n "${CVE_MCP_URL:-}" ]; then
+		echo "[cve-mcp] 已配置外部 CVE_MCP_URL，跳过本地 sidecar"
+		return 0
+	fi
+	if [ ! -x "$CVE_BIN" ]; then
+		echo "[cve-mcp] 未找到 $CVE_BIN，跳过（情报功能降级，不影响 artex）"
+		return 0
+	fi
+	# 冻结服务地址传给 artex（单体侧消费属 B-03G；此刻无人读它，零行为变化）。
+	CVE_MCP_URL="http://$CVE_ADDR"
+	CVE_MCP_DB=./data/cve-mcp.db
+	export CVE_MCP_URL CVE_MCP_DB
+	# 全新安装时 data/ 可能还不存在（artex 首次运行才建它）：sidecar 的
+	# SQLite 打不开缺目录会直接退出——这里先建好，首次启动即健康。
+	mkdir -p ./data 2>/dev/null || true
+	"$CVE_BIN" serve "$CVE_ADDR" &
+	cve_pid=$!
+	echo "[cve-mcp] sidecar 已启动 (pid=$cve_pid, http://$CVE_ADDR)"
+}
+
+# 脚本退出的所有路径（正常退出 / INT/TERM / 循环内 exit）都收掉 sidecar。
+stop_cve_sidecar() {
+	if [ "$cve_pid" -ne 0 ]; then
+		kill -TERM "$cve_pid" 2>/dev/null || true
+	fi
+}
+trap stop_cve_sidecar EXIT
+
 delay=1
 while :; do
+	# sidecar 死亡后随 artex 重启补拉一次；首次进入或跳过场景只尝试一回，
+	# 不在循环里反复刷提示。
+	if [ "$cve_pid" -ne 0 ] && ! kill -0 "$cve_pid" 2>/dev/null; then
+		echo "[cve-mcp] sidecar 已退出，随 artex 重启补拉" >&2
+		cve_pid=0
+		cve_attempted=0
+	fi
+	if [ "$cve_attempted" -eq 0 ]; then
+		start_cve_sidecar
+	fi
+
 	"$BIN" "$@" &
 	child=$!
 

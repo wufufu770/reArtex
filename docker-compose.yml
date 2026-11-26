@@ -42,6 +42,10 @@ services:
       ARTEX_LLM_MODEL: ${ARTEX_LLM_MODEL:-}
       ARTEX_LLM_BASE_URL: ${ARTEX_LLM_BASE_URL:-}
       ARTEX_LLM_PROXY: ${ARTEX_LLM_PROXY:-}
+      # B-01F：CVE 情报 sidecar 的冻结服务地址（compose 内网服务名）。此刻单体
+      # 还没有消费方（客户端接线属 B-03G），多这一行行为零变化；sidecar 不在
+      # 或不可达时单体照常启动，不得因它阻塞。
+      CVE_MCP_URL: http://cve-mcp:8400
     secrets:
       - pg_dsn
       - pg_dsn_admin
@@ -57,8 +61,45 @@ services:
       - ./skills:/app/skills
     restart: unless-stopped
 
+  # B-01F：CVE 情报 sidecar —— 独立容器、独立数据卷（cvedata），故障不阻断
+  # artex 启动（artex 对它没有 depends_on）。不发布任何端口：服务只在 compose
+  # 内网按冻结地址 http://cve-mcp:8400 可达，宿主机与公网都摸不到。
+  # 二进制取宿主机预编译产物（构建方式见 README「CVE 情报服务」一节）；产物
+  # 缺失时本服务起不来（unhealthy 如实显示），artex 不受影响。
+  # 基线复用运行镜像：glibc 与预编译二进制兼容、自带 curl（健康检查用），
+  # 不为 sidecar 单独维护一套镜像。
+  cve-mcp:
+    image: ghcr.io/wufufu770/reartex:${ARTEX_TAG:-latest}
+    entrypoint: ["/srv/cve-mcp/reartex-cve-mcp"]
+    command: ["serve", ":8400"]
+    environment:
+      CVE_MCP_DB: /app/data/cve-mcp.db
+      # 同步凭据（可选）只经 .env 注入，不写 compose 明文：
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      # 只读挂模块目录取预编译二进制；数据走下面的独立卷，互不混写。
+      - ./reartex-cve-mcp:/srv/cve-mcp:ro
+      - cvedata:/app/data
+    healthcheck:
+      # sync-status 是两条无锁 SELECT 的只读面（B-03E 契约），当存活探针零副作用。
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8400/api/cve/sync-status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  # B-01F：CVE sidecar 独立数据卷——SQLite（cve-mcp.db）只在卷里持久化，
+  # 与单体 PostgreSQL / artex data/ 完全隔离；不把 SQLite 依赖搬进主单体库。
+  cvedata:
 
 secrets:
   # 数据库连接串：由 init-pg-dsn-secret.sh 从 .env 生成（0600，不进版本库）。

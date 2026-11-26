@@ -63,6 +63,25 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 ./start.sh
 ```
 
+### CVE 情报服务（sidecar，可选）
+
+`reartex-cve-mcp/` 是独立的只读 CVE 情报服务（MCP stdio / Streamable HTTP + 只读 REST，SQLite 本地库），作为 sidecar 随平台一起运行。**它挂了或没部署，平台照常启动**：单体经环境变量 `CVE_MCP_URL`（冻结地址）连接，不可达即按降级处理、不阻塞任务（B-01E 纪律：服务不可用绝不伪装成「没有漏洞」，单体侧消费随 B 阶段后续卡点亮）。
+
+**预编译二进制模式**（`start.sh` 已内置接线）：
+
+```bash
+cd reartex-cve-mcp && go build -o reartex-cve-mcp . && cd ..
+./start.sh
+```
+
+`start.sh` 检测到 `./reartex-cve-mcp/reartex-cve-mcp` 就会在 `127.0.0.1:8400` 拉起 sidecar（独立数据文件 `data/cve-mcp.db`），并把 `CVE_MCP_URL=http://127.0.0.1:8400` 传给 artex；二进制不存在则跳过、只打一行提示。已有外部/远端 CVE 服务时，显式设置 `CVE_MCP_URL` 再启动，脚本检测到就不拉本地实例。
+
+**Docker Compose 模式**：compose 里的 `cve-mcp` 服务同样取宿主机预编译二进制（只读挂载模块目录），**不发布任何端口**——只在 compose 内网按 `http://cve-mcp:8400` 可达（artex 容器已注入该 `CVE_MCP_URL`），宿主机与公网摸不到；数据在独立卷 `cvedata`，与单体 PostgreSQL 完全隔离（SQLite 不搬进主库）。二进制缺失时该服务起不来（unhealthy 如实显示），artex 不受影响。
+
+- 数据同步：serve 模式默认每 6h 自动同步三源（`CVE_MCP_SYNC_INTERVAL` 可调，`off` 关闭）；也可手动一次性同步：二进制模式 `./reartex-cve-mcp/reartex-cve-mcp sync-once`，compose 模式 `docker compose run --rm cve-mcp sync-once`。
+- 同步凭据（可选）用环境变量 `NVD_API_KEY` / `GITHUB_TOKEN` 注入（compose 下写进 `.env`，不写进 compose/config 明文），永不入库不落日志。
+- 资源上限：compose 侧 0.5 CPU / 256M 内存；本地模式与 artex 同机共存，无额外限制。
+
 ## 使用
 
 - 首次进入 `/setup` 设置管理员密码，之后访问 http://localhost:8787 。
