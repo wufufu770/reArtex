@@ -91,3 +91,150 @@ func TestNormalizeTechTokenNoCrossMerge(t *testing.T) {
 		}
 	}
 }
+
+// ---------- B-04B：粗筛查询护栏 + live PG 候选查询（不可用即跳过） ----------
+
+// 粗筛输入闸：token 必须满足 NormalizeTechToken 输出合同，怪形态 fail-closed。
+func TestTechTokenQueryForm(t *testing.T) {
+	valid := []string{"log4j", "utf8mb4", "log4j-core", "nginx", "s3", "a1-b2"}
+	for _, v := range valid {
+		if !techTokenQueryForm(v) {
+			t.Fatalf("合法 token %q 被拒", v)
+		}
+	}
+	invalid := []string{"", "a", "Log4j", "2fa", "log4j_", "log4j ", "log4j; DROP TABLE assets", "log4j%", "log4j_core", "apache log4j", "-abc"}
+	for _, iv := range invalid {
+		if techTokenQueryForm(iv) {
+			t.Fatalf("非法 token %q 被放行", iv)
+		}
+	}
+}
+
+// 参数 fail-closed：limit/合同校验在发查询之前拒绝（无需 PG 也真实走该分支）。
+func TestCandidateAssetsByTokensParamGuard(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	if _, err := av2.CandidateAssetsByTokens([]string{"log4j"}, 0); err == nil {
+		t.Fatal("limit=0 必须 fail-closed 报错")
+	}
+	if _, err := av2.CandidateAssetsByTokens([]string{"log4j"}, -1); err == nil {
+		t.Fatal("limit<0 必须 fail-closed 报错")
+	}
+	if _, err := av2.CandidateAssetsByTokens([]string{"log4j"}, 1001); err == nil {
+		t.Fatal("limit 超硬顶必须报错不静默夹紧")
+	}
+	if _, err := av2.CandidateAssetsByTokens([]string{"Log4j"}, 10); err == nil {
+		t.Fatal("大写 token（未经规范化）必须报错")
+	}
+	if _, err := av2.CandidateAssetsByTokens([]string{"log4j; DROP TABLE assets"}, 10); err == nil {
+		t.Fatal("注入形态 token 必须报错")
+	}
+	if _, err := av2.CandidateAssetsByTokens(make([]string, 33), 10); err == nil {
+		t.Fatal("token 数超上限必须报错")
+	}
+	got, err := av2.CandidateAssetsByTokens(nil, 10)
+	if err != nil || got != nil {
+		t.Fatalf("空 token 列表必须 (nil,nil) 零查询: %v %v", got, err)
+	}
+}
+
+// live PG：种子两个 HTTP 服务资产，验证 token 子串粗筛、大小写归一命中、
+// 多 token 去重、limit 封顶、未命中 token 零误报。
+func TestCandidateAssetsByTokens(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	idA, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cvematch-a.example.com/",
+		Technologies: []string{"Apache Log4j 2.14.0", "nginx 1.25"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idA)
+
+	idB, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cvematch-b.example.com/",
+		Technologies: []string{"nginx/1.25.3"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idB)
+
+	containsID := func(list []*Asset, id int64) bool {
+		for _, a := range list {
+			if a.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// ① 归一化 token 命中原始描述串（大小写不敏感）：log4j → 仅资产 A。
+	hits, err := av2.CandidateAssetsByTokens([]string{"log4j"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].ID != idA {
+		t.Fatalf("log4j 应恰命中资产 A（得到 %d 行）", len(hits))
+	}
+
+	// ② 多 token：log4j→A、nginx→A∪B，A 去重只出现一次，共 2 行。
+	hits, err = av2.CandidateAssetsByTokens([]string{"log4j", "nginx"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || !containsID(hits, idA) || !containsID(hits, idB) {
+		t.Fatalf("log4j+nginx 应命中 A、B 各一次（得到 %d 行）", len(hits))
+	}
+	countID := func(list []*Asset, id int64) int {
+		n := 0
+		for _, a := range list {
+			if a.ID == id {
+				n++
+			}
+		}
+		return n
+	}
+	if countID(hits, idA) != 1 {
+		t.Fatal("多 token 同资产必须去重只保留首见")
+	}
+
+	// ③ limit 封顶：limit=1 时最多 1 行。
+	hits, err = av2.CandidateAssetsByTokens([]string{"log4j", "nginx"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("limit=1 应封顶 1 行（得到 %d）", len(hits))
+	}
+
+	// ④ 未命中 token：零误报（绝不为 tomcat 造候选）。
+	hits, err = av2.CandidateAssetsByTokens([]string{"tomcat"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("tomcat 不应命中任何种子资产（得到 %d 行）", len(hits))
+	}
+
+	// ⑤ 粗筛刻意过包含：token log4j 也命中存了 "log4j-core 2.17.0" 的资产
+	// （精判收敛属 B-04C，粗筛宁滥勿缺）。
+	idC, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cvematch-c.example.com/",
+		Technologies: []string{"log4j-core 2.17.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idC)
+	hits, err = av2.CandidateAssetsByTokens([]string{"log4j"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(hits, idC) {
+		t.Fatal("粗筛应过包含命中 log4j-core 资产（精判在 B-04C 收敛）")
+	}
+}

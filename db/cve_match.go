@@ -24,8 +24,19 @@ package db
 //   - 残余风险如实申报：裸 log4j2 形态因此不出版本（点分 log4j2.17.0 能出）；
 //     该保守取舍把「误切产品名」与「漏出版本」交换为后者——漏版本在 hint 链路
 //     里只会落到 maybe（B-05 纪律），不会产生假 affected。
+//
+// 粗筛（B-04B，CandidateAssetsByTokens）：存量 assets.technologies 是原始描述串
+// （如 "Apache Log4j 2.14.0"），GIN 索引 idx_av2_technologies 的 @> 只服务
+// 「数组元素精确等值」，对归一化 token（log4j）必然 miss——故粗筛采用卡内并列
+// 选项的 token 子串包含（position(...IN lower(tech))，无 LIKE 通配符语义）：
+//   - 刻意过包含：log4j 同时命中 "log4j-core 2.17.0"——粗筛只产候选，精判
+//     （B-04C 经 B-05 ranges 纯求值）负责收敛，粗筛宁滥勿缺；
+//   - type='service' 前置过滤与部分 GIN 索引同谓词、与数据现实同界（只有
+//     HTTP 服务资产写 technologies）；子串包含不走索引是如实申报的取舍
+//     （资产表规模有界 + LIMIT 封顶，正确性优先于索引）。
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -203,4 +214,110 @@ func techSplitEmbeddedVersion(product string) (base, version string, ok bool) {
 		return "", "", false
 	}
 	return base, tail, true
+}
+
+// techTokenQueryForm 校验 token 满足 NormalizeTechToken 的输出合同：
+// 首字符小写字母、其余 [a-z0-9-]、长度 ≥2。这是粗筛查询的输入闸——上游若绕过
+// 规范化直接传原始文本，必须 fail-closed 报错（绝不静默放行怪形态进 SQL 参数），
+// 也不构造任何通配符语义（查询用 position 字面包含，非 LIKE）。
+func techTokenQueryForm(token string) bool {
+	if len(token) < 2 || token[0] < 'a' || token[0] > 'z' {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		c := token[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// candidateAssetsMaxTokens 限制单次粗筛的 token 数（多 token 逐条查询，上限防
+// 上游失控展开成查询风暴）。超限 fail-closed 报错。
+const candidateAssetsMaxTokens = 32
+
+// candidateAssetsMaxLimit 单 token 候选上限硬顶（卡要求 4 的节流前移到候选层：
+// 提前封顶单 token 命中量，防超大资产表下粗筛失控）。超限报错不静默夹紧。
+const candidateAssetsMaxLimit = 1000
+
+// CandidateAssetsByTokens 按归一化产品 token 粗筛候选资产（B-04B）：在
+// assets.technologies（TEXT[]）里做 token 子串包含匹配，返回候选资产全行。
+// 只做粗筛不做版本精判——命中是「候选」不是「受影响」，判定属 B-04C。
+//   - tokens 必须全部满足 NormalizeTechToken 输出合同（techTokenQueryForm），
+//     否则报错（含原始 token 文本，fail-closed）；
+//   - limit 必须 >0 且 ≤1000（显式参数，零默认夹带）；
+//   - 同一资产命中多个 token 时去重只保留首见；limit 是【合并结果】的全局封顶
+//     （按 token 切片顺序逐 token 查询、先到先得，超额即止不再发后续查询）——
+//     确定性输出：组内 last_seen DESC, id DESC 与 QueryByType 同序；
+//   - 空 token 列表返回 (nil, nil)，不发查询。
+func (s *AssetStore) CandidateAssetsByTokens(tokens []string, limit int) ([]*Asset, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("cve_match: limit 必须 >0，得到 %d", limit)
+	}
+	if limit > candidateAssetsMaxLimit {
+		return nil, fmt.Errorf("cve_match: limit %d 超过硬顶 %d", limit, candidateAssetsMaxLimit)
+	}
+	seen := map[string]bool{}
+	uniq := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		if !techTokenQueryForm(t) {
+			return nil, fmt.Errorf("cve_match: token %q 不满足规范化输出合同（须先过 NormalizeTechToken）", t)
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		uniq = append(uniq, t)
+	}
+	if len(uniq) == 0 {
+		return nil, nil
+	}
+	if len(uniq) > candidateAssetsMaxTokens {
+		return nil, fmt.Errorf("cve_match: token 数 %d 超上限 %d", len(uniq), candidateAssetsMaxTokens)
+	}
+
+	merged := make([]*Asset, 0, len(uniq))
+	byID := map[int64]bool{}
+	for _, token := range uniq {
+		if len(merged) >= limit {
+			break // 全局封顶：合并结果已满，不再发后续 token 查询
+		}
+		rows, err := s.db.Query(`
+SELECT id, type, company_id, array_to_json(task_ids)::text,
+       COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
+       COALESCE(c_segment::text,''), port,
+       COALESCE(icp,''), array_to_json(bound_domains)::text, array_to_json(open_ports)::text, COALESCE(record_type,''),
+       array_to_json(record_value)::text, COALESCE(bundle_id,''), COALESCE(app_name,''),
+       COALESCE(category,''), COALESCE(app_description,''), COALESCE(app_icp,''),
+       COALESCE(url,''), COALESCE(service_type,''), COALESCE(service_name,''),
+       COALESCE(favicon_mmh3,''), status_code, content_length,
+       COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
+       COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
+FROM assets
+WHERE type = 'service'
+  AND EXISTS (SELECT 1 FROM unnest(technologies) AS tech WHERE position($1 IN lower(tech)) > 0)
+ORDER BY last_seen DESC, id DESC
+LIMIT $2`, token, limit)
+		if err != nil {
+			return nil, err
+		}
+		hits, scanErr := scanAssets(rows)
+		_ = rows.Close() // 循环内查询：显式关（scanAssets 不代关，defer 会积压）
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		for _, a := range hits {
+			if byID[a.ID] {
+				continue // 多 token 同资产：去重首见
+			}
+			if len(merged) >= limit {
+				break // 全局封顶：本 token 命中已够，保留顺序先到先得
+			}
+			byID[a.ID] = true
+			merged = append(merged, a)
+		}
+	}
+	return merged, nil
 }
