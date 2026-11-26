@@ -36,8 +36,11 @@ package db
 //     （资产表规模有界 + LIMIT 封顶，正确性优先于索引）。
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/Autumn-27/artex/cveintel"
 )
 
 // TechToken 是技术栈字符串的规范化结果。OK=false 表示无法确信地提取产品名
@@ -321,3 +324,181 @@ LIMIT $2`, token, limit)
 	}
 	return merged, nil
 }
+
+// ---------------------------------------------------------------------------
+// B-04C：版本精判（粗筛候选 × B-05 ranges 纯求值）
+// ---------------------------------------------------------------------------
+
+// RangeVerdict 是 B-05 三态的本地命名（与侧车 version 包同值：affected /
+// not_affected / maybe）。侧车是独立 module 不可 import，这里只做值对齐——
+// 绝不引入第四态，判定语义完全由 B-05 纯求值器产出，本包零复制判定逻辑。
+type RangeVerdict string
+
+const (
+	VerdictAffected    RangeVerdict = "affected"
+	VerdictNotAffected RangeVerdict = "not_affected"
+	VerdictMaybe       RangeVerdict = "maybe"
+)
+
+// VersionRangeEvaluator 是 B-05 精判的最小抽象：与 cveintel.Client.EvaluateRanges
+// 同签名，真实客户端直接满足（编译期断言见 cve_match 链），测试注入 fake。
+type VersionRangeEvaluator interface {
+	EvaluateRanges(ctx context.Context, ecosystem, version string, ranges []cveintel.Range) (verdict, reason string, err error)
+}
+
+// matchCandidatesLimit 是 MatchCVEToAssets 单次粗筛候选封顶（节流前移，卡要求 4
+// 的 hint 风暴保护在候选层先收口）。
+const matchCandidatesLimit = 500
+
+// CVEMatchInput 是一次反向匹配的输入（卡骨架 CVEMatchInput）。
+//   - ProductTokens 必须全部来自 NormalizeTechToken 输出（粗筛合同闸会校验）；
+//   - Ranges 复用 B-01D 客户端的 cveintel.Range（键与 B-03D 纯求值适配层一致，
+//     零复制区间结构）；允许为空——此时全部产品命中候选判 maybe（无区间可判
+//     = 信息不足，B-05 fail-closed 同向）；
+//   - Ecosystem 是顶层组件生态（来自 CVE 情报记录）；空或侧车未知生态时纯求值
+//     fail-closed 落 maybe，绝不 not_affected。
+type CVEMatchInput struct {
+	CVEID         string
+	Ecosystem     string
+	ProductTokens []string
+	Ranges        []cveintel.Range
+}
+
+// AssetMatch 是一个候选资产的精判结果（卡骨架 AssetMatch）。
+//   - AssetDomain 是资产标识（domain → url → ip → "#id" 兜底）；
+//   - Verdict 只会是 affected 或 maybe（not_affected 已在返回前剔除）；
+//   - MatchedTech/MatchedProduct/MatchedVersion/Reason 供 B-04F hint 渲染与
+//     审计追溯（卡骨架之外的增加字段，如实申报）；
+//   - TaskIDs 由 B-04D 子卡补齐（资产→未终态任务归属）。
+type AssetMatch struct {
+	AssetID        int64
+	AssetDomain    string
+	Technologies   []string
+	Verdict        RangeVerdict
+	MatchedTech    string
+	MatchedProduct string
+	MatchedVersion string
+	Reason         string
+	TaskIDs        []int64
+}
+
+// assetMatchIdentifier 取资产标识串。
+func assetMatchIdentifier(a *Asset) string {
+	switch {
+	case a.Domain != "":
+		return a.Domain
+	case a.URL != "":
+		return a.URL
+	case a.IP != "":
+		return a.IP
+	default:
+		return fmt.Sprintf("#%d", a.ID)
+	}
+}
+
+// matchedTechToken 在资产的 technologies 里找「归一化产品命中输入 token 集」的
+// 最佳条目：优先取带版本的命中（保持 technologies 原始顺序，确定性）；全部无
+// 版本时取第一个命中。无命中返回 OK=false——粗筛子串过包含的候选（如 log4j
+// 命中 "log4j-core 2.17.0"）在此被产品等值收敛剔除，正是 B-04A「不误合并」
+// 纪律在精判层的落点。
+func matchedTechToken(a *Asset, tokens map[string]bool) (TechToken, bool) {
+	var withVer, noVer TechToken
+	for _, tech := range a.Technologies {
+		tt := NormalizeTechToken(tech)
+		if !tt.OK || !tokens[tt.Product] {
+			continue
+		}
+		if tt.Version != "" {
+			if withVer.Product == "" {
+				withVer = tt
+			}
+			continue
+		}
+		if noVer.Product == "" {
+			noVer = tt
+		}
+	}
+	if withVer.Product != "" {
+		return withVer, true
+	}
+	if noVer.Product != "" {
+		return noVer, true
+	}
+	return TechToken{}, false
+}
+
+// MatchCVEToAssets 反向匹配全链（卡骨架）：①粗筛候选（B-04B 子串包含）；
+// ②逐候选产品等值收敛 + B-05 ranges 纯求值精判（经注入的 eval，单体零复制
+// 判定逻辑）；③剔除 not_affected，只返回 affected/maybe。
+//   - eval 为 nil ⇒ 报错（精判绝不静默跳过）；
+//   - 求值出错（unavailable/protocol）⇒ 整体返回错误——「网络失败」绝不解释成
+//     「没有漏洞」，宁可整批不产 hint（B-04G 批处理记日志后跳过本批）；
+//   - 资产侧无版本号 ⇒ maybe（卡明文：不判 affected）；CVE 侧无区间 ⇒ 全部
+//     产品命中候选 maybe；
+//   - 候选封顶 matchCandidatesLimit；确定性：候选序 = 粗筛序（token 切片顺序），
+//     同资产命中条目 = technologies 原始顺序优先带版本者。
+func (d *DB) MatchCVEToAssets(ctx context.Context, eval VersionRangeEvaluator, in CVEMatchInput) ([]AssetMatch, error) {
+	if eval == nil {
+		return nil, fmt.Errorf("cve_match: 精判器 eval 必填（绝不静默跳过精判）")
+	}
+	if strings.TrimSpace(in.CVEID) == "" {
+		return nil, fmt.Errorf("cve_match: CVEID 必填")
+	}
+	tokenSet := make(map[string]bool, len(in.ProductTokens))
+	for _, t := range in.ProductTokens {
+		if !techTokenQueryForm(t) {
+			return nil, fmt.Errorf("cve_match: token %q 不满足规范化输出合同（须先过 NormalizeTechToken）", t)
+		}
+		tokenSet[t] = true
+	}
+	if len(tokenSet) == 0 {
+		return nil, nil
+	}
+
+	candidates, err := d.Assets().CandidateAssetsByTokens(in.ProductTokens, matchCandidatesLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]AssetMatch, 0, len(candidates))
+	for _, a := range candidates {
+		tt, ok := matchedTechToken(a, tokenSet)
+		if !ok {
+			continue // 产品等值收敛：子串过包含但归一化产品不在 token 集 ⇒ 剔除
+		}
+		verdict, reason := VerdictMaybe, ""
+		if tt.Version == "" {
+			reason = "资产指纹无版本号，判 maybe（绝不判 affected）"
+		} else if len(in.Ranges) == 0 {
+			reason = "CVE 情报无影响区间，判 maybe"
+		} else {
+			v, r, err := eval.EvaluateRanges(ctx, in.Ecosystem, tt.Version, in.Ranges)
+			if err != nil {
+				return nil, fmt.Errorf("cve_match: CVE %s 精判资产 #%d（%s 版本 %s）失败: %w", in.CVEID, a.ID, tt.Product, tt.Version, err)
+			}
+			switch RangeVerdict(v) {
+			case VerdictAffected, VerdictNotAffected, VerdictMaybe:
+				verdict, reason = RangeVerdict(v), r
+			default:
+				return nil, fmt.Errorf("cve_match: 精判返回非法三态 %q（B-05 契约破坏）", v)
+			}
+		}
+		if verdict == VerdictNotAffected {
+			continue // 卡骨架步骤 3：只返回 verdict != not_affected
+		}
+		out = append(out, AssetMatch{
+			AssetID:        a.ID,
+			AssetDomain:    assetMatchIdentifier(a),
+			Technologies:   a.Technologies,
+			Verdict:        verdict,
+			MatchedTech:    tt.Raw,
+			MatchedProduct: tt.Product,
+			MatchedVersion: tt.Version,
+			Reason:         reason,
+		})
+	}
+	return out, nil
+}
+
+// 编译期断言：真实 cveintel 客户端直接满足精判抽象（B-04C 经真实 sidecar 链）。
+var _ VersionRangeEvaluator = (*cveintel.Client)(nil)

@@ -1,8 +1,12 @@
 package db
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/cveintel"
 )
 
 // B-04A 验收表驱动：Apache Log4j、nginx、OpenSSL、带 vendor 前缀、无版本、
@@ -236,5 +240,196 @@ func TestCandidateAssetsByTokens(t *testing.T) {
 	}
 	if !containsID(hits, idC) {
 		t.Fatal("粗筛应过包含命中 log4j-core 资产（精判在 B-04C 收敛）")
+	}
+}
+
+// ---------- B-04C：版本精判（注入 fake 求值器，B-05 判定逻辑在侧车自测） ----------
+
+// fakeEvaluator 记录调用参数、按版本出三态（verdict 表缺版本 ⇒ maybe）。
+type fakeEvaluator struct {
+	verdicts map[string]string // version → verdict
+	reason   string
+	err      error
+	calls    [][2]string // (ecosystem, version) 调用记录
+}
+
+func (f *fakeEvaluator) EvaluateRanges(_ context.Context, eco, ver string, _ []cveintel.Range) (string, string, error) {
+	f.calls = append(f.calls, [2]string{eco, ver})
+	if f.err != nil {
+		return "", "", f.err
+	}
+	if v, ok := f.verdicts[ver]; ok {
+		return v, f.reason, nil
+	}
+	return "maybe", f.reason, nil
+}
+
+// 匹配全链：affected / maybe（无版本）/ not_affected 剔除 / 产品等值收敛剔除。
+func TestMatchCVEToAssets(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	idA, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-a.example.com/",
+		Technologies: []string{"Apache Log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idA)
+	idB, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-b.example.com/",
+		Technologies: []string{"Apache Log4j"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idB)
+	idC, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-c.example.com/",
+		Technologies: []string{"log4j-core 2.17.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idC)
+	idD, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-d.example.com/",
+		Technologies: []string{"log4j 9.9.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, idD)
+
+	fake := &fakeEvaluator{verdicts: map[string]string{"2.14.0": "affected", "9.9.9": "not_affected"}, reason: "in range"}
+	matches, err := d.MatchCVEToAssets(context.Background(), fake, CVEMatchInput{
+		CVEID:         "CVE-2021-44228",
+		Ecosystem:     "maven",
+		ProductTokens: []string{"log4j"},
+		Ranges:        []cveintel.Range{{From: "2.0", To: "2.15.0"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byID := map[int64]AssetMatch{}
+	for _, m := range matches {
+		byID[m.AssetID] = m
+	}
+	// ① A：版本命中 → affected，字段齐备。
+	m, ok := byID[idA]
+	if !ok || m.Verdict != VerdictAffected {
+		t.Fatalf("资产 A（2.14.0）应 affected: %+v ok=%v", m, ok)
+	}
+	if m.MatchedTech != "Apache Log4j 2.14.0" || m.MatchedProduct != "log4j" || m.MatchedVersion != "2.14.0" {
+		t.Fatalf("A 匹配明细错误: %+v", m)
+	}
+	if m.AssetDomain != "cveeval-a.example.com" {
+		t.Fatalf("A 标识错误: %q", m.AssetDomain)
+	}
+	// ② B：产品命中但无版本 → maybe 绝不 affected（卡明文）。
+	m, ok = byID[idB]
+	if !ok || m.Verdict != VerdictMaybe {
+		t.Fatalf("资产 B（无版本）应 maybe: %+v ok=%v", m, ok)
+	}
+	// ③ C：粗筛子串过包含命中，但归一化产品 log4j-core ∉ token 集 → 精判层剔除
+	//（B-04A 不误合并纪律的落点），且绝不调求值器。
+	if _, ok := byID[idC]; ok {
+		t.Fatal("log4j-core 资产不得进结果（产品等值收敛）")
+	}
+	// ④ D：not_affected 剔除（卡骨架步骤 3）。
+	if _, ok := byID[idD]; ok {
+		t.Fatal("not_affected 资产不得进结果")
+	}
+	// ⑤ 求值器只对带版本的命中被调用（A、D 各一次），ecosystem 透传。
+	if len(fake.calls) != 2 {
+		t.Fatalf("求值器应恰被调 2 次（A、D）: %v", fake.calls)
+	}
+	for _, c := range fake.calls {
+		if c[0] != "maven" {
+			t.Fatalf("ecosystem 未透传: %v", fake.calls)
+		}
+	}
+}
+
+// CVE 侧无区间：全部产品命中候选判 maybe（信息不足 fail-closed 同向）。
+func TestMatchCVEToAssetsEmptyRangesMaybe(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	id, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-e.example.com/",
+		Technologies: []string{"log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+
+	fake := &fakeEvaluator{}
+	matches, err := d.MatchCVEToAssets(context.Background(), fake, CVEMatchInput{
+		CVEID:         "CVE-2024-0001",
+		ProductTokens: []string{"log4j"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Verdict != VerdictMaybe {
+		t.Fatalf("无区间应 maybe: %+v", matches)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatal("无区间不得调求值器")
+	}
+}
+
+// 求值器失败 ⇒ 整体报错（绝不解释成没有漏洞），错误含 CVE 与资产定位。
+func TestMatchCVEToAssetsEvalErrorAborts(t *testing.T) {
+	d, av2, _ := testSetup(t)
+	defer d.Close()
+
+	id, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
+		URL:          "https://cveeval-f.example.com/",
+		Technologies: []string{"log4j 2.14.0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteAsset(d, id)
+
+	fake := &fakeEvaluator{err: fmt.Errorf("cveintel: upstream unavailable")}
+	_, err = d.MatchCVEToAssets(context.Background(), fake, CVEMatchInput{
+		CVEID:         "CVE-2021-44228",
+		ProductTokens: []string{"log4j"},
+		Ranges:        []cveintel.Range{{From: "2.0", To: "2.15.0"}},
+	})
+	if err == nil {
+		t.Fatal("求值失败必须整体报错，绝不静默当 not_affected/跳过")
+	}
+	if !strings.Contains(err.Error(), "CVE-2021-44228") {
+		t.Fatalf("错误必须含 CVE 定位: %v", err)
+	}
+}
+
+// 参数闸：eval nil / 空 CVEID / 非合同 token / 空 token 集全部 fail-closed。
+func TestMatchCVEToAssetsParamGuard(t *testing.T) {
+	d, _, _ := testSetup(t)
+	defer d.Close()
+
+	ctx := context.Background()
+	in := CVEMatchInput{CVEID: "CVE-2021-44228", ProductTokens: []string{"log4j"}, Ranges: []cveintel.Range{{From: "2.0", To: "2.15.0"}}}
+
+	if _, err := d.MatchCVEToAssets(ctx, nil, in); err == nil {
+		t.Fatal("eval=nil 必须报错（精判绝不静默跳过）")
+	}
+	if _, err := d.MatchCVEToAssets(ctx, &fakeEvaluator{}, CVEMatchInput{ProductTokens: []string{"log4j"}, Ranges: in.Ranges}); err == nil {
+		t.Fatal("空 CVEID 必须报错")
+	}
+	if _, err := d.MatchCVEToAssets(ctx, &fakeEvaluator{}, CVEMatchInput{CVEID: "CVE-2021-44228", ProductTokens: []string{"Log4j"}}); err == nil {
+		t.Fatal("非合同 token 必须报错")
+	}
+	got, err := d.MatchCVEToAssets(ctx, &fakeEvaluator{}, CVEMatchInput{CVEID: "CVE-2021-44228"})
+	if err != nil || got != nil {
+		t.Fatalf("空 token 集 (nil,nil): %v %v", got, err)
 	}
 }
