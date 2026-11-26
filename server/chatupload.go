@@ -3,12 +3,18 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
+	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/cveintel"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -103,7 +109,53 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		base := filepath.Base(dest)
 		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest})
 	}
+	if taskScoped && len(out) > 0 {
+		// B-08E：task 上传完成=源码就绪时刻——异步触发一次 OSV 依赖审计。
+		// 触发即返回（绝不阻塞上传响应），失败只留 stderr（不影响上传）。
+		s.triggerDepAuditAsync(id, filepath.Join(s.m.dir, "tasks", id))
+	}
 	writeJSON(w, 200, map[string]any{"attachments": out})
+}
+
+// depAuditOnce/depAuditAssembled 是进程级审计装配闸：首个 task 上传时惰性
+// 装配（CVE_MCP_URL 未配置或 pg 缺席则不装配——避免半装配降级出网）。
+var (
+	depAuditOnce      sync.Once
+	depAuditAssembled atomic.Bool
+)
+
+// triggerDepAuditAsync 装配（一次性）并触发异步依赖审计。已有审计在途或未
+// 装配时静默跳过（频次闸，非错误——上传响应不受影响）。
+func (s *Server) triggerDepAuditAsync(id, taskDir string) {
+	depAuditOnce.Do(func() {
+		if agent.DefaultDepAuditRunner() != nil {
+			depAuditAssembled.Store(true) // 测试/宿主已注入：让位
+			return
+		}
+		if s.m == nil || s.m.pg == nil {
+			return
+		}
+		intelURL := cveintel.URLFromEnv()
+		if intelURL == "" {
+			log.Printf("[js_audit] CVE_MCP_URL 未配置——OSV 依赖审计不装配（B-05 求值不可用，避免以 maybe 固化判定）")
+			return
+		}
+		cli, err := cveintel.New(intelURL)
+		if err != nil {
+			log.Printf("[js_audit] CVE 客户端构造失败——OSV 依赖审计不装配: %v", err)
+			return
+		}
+		agent.SetDefaultDepAuditRunner(agent.NewDepAuditRunner(s.m.pg, cli, os.Getenv("OSV_API_URL")))
+		depAuditAssembled.Store(true)
+	})
+	if !depAuditAssembled.Load() {
+		return
+	}
+	taskID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || taskID <= 0 {
+		return // 非数字任务 id（理论不可达——safeChatID 之外的守卫）
+	}
+	_ = agent.TriggerTaskDepAuditAsync(taskID, taskDir)
 }
 
 // uniqueUploadPath returns dir/name, or dir/name-1, dir/name-2… when it already exists,

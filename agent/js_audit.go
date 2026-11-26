@@ -31,14 +31,23 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Autumn-27/artex/cveintel"
+	"github.com/Autumn-27/artex/db"
 )
 
 // 发现预算常量（确定性封顶，防无界遍历/无界解析）。
@@ -438,4 +447,326 @@ func jsWithinRoot(root, real string) bool {
 		return true
 	}
 	return strings.HasPrefix(real, root+string(os.PathSeparator))
+}
+
+// ---------------------------------------------------------------------------
+// B-08E 编排入口：源码就绪触发一次 + 受控手动重跑。
+//
+// 纪律（卡要求逐字）：
+//   - 异步、有超时（单次全程 5min）、有并发上限（每任务单飞 + 全局 2），
+//     触发即返回——绝不阻塞上传响应/任务主循环，不做常驻轮询；
+//   - 无 package.json = 合法空结果（零 OSV 请求、零事件、非错误）；
+//   - OSV/CVE 上游失败 → 时间线 warning note + stderr 留痕，绝不杀死任务；
+//   - 同一 task+依赖清单摘要重复触发去重（进程内摘要台账，成功审计后才记）；
+//     文件变更经 RerunTaskAudit 显式重跑（force 跳过摘要闸，仍受单飞/并发闸）；
+//   - 只查 Locked 依赖（锁=实际安装的权威记录）：Locked=false 的范围串绝不
+//     当精确版本发 OSV 查询（不精确版本查 OSV=「查不到」垃圾进垃圾出——如实
+//     计数 SkippedUnlocked 留待重跑，绝不据此下「无漏洞」结论）；
+//   - 命中只落 B-08D 事件（RecordOSVVulnEvent 台账幂等）——零 finding、
+//     零任务创建、零 PoC 执行（包安全原则逐字）。
+// ---------------------------------------------------------------------------
+
+const (
+	// depAuditTimeout 是单次审计全程超时（异步与手动重跑同用）。
+	depAuditTimeout = 5 * time.Minute
+	// depAuditMaxConcurrent 是全局并发审计上限（跨任务合计）。
+	depAuditMaxConcurrent = 2
+)
+
+// DepAuditReport 是一次审计的如实汇总（异步观测面：LastReport）。
+type DepAuditReport struct {
+	TaskID          int64
+	Manifests       int
+	Deps            int
+	SkippedUnlocked int // Locked=false 未查询数（如实计数，绝不猜测版本）
+	Vulns           int // OSV 返回漏洞条数（npm 滤后）
+	Events          int // 落时间线事件数
+	DedupedEvents   int // B-08D 台账幂等命中数
+	Warnings        []string
+	SkippedDigest   bool // 摘要去重跳过（重复触发）
+	Empty           bool // 无清单=合法空
+	Duration        time.Duration
+}
+
+// DepAuditRunner 是 OSV 依赖审计编排面（进程级单例经 SetDefaultDepAuditRunner
+// 注册；生命周期接入点只调包级 TriggerTaskDepAuditAsync）。
+type DepAuditRunner struct {
+	pg         *db.DB           // 事件与 warning 落库（nil=审计不可用）
+	intel      *cveintel.Client // B-05 求值客户端（nil=每漏洞 maybe 降级）
+	osvBase    string           // 空=缺省 api.osv.dev
+	timeout    time.Duration
+	sem        chan struct{} // 全局并发闸
+	mu         sync.Mutex
+	inFlight   map[int64]bool
+	lastDigest map[int64]string
+	lastReport map[int64]*DepAuditReport
+}
+
+// NewDepAuditRunner 构造审计运行面。osvBase 空=缺省端点；pg 为 nil 时触发面
+// 直接 false（审计不可用，绝不半装配出网；intel nil 允许——每漏洞 maybe 降级）。
+func NewDepAuditRunner(pg *db.DB, intel *cveintel.Client, osvBase string) *DepAuditRunner {
+	return &DepAuditRunner{
+		pg:         pg,
+		intel:      intel,
+		osvBase:    osvBase,
+		timeout:    depAuditTimeout,
+		sem:        make(chan struct{}, depAuditMaxConcurrent),
+		inFlight:   map[int64]bool{},
+		lastDigest: map[int64]string{},
+		lastReport: map[int64]*DepAuditReport{},
+	}
+}
+
+// 进程级注册表：生命周期接入点无需持有 runner 引用。
+var defaultDepAudit atomic.Pointer[DepAuditRunner]
+
+// SetDefaultDepAuditRunner 注册进程级审计面（宿主装配期调用一次）。
+func SetDefaultDepAuditRunner(r *DepAuditRunner) { defaultDepAudit.Store(r) }
+
+// DefaultDepAuditRunner 读当前注册面（nil=未装配；装配器据此让位测试注入）。
+func DefaultDepAuditRunner() *DepAuditRunner { return defaultDepAudit.Load() }
+
+// TriggerTaskDepAuditAsync 源码就绪触发面：异步一次性审计，立即返回。
+// false=未装配或该任务已有审计在途（频次闸，非错误）。
+func TriggerTaskDepAuditAsync(taskID int64, workdir string) bool {
+	r := defaultDepAudit.Load()
+	if r == nil {
+		return false
+	}
+	return r.TriggerTaskAuditAsync(taskID, workdir)
+}
+
+// TriggerTaskAuditAsync 异步触发：有界 goroutine（单飞+全局信号量），失败只
+// 落 warning 与 stderr——绝不影响触发方。
+func (r *DepAuditRunner) TriggerTaskAuditAsync(taskID int64, workdir string) bool {
+	if r == nil || r.pg == nil {
+		return false
+	}
+	if !r.begin(taskID) {
+		return false // 同任务已有审计在途：频次闸跳过（非错误）
+	}
+	go func() {
+		defer r.end(taskID)
+		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+		defer cancel()
+		rep, err := r.run(ctx, taskID, workdir, false)
+		if err != nil {
+			r.recordWarning(taskID, "OSV 依赖审计失败："+err.Error()+"（不影响任务）")
+			return
+		}
+		r.storeReport(taskID, rep)
+	}()
+	return true
+}
+
+// RerunTaskAudit 受控手动重跑：同步等待结果（调用方自带 ctx），force 跳过
+// 摘要去重（文件变更后显式重审）；单飞与全局并发闸仍然生效。
+func (r *DepAuditRunner) RerunTaskAudit(ctx context.Context, taskID int64, workdir string) (*DepAuditReport, error) {
+	if r == nil || r.pg == nil {
+		return nil, fmt.Errorf("OSV 依赖审计未装配")
+	}
+	if !r.begin(taskID) {
+		return nil, fmt.Errorf("该任务已有审计在途，请稍后重试")
+	}
+	defer r.end(taskID)
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	rep, err := r.run(ctx, taskID, workdir, true)
+	if err != nil {
+		r.recordWarning(taskID, "OSV 依赖审计重跑失败："+err.Error()+"（不影响任务）")
+		return nil, err
+	}
+	r.storeReport(taskID, rep)
+	return rep, nil
+}
+
+// run 是单次审计主体（调用方已持单飞与超时）。force=true 跳过摘要闸。
+func (r *DepAuditRunner) run(ctx context.Context, taskID int64, workdir string, force bool) (*DepAuditReport, error) {
+	// 全局并发闸（有界等待，受 ctx——取消即刻退出）。
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("等待审计并发闸被取消: %w", ctx.Err())
+	}
+	start := time.Now()
+	rep := &DepAuditReport{TaskID: taskID}
+
+	d, err := DiscoverJSDeps(workdir)
+	if err != nil {
+		return nil, fmt.Errorf("依赖发现失败: %w", err)
+	}
+	rep.Manifests = countJSManifests(d)
+	rep.Deps = len(d.Deps)
+	digest := jsManifestDigest(d)
+	if !force && r.digestOf(taskID) == digest {
+		rep.SkippedDigest = true
+		rep.Duration = time.Since(start)
+		return rep, nil
+	}
+	if len(d.Deps) == 0 {
+		// 无清单=合法空结果（卡要求 3）：记摘要——重复触发不再空跑。
+		r.setDigest(taskID, digest)
+		rep.Empty = true
+		rep.Duration = time.Since(start)
+		return rep, nil
+	}
+
+	// 只查 Locked 依赖：范围串/unsupported 形态绝不当精确版本出网。
+	refs := make([]OSVQueryRef, 0, len(d.Deps))
+	for i := range d.Deps {
+		if !d.Deps[i].Locked {
+			rep.SkippedUnlocked++
+			continue
+		}
+		refs = append(refs, OSVQueryRef{
+			Ecosystem: d.Deps[i].Ecosystem,
+			Name:      d.Deps[i].Name,
+			Version:   d.Deps[i].Version,
+		})
+	}
+	if len(refs) == 0 {
+		r.setDigest(taskID, digest)
+		rep.Empty = true // 无可定版依赖：合法空（Unlocked 已如实计数）
+		rep.Duration = time.Since(start)
+		return rep, nil
+	}
+
+	osv := &OSVClient{Base: r.osvBase}
+	hits, err := osv.QueryBatch(ctx, refs)
+	if err != nil {
+		return nil, fmt.Errorf("OSV 查询失败: %w", err) // 调用方落 warning，不杀任务
+	}
+	for _, h := range hits {
+		rep.Vulns += len(h.Vulns)
+	}
+	verdicts := EvaluateOSVHits(ctx, r.intel, hits)
+	for i, dv := range verdicts {
+		for j, vv := range dv.Vulns {
+			in := db.OSVEventInput{
+				TaskID:        taskID,
+				Package:       dv.Ref.Name,
+				Version:       dv.Ref.Version,
+				VulnID:        vv.VulnID,
+				Aliases:       vv.Aliases,
+				FixedVersions: hits[i].Vulns[j].FixedVersions(), // 判定与漏洞对齐（i/j 同序）
+				Verdict:       string(vv.Verdict),
+				Reason:        vv.Reason,
+			}
+			_, deduped, err := r.pg.RecordOSVVulnEvent(in)
+			if err != nil {
+				// 单条事件失败：warning 继续（绝不因事件面失败杀任务）。
+				rep.Warnings = append(rep.Warnings,
+					fmt.Sprintf("事件落库失败 %s×%s: %v", dv.Ref.Name, vv.VulnID, err))
+				continue
+			}
+			if deduped {
+				rep.DedupedEvents++
+			} else {
+				rep.Events++
+			}
+		}
+	}
+	r.setDigest(taskID, digest) // 成功才记摘要：失败的审计允许下次触发重试
+	rep.Duration = time.Since(start)
+	return rep, nil
+}
+
+// begin/end 是每任务单飞闸。
+func (r *DepAuditRunner) begin(taskID int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inFlight[taskID] {
+		return false
+	}
+	r.inFlight[taskID] = true
+	return true
+}
+
+func (r *DepAuditRunner) end(taskID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.inFlight, taskID)
+}
+
+func (r *DepAuditRunner) digestOf(taskID int64) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastDigest[taskID]
+}
+
+func (r *DepAuditRunner) setDigest(taskID int64, digest string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastDigest[taskID] = digest
+}
+
+func (r *DepAuditRunner) storeReport(taskID int64, rep *DepAuditReport) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastReport[taskID] = rep
+}
+
+// LastReport 返回该任务最近一次完成的审计汇总（nil=尚无；观测面，非状态源）。
+func (r *DepAuditRunner) LastReport(taskID int64) *DepAuditReport {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rep := r.lastReport[taskID]
+	if rep == nil {
+		return nil
+	}
+	cp := *rep
+	return &cp
+}
+
+// recordWarning 落一条时间线 warning note（Worker=system——平台侧留痕先例）；
+// 任务不存在/无 exploration 时只留 stderr（绝不 panic、绝不影响任务）。
+func (r *DepAuditRunner) recordWarning(taskID int64, msg string) {
+	log.Printf("[js_audit] task %d: %s", taskID, msg)
+	if r.pg == nil {
+		return
+	}
+	tk, err := r.pg.GetTask(taskID)
+	if err != nil || tk == nil || tk.ExplorationID <= 0 {
+		return
+	}
+	if _, aerr := r.pg.Exploration(tk.ExplorationID).AppendActivity(db.Activity{
+		Worker:  "system",
+		Kind:    "note",
+		Summary: osvTruncateWarning(msg),
+	}); aerr != nil {
+		log.Printf("[js_audit] task %d: warning 落时间线失败: %v", taskID, aerr)
+	}
+}
+
+// osvTruncateWarning 限制 warning 摘要长度（时间线展示面预算）。
+func osvTruncateWarning(msg string) string {
+	const max = 512
+	if len(msg) <= max {
+		return msg
+	}
+	return msg[:max-len("…(截断)")] + "…(截断)"
+}
+
+// countJSManifests 统计发现面涉及的清单数（Deps 的 manifest 去重数）。
+func countJSManifests(d *JSDiscovery) int {
+	seen := map[string]bool{}
+	for i := range d.Deps {
+		seen[d.Deps[i].Manifest] = true
+	}
+	return len(seen)
+}
+
+// jsManifestDigest 依赖清单摘要（sha256，输入为确定性排序的发现面——同内容
+// 同摘要，文件变更即变）。
+func jsManifestDigest(d *JSDiscovery) string {
+	h := sha256.New()
+	for i := range d.Deps {
+		fmt.Fprintf(h, "%s|%s|%s|%v|%d\n", d.Deps[i].Manifest, d.Deps[i].Name,
+			d.Deps[i].Version, d.Deps[i].Locked, len(d.Deps[i].Reason))
+	}
+	for _, s := range d.Skipped {
+		fmt.Fprintf(h, "skip|%s|%s\n", s.Path, s.Reason)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
