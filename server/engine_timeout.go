@@ -242,11 +242,23 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 		status = "done"
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
+	if won {
+		// 完成闸可能把「终局 planner 宣称达成」的 done 改成 timeout。
+		// 蒸馏和日志都看落库后的状态。评级在 SetTaskStatusGuarded 里只算这一次。
+		if live := e.m.TaskStatus(t.ID); live != "" {
+			status = live
+		}
+	}
 	switch {
 	case err != nil:
 		log.Printf("[deadline] task %s 落终态失败: %v", t.ID, err)
 	case won:
 		log.Printf("[deadline] task %s 收尾完成,终态=%s", t.ID, status)
+		if status == "timeout" {
+			if detail, ok := e.unmetTimeoutDetail(t, "【完成闸】任务到点，目标未全部达成，终态记 timeout"); ok {
+				e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: detail})
+			}
+		}
 		// P5 传承图：goalless/终局判定为 done 的超时收尾同样蒸馏（timeout 态不蒸馏）。
 		if status == "done" && e.LegacyDistiller != nil {
 			e.LegacyDistiller(t)
