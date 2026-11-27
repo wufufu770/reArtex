@@ -1069,6 +1069,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/monitor/repos/{id}", s.monitorRepoGet)
 	mux.HandleFunc("PATCH /api/monitor/repos/{id}", s.monitorRepoEnable)
 	mux.HandleFunc("DELETE /api/monitor/repos/{id}", s.monitorRepoDelete)
+	mux.HandleFunc("GET /api/monitor/findings", s.monitorFindingList) // B-09G：findings 列表+人工处置（requireAuth 内；列表是 B-09H 前端的必要读面）
+	mux.HandleFunc("POST /api/monitor/findings/{id}/reproduce", s.monitorFindingReproduce)
+	mux.HandleFunc("POST /api/monitor/findings/{id}/rejudge", s.monitorFindingRejudge)
+	mux.HandleFunc("POST /api/monitor/findings/{id}/ignore", s.monitorFindingIgnore)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
