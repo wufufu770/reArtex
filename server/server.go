@@ -2405,6 +2405,9 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 				body["grade_summary"] = row.GradeSummary
 				body["grade_score"] = scoreJSON(row.GradeScore)
 			}
+			if n, err := s.m.PG().MaxImpactLevel(meta.ID); err == nil {
+				body["max_impact_level"] = n
+			}
 			writeJSON(w, 200, body)
 			return
 		}
@@ -2416,7 +2419,13 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
 	// C-02C2：详情刷新后仍要看到资源模式。只附加与创建/PATCH 相同的只读键，不改写入规则。
 	level, reason, mode, grade, summary, score := s.taskDifficultyOf(t.ID)
-	writeJSON(w, 200, taskLevelView(dto, t.Goal, t.Description, level, reason, mode, grade, summary, score))
+	body := taskLevelView(dto, t.Goal, t.Description, level, reason, mode, grade, summary, score)
+	if id, err := strconv.ParseInt(t.ID, 10, 64); err == nil && id > 0 && s.m.pg != nil {
+		if n, err := s.m.pg.MaxImpactLevel(id); err == nil {
+			body["max_impact_level"] = n
+		}
+	}
+	writeJSON(w, 200, body)
 }
 
 // taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).
@@ -2968,17 +2977,27 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Status    *string `json:"status"`
-		Severity  *string `json:"severity"`
-		Name      *string `json:"name"`
-		VulnClass *string `json:"vulnclass"`
+		Status        *string `json:"status"`
+		Severity      *string `json:"severity"`
+		Name          *string `json:"name"`
+		VulnClass     *string `json:"vulnclass"`
+		ImpactLevel   *int    `json:"impact_level"`
+		EvidenceLevel *int    `json:"evidence_level"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
-	if body.Status == nil && body.Severity == nil && body.Name == nil && body.VulnClass == nil {
-		writeErr(w, 400, "nothing to update: provide status/severity/name/vulnclass")
+	if body.Status == nil && body.Severity == nil && body.Name == nil && body.VulnClass == nil && body.ImpactLevel == nil && body.EvidenceLevel == nil {
+		writeErr(w, 400, "nothing to update: provide status/severity/name/vulnclass/impact_level/evidence_level")
+		return
+	}
+	if body.ImpactLevel != nil && !db.ValidFindingLevel(*body.ImpactLevel) {
+		writeErr(w, 400, "impact_level 必须是 1-4")
+		return
+	}
+	if body.EvidenceLevel != nil && !db.ValidFindingLevel(*body.EvidenceLevel) {
+		writeErr(w, 400, "evidence_level 必须是 1-4")
 		return
 	}
 	if body.Status != nil {
@@ -3036,6 +3055,20 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		}
 		if n == 0 {
 			writeErr(w, 404, "finding not found")
+			return
+		}
+	}
+	if body.ImpactLevel != nil || body.EvidenceLevel != nil {
+		if err := s.m.pg.ApplyFindingLevels(id, body.ImpactLevel, body.EvidenceLevel); err != nil {
+			if errors.Is(err, db.ErrFindingNotFound) {
+				writeErr(w, 404, "finding not found")
+				return
+			}
+			if errors.Is(err, db.ErrFindingLevelInvalid) {
+				writeErr(w, 400, err.Error())
+				return
+			}
+			writeErr(w, 500, err.Error())
 			return
 		}
 	}

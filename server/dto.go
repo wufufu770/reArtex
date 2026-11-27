@@ -39,7 +39,7 @@ type TaskDTO struct {
 	PinnedAt           string             `json:"pinned_at,omitempty"`
 	Description        string             `json:"description"`
 	Goal               string             `json:"goal"`
-	Status             string             `json:"status"` // created | running | paused | done | failed
+	Status             string             `json:"status"`  // created | running | paused | done | failed
 	Drained            bool               `json:"drained"` // 0.15.42 A3：软截止中（停派新意图；列表徽章 + 详情一键恢复）
 	CreatedAt          string             `json:"created_at"`
 	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
@@ -133,10 +133,10 @@ func taskDTO(t *Task, status string) TaskDTO {
 		ActiveLLMProfileID: llmState.ActiveID,
 		LLMFailoverState:   llmState.FailoverState,
 		LLMFailoverReason:  llmState.FailoverReason,
-	SourceTaskIDs:      sourceIDs,
-	CompanyIDs:         lifecycle.CompanyIDs,
-	CoverageEnabled:    t.CoverageEnabled,
-	ScopeConfigured:    t.ScopeConfigured,
+		SourceTaskIDs:      sourceIDs,
+		CompanyIDs:         lifecycle.CompanyIDs,
+		CoverageEnabled:    t.CoverageEnabled,
+		ScopeConfigured:    t.ScopeConfigured,
 	}
 }
 
@@ -336,6 +336,12 @@ type FindingDTO struct {
 	// root_cause_key 相同的 findings 为「疑似同根因」组（合并走人工）。
 	EvidenceStatus string `json:"evidence_status,omitempty"`
 	RootCauseKey   string `json:"root_cause_key,omitempty"`
+	// C-04 三维分级。证据不足只在 critical/high 且证据等级 < 3 时为 true。
+	ImpactLevel            int    `json:"impact_level"`
+	EvidenceLevel          int    `json:"evidence_level"`
+	EvidenceLevelRequested int    `json:"evidence_level_requested"`
+	EvidenceLevelReason    string `json:"evidence_level_reason,omitempty"`
+	EvidenceInsufficient   bool   `json:"evidence_insufficient"`
 
 	IntentID        string            `json:"intent_id,omitempty"`
 	ParamID         string            `json:"param_id,omitempty"`
@@ -466,16 +472,21 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		FindingID:    i64s(f.ID),
 		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
 		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,
-		VulnClass: f.VulnClass,
-		Name:      f.Name,
-		Severity:  f.Severity,
-		Status:    status,
-		Summary:   f.Summary,
-		Evidence:  f.Evidence,
-		Report:    f.Report,
-		EvidenceStatus: f.EvidenceStatus,
-		RootCauseKey:   f.RootCauseKey,
-		TS:        rfc3339(f.CreatedAt),
+		VulnClass:              f.VulnClass,
+		Name:                   f.Name,
+		Severity:               f.Severity,
+		Status:                 status,
+		Summary:                f.Summary,
+		Evidence:               f.Evidence,
+		Report:                 f.Report,
+		EvidenceStatus:         f.EvidenceStatus,
+		RootCauseKey:           f.RootCauseKey,
+		ImpactLevel:            f.ImpactLevel,
+		EvidenceLevel:          f.EvidenceLevel,
+		EvidenceLevelRequested: f.EvidenceLevelRequested,
+		EvidenceLevelReason:    f.EvidenceLevelReason,
+		EvidenceInsufficient:   !db.EvidenceSufficient(f.Severity, f.EvidenceLevel),
+		TS:                     rfc3339(f.CreatedAt),
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {
@@ -613,20 +624,20 @@ func agentDTOs(in []*db.Agent) []AgentDTO {
 // ---- LLMProfile (frontend "LLMProfile") — string id ----
 
 type LLMProfileDTO struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Format          string  `json:"format"`
-	BaseURL         string  `json:"base_url,omitempty"`
-	Proxy           string  `json:"proxy,omitempty"`
-	Model           string  `json:"model"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Format          string   `json:"format"`
+	BaseURL         string   `json:"base_url,omitempty"`
+	Proxy           string   `json:"proxy,omitempty"`
+	Model           string   `json:"model"`
 	Models          []string `json:"models,omitempty"` // E1 多模型：可用模型列表（含默认）
-	APIKeyHint      string  `json:"api_key_hint,omitempty"`
-	RatePerSecond   float64 `json:"rate_per_second"`
-	RatePerMinute   float64 `json:"rate_per_minute"`
-	ContextWindowK  int     `json:"context_window_k"`
-	ThinkingType    string  `json:"thinking_type"`
-	ReasoningEffort string  `json:"reasoning_effort"`
-	IsDefault       bool    `json:"is_default"`
+	APIKeyHint      string   `json:"api_key_hint,omitempty"`
+	RatePerSecond   float64  `json:"rate_per_second"`
+	RatePerMinute   float64  `json:"rate_per_minute"`
+	ContextWindowK  int      `json:"context_window_k"`
+	ThinkingType    string   `json:"thinking_type"`
+	ReasoningEffort string   `json:"reasoning_effort"`
+	IsDefault       bool     `json:"is_default"`
 	// 轮询(故障转移)参数：priority 越大越先被选中(激活配置恒为链首)；
 	// pool_exclude=true 则不作为故障转移目标，但仍可被 agent/任务显式绑定。
 	Priority    int  `json:"priority"`
