@@ -40,6 +40,12 @@ func monitorAPITestServer(t *testing.T) (*Server, http.Handler, string) {
 	if err != nil {
 		t.Fatalf("sign jwt: %v", err)
 	}
+	// 连接归还：整包回归下共享 PG max_connections=100，每个用例的池若不显式
+	// 关闭，被泄漏的后台 goroutine（task-archive/scheduler 等轮询面）钉住就
+	// 不空闲（ConnMaxIdleTime 5min 不生效），套件尾部用例（notify 族）会撞
+	// SQLSTATE 53300 too many clients。先注册=最后执行（LIFO）：行删除清理
+	// 仍先跑，随后 Manager.Close 归还 traffic+pg 池。
+	t.Cleanup(func() { _ = m.Close() })
 	t.Cleanup(func() {
 		_, _ = m.pg.Exec(`DELETE FROM monitor_findings WHERE repo_id IN (SELECT id FROM monitor_repos WHERE repo_url LIKE $1)`, monitorAPITestPrefix+"%")
 		_, _ = m.pg.Exec(`DELETE FROM monitor_repos WHERE repo_url LIKE $1`, monitorAPITestPrefix+"%")
