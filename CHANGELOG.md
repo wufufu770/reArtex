@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.118] - 2026-11-27
+
+### 新增（C-05E：任务详情和报告列出未达成目标）
+
+- 背景：闸门已经会把未达成的收尾记成 timeout。本批把这份清单交到详情接口和报告初稿。页面上的卡片留到下一小批，避免和 server 文件混过 5 个生产文件。
+- `GET /api/tasks/{id}`（内存任务和只读回源）增加 `unmet_goals`：`node_id`、`text`、`criteria`、`reason`。没有未达成目标时是 `[]`，不是 null。读取失败只记日志，详情不因此 500，这一键是空数组。进行中的任务也会返回当前还没了结的目标，不限终态。
+- 报告初稿在执行概览后面固定一节「未达成目标」。有则列出文本、判定标准和原因。没有则写「（无未达成目标）」。读失败时写明不能据此当成已全部完成。
+- 目标拆解没有产出时，回退的那一条目标用任务原文同时作为文本和判定标准。
+- 【与卡面差异（如实说明）】① 详情页的卡片还没画。接口已经带上清单。② 人工在页面上新增目标仍不强制 criteria，否则现有表单会 400。那种目标的判定标准可以是空。③ 不回写已经完成的任务。④ 评级口径没动。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./server/ -run 'TestUnmetGoalsOnTaskAndReport|TestGoalGateRewritesDoneToTimeout' -timeout 10m` 通过（1.9s）：3 met + 1 open 的详情状态是 timeout，`unmet_goals` 只有「还没达成 / 读到 flag」；报告含这一节和未达成原因；四个都 met 时详情是 done、清单是 `[]`，报告写「无未达成目标」。`go test -race -count=1 ./server/ -timeout 25m` 全包 55.4s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：详情页把 `unmet_goals` 画出来。不开始 C-06。
+
 ## [0.15.117] - 2026-11-27
 
 ### 新增（C-05D：终局规划轮不产新意图）
