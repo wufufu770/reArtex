@@ -41,6 +41,9 @@ export interface Task {
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
   scope_configured?: boolean; // seed 是否配好 scope；false=详情页显示「scope 未配置」横幅（H1）
+  task_execution_mode?: string; // 资源模式覆盖；空=跟随难度。不是执行档的 mode
+  default_execution_mode?: string; // 难度对应的默认资源模式
+  effective_execution_mode?: string; // 当前生效资源模式（有覆盖用覆盖）
 }
 
 export interface TaskCategory {

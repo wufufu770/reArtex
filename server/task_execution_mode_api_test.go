@@ -80,6 +80,13 @@ func TestTaskExecutionModeAPI(t *testing.T) {
 	if n, _ := strconv.ParseInt(plainID, 10, 64); func() bool { _, ok := s.engine.ExecutionProfileFor(n); return ok }() {
 		t.Fatal("未传执行档不应写入 0.15.17 执行档")
 	}
+	code, out = do(http.MethodGet, "/api/tasks/"+plainID, "")
+	if code != 200 {
+		t.Fatalf("get task: %d %v", code, out)
+	}
+	if out["task_execution_mode"] != "" || out["default_execution_mode"] != string(agent.ModeBalanced) || out["effective_execution_mode"] != string(agent.ModeBalanced) {
+		t.Fatalf("详情应带回资源模式三键: %v", out)
+	}
 
 	// 难度 easy、不覆盖：默认 fast，生效 fast，库内仍是空串。
 	code, out = do(http.MethodPost, "/api/tasks", `{"description":"c02c-easy","goal":"收集子域","task_difficulty":"easy"}`)

@@ -458,6 +458,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       </Card>
       {/* 执行档位（0.15.17）：难度×模式，只调请求级推理强度与资源帽——切档即时生效且缓存安全 */}
       <ExecutionProfileCard taskId={taskId} />
+      <ResourceModeCard taskId={taskId} />
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
           删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
       <Card>
@@ -1477,6 +1478,84 @@ function ExecutionProfileCard({ taskId }: { taskId: string }) {
             </TooltipContent>
           </Tooltip>
         ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+const resourceModeOptions = [
+  { value: "", label: "跟随难度" },
+  { value: "fast", label: "fast（轻快）" },
+  { value: "balanced", label: "balanced（均衡）" },
+  { value: "super_heavy", label: "super_heavy（重火力）" },
+] as const;
+
+function resourceModeLabel(mode: string | undefined): string {
+  if (!mode) return "跟随难度";
+  return resourceModeOptions.find((option) => option.value === mode)?.label ?? mode;
+}
+
+// ResourceModeCard（C-02C2）：资源模式覆盖。与上面的执行档不是同一件事。
+function ResourceModeCard({ taskId }: { taskId: string }) {
+  const [view, setView] = React.useState<Task | null>(null);
+  const [saving, setSaving] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    api
+      .task(taskId)
+      .then(setView)
+      .catch(() => setView(null));
+  }, [taskId]);
+
+  React.useEffect(() => {
+    load();
+  }, [load]);
+
+  const current = view?.task_execution_mode ?? "";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">资源模式</CardTitle>
+        <CardDescription>跟随任务难度，或手动指定。这不是上方的执行档。</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        <label className="grid gap-2 text-sm" htmlFor="resource-mode-edit">
+          覆盖
+          <select
+            id="resource-mode-edit"
+            className="h-8 max-w-xs rounded-md border bg-background px-2 text-sm"
+            value={current}
+            disabled={saving || !view}
+            onChange={(e) => {
+              const next = e.target.value;
+              setSaving(true);
+              api
+                .patchTaskExecutionMode(taskId, next)
+                .then((updated) => {
+                  setView(updated);
+                  toast.success("资源模式已更新");
+                })
+                .catch((err) => toast.error(`更新失败：${(err as Error).message}`))
+                .finally(() => setSaving(false));
+            }}
+          >
+            {resourceModeOptions.map((option) => (
+              <option key={option.value || "follow"} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="text-sm">
+          <span className="text-muted-foreground">难度 → 默认模式：</span>
+          {view?.default_execution_mode ? resourceModeLabel(view.default_execution_mode) : "—"}
+        </div>
+        <div className="text-sm">
+          <span className="text-muted-foreground">当前生效模式：</span>
+          {view?.effective_execution_mode ? resourceModeLabel(view.effective_execution_mode) : "—"}
+        </div>
+        {saving ? <Spinner className="size-3.5" /> : null}
       </CardContent>
     </Card>
   );
