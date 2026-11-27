@@ -139,6 +139,28 @@ FROM findings WHERE task_id=$1 ORDER BY severity, id`, req.TaskID)
 	b.WriteString(fmt.Sprintf("- 业务差异：%d 条（open %d / pushed %d / confirmed %d / 误报 %d）\n",
 		len(diffs), diffByStatus["open"], diffByStatus["pushed"], diffByStatus["confirmed"], diffByStatus["false_positive"]))
 	b.WriteString(fmt.Sprintf("- 覆盖缺口：%d 条（open %d）\n", len(gaps), gapOpen))
+
+	// 未达成目标固定成一节。没有时也写「无」，不能只留「已完成」。
+	unmet, unmetErr := pg.UnmetGoalsByTask(req.TaskID)
+	b.WriteString("\n## 未达成目标\n\n")
+	switch {
+	case unmetErr != nil:
+		b.WriteString("（未达成目标读取失败。不能据此把任务写成已全部完成。）\n")
+	case len(unmet) == 0:
+		b.WriteString("（无未达成目标）\n")
+	default:
+		for _, g := range unmet {
+			text := oneLine(g.Text)
+			if text == "" {
+				text = fmt.Sprintf("目标 #%d", g.NodeID)
+			}
+			criteria := oneLine(g.Criteria)
+			if criteria == "" {
+				criteria = "（无判定标准）"
+			}
+			b.WriteString(fmt.Sprintf("- %s\n  - 判定标准：%s\n  - 未达成原因：%s\n", text, criteria, oneLine(g.Reason)))
+		}
+	}
 	if len(edgeRuns) > 0 {
 		keys := make([]string, 0, len(edgeRuns))
 		for k := range edgeRuns {

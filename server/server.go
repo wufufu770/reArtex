@@ -2408,6 +2408,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 			if n, err := s.m.PG().MaxImpactLevel(meta.ID); err == nil {
 				body["max_impact_level"] = n
 			}
+			body["unmet_goals"] = unmetGoalsForTask(s.m.PG(), meta.ID)
 			writeJSON(w, 200, body)
 			return
 		}
@@ -2424,6 +2425,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		if n, err := s.m.pg.MaxImpactLevel(id); err == nil {
 			body["max_impact_level"] = n
 		}
+		body["unmet_goals"] = unmetGoalsForTask(s.m.pg, id)
 	}
 	writeJSON(w, 200, body)
 }
