@@ -226,6 +226,55 @@ func TestTaskGradeCreateSaveRestore(t *testing.T) {
 	}
 }
 
+func TestLoadTaskGradeFactsEvidenceLevels(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	stamp := time.Now().UnixNano()
+	created, err := d.CreateTaskWithOptions(fmt.Sprintf("c03d-levels-%d", stamp), "看看分级", TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(created.ID) })
+
+	good := "GET /api?id=1 HTTP/1.1\n200 OK"
+	if _, err := d.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status)
+VALUES ($1,'sqli','high','SQL 注入可读取他人数据',$2,'confirmed')`, created.ID, good); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status, evidence_level, evidence_level_requested, evidence_level_reason)
+VALUES ($1,'sqli','critical','这不是漏洞',$2,'pending',3,3,'')`, created.ID, good); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status, evidence_level, evidence_level_requested, evidence_level_reason)
+VALUES ($1,'sqli','high','SQL 注入可读取他人数据',$2,'confirmed',2,4,'自报证据等级 L4，可验证上限为 L2')`, created.ID, good); err != nil {
+		t.Fatal(err)
+	}
+
+	facts, err := d.LoadTaskGradeFacts(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts.Findings) != 3 {
+		t.Fatalf("发现行 %d，want 3", len(facts.Findings))
+	}
+	legacy := facts.Findings[0]
+	if legacy.EvidenceLevel != 1 || legacy.EvidenceLevelRequested != 1 || legacy.EvidenceLevelReason != "" || legacy.Evidence != good {
+		t.Fatalf("存量行应是默认 L1 且无原因：%+v", legacy)
+	}
+	raised := facts.Findings[1]
+	if raised.EvidenceLevel != 3 || raised.EvidenceLevelRequested != 3 || raised.EvidenceLevelReason != "" || raised.Summary != "这不是漏洞" {
+		t.Fatalf("自报 L3：%+v", raised)
+	}
+	capped := facts.Findings[2]
+	if capped.EvidenceLevel != 2 || capped.EvidenceLevelRequested != 4 || capped.EvidenceLevelReason == "" {
+		t.Fatalf("降级行：%+v", capped)
+	}
+}
+
 func seedGradeFacts(t *testing.T, d *DB, task *Task) error {
 	t.Helper()
 	expID := task.ExplorationID

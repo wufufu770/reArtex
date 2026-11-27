@@ -178,6 +178,141 @@ func TestTaskGradeAPI(t *testing.T) {
 	}
 }
 
+// TestTaskGradeEvidenceLevelRule 钉住 C-03D：
+// 存量发现仍过门；自报不是默认 L1 或写了降级原因的发现，按证据等级 ≥ 3。
+// 已经落库的等级不因发现改动重写；显式重新评级才用新口径。
+func TestTaskGradeEvidenceLevelRule(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer m.Close()
+	td := t.TempDir()
+	s := New(testServerCtx(t), m, td, td, td)
+	h := s.Handler()
+	tok, err := signJWT(s.jwtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(method, path, body string) (int, map[string]any) {
+		t.Helper()
+		r := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+	good := "GET /api?id=1 HTTP/1.1\n200 OK"
+	seed := func(n int64) {
+		t.Helper()
+		// 存量：过门。省略分级列，落默认 L1 / 自报 1 / 空原因。
+		if _, err := m.pg.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status) VALUES ($1,'sqli','high','SQL 注入可读取他人数据',$2,'confirmed')`, n, good); err != nil {
+			t.Fatal(err)
+		}
+		// 存量：证据为空，门不通过。
+		if _, err := m.pg.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status) VALUES ($1,'sqli','low','待补证据','','pending')`, n); err != nil {
+			t.Fatal(err)
+		}
+		// 新发现：自报 L3，结论自否。旧门会排除，新口径按等级算完整。
+		if _, err := m.pg.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status, evidence_level, evidence_level_requested, evidence_level_reason)
+VALUES ($1,'sqli','critical','这不是漏洞',$2,'confirmed',3,3,'')`, n, good); err != nil {
+			t.Fatal(err)
+		}
+		// 新发现：自报 L4 降到 L2。旧门会放行，新口径不算完整。两条，让新旧计数不一样。
+		for i := 0; i < 2; i++ {
+			if _, err := m.pg.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status, evidence_level, evidence_level_requested, evidence_level_reason)
+VALUES ($1,'sqli','high','SQL 注入可读取他人数据',$2,'confirmed',2,4,'自报证据等级 L4，可验证上限为 L2')`, n, good); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// 新发现：落到 L4。两种口径都算完整。
+		if _, err := m.pg.Exec(`INSERT INTO findings (task_id, vulnclass, severity, summary, evidence, status, evidence_level, evidence_level_requested, evidence_level_reason)
+VALUES ($1,'sqli','high','未授权访问可导出用户列表',$2,'confirmed',4,4,'')`, n, good); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 新口径完整 3/6（存量过门 + L3 + L4）。旧门是 4/6（两条 L2 也过门，自否的 L3 不过）。
+	// 已验证 5/6。无目标、无范围资产。
+	wantNew := agent.ComputeGrade(agent.GradeInput{
+		VerifiedFindings: 5, TotalFindings: 6,
+		EvidenceCompleteFindings: 3,
+	})
+	if !strings.Contains(wantNew.Summary, "证据完整率 50%") || strings.Contains(wantNew.Summary, "证据完整率 67%") {
+		t.Fatalf("期望摘要能把 3/6 和 4/6 分开：%s", wantNew.Summary)
+	}
+
+	// 已经写上的等级，再进一次终态也不覆盖。重新评级才换成新口径。
+	held, err := m.CreateTaskWithOptions("c03d-held", "已有评级不动", db.TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldN, err := strconv.ParseInt(held.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed(heldN)
+	if err := m.pg.SetStatus(heldN, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.pg.SaveTaskGrade(heldN, "C", "旧口径保持", 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetTaskStatus(held.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(http.MethodGet, "/api/tasks/"+held.ID, "")
+	if code != 200 || body["grade_summary"] != "旧口径保持" || body["grade"] != "C" {
+		t.Fatalf("已有评级不应被终态重写：%d %v", code, body)
+	}
+	code, body = do(http.MethodPost, "/api/tasks/"+held.ID+"/regrade", "")
+	if code != 200 || body["grade_summary"] != wantNew.Summary || body["grade"] != wantNew.Grade {
+		t.Fatalf("重新评级应换成新口径\n got %v / %v\nwant %s / %s", body["grade"], body["grade_summary"], wantNew.Grade, wantNew.Summary)
+	}
+
+	// 还没评过的任务，第一次进入终态就用新口径。之后改等级不自动重算。
+	fresh, err := m.CreateTaskWithOptions("c03d-fresh", "终态用新口径", db.TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshN, err := strconv.ParseInt(fresh.ID, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed(freshN)
+	if err := m.SetTaskStatus(fresh.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	code, body = do(http.MethodGet, "/api/tasks/"+fresh.ID, "")
+	if code != 200 || body["grade_summary"] != wantNew.Summary {
+		t.Fatalf("新终态应是新口径\n got %v\nwant %s", body["grade_summary"], wantNew.Summary)
+	}
+	score, _ := body["grade_score"].(float64)
+	if math.Abs(score-wantNew.Score) > 0.05 {
+		t.Fatalf("分数 got %v want %v", score, wantNew.Score)
+	}
+	if _, err := m.pg.Exec(`UPDATE findings SET evidence_level=3 WHERE task_id=$1 AND evidence_level=2`, freshN); err != nil {
+		t.Fatal(err)
+	}
+	code, heldBody := do(http.MethodGet, "/api/tasks/"+fresh.ID, "")
+	if code != 200 || heldBody["grade_summary"] != wantNew.Summary {
+		t.Fatalf("改发现后不应自动重算：%v", heldBody["grade_summary"])
+	}
+	wantRaised := agent.ComputeGrade(agent.GradeInput{
+		VerifiedFindings: 5, TotalFindings: 6,
+		EvidenceCompleteFindings: 5,
+	})
+	if !strings.Contains(wantRaised.Summary, "证据完整率 83%") {
+		t.Fatalf("抬到 L3 后应是 5/6：%s", wantRaised.Summary)
+	}
+	code, body = do(http.MethodPost, "/api/tasks/"+fresh.ID+"/regrade", "")
+	if code != 200 || body["grade_summary"] != wantRaised.Summary || body["grade"] != wantRaised.Grade {
+		t.Fatalf("重新评级应看到抬升后的完整率\n got %v / %v\nwant %s / %s", body["grade"], body["grade_summary"], wantRaised.Grade, wantRaised.Summary)
+	}
+}
+
 func TestTaskGradeSourceDoesNotCallLLM(t *testing.T) {
 	src, err := os.ReadFile("task_grade.go")
 	if err != nil {

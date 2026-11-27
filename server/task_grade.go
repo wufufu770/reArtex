@@ -47,7 +47,13 @@ func persistTaskGrade(pg *db.DB, taskID int64, force bool) error {
 func gradeInput(facts db.TaskGradeFacts) agent.GradeInput {
 	findings := make([]agent.GradeFinding, len(facts.Findings))
 	for i, f := range facts.Findings {
-		findings[i] = agent.GradeFinding{Summary: f.Summary, Evidence: f.Evidence}
+		findings[i] = agent.GradeFinding{
+			Summary:                f.Summary,
+			Evidence:               f.Evidence,
+			EvidenceLevel:          f.EvidenceLevel,
+			EvidenceLevelRequested: f.EvidenceLevelRequested,
+			EvidenceLevelReason:    f.EvidenceLevelReason,
+		}
 	}
 	return agent.GradeInput{
 		GoalsMet:                 facts.GoalsMet,

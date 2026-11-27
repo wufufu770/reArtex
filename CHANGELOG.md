@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.120] - 2026-11-27
+
+### 新增（C-03D：新发现按证据等级计完整，存量仍过门）
+
+- 背景：C-03 的证据完整率一直按 `CheckFindingGate` 近似。C-04 把证据等级落了库，但存量行默认 L1。若全体改成「证据等级 ≥ L3」，重新评级会把没人重标过的历史任务证据完整率打成 0。业主定了口径：走过 C-04 写入的发现按等级计，存量发现仍过门。本批只改这个计数。命名用 C-03D 而不是 C-04G，因为变的是评级的证据完整率，不是分级本身。
+- 新发现：`evidence_level_requested > 1`，或 `evidence_level_reason` 去空白后非空。完整条件是落库的 `evidence_level ≥ 3`，不再看门。结论自否、证据正文为空，只要等级够了也算完整。
+- 存量发现：自报仍是默认 1（或调用方没填，内存里是 0），且没有降级原因。仍以 `CheckFindingGate` 为准。只改了落库的 `evidence_level`、自报还是 1、原因还是空，不算新发现。
+- 已经落库的等级不自动重写。新的一次终态结算（还没评过）和 `POST /api/tasks/{id}/regrade` 才用新计数。改 finding 之后不重新评级，GET 仍是原来的等级和摘要。
+- 【与卡面差异（如实说明）】① 这不是 C-06，也不是 C-04 卡面里的展示项。C-03 卡面写过「完整 = 证据等级 ≥ L3，没有证据等级字段时先按过门近似，待 C-04 落地后切换」。业主没有要求把存量一并切换，所以这里按行区分，不整表替换。② 标记不用探索节点 payload 里有没有分级键。`RecordFinding` 省略等级也会把键写进去，只改影响层级的写入也会补键，会把「默认等级、没有原因」的存量发现改判成新口径。③ 省略参数写成的新发现（自报 1、原因为空）和 ALTER 默认值在列上分不开，仍走旧门。④ 不回写已经评过的任务。⑤ 已验证发现仍只数 `status='confirmed'`。严重度取值没变。⑥ `db` 只把三列读出来，完整与否仍在 `agent` 里算。
+- 验证：`gofmt` 干净；`go vet ./agent/ ./db/ ./server/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./agent/ -run 'TestComputeGrade|TestCountEvidenceComplete|TestGradingSource|TestValidGrade' -timeout 5m` 通过（1.4s）；`go test -race -count=1 ./db/ -run 'TestLoadTaskGradeFactsEvidenceLevels|TestTaskGrade' -timeout 10m` 通过（1.7s）；`go test -race -count=1 ./server/ -run 'TestTaskGradeEvidenceLevelRule|TestTaskGradeAPI$|TestTaskGradeSourceDoesNotCallLLM' -timeout 10m` 通过（2.0s）。混合任务新口径证据完整 3/6（摘要「证据完整率 50%」），旧门会是 4/6（67%）。已写入的「旧口径保持」在再次进入终态后不变，重新评级才换成新口径；把两条 L2 抬到 L3 后不重新评级则摘要不变，重新评级后为 5/6（83%）。`go test -race -count=1 ./agent/ -timeout 20m` 全包通过（8.7s）。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（22.0s）。`go test -race -count=1 ./server/ -timeout 25m` 全包 61.3s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（`monitor_poller.go` 的 `ListNewCommits` 竞态，栈不经过本批文件）。CI 的 `go test ./...` 不带 `-race`。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：C-06 任务列表与详情页展示难度、评级、最高影响层级，并按难度和评级筛选。
+
 ## [0.15.119] - 2026-11-27
 
 ### 新增（C-05F：任务详情页列出未达成目标）
