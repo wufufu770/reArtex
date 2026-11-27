@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.102] - 2026-11-27
+
+### 新增（C-02D1：方案 B 的 planner 轮次缩放和组内并发收紧）
+
+- 背景：业主选定方案 B。本批只做轮次和有群组任务的并发。复测建议过滤和 oracle 展示超过 5 个生产文件，拆到下一批。全局 `task_concurrency_limit` 没动。预算 1/2/3 仍只是标签，没有换成 token。
+- `ScaledPlannerTurns`：配置的 MaxTurns ≤ 0 时原样返回（0 仍是不限）。为正数时以 balanced 的 6 为 1 倍，fast 乘 3/6，super_heavy 乘 10/6，四舍五入，至少 1。例：配置 6 → fast 3 / balanced 6 / super_heavy 10；配置 1 且 fast → 1；配置 5 且 fast → 3。
+- planner 每次 `Plan` 现读 `tasks.difficulty` 和 `execution_mode`（`ExplorationStore.TaskResourceFields`），再缩放这一轮的 `MaxTurns`。读不到任务行就保持配置值。不改 worker 自己的 maxTurns。
+- 有群组的认领：快路径和事务里的组内上限都与画像并发 2/3/5 取较小值。没有群组的任务仍走原来的单条认领，不新造槽位。画像读失败时不额外收紧。默认 medium、空覆盖的画像并发是 3，所以组内上限 5 时第三次能领、第四次被拒；改成 super_heavy 后第四次可以领。已有「上限 1」的用例仍是 1，因为组内上限更小。
+- 【与卡面差异（如实说明）】① 按方案 B，不把 3/6/10 直接写成绝对轮次，也不把 1/2/3 当成 token。② 没有群组的任务并发不变。③ worker 步数上限不缩放。④ 复测不自动派发；建议过滤和 `RequireOracle` 展示在下一批，本批不阻断复测。
+- 验证：`gofmt` 干净；`go vet ./agent/ ./db/ ./server/` 干净。`go test -race -count=1 ./agent/ ./db/ -timeout 20m` 通过（agent 9.7s，db 28.6s）。`go test -race -count=1 ./server/ -timeout 25m` 全包 78.2s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（`monitorFakeGH.seen` 竞态，栈不经过本批文件）。组内收紧用例 `TestResourceModeTightensGroupCap` 与原有组内上限用例 PASS。
+- 留下：C-02D2 建议复测过滤和 oracle 只展示。不开始 C-03。
+
 ## [0.15.101] - 2026-11-27
 
 ### 新增（C-02C2：资源模式的创建表单与详情展示）

@@ -398,3 +398,21 @@ func resourceProfileFor(mode ExecutionMode) ExecutionProfile {
 		}
 	}
 }
+
+// ScaledPlannerTurns 把 agent 管理配置里的 MaxTurns 按资源画像的相对轮次缩放。
+// configured <= 0 表示不限，原样返回（0 仍是不限）。
+// 以 balanced 的 6 轮为 1 倍：fast 乘 3/6，super_heavy 乘 10/6。四舍五入，至少 1。
+// TokenBudget 不参与换算，1/2/3 不是 token 数。
+func ScaledPlannerTurns(configured, plannerRounds int) int {
+	if configured <= 0 {
+		return configured
+	}
+	if plannerRounds <= 0 {
+		plannerRounds = 6
+	}
+	scaled := (configured*plannerRounds + 3) / 6
+	if scaled < 1 {
+		return 1
+	}
+	return scaled
+}

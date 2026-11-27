@@ -265,12 +265,12 @@ const (
 	settingLegacyAutoAccept = "legacy_auto_accept"
 	// settingAutoScaling（0.15.17，默认关）：执行档位自动升降缩放（planner 轮界
 	// 评估：高危发现/连续失败升档，熔断预算 70% 降档；3 轮冷却滞回）。
-	settingAutoScaling = "auto_scaling"
-	settingWebSearchOn         = "web_search_enabled"
-	settingWebSearchBackend    = "web_search_backend"
-	settingBraveKey            = "brave_search_api_key"
-	settingTavilyKey           = "tavily_search_api_key"
-	settingWebSearchProxy      = "web_search_proxy"
+	settingAutoScaling      = "auto_scaling"
+	settingWebSearchOn      = "web_search_enabled"
+	settingWebSearchBackend = "web_search_backend"
+	settingBraveKey         = "brave_search_api_key"
+	settingTavilyKey        = "tavily_search_api_key"
+	settingWebSearchProxy   = "web_search_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
@@ -928,7 +928,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled, ScopeConfigured: pt.ScopeConfigured,
-		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }
@@ -2105,6 +2105,13 @@ func (m *Manager) claimIntentWithinGroupCap(taskID, explorationID, intentID int6
 	running, err := groupRunningIntents(tx, explorationID)
 	if err != nil {
 		return false, err
+	}
+	// 与快路径同一口径：有群组时，组内上限和画像并发取较小值。读不到画像就不额外收紧。
+	var difficulty, executionMode string
+	if qerr := tx.QueryRow(`SELECT COALESCE(difficulty,'medium'), COALESCE(execution_mode,'') FROM tasks WHERE id=$1`, taskID).Scan(&difficulty, &executionMode); qerr == nil {
+		if capN := agent.ResolveProfile(difficulty, executionMode).WorkerConcurrency; capN > 0 && capN < limit {
+			limit = capN
+		}
 	}
 	if running >= limit {
 		return false, nil

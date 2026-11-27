@@ -55,8 +55,8 @@ type Planner struct {
 	// situationAppend 是「业务建模摘要段 + 偏锋判据段」的追加回调（合并施工 G-19）：
 	// 两个功能统一走这一个口子拼进态势，每轮现取（易变内容不进 system）。
 	// nil = 不注入。
-	strategyContext  func(taskID int64) string
-	situationAppend  func(taskID int64) string
+	strategyContext func(taskID int64) string
+	situationAppend func(taskID int64) string
 
 	// guardProvider 是「按任务号取 guard hook」的回调（0.15.13 宿主侧装配）。
 	// planner 的工具调用此前连 guard hook 都不过——基线预检/短路表/拦截规则/
@@ -71,6 +71,23 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// scaledMaxTurns 在每次规划前现读任务难度和 execution_mode。
+// 配置为 0 时保持不限。读不到任务行时保持配置值，不把规划收成 1。
+// 不改 worker 的 maxTurns：画像里的轮次只约束 planner。
+func (p *Planner) scaledMaxTurns(ts *db.ExplorationStore) int {
+	if p == nil || p.maxTurns <= 0 || ts == nil {
+		if p == nil {
+			return 0
+		}
+		return p.maxTurns
+	}
+	difficulty, mode, err := ts.TaskResourceFields()
+	if err != nil {
+		return p.maxTurns
+	}
+	return ScaledPlannerTurns(p.maxTurns, ResolveProfile(difficulty, mode).PlannerRounds)
+}
 
 // SetGuardProvider 注入「按任务号取 guard hook」回调（0.15.13：基线预检/短路表/
 // 拦截规则/审计链此前只盖 worker 与 chat——planner 的工具调用全部绕过，见
@@ -591,8 +608,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		BashEnv:       proxyEnv(p.proxyAddr, p.proxyCACert, egressTaskID(ctx, taskID)), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:    taskDir,                                                         // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir: cmdOutDir(taskDir),
-		MaxTurns:      p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:   maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		MaxTurns:      p.scaledMaxTurns(ts), // 0 = 不限；正数按本轮现读的资源画像缩放
+		MaxDuration:   maxDur,               // 0=不限;有 deadline 时=距 deadline 剩余
 		Compaction:    compactionConfig(p.compactionWindow()),
 		// 跨唤醒共享的规划待办：让串行链在多轮之间保留（session 是新的，store 不是）。
 		Todos: p.todoFor(ts.ID()),
