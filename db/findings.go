@@ -272,6 +272,48 @@ func resolveFindingLevels(impact, evidence int, evidenceText string, reproduced 
 	return impact, applied, requested, reason, nil
 }
 
+// ApplyFindingLevels 按调用方给出的维度更新一条 finding。
+// nil 表示这一维不改。给出的值必须是 1–4。证据等级仍走上限，不能绕过降级。
+func (d *DB) ApplyFindingLevels(id int64, impact, evidence *int) error {
+	if impact != nil && !ValidFindingLevel(*impact) {
+		return ErrFindingLevelInvalid
+	}
+	if evidence != nil && !ValidFindingLevel(*evidence) {
+		return ErrFindingLevelInvalid
+	}
+	if impact == nil && evidence == nil {
+		return nil
+	}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return err
+	}
+	var curImpact, requested int
+	var evidenceText string
+	err := d.QueryRow(`SELECT impact_level, evidence_level_requested, COALESCE(evidence,'')
+		FROM findings WHERE id=$1`, id).Scan(&curImpact, &requested, &evidenceText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFindingNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if impact != nil {
+		curImpact = *impact
+	}
+	if evidence != nil {
+		requested = *evidence
+	}
+	var reproduced bool
+	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_retests WHERE finding_id=$1 AND verdict='reproduced')`, id).Scan(&reproduced); err != nil {
+		return err
+	}
+	applied, reason, err := CapEvidenceLevel(requested, evidenceText, reproduced)
+	if err != nil {
+		return err
+	}
+	return d.writeFindingLevels(id, curImpact, applied, requested, reason)
+}
+
 // RefreshFindingEvidenceLevel 按当前证据正文和是否已有 reproduced 复测，
 // 重新套用上限。只把证据等级往自报值回升或维持，不会升过自报，也不会改影响层级。
 // 存量行自报默认是 1，所以复测通过不会把没人申请过 L4 的旧记录抬上去。
