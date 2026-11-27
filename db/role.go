@@ -310,4 +310,6 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	taskDifficultySchemaReady.Store(pool, struct{}{})
 	// C-02B：tasks.execution_mode（db/tasks.go）——启动期已应用，运行期免 DDL。
 	taskExecutionModeSchemaReady.Store(pool, struct{}{})
+	// C-03B：tasks.grade / grade_summary / grade_score（db/tasks.go）——启动期已应用，运行期免 DDL。
+	taskGradeSchemaReady.Store(pool, struct{}{})
 }

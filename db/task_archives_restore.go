@@ -330,6 +330,12 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  -- 直接赋值会撞 NOT NULL。缺列回落空串（跟随难度），有列则原样恢复，
  -- 不把空值改写成某一档。非法快照值留给 CHECK 拒绝。
  execution_mode=COALESCE(archived.execution_mode, ''),
+ -- C-03B：旧快照没有评级三列时 json_populate_record 给出 NULL。
+ -- grade / grade_summary 是 NOT NULL，缺列回落空串（还没评）。
+ -- grade_score 本身可空，缺列保持 NULL，不能写成 0（0 分是评过的 C）。
+ grade=COALESCE(archived.grade, ''),
+ grade_summary=COALESCE(archived.grade_summary, ''),
+ grade_score=archived.grade_score,
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
