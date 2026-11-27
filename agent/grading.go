@@ -66,8 +66,10 @@ func ComputeGrade(in GradeInput) GradeResult {
 }
 
 // CountEvidenceComplete 统计「有非空证据且通过 finding_gate」的发现数。
-// CheckFindingGate 的 R1 已经拒绝空白证据，所以通过门即满足卡面的两项近似。
-// C-04 的证据等级还没落地，这里不读 evidence_level，也不读 evidence_status。
+// CheckFindingGate 的 R1 已经拒绝空白证据，所以通过门即满足原先的两项近似。
+// C-04 的 evidence_level 已经落库，但存量行默认 L1。若这里改成「证据等级 ≥ L3」，
+// 重新评级会把还没人重标过的历史任务证据完整率打成 0。口径是否切换留给业主，
+// 本函数继续不读 evidence_level，也不读 evidence_status。已验证发现仍只数 confirmed。
 func CountEvidenceComplete(findings []GradeFinding) int {
 	n := 0
 	for _, f := range findings {

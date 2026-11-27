@@ -19,6 +19,32 @@ func renderFixture() []*db.DBFinding {
 	}
 }
 
+func TestFindingDimensionExport(t *testing.T) {
+	f := &db.DBFinding{ID: 9, VulnClass: "sqli", Name: "注入", Severity: "critical", Status: "pending",
+		ImpactLevel: 4, EvidenceLevel: 2, Summary: "说明", Evidence: "只有说明"}
+	if label := findingDimensionLabel(f); label != "影响 L4；证据 L2（证据不足）" {
+		t.Fatalf("label=%q", label)
+	}
+	md := SingleFindingMarkdown(f, time.Unix(0, 0).UTC())
+	if !strings.Contains(md, "证据不足") {
+		t.Fatal(md)
+	}
+	csvText := string(FindingsCSV([]*db.DBFinding{f}))
+	if !strings.Contains(csvText, "影响层级") || !strings.Contains(csvText, ",4,2,是") {
+		t.Fatal(csvText)
+	}
+	body, err := FindingsSARIF([]*db.DBFinding{f}, time.Unix(0, 0).UTC())
+	if err != nil || !strings.Contains(string(body), `"evidence_insufficient":true`) {
+		t.Fatalf("sarif=%s err=%v", body, err)
+	}
+	if !strings.Contains(string(FindingsTXT([]*db.DBFinding{f}, time.Unix(0, 0).UTC())), "证据不足") {
+		t.Fatal("txt 未透传")
+	}
+	if !strings.Contains(string(FindingsHTML([]*db.DBFinding{f}, time.Unix(0, 0).UTC())), "证据不足") {
+		t.Fatal("html 未透传")
+	}
+}
+
 func TestFindingsTXTSections(t *testing.T) {
 	out := FindingsTXT(renderFixture(), time.Unix(0, 0).UTC())
 	s := string(out)
@@ -39,8 +65,8 @@ func TestFindingsSARIFShape(t *testing.T) {
 		Runs    []struct {
 			Tool struct {
 				Driver struct {
-					Name  string   `json:"name"`
-					Rules []any    `json:"rules"`
+					Name  string `json:"name"`
+					Rules []any  `json:"rules"`
 				} `json:"driver"`
 			} `json:"tool"`
 			Results []struct {
