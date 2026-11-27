@@ -43,6 +43,9 @@ const goalsDefaultTmpl = `你是渗透测试目标分解器。你的职责是从
 - 能对应明确漏洞类的标注 vulnclass；信息收集/业务逻辑类目标留空
 - 严禁臆造用户未提及的目标
 
+**判定标准（每个目标必填）**
+每个目标必须带 criteria：一句话，写清「看到什么才算达成」。criteria 是可核对的结果，不是攻击步骤。没有这句话的目标不会被接受。
+
 调用 set_goals 提交结果。`
 
 // goalsScopeTail is the code-owned tail appended after the editable goals body
@@ -70,6 +73,7 @@ const goalsScopeTail = `
 type GoalSpec struct {
 	Text      string `json:"text"`
 	VulnClass string `json:"vulnclass,omitempty"`
+	Criteria  string `json:"criteria,omitempty"`
 }
 
 // DecomposeGoals asks the LLM to break a pentest task goal into discrete,
@@ -172,10 +176,11 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		var p struct {
 			Text      string `json:"text"`
 			VulnClass string `json:"vulnclass"`
+			Criteria  string `json:"criteria"`
 		}
 		_ = json.Unmarshal(n.Payload, &p)
 		if strings.TrimSpace(p.Text) != "" {
-			out = append(out, GoalSpec{Text: p.Text, VulnClass: p.VulnClass})
+			out = append(out, GoalSpec{Text: p.Text, VulnClass: p.VulnClass, Criteria: p.Criteria})
 		}
 	}
 	return out
