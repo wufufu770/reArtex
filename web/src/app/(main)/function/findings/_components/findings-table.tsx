@@ -17,6 +17,7 @@ import {
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingLevelBadges } from "@/components/finding-level-badge";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -391,6 +392,7 @@ export function FindingsTable({
                             证据未核实
                           </Badge>
                         )}
+                        <FindingLevelBadges finding={f} />
                         {f.root_cause_key && (
                           <Badge variant="outline" className="text-[10px]" title={`同根因组 ${f.root_cause_key}`}>
                             同根因组
