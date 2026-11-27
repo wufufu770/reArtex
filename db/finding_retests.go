@@ -214,6 +214,18 @@ WHERE conversation_id=$1 AND status='running' AND (verdict='' OR (verdict=$2 AND
 	} else if n == 0 {
 		return ErrRetestNotRunning
 	}
+	// 独立复测判 reproduced 之后，证据等级可以按当初的自报升到 L4。
+	// 没申请过更高档的记录保持原等级。刷新失败要返回：结论已经写下，
+	// 相同 verdict 的重试仍会命中，调用方可以再刷一次。
+	if verdict == "reproduced" {
+		var findingID int64
+		if err := d.QueryRowContext(ctx, `SELECT finding_id FROM finding_retests WHERE conversation_id=$1`, conversationID).Scan(&findingID); err != nil {
+			return err
+		}
+		if err := d.RefreshFindingEvidenceLevel(findingID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
