@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.100] - 2026-11-27
+
+### 新增（C-02C1：资源模式覆盖的创建/修改接口与审计）
+
+- 背景：C-02B（0.15.99）只把 `tasks.execution_mode` 落库。本批接上 HTTP。前端创建/详情页会再进 `web/`，和本批的 server 文件加在一起超过 5 个生产文件，所以前端拆成 C-02C2，本批不做。派发接线是 C-02D，也不做。
+- `POST /api/tasks` 接受 `task_execution_mode`。省略或空白落库空串（跟随难度），不把 `DefaultExecutionMode` 写进列。`fast` / `balanced` / `super_heavy` 去空白后原样落库。`auto` / `simple` / `medium` / `hard` / `FAST` / `expert` / `insane` 返回 400，且不建任务。已有字段 `difficulty`（执行档 auto/simple/medium/hard）和 `mode`（0.15.17 请求级档位）原样可用，不会写进 `tasks.execution_mode`。
+- `PATCH /api/tasks/{id}` 接受同一个字段。省略 = 不改；空串或纯空白 = 清回跟随难度；非法值 400，库内旧值不动。只改名称或只改 `task_difficulty` 不改这一列。改难度后，响应里的生效模式按新难度重算，但不另写一条资源模式审计。
+- 响应（创建和这条 PATCH）增加三个键：`task_execution_mode`（库内覆盖，空 = 未覆盖）、`default_execution_mode`（难度 → 默认模式）、`effective_execution_mode`（有覆盖用覆盖，否则用默认）。不用键名 `difficulty` 或 `mode`。
+- 审计：覆盖值真变化时写 `task.execution_mode`（actor=operator，source=task-api，payload 含 old/new）。创建不写这条，与 C-01B 的 `task.difficulty` 一样。理由里空串写成「跟随难度」，payload 仍是空串。审计失败只记日志，不把已落库的修改倒成 500。
+- 【与卡面差异（如实说明）】① JSON 字段叫 `task_execution_mode`，不叫 `execution_mode`，也不叫 `mode`。同一条创建请求里的 `mode` 已经是 0.15.17 执行档。`db.Task` 的 json 标签仍是 `execution_mode`，但列表 DTO 不序列化那一列。② 前端展示未做，留给 C-02C2。GET 列表仍不带这三键（内存 `server.Task` 未缓存该列）。③ 创建不写审计，只在 PATCH 真变化时写。④ 没有把画像接进 planner、worker 并发或复测。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净；`go test -race -count=1 ./server/ -run 'TestTaskExecutionModeAPI$|TestTaskDifficultyAPI$' -timeout 10m` 通过（2.4s，两个用例 PASS）。`go test -race -count=1 ./server/ -timeout 25m` 全包 63.4s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`：`-race` 报 `monitorFakeGH.seen` 在 `monitor_poller_test.go:40` 写、`:336` 读，栈不经过本批文件。CI 的 `go test ./...` 不带 `-race`。
+- 留下：C-02C2 前端展示。C-02D 派发接线仍等业主选择换算方案。下一项任务卡是 C-03，本批不开始。
+
 ## [0.15.99] - 2026-11-27
 
 ### 新增（C-02B：tasks.execution_mode 落库）
