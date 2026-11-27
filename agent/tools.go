@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"unicode/utf8"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/internal/ingestsanitize"
@@ -68,7 +68,7 @@ type ToolSet struct {
 	findingValidator FindingValidator
 	// factStateReviewer 是 P4 fact 三态转移的注入点；nil = review_fact 不可用。
 	factStateReviewer FactStateReviewer
-	worker           string
+	worker            string
 	// memberAgentKey 是【调用者的成员身份】（群成员的 agent key，如 pentest/reporter）。
 	//
 	// 为什么不用 worker 字段当成员身份：worker 是执行器名（work#N / planner / human），
@@ -563,8 +563,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 		factNodes = append(factNodes, fn)
 	}
-	out["findings_total"] = len(vulnNodes)                             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                                      // 探索事实/结论数（含否定结论）
+	out["findings_total"] = len(vulnNodes) // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
+	out["facts"] = len(factNodes)          // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -1719,6 +1719,20 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 
 // --- worker write tools ---
 
+// parseFindingLevel 解析 report_finding 的可选等级。空或 null 表示省略（调用方按 L1）。
+// 非整数、0 和 1–4 以外的值都拒绝，避免 5 或 2.5 被截成合法档。
+func parseFindingLevel(raw json.RawMessage) (int, error) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return 0, nil
+	}
+	var n int
+	if err := json.Unmarshal([]byte(s), &n); err != nil || !db.ValidFindingLevel(n) {
+		return 0, db.ErrFindingLevelInvalid
+	}
+	return n, nil
+}
+
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", `记录确认的漏洞。任务上下文传当前 intent_id。返回 finding_id（独立漏洞记录 ID）与 finding_node_id（探索节点 ID，第一行保留该编号）。
 
@@ -1737,9 +1751,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 
 【组合升权】单独低价值可组合变高价值：信息泄露+CVE=可利用 1day；XSS+CSRF=账户接管；SSRF+云元数据=云接管；JWT 密钥泄露+伪造=认证绕过；文件上传+解析漏洞=webshell；IDOR+批量遍历=大规模泄露。有组合链时在 summary 写明链条并按组合后结果评级。
 
-用 evidence 提供可验证证据；HTTP 漏洞按 traffic_refs 规则绑定真实流量。`, obj(map[string]any{
+用 evidence 提供可验证证据；HTTP 漏洞按 traffic_refs 规则绑定真实流量。impact_level 是影响层级（1 信息 / 2 认证·越权 / 3 控制 / 4 数据·资金），省略为 1。evidence_level 是自报证据等级（1 推断 / 2 复现 / 3 完整证据链 / 4 独立复核）；系统会按证据正文和独立复测降级，不在 1–4 会被拒绝。`, obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low|info（拿不准降一档；未证实候选面=info；纯信息泄露/无凭据暴露=info）"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"impact_level":     map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "description": "影响层级：1 信息 / 2 认证·越权 / 3 控制 / 4 数据·资金。省略为 1。"},
+		"evidence_level":   map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "description": "自报证据等级：1 推断 / 2 复现 / 3 完整证据链 / 4 独立复核。系统会降到可验证上限。省略为 1。"},
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
@@ -1751,9 +1767,19 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
+			ImpactLevel                                  json.RawMessage   `json:"impact_level"`
+			EvidenceLevel                                json.RawMessage   `json:"evidence_level"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
+		}
+		impact, err := parseFindingLevel(a.ImpactLevel)
+		if err != nil {
+			return actool.Errorf("impact_level 必须是 1-4 的整数（省略表示 L1）"), nil
+		}
+		evidenceLevel, err := parseFindingLevel(a.EvidenceLevel)
+		if err != nil {
+			return actool.Errorf("evidence_level 必须是 1-4 的整数（省略表示 L1）"), nil
 		}
 		// E1-7（方案 v10 §9）：severity 归一化校验——乱值不再直落库，当场把合法
 		// 枚举回给模型改写（此前「等级都给错」的直接通道）。
@@ -1785,7 +1811,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs), ImpactLevel: impact, EvidenceLevel: evidenceLevel}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1836,15 +1862,15 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
-	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	Summary    string `json:"summary"`
+	Detail     string `json:"detail"`
+	Evidence   string `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
+	Confidence string `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
 	// Subtype 仅平台内部使用：handoff（P3 交接事实，结构校验见 recordOneFact）。
 	// 工具 schema 不暴露——由引擎的交接轮注入提示，模型按提示携带。
-	Subtype   string            `json:"subtype,omitempty"`
-	IntentID  json.RawMessage   `json:"intent_id"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
+	Subtype  string            `json:"subtype,omitempty"`
+	IntentID json.RawMessage   `json:"intent_id"`
+	AssetIDs []json.RawMessage `json:"asset_ids"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为

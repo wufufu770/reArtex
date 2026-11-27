@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.110] - 2026-11-27
+
+### 新增（C-04C：report_finding 接收影响层级和证据等级）
+
+- 背景：C-04B（0.15.109）已经会在 `RecordFinding` 里降级。本批只改工具入口，让模型传得进这两个数。
+- `report_finding` 增加可选参数 `impact_level` 和 `evidence_level`。省略或 null 按 L1。必须是 1–4 的整数；`5`、`0`、`2.5`、字符串都不入库。`impact_level=5` 的返回是工具错误「impact_level 必须是 1-4 的整数」，探索节点和 findings 行都不写。
+- critical + `evidence_level=2` 且证据只是说明文字：入库成功，落下 L2，返回 `evidence_insufficient=true`。降级原因沿用 C-04B，自报高于上限时才有。
+- 【与卡面差异（如实说明）】① `report_finding` 是 agent 工具，没有 HTTP 状态码。卡面写的 400 在这里是工具错误且不入库；真正的 HTTP 400 留到发现 PATCH。② 列表和详情页的「证据不足」徽章还没画。返回值里已经有 `evidence_insufficient`，页面留给后面的展示批。任务详情上的最高影响层级仍归 C-06。③ 工具描述补了一句分级说明，原有评级基准核心句还在。
+- 验证：`gofmt` 干净；`go vet ./agent/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./agent/ -run 'TestReportFinding|TestRatingBaseline' -timeout 10m` 通过（1.9s）。`go test -race -count=1 ./agent/ -timeout 20m` 全包通过（9.1s）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：C-04D 把等级和「证据不足」透出到发现接口与报告导出，并给 PATCH 一个真正的 400。不开始 C-05。
+
 ## [0.15.109] - 2026-11-27
 
 ### 新增（C-04B：report_finding 的落库路径按证据上限降级）
