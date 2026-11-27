@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.111] - 2026-11-27
+
+### 新增（C-04D：发现接口透出三维分级，PATCH 非法等级返回 400）
+
+- 背景：C-04C（0.15.110）让工具能写入分级。本批把同一组字段放到发现接口上，并给人工修改一个真正的 HTTP 400。报告正文和页面徽章还没改。
+- 发现 DTO（列表、详情、PATCH 响应）增加 `impact_level`、`evidence_level`、`evidence_level_requested`、`evidence_level_reason`、`evidence_insufficient`。`evidence_insufficient` 由 `EvidenceSufficient` 现算：critical/high 且证据等级 < 3 为 true。不另存一列。
+- `PATCH /api/exploration/findings/{id}` 接受 `impact_level` 和 `evidence_level`。`5` 在任何写入之前返回 400，库内旧值不动。合法值走 `ApplyFindingLevels`，证据等级仍按上限降级，不能靠 PATCH 绕过。
+- `GET /api/tasks/{id}`（内存任务和只读回源）增加 `max_impact_level`。没有 finding 时是 0。查询失败时不把整个详情打成 500，这一键就不出现。展示留给 C-06。
+- 【与卡面差异（如实说明）】① 工具错误仍然不是 HTTP 400；HTTP 400 在这条 PATCH 上。② 带 `task` 参数的发现列表仍从探索节点读，节点 DTO 还没有这几列。全局发现页和发现详情走 findings 表，已经有。任务详情里的发现 tab 归 C-06。③ 报告导出还没透传。④ 评级口径未改。
+- 验证：`gofmt` 干净；`go vet ./db/ ./server/` 干净。`go test -race -count=1 ./server/ -run 'TestFindingLevelsAPI$' -timeout 10m` 通过（1.8s）：`impact_level=5` 返回 400 且行仍是 L1/L1；critical + 证据 L2 返回 200 且 `evidence_insufficient=true`；GET 详情同样为 true；`GET /api/tasks/{id}` 的 `max_impact_level` 为 4。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（21.4s）。`go test -race -count=1 ./server/ -timeout 25m` 全包 57.4s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（栈不经过本批文件）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：C-04E 报告导出透传。页面徽章再下一批。不开始 C-05。
+
 ## [0.15.110] - 2026-11-27
 
 ### 新增（C-04C：report_finding 接收影响层级和证据等级）
