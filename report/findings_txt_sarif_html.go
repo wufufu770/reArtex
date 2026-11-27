@@ -23,6 +23,9 @@ func FindingsTXT(fs []*db.DBFinding, generatedAt time.Time) []byte {
 	for i, f := range fs {
 		fmt.Fprintf(&b, "[%d] %s\n", i+1, findingTitle(f))
 		fmt.Fprintf(&b, "  严重等级：%s\n", severityCN(f.Severity))
+		if label := findingDimensionLabel(f); label != "" {
+			fmt.Fprintf(&b, "  分级：%s\n", label)
+		}
 		fmt.Fprintf(&b, "  处置状态：%s\n", statusCN(f.Status))
 		if f.TaskDescription != "" {
 			fmt.Fprintf(&b, "  任务：%s\n", f.TaskDescription)
@@ -78,13 +81,18 @@ func FindingsSARIF(fs []*db.DBFinding, generatedAt time.Time) ([]byte, error) {
 			"partialFingerprints": map[string]string{
 				"reartexFindingId/v1": strconvI64(f.ID),
 			},
+			"properties": map[string]any{
+				"impact_level":          f.ImpactLevel,
+				"evidence_level":        f.EvidenceLevel,
+				"evidence_insufficient": f.EvidenceLevel > 0 && !db.EvidenceSufficient(f.Severity, f.EvidenceLevel),
+			},
 		})
 	}
 	var ruleList []map[string]any
 	for id := range rules {
 		ruleList = append(ruleList, map[string]any{
-			"id":   id,
-			"name": id,
+			"id":      id,
+			"name":    id,
 			"helpUri": "", // 无独立帮助页——留空合法
 		})
 	}
@@ -98,7 +106,7 @@ func FindingsSARIF(fs []*db.DBFinding, generatedAt time.Time) ([]byte, error) {
 				"semanticVersion": "0.15.36",
 				"rules":           ruleList,
 			}},
-			"results":     results,
+			"results":           results,
 			"automationDetails": map[string]any{"id": "reartex/findings/" + generatedAt.Format("20060102150405")},
 		}},
 	}
@@ -124,6 +132,9 @@ pre{background:#f5f5f5;padding:.75rem;border-radius:4px;overflow-x:auto;font-siz
 	for _, f := range fs {
 		fmt.Fprintf(&b, `<div class="finding"><span class="sev sev-%s">%s</span> <strong>%s</strong> <span class="meta">[%s]</span>`,
 			f.Severity, severityCN(f.Severity), htmlEscape(findingTitle(f)), statusCN(f.Status))
+		if label := findingDimensionLabel(f); label != "" {
+			fmt.Fprintf(&b, `<div class="meta">%s</div>`, htmlEscape(label))
+		}
 		if f.TaskDescription != "" {
 			fmt.Fprintf(&b, `<div class="meta">任务：%s</div>`, htmlEscape(f.TaskDescription))
 		}

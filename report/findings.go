@@ -69,6 +69,9 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			fmt.Fprintf(&b, "- **类别**：%s\n", f.VulnClass)
 		}
 		fmt.Fprintf(&b, "- **状态**：%s\n", nz(f.Status, "pending"))
+		if label := findingDimensionLabel(f); label != "" {
+			fmt.Fprintf(&b, "- **分级**：%s\n", label)
+		}
 		if desc := strings.TrimSpace(f.TaskDescription); desc != "" {
 			fmt.Fprintf(&b, "- **所属任务**：%s\n", desc)
 		}
@@ -98,6 +101,9 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		fmt.Fprintf(&b, "- **类别**：%s\n", f.VulnClass)
 	}
 	fmt.Fprintf(&b, "- **严重等级**：%s\n", nz(f.Severity, "info"))
+	if label := findingDimensionLabel(f); label != "" {
+		fmt.Fprintf(&b, "- **分级**：%s\n", label)
+	}
 	fmt.Fprintf(&b, "- **状态**：%s\n", nz(f.Status, "pending"))
 	if desc := strings.TrimSpace(f.TaskDescription); desc != "" {
 		fmt.Fprintf(&b, "- **所属任务**：%s\n", desc)
@@ -149,8 +155,9 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
+	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID", "影响层级", "证据等级", "证据不足"})
 	for _, f := range items {
+		impact, evidence, insuff := findingExportLevels(f)
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
 			findingTitle(f),
@@ -160,7 +167,11 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 			f.TaskDescription,
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
 			strings.TrimSpace(f.Summary),
-			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			fmt.Sprint(len(f.TrafficBindings)),
+			findingTrafficIDs(f),
+			impact,
+			evidence,
+			insuff,
 		})
 	}
 	w.Flush()
@@ -197,4 +208,37 @@ func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
 	}
 	out.WriteString("\n")
 	return out.String()
+}
+
+// findingExportLevels 把三维分级收成导出用的三列。两级都还是 0（未扫描的旧结构）时留空，
+// 避免把零值写成 L0。库里的行默认至少是 1。
+func findingExportLevels(f *db.DBFinding) (impact, evidence, insuff string) {
+	if f == nil || (f.ImpactLevel < 1 && f.EvidenceLevel < 1) {
+		return "", "", ""
+	}
+	impactN, evidenceN := f.ImpactLevel, f.EvidenceLevel
+	if impactN < 1 {
+		impactN = 1
+	}
+	if evidenceN < 1 {
+		evidenceN = 1
+	}
+	insuff = "否"
+	if !db.EvidenceSufficient(f.Severity, evidenceN) {
+		insuff = "是"
+	}
+	return fmt.Sprintf("%d", impactN), fmt.Sprintf("%d", evidenceN), insuff
+}
+
+// findingDimensionLabel 是给人读的一行分级。未分级时返回空串。
+func findingDimensionLabel(f *db.DBFinding) string {
+	impact, evidence, insuff := findingExportLevels(f)
+	if impact == "" {
+		return ""
+	}
+	label := fmt.Sprintf("影响 L%s；证据 L%s", impact, evidence)
+	if insuff == "是" {
+		label += "（证据不足）"
+	}
+	return label
 }
