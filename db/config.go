@@ -236,6 +236,53 @@ func (d *DB) MigrateLLMPoolOptIn() error {
 	return tx.Commit()
 }
 
+// SetPoolMembers 按显式有序名单重写故障转移链的成员与顺位（轮询抽屉手动编辑
+// 的后端）。名单顺序即链序：列出的配置 pool_exclude=false、priority 按位置
+// 递减（链序 ORDER BY priority DESC，第一顺位拿最高值）；不在名单里的非激活
+// 配置一律 pool_exclude=true（出链）。激活配置是永久链首（PoolProfiles 以
+// is_default 直通），名单漏了它就自动补到首位——落库形态与抽屉所见一致。
+// 名单里的未知 id 回滚整次写入（所见即所存，绝不静默丢弃半份配置）。
+func (d *DB) SetPoolMembers(ids []int64) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return fmt.Errorf("llm_profiles: 非法的配置 id %d", id)
+		}
+		if seen[id] {
+			return fmt.Errorf("llm_profiles: 配置 #%d 重复出现在轮询名单里", id)
+		}
+		seen[id] = true
+	}
+	var activeID int64
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT id FROM llm_profiles WHERE is_default), 0)`).Scan(&activeID); err != nil {
+		return err
+	}
+	// 激活配置缺席则补首（priority 恒最高，与「激活恒为链首」的展示一致）。
+	final := ids
+	if activeID != 0 && !seen[activeID] {
+		final = append([]int64{activeID}, ids...)
+	}
+	for i, id := range final {
+		res, err := tx.Exec(`UPDATE llm_profiles SET pool_exclude=false, priority=$1 WHERE id=$2`,
+			len(final)-i, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("llm_profiles: 配置 #%d 不存在（轮询名单含未知 id）", id)
+		}
+	}
+	if _, err := tx.Exec(`UPDATE llm_profiles SET pool_exclude=true WHERE NOT is_default AND NOT (id = ANY($1))`, final); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	hint := p.APIKeyHint

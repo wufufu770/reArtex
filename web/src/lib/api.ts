@@ -1643,6 +1643,10 @@ export const api = {
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
   // 轮询链的实际顺序 + 各配置的熔断状态。
   llmPool: () => get<LLMPoolStatus>("/llm/pool"),
+  // 按有序 id 名单重写轮询链（数组顺序即链序；激活配置缺席时后端自动补首，
+  // 名单外的非激活配置一律出链）。返回刷新后的链，所见即所存。
+  saveLLMPoolMembers: (ids: string[]) =>
+    post<LLMPoolStatus>("/llm/pool/members", { members: ids.map((id) => ({ id: Number(id) })) }),
   // 清除熔断，让下一次调用立刻重试该配置；不传 id = 全部清除。
   resetLLMPool: (id?: string) => post<LLMPoolStatus>("/llm/pool/reset", { id: id ? Number(id) : 0 }),
   // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。

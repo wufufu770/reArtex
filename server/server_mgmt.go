@@ -2099,6 +2099,39 @@ func (s *Server) pgLLMPoolReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.llmPoolStatus())
 }
 
+// pgSetPoolMembers rewrites the failover chain from the pool drawer's manual
+// editor: an ordered id list (数组顺序即链序；激活配置缺席时由存储层自动补首，
+// 它是永久链首). Non-listed non-active profiles drop out of the chain. Saving
+// rebuilds the engine's providers immediately — same live pair as pgSaveProfile,
+// because priority/pool_exclude edits reshape the chain just the same. The
+// refreshed chain comes back so the drawer stays what-you-see-is-what's-stored.
+func (s *Server) pgSetPoolMembers(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	var body struct {
+		Members []struct {
+			ID int64 `json:"id"`
+		} `json:"members"`
+	}
+	if err := decode(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	ids := make([]int64, 0, len(body.Members))
+	for _, m := range body.Members {
+		ids = append(ids, m.ID)
+	}
+	if err := pg.SetPoolMembers(ids); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.invalidateProfileAgents() // 顺位/成员变了，缓存的 per-profile agent 一律重挂
+	s.reapplyActiveProfile()    // 与 pgSaveProfile 同款：链形变化即时落到运行引擎
+	writeJSON(w, 200, s.llmPoolStatus())
+}
+
 // pgListModels fetches available models from the provider's API endpoint.
 // Supports OpenAI-format (GET /models) and Anthropic-format (GET /v1/models); for
 // Anthropic-compatible third parties (e.g. DeepSeek) whose model list lives only on

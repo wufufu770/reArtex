@@ -3,6 +3,8 @@
 import * as React from "react";
 
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   Loader2Icon,
   PlugZapIcon,
   PlusIcon,
@@ -12,6 +14,7 @@ import {
   StarIcon,
   Trash2Icon,
   TriangleAlertIcon,
+  XIcon,
   ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -209,6 +212,21 @@ function PoolSheet({
   onReload: () => Promise<void>;
 }) {
   const [busy, setBusy] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  // 可编辑名单：有序 profile_id，激活恒在首位（后端保证，编辑器也禁止越过它）。
+  // null = 尚未从后端链派生；关闭抽屉即丢弃未保存的本地编辑，下次打开重新派生。
+  const [members, setMembers] = React.useState<string[] | null>(null);
+
+  // 从后端链派生名单：参与轮询的成员（激活||未排除），后端已按实际尝试顺序排好。
+  const chainMembers = React.useCallback(
+    (p: LLMPoolStatus) => p.chain.filter((m) => m.active || !m.excluded).map((m) => m.profile_id),
+    [],
+  );
+
+  React.useEffect(() => {
+    if (open && pool && members === null) setMembers(chainMembers(pool));
+    if (!open && members !== null) setMembers(null);
+  }, [open, pool, members, chainMembers]);
 
   // 冷却倒计时是后端算出的剩余秒数——抽屉开着且有配置不正常时才定时拉，让它走起来。
   React.useEffect(() => {
@@ -245,11 +263,49 @@ function PoolSheet({
     }
   }
 
+  // move/remove/join 只改本地名单，保存时一次性落库（数组顺序即链序）。
+  // 激活配置占据第 0 位且不可移动——上下移动不允许越过它。
+  function move(index: number, offset: -1 | 1) {
+    if (members === null || index <= 0) return;
+    const target = index + offset;
+    if (target <= 0 || target >= members.length) return;
+    const next = [...members];
+    [next[index], next[target]] = [next[target], next[index]];
+    setMembers(next);
+  }
+  function remove(id: string) {
+    if (members === null) return;
+    setMembers(members.filter((m) => m !== id));
+  }
+  function join(id: string) {
+    if (members === null || members.includes(id)) return;
+    setMembers([...members, id]);
+  }
+  async function save() {
+    if (saving || members === null) return;
+    setSaving(true);
+    try {
+      // 后端按位置写 priority、名单外一律出链，返回刷新后的链——所见即所存。
+      await api.saveLLMPoolMembers(members);
+      await onReload();
+      toast.success("已保存轮询配置，即时生效（正在跑的这一轮调用仍用旧链）");
+    } catch (e) {
+      toast.error(`保存失败：${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const enabled = pool?.enabled ?? false;
   const chain = pool?.chain ?? [];
-  // 参与轮询的成员（排除被标记「不参与轮询」的），顺序即后端实际的尝试顺序。
-  const inChain = chain.filter((m) => m.active || !m.excluded);
   const tripped = chain.filter((m) => m.state === "tripped");
+  // 编辑视图：本地名单（保存前）与链外候选（可加入）。dirty = 与后端不一致。
+  const list = members ?? [];
+  const rows = list
+    .map((id, index) => ({ m: chain.find((c) => c.profile_id === id), index }))
+    .filter((r): r is { m: LLMPoolMember; index: number } => r.m !== undefined);
+  const candidates = chain.filter((m) => !m.active && m.excluded && !list.includes(m.profile_id));
+  const dirty = members !== null && pool !== null && members.join(",") !== chainMembers(pool).join(",");
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -301,20 +357,34 @@ function PoolSheet({
               <div className="grid gap-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-sm">轮询顺序</Label>
-                  {tripped.length > 0 && (
-                    <Button size="sm" variant="ghost" onClick={() => void recover()}>
-                      <RotateCcwIcon /> 全部恢复
+                  <div className="flex items-center gap-1">
+                    {dirty && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={saving}
+                        onClick={() => pool && setMembers(chainMembers(pool))}
+                      >
+                        <RotateCcwIcon /> 放弃修改
+                      </Button>
+                    )}
+                    <Button size="sm" disabled={!dirty || saving} onClick={() => void save()}>
+                      <SaveIcon /> {saving ? "保存中…" : "保存"}
                     </Button>
-                  )}
+                    {tripped.length > 0 && (
+                      <Button size="sm" variant="ghost" onClick={() => void recover()}>
+                        <RotateCcwIcon /> 全部恢复
+                      </Button>
+                    )}
+                  </div>
                 </div>
-                {inChain.length < 2 && (
+                {list.length < 2 && (
                   <p className="text-muted-foreground text-xs">
-                    当前只有 {inChain.length} 个可用配置，轮询不会生效——至少需要 2 个已填 API Key 且参与轮询的配置。
+                    当前只有 {list.length} 个参与轮询的配置，轮询不会生效——至少需要 2 个已填 API Key 且参与轮询的配置。
                   </p>
                 )}
-                {chain.map((m) => {
-                  const excluded = m.excluded && !m.active;
-                  const order = excluded ? null : inChain.findIndex((x) => x.profile_id === m.profile_id) + 1;
+                {rows.map(({ m, index }) => {
+                  const active = m.active;
                   // 端点维度的状态（候选地址/切换历史）。endpoints 缺省（后端未发版）时不渲染。
                   const ep = pool?.endpoints?.find((e) => e.profile_id === m.profile_id);
                   return (
@@ -322,21 +392,19 @@ function PoolSheet({
                       key={m.profile_id}
                       className={cn(
                         "grid gap-1 rounded-lg border p-2.5 text-sm",
-                        excluded && "opacity-55",
                         m.state === "tripped" && "border-destructive/40",
                       )}
                     >
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span className="w-5 shrink-0 text-center font-mono text-muted-foreground text-xs">
-                          {order ?? "—"}
+                          {index + 1}
                         </span>
                         <span className="font-medium">{m.name}</span>
-                        {m.active && (
+                        {active && (
                           <Badge variant="outline" className="border-amber-400/50 text-amber-500">
                             激活
                           </Badge>
                         )}
-                        {excluded && <Badge variant="outline">不参与轮询</Badge>}
                         <div className="ml-auto flex items-center gap-2">
                           {m.state === "tripped" && m.cooldown_secs > 0 && (
                             <span className="text-muted-foreground text-xs">冷却 {cooldownText(m.cooldown_secs)}</span>
@@ -356,11 +424,44 @@ function PoolSheet({
                               <RotateCcwIcon className="size-3.5" />
                             </Button>
                           )}
+                          {!active && (
+                            <>
+                              <Button
+                                size="icon-sm"
+                                variant="ghost"
+                                aria-label="上移"
+                                title="上移：更早被尝试"
+                                disabled={saving || index === 1}
+                                onClick={() => move(index, -1)}
+                              >
+                                <ArrowUpIcon />
+                              </Button>
+                              <Button
+                                size="icon-sm"
+                                variant="ghost"
+                                aria-label="下移"
+                                title="下移：更晚被尝试"
+                                disabled={saving || index === list.length - 1}
+                                onClick={() => move(index, 1)}
+                              >
+                                <ArrowDownIcon />
+                              </Button>
+                              <Button
+                                size="icon-sm"
+                                variant="ghost"
+                                aria-label="移出轮询"
+                                title="移出轮询：不再作为故障转移目标"
+                                disabled={saving}
+                                onClick={() => remove(m.profile_id)}
+                              >
+                                <XIcon />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 pl-7 text-muted-foreground text-xs">
                         <code className="truncate font-mono">{m.model}</code>
-                        {!m.active && <span>优先级 {m.priority}</span>}
                       </div>
                       {m.last_error && (
                         <p className="truncate pl-7 font-mono text-muted-foreground text-xs" title={m.last_error}>
@@ -371,17 +472,41 @@ function PoolSheet({
                     </div>
                   );
                 })}
-                {chain.length === 0 && (
+                {rows.length === 0 && (
                   <div className="rounded-lg border border-dashed p-4 text-center text-muted-foreground text-sm">
-                    暂无配置
+                    暂无参与轮询的配置
+                  </div>
+                )}
+                {candidates.length > 0 && (
+                  <div className="grid gap-1.5 rounded-lg border border-dashed p-2.5">
+                    <p className="text-muted-foreground text-xs">
+                      未参与轮询的配置——点击加入会排在链尾（也可在各配置编辑里开关「不参与轮询」）：
+                    </p>
+                    {candidates.map((m) => (
+                      <div key={m.profile_id} className="flex items-center gap-2 text-sm">
+                        <span className="font-medium">{m.name}</span>
+                        <code className="truncate font-mono text-muted-foreground text-xs">{m.model}</code>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="ml-auto shrink-0"
+                          aria-label="加入轮询"
+                          title="加入轮询：作为故障转移目标，排在链尾（保存后可再调整顺序）"
+                          disabled={saving}
+                          onClick={() => join(m.profile_id)}
+                        >
+                          <PlusIcon />
+                        </Button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
 
               <div className="rounded-lg border border-dashed p-3 text-muted-foreground text-xs leading-relaxed">
-                激活配置恒为第 1 顺位，其余按优先级从高到低（在各配置里设置）。某个配置失败后进入冷却 （60s → 5min →
-                30min），冷却期内被跳过，恢复后自动切回。上下文窗口装不下当前请求的配置会被跳过。 指定了模型的 Agent
-                与任务默认不参与轮询。
+                在上面直接编辑成员与顺序（激活配置恒为第 1 顺位，不可移动/移出），点「保存」落库并即时生效——正在跑的
+                这一轮调用仍用旧链。某个配置失败后进入冷却（60s → 5min → 30min），冷却期内被跳过，恢复后自动切回。
+                上下文窗口装不下当前请求的配置会被跳过。指定了模型的 Agent 与任务默认不参与轮询。
               </div>
             </>
           )}
@@ -913,7 +1038,8 @@ function ProfileSheet({
                   轮询优先级
                 </Label>
                 <p className="text-muted-foreground text-xs">
-                  数字越大越先被选中；激活配置恒为第 1 顺位，与本值无关。相同优先级的配置会轮流打头，天然分摊额度。
+                  数字越大越先被选中；激活配置恒为第 1 顺位，与本值无关。顺序也可在「LLM
+                  轮询」抽屉里直接编辑——那里的保存会按链位覆写本值。
                 </p>
               </div>
               <Input
