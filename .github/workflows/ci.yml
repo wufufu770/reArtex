@@ -191,10 +191,17 @@ jobs:
         # Tier-0 命中在任何档位下都违规，--tier 2 才是「仅锁 Tier-0」的本意。
         # tag 推送的 event.before 是旧附注 tag 对象 sha——guard 的 <base>...HEAD
         # 语法只认 commit，v0.15.95 重钉 tag 首次踩中（4s 即 traceback）。先剥离
-        # 到 commit 再传：event.before 本是 commit sha（分支推送）时解析结果原样，
-        # 零行为变化；剥离失败（极端残留）回退原值让 guard 显式报错不吞问题。
+        # 到 commit 再传：分支推送的 before 本是 commit sha，解析原样零行为变化。
+        # 第二处实证（同日）：强推重钉后旧 tag 对象已从远端移除，clone 里 peel
+        # 不到 ⇒ 此时「before」语义已不存在，无可 diff 的区间——显式跳过（不回退
+        # 原值喂 guard 再崩），新内容全量面由 secret-scan all（整树+全历史）、
+        # go-test、e2e-smoke 覆盖；分支推送不受影响，硬锁照常强制。
         run: |
-          BASE=$(git rev-parse "${{ github.event.before }}^{commit}" 2>/dev/null || echo "${{ github.event.before }}")
+          BASE=$(git rev-parse "${{ github.event.before }}^{commit}" 2>/dev/null || true)
+          if [ -z "$BASE" ]; then
+            echo "event.before 无法解析为 commit（tag 对象已被强推移除）——跳过区间硬锁；内容/测试面由其余门覆盖"
+            exit 0
+          fi
           python3 scripts/rsi_guard.py --base "$BASE" --enforce --tier 2
 
   # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
