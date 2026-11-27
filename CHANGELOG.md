@@ -5,6 +5,13 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.104] - 2026-11-27
+
+### 修复（C-02D2 CI：密文篡改测试在末字节已是 A 时会放行）
+
+- `TestDecryptRejectsTamperedCiphertext` 把 base64 末字节写成 `A`。密文末尾本来就是 `A` 时等于没改，GCM 解密成功，用例报「被篡改的密文应解密失败」。#10 的一次 `go-test` 因此失败，同提交的另一次通过。现改为末字节是 `A` 时改成 `B`，否则改成 `A`。与资源模式无关。
+- 验证：`go test -race -count=1 ./db/ -run 'TestDecryptRejectsTamperedCiphertext|TestEncryptIsRandomized|TestDecryptRejectsWrongKey' -timeout 5m`。
+
 ## [0.15.103] - 2026-11-27
 
 ### 新增（C-02D2：建议复测标记与 oracle 只展示）

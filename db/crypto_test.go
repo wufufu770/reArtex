@@ -66,7 +66,12 @@ func TestDecryptRejectsTamperedCiphertext(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := []byte(enc)
-	raw[len(raw)-1] = 'A'
+	// 末字节若本来就是 A，写成 A 等于没改，GCM 会照常解开。换成另一个 base64 字符。
+	if raw[len(raw)-1] == 'A' {
+		raw[len(raw)-1] = 'B'
+	} else {
+		raw[len(raw)-1] = 'A'
+	}
 	if _, err := decryptSecret(string(raw), key, "p"); err == nil {
 		t.Fatal("被篡改的密文应解密失败")
 	}
