@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.117] - 2026-11-27
+
+### 新增（C-05D：终局规划轮不产新意图）
+
+- 背景：超时收尾的终局 planner 轮此前只在提示词里说「不要再生成新意图」，正常回合里 `add_intent` 仍可用。收尾阶段的工具隐藏只在步数或墙钟把这一轮推进结算时才生效。本批把终局轮整段禁掉新意图。
+- `TaskClock.Final` 为真时，planner 的工具面去掉 `add_intent` 和 `propose_intent`，`prove_goal` 还在。两个工具的处理器再查一次同一个标记，命中就返回「任务终局收尾轮禁止新增意图」，不写意图节点，也不写活动。没有这个标记时，`add_intent` 仍能建意图。
+- 【与卡面差异（如实说明）】① 卡面写「该行为深度分析已确认存在」。核对后，硬禁止只覆盖结算阶段；终局轮的正常回合之前能写出意图。本批补上这道拒绝。② 不改超时收尾的状态机。未达成仍由 C-05C 记 timeout。③ 详情页和报告里的未达成清单还没做。
+- 验证：`gofmt` 干净；`go vet ./agent/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./agent/ -run 'TestFinalRoundRejectsNewIntent|TestSetGoalsRequiresCriteriaAndProveCitesEvidence' -timeout 10m` 通过（1.8s）：终局上下文下两个工具都拒绝，意图节点 0，`activity` 里也没有这两次工具调用；去掉终局标记后能建 1 条意图；过滤后的工具面没有这两个名字，仍有 `prove_goal`。`go test -race -count=1 ./agent/ -timeout 20m` 全包通过（8.7s）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./server/`（本批零改动）。
+- 留下：报告和任务详情列出未达成目标。页面展示若本批放不下，下一小批只做数据出口。不开始 C-06。
+
 ## [0.15.116] - 2026-11-27
 
 ### 新增（C-05C：未达成目标不许记 done，终态记 timeout）

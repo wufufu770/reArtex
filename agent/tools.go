@@ -1337,7 +1337,10 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			// verify（验证/复测）之一；认不出按未标注处理（不设种类上限）。
 			"kind": str("本方向的种类（可选，一个词）：recon（侦察/收集类，如子域枚举、端口扫描、指纹）/ exploit（利用/攻击类，如注入、爆破）/ verify（验证/复测类，如证明某漏洞存在）。同种类意图有并发上限时按它限流。"),
 		}),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if taskClockFrom(ctx).Final {
+				return actool.Errorf("任务终局收尾轮禁止新增意图"), nil
+			}
 			var a struct {
 				Intents    []intentItem `json:"intents"`
 				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
@@ -1428,7 +1431,10 @@ func toolProposeIntent(ts *ToolSet) actool.CoreTool {
 }
 
 // proposeIntent 是 propose_intent 的实现：五道闸门 + 一次写入。
-func (t *ToolSet) proposeIntent(_ context.Context, in json.RawMessage) (actool.Result, error) {
+func (t *ToolSet) proposeIntent(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+	if taskClockFrom(ctx).Final {
+		return actool.Errorf("任务终局收尾轮禁止新增意图"), nil
+	}
 	var a struct {
 		Summary  string            `json:"summary"`
 		AssetIDs []json.RawMessage `json:"asset_ids"`
