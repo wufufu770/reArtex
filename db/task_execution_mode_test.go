@@ -13,6 +13,37 @@ import (
 	"time"
 )
 
+func TestTaskResourceFieldsFreshRead(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	easy := TaskDifficultyEasy
+	created, err := d.CreateTaskWithOptions(fmt.Sprintf("c02d-fields-%d", time.Now().UnixNano()), "收集", TaskCreateOptions{
+		Difficulty: &easy, ExecutionMode: TaskExecutionModeFast,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(created.ID) })
+	difficulty, mode, err := d.Exploration(created.ExplorationID).TaskResourceFields()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if difficulty != TaskDifficultyEasy || mode != TaskExecutionModeFast {
+		t.Fatalf("现读 %q / %q", difficulty, mode)
+	}
+	clear := ""
+	if _, err := d.UpdateTask(created.ID, TaskPatch{ExecutionMode: &clear}); err != nil {
+		t.Fatal(err)
+	}
+	difficulty, mode, err = d.Exploration(created.ExplorationID).TaskResourceFields()
+	if err != nil || difficulty != TaskDifficultyEasy || mode != "" {
+		t.Fatalf("清空后应现读到空覆盖，得到 %q / %q err=%v", difficulty, mode, err)
+	}
+}
+
 func TestTaskExecutionModeSchemaIdempotent(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

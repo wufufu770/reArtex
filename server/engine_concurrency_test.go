@@ -63,6 +63,47 @@ func concurrencyTestIntent(t *testing.T, task *Task, text string) int64 {
 	return id
 }
 
+func TestTightenGroupLimit(t *testing.T) {
+	if got := tightenGroupLimit(5, 3); got != 3 {
+		t.Fatalf("画像更严时应取 3，得到 %d", got)
+	}
+	if got := tightenGroupLimit(1, 5); got != 1 {
+		t.Fatalf("组内更严时应保持 1，得到 %d", got)
+	}
+	if got := tightenGroupLimit(5, 0); got != 5 {
+		t.Fatalf("读不到画像时不应收紧，得到 %d", got)
+	}
+}
+
+// TestResourceModeTightensGroupCap：群组上限 5，默认 medium 的画像并发是 3，
+// 第三次认领成功，第四次被拒。改成 super_heavy 后第四次可以领。
+func TestResourceModeTightensGroupCap(t *testing.T) {
+	s, pg := taskHallTestServer(t)
+	task, taskID := concurrencyTestTask(t, s, pg, "资源模式收紧组内并发")
+	concurrencyTestGroup(t, pg, taskID, 5)
+	ids := make([]int64, 4)
+	for i := range ids {
+		ids[i] = concurrencyTestIntent(t, task, fmt.Sprintf("意图 %d", i+1))
+	}
+	for i := 0; i < 3; i++ {
+		got := s.engine.claimNext(task, fmt.Sprintf("work#%d", i+1))
+		if got == nil || got.ID != ids[i] {
+			t.Fatalf("第 %d 次认领失败: %+v", i+1, got)
+		}
+	}
+	if got := s.engine.claimNext(task, "work#4"); got != nil {
+		t.Fatalf("画像并发 3 已满，第四次应被拒，实际 #%d", got.ID)
+	}
+	heavy := db.TaskExecutionModeSuperHeavy
+	if _, err := pg.UpdateTask(taskID, db.TaskPatch{ExecutionMode: &heavy}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.engine.claimNext(task, "work#4")
+	if got == nil || got.ID != ids[3] {
+		t.Fatalf("改成 super_heavy 后应能领第 4 条，实际 %+v", got)
+	}
+}
+
 // TestGroupConcurrencyCapBlocksExtraClaim：上限=1 时，第二次认领必须被拒；前一条
 // 结束后又能领。
 func TestGroupConcurrencyCapBlocksExtraClaim(t *testing.T) {

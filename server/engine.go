@@ -2717,6 +2717,8 @@ func (e *Engine) groupCapAllowsClaim(t *Task) bool {
 	if !hasGroup || limit <= 0 {
 		return true
 	}
+	// 有群组才把画像并发（2/3/5）和组内上限取较小值。没有群组的任务不在这里新造槽位。
+	limit = tightenGroupLimit(limit, e.taskResourceCap(t))
 	if e.GroupRunningIntents == nil {
 		return true
 	}
@@ -2729,6 +2731,35 @@ func (e *Engine) groupCapAllowsClaim(t *Task) bool {
 		return true
 	}
 	return running < limit
+}
+
+// tightenGroupLimit 把群组上限收紧到资源画像的并发。画像读不到时 resourceCap=0，保持原上限。
+func tightenGroupLimit(groupLimit, resourceCap int) int {
+	if groupLimit <= 0 || resourceCap <= 0 || resourceCap >= groupLimit {
+		return groupLimit
+	}
+	return resourceCap
+}
+
+// taskResourceCap 每次认领现读 tasks.difficulty / execution_mode，不使用内存快照。
+// 读失败返回 0，调用方保持原来的组内上限。
+func (e *Engine) taskResourceCap(t *Task) int {
+	if e == nil || e.m == nil || e.m.pg == nil || t == nil {
+		return 0
+	}
+	id, ok := e.taskNumericID(t)
+	if !ok {
+		return 0
+	}
+	row, err := e.m.pg.GetTask(id)
+	if err != nil || row == nil {
+		return 0
+	}
+	capN := agent.ResolveProfile(row.Difficulty, row.ExecutionMode).WorkerConcurrency
+	if capN <= 0 {
+		return 0
+	}
+	return capN
 }
 
 // groupConcurrencyLimit 读这个 task 所属群组的并发上限；ok=false 表示没有群组。
@@ -2830,7 +2861,7 @@ func (e *Engine) Drained(taskID string) bool {
 }
 
 // notifyDrainComplete 软截止收尾播报（0.15.55）：完成判据是【意图清零】
-//（open/running/paused 全无）——清零时播报一次；软截止翻转时由 Drain 清位。
+// （open/running/paused 全无）——清零时播报一次；软截止翻转时由 Drain 清位。
 func (e *Engine) notifyDrainComplete(t *Task) {
 	if e == nil || t == nil || t.Store == nil {
 		return

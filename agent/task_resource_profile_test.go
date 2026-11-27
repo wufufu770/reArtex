@@ -134,6 +134,40 @@ func TestResolveProfileIllegalModeFallsBack(t *testing.T) {
 	}
 }
 
+func TestScaledPlannerTurns(t *testing.T) {
+	if got := ScaledPlannerTurns(0, 3); got != 0 {
+		t.Fatalf("0 应保持不限，得到 %d", got)
+	}
+	if got := ScaledPlannerTurns(-4, 10); got != -4 {
+		t.Fatalf("负数应原样返回，得到 %d", got)
+	}
+	cases := []struct {
+		configured int
+		rounds     int
+		want       int
+	}{
+		{6, 3, 3},
+		{6, 6, 6},
+		{6, 10, 10},
+		{1, 3, 1},
+		{5, 3, 3},
+		{5, 10, 8},
+	}
+	for _, c := range cases {
+		if got := ScaledPlannerTurns(c.configured, c.rounds); got != c.want {
+			t.Fatalf("configured=%d rounds=%d got=%d want=%d", c.configured, c.rounds, got, c.want)
+		}
+	}
+	// 预算档位不进入轮次换算：easy 覆盖成 super_heavy 只用轮次 10。
+	profile := ResolveProfile(LevelEasy, string(ModeSuperHeavy))
+	if profile.TokenBudget != 3 {
+		t.Fatalf("相对预算应仍是标签 3，得到 %d", profile.TokenBudget)
+	}
+	if got := ScaledPlannerTurns(6, profile.PlannerRounds); got != 10 {
+		t.Fatalf("super_heavy 轮次缩放应得 10，得到 %d", got)
+	}
+}
+
 func TestResolveProfileDoesNotTouchExecutionRegistry(t *testing.T) {
 	const id int64 = 702
 	SetExecutionProfile(id, ResolveExecutionProfile(DifficultySimple, ModeFast))
