@@ -6,6 +6,7 @@ import Link from "next/link";
 
 import { FlaskConicalIcon, RotateCcwIcon } from "lucide-react";
 
+import { FindingLevelBadges } from "@/components/finding-level-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,7 @@ export function FindingsCards({ items, activeRetests, onRetest, onDeepen }: Find
               <div className="flex flex-wrap items-center gap-1.5">
                 <StatusBadge domain="severity" value={f.severity} dot />
                 <StatusBadge domain="finding" value={f.status} dot />
+                <FindingLevelBadges finding={f} />
                 <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
               </div>
               <div className="flex min-w-0 flex-col gap-1">
