@@ -281,3 +281,120 @@ func (s *AutoScaler) EvaluateTurn(current TaskExecutionProfile, sig TurnSignals)
 		NewProfile: updated,
 	}
 }
+
+// ---------- C-02A 任务难度 → 资源画像 ----------
+//
+// 上面的 TaskExecutionProfile / ResolveExecutionProfile 是 0.15.17 的请求级档位
+// （推理强度、压缩窗口、AutoScaler 熔断信号），输入是执行档 auto/simple/medium/hard。
+// 下面这张表是另一件事：把 C-01 的任务难度 easy/medium/hard/expert 翻译成
+// 预算、并发、planner 轮次和复测范围。两张表共用 ModeFast / ModeBalanced /
+// ModeSuperHeavy 这三个字符串，但不共用解析函数，也不写 profileRegistry。
+//
+// 本批只提供纯函数。tasks.execution_mode 列、PATCH、planner/worker/复测接线都还没做：
+// 现有轮次与 token 没有可对齐的绝对常量（见各字段注释），硬接到派发上会改掉
+// 「maxTurns=0 不限」的现行行为。
+
+// 复测范围。oracle 未落地（E-02）时 RequireOracle 只是标注，不代替复测。
+const (
+	RetestScopeKeyOnly  = "key_only"
+	RetestScopeHighPlus = "high_plus"
+	RetestScopeAll      = "all"
+)
+
+// ExecutionProfile 是一张确定性资源画像。
+// TokenBudget 与 PlannerRounds 用的是卡面相对档位，不是 token 数或已生效的轮次上限。
+type ExecutionProfile struct {
+	Mode              ExecutionMode
+	WorkerConcurrency int
+	TokenBudget       int64
+	PlannerRounds     int
+	RetestScope       string
+	RequireOracle     bool
+}
+
+// DefaultExecutionMode 把任务难度映射成默认资源模式。
+// 空值、空白和执行档的 auto/simple 都不是任务难度，回落 balanced。
+// 大小写敏感，与 ValidDifficulty 同一口径。
+// 不能叫 DefaultMode：那个名字已经被 0.15.17 的常量占用（恒为 balanced）。
+func DefaultExecutionMode(level string) ExecutionMode {
+	switch strings.TrimSpace(level) {
+	case LevelEasy:
+		return ModeFast
+	case LevelMedium, LevelHard:
+		return ModeBalanced
+	case LevelExpert:
+		return ModeSuperHeavy
+	default:
+		return ModeBalanced
+	}
+}
+
+// ValidResourceMode 报告 s 是否为可手动覆盖的资源模式。
+// 空串不是覆盖（空 = 跟随难度）。ModeAuto 是 0.15.17 的执行档，不是本表的覆盖值。
+func ValidResourceMode(s string) bool {
+	switch ExecutionMode(strings.TrimSpace(s)) {
+	case ModeFast, ModeBalanced, ModeSuperHeavy:
+		return true
+	}
+	return false
+}
+
+// ResolveProfile 按「手动模式优先，空则跟难度」解析资源画像。
+// 纯函数：不读库、不写 profileRegistry、不调 LLM。
+// executionMode 去空白后非空但不在白名单 → 回落 balanced 画像（与卡面 switch 的默认支一致）。
+// 这种值不能当覆盖落库；拒绝写入是后续 API 批的事，本函数不产生错误。
+func ResolveProfile(difficulty, executionMode string) ExecutionProfile {
+	mode := ExecutionMode(strings.TrimSpace(executionMode))
+	if mode == "" {
+		mode = DefaultExecutionMode(difficulty)
+	}
+	return resourceProfileFor(mode)
+}
+
+// resourceProfileFor 是映射表本身。改数只改这里，解析顺序在 ResolveProfile。
+//
+// TokenBudget 1/2/3、PlannerRounds 3/6/10 是相对档位，不是绝对 token / 轮次：
+// planner 的 MaxTurns 来自 agent 管理配置（0 = 不限，planner.go），没有 3/6/10 这组常量；
+// 唯一的 token 常量 SuperHeavyHardTokenBudget（800_000）是 0.15.17 AutoScaler 的降档信号，
+// 不是按难度分的每轮预算。绝对数留给 G-06 / H-05，决策 #7 之前不在这里换算。
+func resourceProfileFor(mode ExecutionMode) ExecutionProfile {
+	switch mode {
+	case ModeFast:
+		// 并发卡面给的是 1–2，取上限 2。
+		return ExecutionProfile{
+			Mode:              ModeFast,
+			WorkerConcurrency: 2,
+			TokenBudget:       1,
+			PlannerRounds:     3,
+			RetestScope:       RetestScopeKeyOnly,
+			RequireOracle:     false,
+		}
+	case ModeBalanced:
+		return ExecutionProfile{
+			Mode:              ModeBalanced,
+			WorkerConcurrency: 3,
+			TokenBudget:       2,
+			PlannerRounds:     6,
+			RetestScope:       RetestScopeHighPlus,
+			RequireOracle:     false,
+		}
+	case ModeSuperHeavy:
+		return ExecutionProfile{
+			Mode:              ModeSuperHeavy,
+			WorkerConcurrency: 5,
+			TokenBudget:       3,
+			PlannerRounds:     10,
+			RetestScope:       RetestScopeAll,
+			RequireOracle:     true,
+		}
+	default:
+		return ExecutionProfile{
+			Mode:              ModeBalanced,
+			WorkerConcurrency: 3,
+			TokenBudget:       2,
+			PlannerRounds:     6,
+			RetestScope:       RetestScopeHighPlus,
+			RequireOracle:     false,
+		}
+	}
+}
