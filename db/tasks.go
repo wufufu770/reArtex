@@ -69,6 +69,13 @@ type Task struct {
 	// 难度以后改了，空列仍然跟新难度走。不是 0.15.17 执行档的
 	// auto/simple/medium/hard。非法值拒绝写入，不静默改成 balanced。
 	ExecutionMode string `json:"execution_mode"`
+	// Grade 是终态评级（C-03）：S / A / B / C。空串 = 还没评。
+	// 终态结算写一次，不随后来的 finding 改动变化；重算只走显式重新评级。
+	// 不是执行档，也不是任务难度。
+	Grade        string `json:"grade"`
+	GradeSummary string `json:"grade_summary"`
+	// GradeScore 未评时为 nil（列是 NULL）。已评时是公式分，可以是 0，所以不能用 0 当未评。
+	GradeScore *float64 `json:"grade_score,omitempty"`
 }
 
 // TaskDeleteResult reports optional related-data cleanup performed in the same
@@ -123,6 +130,10 @@ var (
 	// ErrTaskExecutionModeInvalid 表示资源模式不在白名单。空串合法（跟随难度）。
 	// 非法值拒绝写入，不静默改成 balanced。HTTP 400 留给 C-02C。
 	ErrTaskExecutionModeInvalid = errors.New("task execution_mode must be empty, fast, balanced, or super_heavy")
+	// ErrTaskGradeNotTerminal 表示任务还不是终态，不能写入评级。
+	ErrTaskGradeNotTerminal = errors.New("只有终态任务可以评级")
+	// ErrTaskGradeInvalid 表示等级不在 S/A/B/C。空串不是等级，清除走 ClearTaskGrade。
+	ErrTaskGradeInvalid = errors.New("task grade must be S, A, B, or C")
 )
 
 // 任务难度四值（C-01）。与执行档位的 simple/auto 不是同一套枚举。
@@ -137,6 +148,12 @@ const (
 	TaskExecutionModeFast       = "fast"
 	TaskExecutionModeBalanced   = "balanced"
 	TaskExecutionModeSuperHeavy = "super_heavy"
+	// 任务评级四值（C-03）。空串不在这里：空是「还没评」。
+	// 与 agent.GradeS/A/B/C 的字符串一致。db 不能 import agent。
+	TaskGradeS = "S"
+	TaskGradeA = "A"
+	TaskGradeB = "B"
+	TaskGradeC = "C"
 )
 
 //go:embed schema_task_difficulty.sql
@@ -145,11 +162,17 @@ var taskDifficultySchemaSQL string
 //go:embed schema_task_execution_mode.sql
 var taskExecutionModeSchemaSQL string
 
+//go:embed schema_task_grade.sql
+var taskGradeSchemaSQL string
+
 // taskDifficultySchemaReady 按连接池标记 DDL 已就位（markRuntimeSchemasReady 同键）。
 var taskDifficultySchemaReady sync.Map
 
 // taskExecutionModeSchemaReady 同上，键是运行期连接池指针。
 var taskExecutionModeSchemaReady sync.Map
+
+// taskGradeSchemaReady 同上，键是运行期连接池指针。
+var taskGradeSchemaReady sync.Map
 
 // EnsureTaskDifficultySchema 幂等补上 tasks.difficulty / difficulty_reason。
 // 启动期用迁移连接调用；运行期连接被 markRuntimeSchemasReady 标成就位后不再执行 DDL。
@@ -181,6 +204,31 @@ func (d *DB) EnsureTaskExecutionModeSchema() error {
 	}
 	taskExecutionModeSchemaReady.Store(d.DB, struct{}{})
 	return nil
+}
+
+// EnsureTaskGradeSchema 幂等补上 tasks.grade / grade_summary / grade_score。
+// 启动期用迁移连接调用；运行期连接被 markRuntimeSchemasReady 标成就位后不再执行 DDL。
+func (d *DB) EnsureTaskGradeSchema() error {
+	if d == nil || d.DB == nil {
+		return errors.New("数据库未装配")
+	}
+	if _, ok := taskGradeSchemaReady.Load(d.DB); ok {
+		return nil
+	}
+	if _, err := d.Exec(taskGradeSchemaSQL); err != nil {
+		return fmt.Errorf("应用任务评级 schema 失败: %w", err)
+	}
+	taskGradeSchemaReady.Store(d.DB, struct{}{})
+	return nil
+}
+
+// ValidTaskGrade 报告 s 是否为 S/A/B/C。空串不是等级。大小写敏感。
+func ValidTaskGrade(s string) bool {
+	switch s {
+	case TaskGradeS, TaskGradeA, TaskGradeB, TaskGradeC:
+		return true
+	}
+	return false
 }
 
 // ValidTaskDifficulty 报告 s 是否为四值白名单（大小写敏感，不接受执行档位的 auto/simple）。
@@ -363,6 +411,9 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
 		return nil, err
 	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return nil, err
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -540,12 +591,17 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), COALESCE(scope_configured,true), first_run_at, deadline_at, COALESCE(difficulty,'medium'), COALESCE(difficulty_reason,''), COALESCE(execution_mode,'')`
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), COALESCE(scope_configured,true), first_run_at, deadline_at, COALESCE(difficulty,'medium'), COALESCE(difficulty_reason,''), COALESCE(execution_mode,''), COALESCE(grade,''), COALESCE(grade_summary,''), grade_score`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ScopeConfigured, &t.FirstRunAt, &t.DeadlineAt, &t.Difficulty, &t.DifficultyReason, &t.ExecutionMode); err != nil {
+	var score sql.NullFloat64
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ScopeConfigured, &t.FirstRunAt, &t.DeadlineAt, &t.Difficulty, &t.DifficultyReason, &t.ExecutionMode, &t.Grade, &t.GradeSummary, &score); err != nil {
 		return nil, err
+	}
+	if score.Valid {
+		v := score.Float64
+		t.GradeScore = &v
 	}
 	t.Pinned = t.PinnedAt != nil
 	return &t, nil
@@ -585,6 +641,9 @@ func (d *DB) ListTasks() ([]*Task, error) {
 		return nil, err
 	}
 	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
 		return nil, err
 	}
 	// id 是 BIGSERIAL，同一时刻创建的任务也有稳定且唯一的顺序。
@@ -633,6 +692,9 @@ func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
 	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
 		return nil, err
 	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return nil, err
+	}
 	var difficulty string
 	if patch.Difficulty != nil {
 		difficulty = strings.TrimSpace(*patch.Difficulty)
@@ -679,6 +741,9 @@ func (d *DB) GetTask(id int64) (*Task, error) {
 		return nil, err
 	}
 	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
 		return nil, err
 	}
 	t, err := scanTask(d.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=$1 AND deleted_at IS NULL`, id))
@@ -929,4 +994,128 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 		return result, err
 	}
 	return result, tx.Commit()
+}
+
+// TaskGradeFinding 是评级取证用的一条发现。只带结论和证据正文，
+// 证据是否完整由 agent.CheckFindingGate 判定（db 不能 import agent）。
+type TaskGradeFinding struct {
+	Summary  string
+	Evidence string
+}
+
+// TaskGradeFacts 是一次评级要用的确定性计数。
+// 目标口径与 GoalCountsAll 相同：kind='goal' 的总数，以及其中 state='met'。
+// 已验证发现是 status='confirmed'。覆盖率是 TaskCoverage 的分母 / 已测。
+// abandoned 的目标算进总数、不算达成。
+type TaskGradeFacts struct {
+	GoalsMet, GoalsTotal            int
+	VerifiedFindings, TotalFindings int
+	CoveredAssets, ScopedAssets     int
+	Findings                        []TaskGradeFinding
+}
+
+// LoadTaskGradeFacts 为单任务读取评级输入。任务不存在时返回 sql.ErrNoRows。
+// 不调用 GoalCountsAll：那是全表汇总，这里用同一谓词只查这一个探索。
+func (d *DB) LoadTaskGradeFacts(taskID int64) (TaskGradeFacts, error) {
+	var facts TaskGradeFacts
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return facts, err
+	}
+	var expID int64
+	err := d.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&expID)
+	if err != nil {
+		return facts, err
+	}
+	if err := d.QueryRow(`
+SELECT COUNT(*), COUNT(*) FILTER (WHERE state='met')
+FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='goal'`, expID).Scan(&facts.GoalsTotal, &facts.GoalsMet); err != nil {
+		return facts, err
+	}
+	if err := d.QueryRow(`
+SELECT COUNT(*), COUNT(*) FILTER (WHERE status=$2)
+FROM findings
+WHERE task_id=$1`, taskID, FindingConfirmed).Scan(&facts.TotalFindings, &facts.VerifiedFindings); err != nil {
+		return facts, err
+	}
+	rows, err := d.Query(`
+SELECT COALESCE(summary,''), COALESCE(evidence,'')
+FROM findings
+WHERE task_id=$1
+ORDER BY id`, taskID)
+	if err != nil {
+		return facts, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f TaskGradeFinding
+		if err := rows.Scan(&f.Summary, &f.Evidence); err != nil {
+			return facts, err
+		}
+		facts.Findings = append(facts.Findings, f)
+	}
+	if err := rows.Err(); err != nil {
+		return facts, err
+	}
+	cov, err := d.Assets().TaskCoverage(taskID, expID)
+	if err != nil {
+		return facts, err
+	}
+	if cov != nil {
+		facts.ScopedAssets = cov.Denominator
+		facts.CoveredAssets = cov.Tested
+	}
+	return facts, nil
+}
+
+// SaveTaskGrade 把一次评级写入任务行。force=false 时只在还没评（grade=”）
+// 且任务已是终态时写入；已经评过则返回 false, nil，不覆盖。
+// force=true 时终态任务一律覆盖。非终态返回 ErrTaskGradeNotTerminal，不写。
+// 等级必须是 S/A/B/C。分数与摘要同一次 UPDATE 写入。
+func (d *DB) SaveTaskGrade(id int64, grade, summary string, score float64, force bool) (bool, error) {
+	if !ValidTaskGrade(grade) {
+		return false, fmt.Errorf("%w: %q", ErrTaskGradeInvalid, grade)
+	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return false, err
+	}
+	q := `UPDATE tasks
+SET grade=$2, grade_summary=$3, grade_score=$4
+WHERE id=$1 AND deleted_at IS NULL AND status IN ('done','failed','timeout')`
+	if !force {
+		q += ` AND grade=''`
+	}
+	res, err := d.Exec(q, id, grade, summary, score)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		return true, nil
+	}
+	var status, existing string
+	err = d.QueryRow(`SELECT status, grade FROM tasks WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&status, &existing)
+	if err == sql.ErrNoRows {
+		return false, sql.ErrNoRows
+	}
+	if err != nil {
+		return false, err
+	}
+	if !IsTerminal(status) {
+		return false, ErrTaskGradeNotTerminal
+	}
+	if !force && existing != "" {
+		return false, nil
+	}
+	return false, fmt.Errorf("保存任务评级失败")
+}
+
+// ClearTaskGrade 把评级清回未评。离开终态时调用，让下一次进入终态重新计算。
+// 已经是空的则不动。
+func (d *DB) ClearTaskGrade(id int64) error {
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return err
+	}
+	_, err := d.Exec(`UPDATE tasks SET grade='', grade_summary='', grade_score=NULL WHERE id=$1 AND grade<>''`, id)
+	return err
 }

@@ -467,6 +467,12 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureTaskExecutionModeSchema(); err != nil {
 			return fmt.Errorf("apply task execution mode schema: %w", err)
 		}
+		// C-03B：tasks.grade / grade_summary / grade_score。列不在
+		// db/schema.sql（RESERVED），taskCols 已引用这三列——漏接启动期会让
+		// 首个任务读在受限角色下报 42703。
+		if err := schemaDB.EnsureTaskGradeSchema(); err != nil {
+			return fmt.Errorf("apply task grade schema: %w", err)
+		}
 		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
 		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用
 		// 有 DDL 权限的连接建好：受限运行角色建不了表。

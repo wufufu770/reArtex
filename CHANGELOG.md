@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.106] - 2026-11-27
+
+### 新增（C-03B：tasks.grade / grade_summary / grade_score 落库）
+
+- 背景：C-03A（0.15.105）只放了纯函数 `ComputeGrade`。本批把评级三列落进 `tasks`，并提供读取四项计数、写入、清除。终态钩子、重新评级接口和 `GET /api/tasks/{id}` 仍是 C-03C，本批不做。
+- `db/schema_task_grade.sql`（新增）：幂等补 `grade TEXT NOT NULL DEFAULT ''`、`grade_summary TEXT NOT NULL DEFAULT ''`、`grade_score REAL`（可空，无默认）。空等级 + NULL 分数 = 还没评。0 分是评过的 C，不能拿来当未评。`ck_tasks_grade` 只允许 `''/S/A/B/C`。`ck_tasks_grade_score` 要求「空等级且分数 NULL」或「有等级且分数非 NULL」，禁止只写一半。约束先 `DROP CONSTRAINT IF EXISTS` 再 `ADD`。不加索引：本批没有按等级筛选的查询。
+- `db/tasks.go`：`Task` / `taskCols` / `scanTask` 同步三列。`SaveTaskGrade` 只接受 S/A/B/C，并且只写终态任务；`force=false` 时已有等级不覆盖（改 finding 后再写一次，库里的等级不动）。`force=true` 覆盖。非终态返回 `ErrTaskGradeNotTerminal`，不改行。`ClearTaskGrade` 清回未评。`LoadTaskGradeFacts` 读单任务计数：目标与 `GoalCountsAll` 同一谓词（`kind='goal'`，`state='met'`；abandoned 算进总数、不算达成），已验证发现是 `status='confirmed'`，覆盖率是 `AssetStore.TaskCoverage` 的分母和已测数，另外带回每条发现的 summary/evidence 供调用方过 `CheckFindingGate`。创建和只改名称都不碰这三列。
+- `db/db.go` + `db/role.go`：启动迁移块调用 `EnsureTaskGradeSchema`，并在 `markRuntimeSchemasReady` 登记。`taskCols` 已经引用新列，漏接会让受限运行角色的第一次任务读报 42703。
+- `db/task_archives_restore.go`：恢复语句补上三列。旧快照没有键时 `json_populate_record` 给出 NULL；`grade` / `grade_summary` 用 `COALESCE` 回落空串，`grade_score` 保持 NULL。快照里有值则原样恢复。
+- 测试（`db/task_grade_test.go`）：幂等 DDL + NOT NULL + 空默认 + 分数可空 + CHECK 四值在场；新建是未评；非终态和非法等级拒绝且不改行；2/4 目标（含 abandoned）、2/4 已确认发现、1/2 覆盖资产读数正确；终态首次写入后现读是 A；改 finding 且不 force 不覆盖；force 覆盖成 S；只改名称不动评级；清除后回到未评；直写 `D`、有等级无分数、空等级带分数都被 CHECK 拒绝；列表能读到该列；旧快照缺列回落未评、完整快照恢复 B。既有 C-01A / C-02B 用例同包通过。
+- 【与卡面差异（如实说明）】① 未改 `db/schema.sql`：该文件是 RESERVED，新列走独立 `schema_*.sql`。② 白名单在 `db.ValidTaskGrade`，与 `agent.ValidGrade` 字符串一致。db 不能 import agent。③ 单任务查询，不调用 `GoalCountsAll()` 扫全表。谓词相同。④ 覆盖率函数是 `AssetStore.TaskCoverage`（分母 = 命中 `task_scope` 的资产，分子 = 锚定到 fact 的已测资产）。不看 `coverage_enabled` 开关。⑤ `grade_score` 用卡面的 REAL。76.4 读回按 0.01 容差比对；等级和摘要是文本，两次读取一致。⑥ 证据完整与否不在 db 里算：发现正文交回去，由 C-03A 的 `CountEvidenceComplete` 过 `CheckFindingGate`。⑦ 未接终态钩子，未做重新评级接口，GET 还不返回这三列。前端展示归 C-06。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净；`go test -race -count=1 ./db/ -run 'TestTaskGrade|TestTaskExecutionMode|TestTaskDifficulty' -timeout 10m` 通过（1.8s）；`go test -race -count=1 ./db/ -timeout 25m` 全包通过（21.5s，exit 0）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：C-03C 在 `Manager.SetTaskStatus` / `SetTaskStatusGuarded` 进入终态时算一次并落库，离开终态时清除，并提供带审计的重新评级。`GET /api/tasks/{id}` 回读 `grade` 与 `grade_summary`。不开始 C-04。
+
 ## [0.15.105] - 2026-11-27
 
 ### 新增（C-03A：任务评级公式，纯函数）
