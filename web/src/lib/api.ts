@@ -316,8 +316,16 @@ export const api = {
     post<{ ok: boolean }>("/auth/change-password", { old_password: oldPassword, new_password: newPassword }),
 
   // ---- tasks ----
-  tasks: () =>
-    get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
+  tasks: (filter?: { difficulty?: string; grade?: string }) => {
+    const query = new URLSearchParams();
+    if (filter?.difficulty && filter.difficulty !== "all") query.set("difficulty", filter.difficulty);
+    if (filter?.grade && filter.grade !== "all") query.set("grade", filter.grade);
+    const qs = query.toString();
+    return get<{ tasks: Task[]; active: string }>(`/tasks${qs ? `?${qs}` : ""}`).then((r) => ({
+      tasks: arr(r.tasks),
+      active: r.active ?? "",
+    }));
+  },
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     name?: string;
