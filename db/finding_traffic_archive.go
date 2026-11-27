@@ -80,6 +80,16 @@ func normalizeArchivedFindingVersions(raw json.RawMessage) (json.RawMessage, err
 				row[key] = 0
 			}
 		}
+		// C-04A：旧快照没有三维分级列。json_populate_record 对缺键给 NULL，
+		// 会绕过 DEFAULT 1 / 空串，直接撞 NOT NULL。这里补回默认，不按正文升级。
+		for _, key := range []string{"impact_level", "evidence_level", "evidence_level_requested"} {
+			if row[key] == nil {
+				row[key] = 1
+			}
+		}
+		if row["evidence_level_reason"] == nil {
+			row["evidence_level_reason"] = ""
+		}
 	}
 	return json.Marshal(rows)
 }
