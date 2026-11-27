@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.103] - 2026-11-27
+
+### 新增（C-02D2：建议复测标记与 oracle 只展示）
+
+- 背景：方案 B 的后半。复测不自动派发。`RetestSuggested` 只按生效画像的 `RetestScope` 判断严重度算不算建议：`key_only` 仅 critical，`high_plus` 为 high 与 critical，`all` 为 critical/high/medium/low。
+- 创建、修改和 `GET /api/tasks/{id}` 的任务视图增加 `retest_scope` 与 `require_oracle`。这是 `ResolveProfile` 的现算结果，不另落库。
+- 详情资源模式卡展示建议复测范围，以及「程序化验证：需要标注（不阻断人工复测）/ 不要求」。复测页在匹配的漏洞上加「建议复测」标记，列表不隐藏，发起复测的按钮仍在。
+- 【与卡面差异（如实说明）】① 不自动创建复测任务。② `RequireOracle` 只展示。E-02 未做，不因为这个标记拒绝人工复测。③ 建议标记不是第二套派发闸门。
+- 验证：`gofmt` 干净；`go test -race -count=1 ./agent/ -run 'TestRetestSuggested|TestScaledPlannerTurns'` 通过（1.4s）；`go test -race -count=1 ./server/ -run 'TestTaskExecutionModeAPI$'` 通过（2.1s）。前端 `biome check --diagnostic-level=error` 通过，`tsc --noEmit` 通过，`npm run test:mentions` 通过。
+- C-02 到此停止。不开始 C-03。
+
 ## [0.15.102] - 2026-11-27
 
 ### 新增（C-02D1：方案 B 的 planner 轮次缩放和组内并发收紧）
