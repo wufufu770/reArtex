@@ -581,16 +581,110 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','blocked')`, s.ex
 	return n, nil
 }
 
-// UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
+// UpdateGoalPayload rewrites a goal node's text (and optional vulnclass).
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
+//
+// 其它 payload 键保留：判定标准 criteria、达成时写入的 evidence_id / evidence_reason
+// 不能因为改了一句话就被整包替换抹掉。vulnclass 传空则删掉该键（与旧行为一致）。
 func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
-	payload := map[string]any{"text": text}
-	if vulnclass != "" {
-		payload["vulnclass"] = vulnclass
+	var raw []byte
+	err := s.db.QueryRow(`SELECT payload FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("目标不存在")
 	}
-	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return fmt.Errorf("目标 payload 无法解析: %w", err)
+		}
+	}
+	payload["text"] = text
+	if strings.TrimSpace(vulnclass) != "" {
+		payload["vulnclass"] = strings.TrimSpace(vulnclass)
+	} else {
+		delete(payload, "vulnclass")
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(out), id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
+// UnmetGoalReason 是「还没达成」的固定原因。查询只返回状态不是 met、也不是 abandoned 的目标。
+const UnmetGoalReason = "未标记达成（met），也未放弃（abandoned）"
+
+// UnmetGoal 是一条收尾时仍未达成的目标。Text / Criteria 来自 goal 节点 payload。
+// Reason 不落库，每次查询填同一句，避免调用方各写各的。
+type UnmetGoal struct {
+	NodeID   int64  `json:"node_id"`
+	Text     string `json:"text"`
+	Criteria string `json:"criteria"`
+	Reason   string `json:"reason"`
+}
+
+// UnmetGoals 返回这个探索里还没了结的目标（kind=goal 且 state 不是 met / abandoned）。
+// 没有未达成目标时返回空切片，不是 nil。不存在的探索也是空切片。
+func (d *DB) UnmetGoals(explorationID int64) ([]UnmetGoal, error) {
+	rows, err := d.Query(`
+SELECT id, COALESCE(payload->>'text',''), COALESCE(payload->>'criteria','')
+FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='goal' AND state NOT IN ('met','abandoned')
+ORDER BY id`, explorationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]UnmetGoal, 0)
+	for rows.Next() {
+		var g UnmetGoal
+		if err := rows.Scan(&g.NodeID, &g.Text, &g.Criteria); err != nil {
+			return nil, err
+		}
+		g.Reason = UnmetGoalReason
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UnmetGoalsByTask 按任务读未达成目标。任务不存在或已删除时返回 sql.ErrNoRows。
+func (d *DB) UnmetGoalsByTask(taskID int64) ([]UnmetGoal, error) {
+	var expID int64
+	err := d.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&expID)
+	if err != nil {
+		return nil, err
+	}
+	return d.UnmetGoals(expID)
+}
+
+// MarkGoalMet 把本探索的一条目标标成 met，并把证据节点 id 和理由写进 payload。
+// evidenceID 是 fact 或 finding 的探索节点 id（与 prove_goal 的 evidence_id 同一口径），不是 findings 表主键。
+// 不存在、不是 goal、或不属于本探索时返回错误，不改任何行。
+func (s *ExplorationStore) MarkGoalMet(goalID, evidenceID int64, reason string) error {
+	if goalID <= 0 || evidenceID <= 0 {
+		return fmt.Errorf("goal_id 和 evidence_id 必填")
+	}
+	res, err := s.db.Exec(`
+UPDATE exploration_nodes
+SET state='met',
+    payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('evidence_id', $1::bigint, 'evidence_reason', $2::text),
+    content_version = content_version + 1,
+    blocked_reason = NULL
+WHERE id=$3 AND exploration_id=$4 AND kind='goal'`, evidenceID, strings.TrimSpace(reason), goalID, s.expID)
 	if err != nil {
 		return err
 	}
