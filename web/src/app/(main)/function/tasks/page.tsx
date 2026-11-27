@@ -49,6 +49,7 @@ import { toast } from "sonner";
 import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
+import { DifficultyBadge, GradeBadge, ImpactBadge } from "@/components/task-level-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
@@ -245,6 +246,24 @@ const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
 // 统一用这个哨兵值,提交时再翻译成后端的 null。
 const UNCATEGORIZED_VALUE = "uncategorized";
 
+const DIFFICULTY_OPTIONS = [
+  { value: "easy", label: "easy" },
+  { value: "medium", label: "medium" },
+  { value: "hard", label: "hard" },
+  { value: "expert", label: "expert" },
+] as const;
+
+const GRADE_OPTIONS = [
+  { value: "S", label: "S" },
+  { value: "A", label: "A" },
+  { value: "B", label: "B" },
+  { value: "C", label: "C" },
+  { value: "ungraded", label: "未评级" },
+] as const;
+
+type DifficultyFilter = "all" | (typeof DIFFICULTY_OPTIONS)[number]["value"];
+type GradeFilter = "all" | (typeof GRADE_OPTIONS)[number]["value"];
+
 // 可暂停 = 非终态且未暂停,与后端 applyTaskControlWithCause 的门控一致
 // (done/failed/timeout 为终态);paused 才可继续。行内按钮与批量控制共用此判断,
 // 两边不会出现一个可点、另一个不可点的分歧。
@@ -267,6 +286,16 @@ const TASK_STATUS_RANK = new Map(STATUS_OPTIONS.map((option, index) => [option.v
 
 function taskIsPinned(task: Task): boolean {
   return task.pinned ?? Boolean(task.pinned_at);
+}
+
+function taskLevelTitle(task: Task): string | undefined {
+  const parts: string[] = [];
+  if (task.difficulty_reason?.trim()) parts.push(task.difficulty_reason.trim());
+  if (task.suggested_difficulty && task.suggested_difficulty !== task.task_difficulty) {
+    const why = task.suggested_difficulty_reason?.trim();
+    parts.push(why ? `系统建议：${task.suggested_difficulty}（${why}）` : `系统建议：${task.suggested_difficulty}`);
+  }
+  return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 function compareTaskIDs(left: string, right: string): number {
@@ -313,6 +342,8 @@ export default function TasksPage() {
   const [categoriesLoaded, setCategoriesLoaded] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<TaskStatus | "all">("all");
+  const [difficultyFilter, setDifficultyFilter] = React.useState<DifficultyFilter>("all");
+  const [gradeFilter, setGradeFilter] = React.useState<GradeFilter>("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
   const [filtersHydrated, setFiltersHydrated] = React.useState(false);
   const [sortPreference, setSortPreference] = useStoredSortPreference(
@@ -332,9 +363,20 @@ export default function TasksPage() {
     const raw = getLocalStorageValue(TASK_FILTER_PREFERENCE_KEY);
     if (raw) {
       try {
-        const parsed = JSON.parse(raw) as { status?: unknown; category?: unknown };
+        const parsed = JSON.parse(raw) as {
+          status?: unknown;
+          category?: unknown;
+          difficulty?: unknown;
+          grade?: unknown;
+        };
         if (parsed.status === "all" || STATUS_OPTIONS.some((option) => option.value === parsed.status)) {
           setStatusFilter(parsed.status as TaskStatus | "all");
+        }
+        if (parsed.difficulty === "all" || DIFFICULTY_OPTIONS.some((option) => option.value === parsed.difficulty)) {
+          setDifficultyFilter(parsed.difficulty as DifficultyFilter);
+        }
+        if (parsed.grade === "all" || GRADE_OPTIONS.some((option) => option.value === parsed.grade)) {
+          setGradeFilter(parsed.grade as GradeFilter);
         }
         if (
           typeof parsed.category === "string" &&
@@ -353,9 +395,14 @@ export default function TasksPage() {
     if (!filtersHydrated) return;
     setLocalStorageValue(
       TASK_FILTER_PREFERENCE_KEY,
-      JSON.stringify({ status: statusFilter, category: categoryFilter }),
+      JSON.stringify({
+        status: statusFilter,
+        category: categoryFilter,
+        difficulty: difficultyFilter,
+        grade: gradeFilter,
+      }),
     );
-  }, [categoryFilter, filtersHydrated, statusFilter]);
+  }, [categoryFilter, difficultyFilter, filtersHydrated, gradeFilter, statusFilter]);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -398,7 +445,7 @@ export default function TasksPage() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: both filters intentionally reset pagination.
   React.useEffect(() => {
     setPage(1);
-  }, [query, statusFilter, categoryFilter, sortField, sortDirection]);
+  }, [query, statusFilter, categoryFilter, difficultyFilter, gradeFilter, sortField, sortDirection]);
 
   const paginated = React.useMemo(
     () => ordered.slice((page - 1) * pageSize, page * pageSize),
@@ -459,7 +506,7 @@ export default function TasksPage() {
 
   const load = React.useCallback(() => {
     api
-      .tasks()
+      .tasks({ difficulty: difficultyFilter, grade: gradeFilter })
       .then((r) => {
         const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
         const sig = JSON.stringify(next);
@@ -478,7 +525,7 @@ export default function TasksPage() {
       .catch(() => {
         /* 与任务轮询同口径 best-effort */
       });
-  }, []);
+  }, [difficultyFilter, gradeFilter]);
 
   // decideEscalation 批准/驳回一张提议；批准成功带任务号。
   const [decidingId, setDecidingId] = React.useState<number | null>(null);
@@ -919,6 +966,36 @@ export default function TasksPage() {
                     </SelectGroup>
                   </SelectContent>
                 </Select>
+                <Select value={difficultyFilter} onValueChange={(v) => setDifficultyFilter(v as DifficultyFilter)}>
+                  <SelectTrigger className="w-36">
+                    <SelectValue placeholder="难度" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="all">全部难度</SelectItem>
+                      {DIFFICULTY_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <Select value={gradeFilter} onValueChange={(v) => setGradeFilter(v as GradeFilter)}>
+                  <SelectTrigger className="w-32">
+                    <SelectValue placeholder="评级" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="all">全部评级</SelectItem>
+                      {GRADE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
                 <Select value={categoryFilter} onValueChange={setCategoryFilter}>
                   <SelectTrigger className="w-40">
                     <SelectValue placeholder="任务分类" />
@@ -1012,7 +1089,9 @@ export default function TasksPage() {
 
               {tasks.length === 0 ? (
                 <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
-                  暂无任务，点击右上角「新建任务」开始。
+                  {difficultyFilter !== "all" || gradeFilter !== "all"
+                    ? "没有匹配的任务。"
+                    : "暂无任务，点击右上角「新建任务」开始。"}
                 </div>
               ) : filtered.length === 0 ? (
                 <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
@@ -1047,6 +1126,7 @@ export default function TasksPage() {
                         direction={sortDirection}
                         onSort={sortTasksBy}
                       />
+                      <TableHead>难度 / 评级 / 影响</TableHead>
                       <TableHead className="text-center">目标进度</TableHead>
                       <TableHead className="text-center" title="严重 / 高 / 中 / 低">
                         漏洞 <span className="text-muted-foreground font-normal">严/高/中/低</span>
@@ -1318,6 +1398,13 @@ const TaskRow = React.memo(function TaskRow({
         ) : (
           <StatusBadge domain="task" value={task.status} dot />
         )}
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-1">
+          <DifficultyBadge d={task.task_difficulty} title={taskLevelTitle(task)} />
+          <GradeBadge g={task.grade} title={task.grade_summary ? task.grade_summary : undefined} />
+          <ImpactBadge level={task.max_impact_level} title="最高影响层级" />
+        </div>
       </TableCell>
       <TableCell className="text-muted-foreground text-center text-xs tabular-nums">
         {typeof task.goals_total === "number" && task.goals_total > 0 ? (
