@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.98] - 2026-11-27
+
+### 新增（C-02A：任务难度 → 资源画像映射表，纯函数）
+
+- 背景：C-02 要求 `execution_mode`（fast/balanced/super_heavy）跟任务难度联动、可手动覆盖，并用一张确定性表翻译成并发、token 预算、planner 轮次、复测范围。整卡不能一次做完——数据层（`tasks.execution_mode`）、HTTP 覆盖、planner/worker/复测接线、前端展示加在一起跨 db / agent / server / web，生产文件超过 5 个。本批只做映射表（C-02A）。派发仍走现行路径，行为不变。
+- 现状核实：① `agent/execution_profile.go` 已存在，但是 0.15.17 的请求级执行档（`TaskDifficulty` = auto/simple/medium/hard，`ResolveExecutionProfile` 只调推理强度 / 压缩窗口 / AutoScaler 信号），不能按卡面「新建」覆盖。② 常量 `DefaultMode` 已是「恒为 balanced」，函数名让给 `DefaultExecutionMode`（C-01B 留白的那个）。③ `DifficultyMedium` / `DifficultyHard` 仍被执行档占用，任务难度继续用 `LevelEasy` / `LevelMedium` / `LevelHard` / `LevelExpert`。④ `tasks` 表没有 `execution_mode` 列，`db.Task` 也没有该字段。
+- `agent/execution_profile.go`（文件末尾新增一节，不改 0.15.17 的解析与注册表）：`DefaultExecutionMode(level)` 把 easy/medium/hard/expert 映射成 fast/balanced/balanced/super_heavy，空值与执行档的 auto/simple 回落 balanced。`ResolveProfile(difficulty, executionMode)` 在覆盖去空白后非空时用覆盖，否则用默认模式。`ValidResourceMode` 只认 fast/balanced/super_heavy（空串与 `auto` 都不是覆盖值）。三档画像：fast = 并发 2、相对预算 1、轮次 3、复测 `key_only`、不要 oracle；balanced = 3 / 2 / 6 / `high_plus` / 不要 oracle；super_heavy = 5 / 3 / 10 / `all` / `RequireOracle=true`。非法覆盖回落 balanced 画像，不跟随难度——这种值不能落库，400 留给后续 API 批。函数不读库、不写 `profileRegistry`、不调 LLM。
+- 【与卡面差异（如实说明）】① 不新建文件，追加在已有 `execution_profile.go`。覆盖该文件会删掉 0.15.17 执行档。② `ResolveProfile` 的参数是两个字符串，不是 `*db.Task`：列还没落库，签名若依赖 `task.ExecutionMode` 现在编不过；纯函数也不该为了读两个字段去 import 一行库记录。③ 函数名不是 `DefaultMode(d Difficulty)`：`DefaultMode` 是已有常量，`Difficulty` 类型被执行档占用。④ `RequireOracle` 跟生效模式走，不跟难度标签走。expert 不覆盖时是 super_heavy，所以会标 true；easy 被手动改成 super_heavy 同样标 true；expert 被收成 fast 则不标。卡面结构体注释写「expert 专属」，表本身写在 super_heavy 一档，本批以表为准。E-02 的 oracle 没做，这个布尔只是标注，不跳过复测，也还没接到复测派发。⑤ TokenBudget 1/2/3 与 PlannerRounds 3/6/10 保持卡面的相对档位，没有换成绝对 token / 轮次。核实结果：`agent/planner.go` 的 `MaxTurns` 来自 agent 管理配置，`0` = 不限，没有 3/6/10 这组常量；`Planner.maxTokens()` 为 0 时不发上限。唯一的 token 常量是 `SuperHeavyHardTokenBudget = 800_000`，它是 0.15.17 AutoScaler 的降档信号，不是按难度分的每轮预算。worker 并发也没有「按任务取槽位」的函数：`server/engine.go` 的 `claimNext` 判的是群组上限 N，全局 M 在 `reconcileConcurrency` / `task_concurrency_limit`（跨任务同时跑几个，默认关），都不是本表的 per-task 并发。按卡面「接线前先核实，勿硬编」，本批不把占位数写进派发。⑥ 未加 `tasks.execution_mode` 列，未改 `PATCH /api/tasks/{id}`，未改前端。
+- 验证：`gofmt` 干净；`go vet ./agent/` 干净；`go test -race -count=1 ./agent/ -run 'TestDefaultExecutionMode|TestValidResourceMode|TestResolveProfile|TestResolveExecutionProfile|TestAssessAutoProfile|TestApplyExecutionProfileEffort|TestClampCompactionWindow|TestAutoScaler|TestProfileRegistry|TestValidDifficulty|TestSuggestDifficulty' -timeout 20m` 通过（1.3s）。`go test -race -count=1 ./agent/ -timeout 20m` 全包 2.2s 未通过：本环境没有 `ARTEX_PG_DSN`，唯一失败是既有 `TestTier1ReadOnlyToolsNoScopeLeak`（`tier1_scope_gate_test.go:173` 建平台管理器，栈不经过本批函数）。未跑 `./server/`（本批零改动）；已知的 `TestMonitorPollerShutdownAndThrottle` `-race` 竞态不在本批范围。
+- 留下：C-02B 数据层（`tasks.execution_mode TEXT NOT NULL DEFAULT ''`，空 = 跟随难度）；C-02C `PATCH` 白名单与 400、审计、创建/详情展示「难度 → 默认模式 / 当前生效模式」；C-02D 才接线 planner 轮次、worker 并发与复测范围——接线前要先决定相对档位如何换成现有的 maxTurns / 并发闸，不能把 1/2/3 当成 token 数。下一项任务卡是 C-03，本批不开始。
+
 ## [0.15.97] - 2026-11-27
 
 ### 新增（C-01B：任务难度建议与创建/修改接口）

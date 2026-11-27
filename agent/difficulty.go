@@ -10,7 +10,8 @@ package agent
 // 规则是确定性关键词，不调 LLM。建议只回给调用方，不自动落库——用户不传时
 // 存储层默认 medium，用户显式覆盖以用户值为准。
 //
-// DefaultExecutionMode 属于 C-02，这里故意没有。
+// DefaultExecutionMode 在 execution_profile.go（C-02A）：把本文件的任务难度
+// 映射成资源模式 fast/balanced/super_heavy。这里只建议难度，不决定预算。
 
 import "strings"
 
