@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.108] - 2026-11-27
+
+### 新增（C-04A：findings 影响层级与证据等级落库）
+
+- 背景：C-04 要把每条 finding 从单一严重度扩成三维（严重度 × 影响 L1–L4 × 证据 L1–L4）。整卡跨 db / agent / server / report / web：数据列、`report_finding` 写入与降级、列表详情徽章、报告透传、任务最高影响层级，加在一起超过 5 个生产文件。本批只做数据层和纯函数（C-04A）。不改 `report_finding`，不改接口，不改页面。
+- 现状核实：`findings` 没有 `impact_level` / `evidence_level`。严重度仍是 `severity`（critical/high/medium/low/info）。`evidence_status` 是 0.15.35 的活动流交叉验证，不是这套 L1–L4。`finding_retests.verdict` 已有 `reproduced`。`db/schema.sql` 仍是 RESERVED。
+- `db/schema_finding_levels.sql`（新增）：幂等补 `impact_level` / `evidence_level` / `evidence_level_requested`（SMALLINT NOT NULL DEFAULT 1，CHECK 1–4）和 `evidence_level_reason`（TEXT NOT NULL DEFAULT ''）。存量行靠默认值变成 L1/L1，不按证据正文追溯升级。不加索引：本批没有按这两列筛选的查询，`MaxImpactLevel` 按已有 `task_id` 索引聚合即可。
+- `db/findings.go`：`DBFinding`、`findingSelectCols`、列表/详情/导出的扫描同步这四列。`SetFindingLevels` 在一个事务里写影响层级和证据等级，并镜像到探索节点 payload；不在 1–4 返回 `ErrFindingLevelInvalid`，不改行；没有这行返回 `ErrFindingNotFound`。显式写入把自报值改成这次的证据等级并清空降级原因。`EvidenceSufficient` 对 critical/high 要求证据等级 ≥ 3，medium/low/info/空串不强制。`CapEvidenceLevel` 只降不升：省略（0）按 L1；空证据最高 L1；有正文但够不上「去空白后 ≥20 字且含工具输出引用」最高 L2；引用够了但没有 `verdict=reproduced` 最高 L3；两者都有才允许 L4。自报高于上限时返回降后的等级和非空原因。`MaxImpactLevel` 对没有 finding 的任务返回 0。`AddFinding` 的 INSERT 不写这几列，走默认值。
+- `db/db.go` + `db/role.go`：启动迁移块调用 `EnsureFindingLevelsSchema`，并在 `markRuntimeSchemasReady` 登记。`findingSelectCols` 已经引用新列，漏接会让受限运行角色的第一次发现读报 42703。
+- `db/finding_traffic_archive.go`：旧快照缺这四键时，`json_populate_record` 会给出 NULL 并绕过默认值。恢复前补回 1 / 1 / 1 / 空串。快照里有值则原样恢复。
+- 【与卡面差异（如实说明）】① 未改 `db/schema.sql`。新列走独立 `schema_*.sql`。② 卡面只写 `impact_level` 与 `evidence_level`。另加 `evidence_level_requested` 与 `evidence_level_reason`，否则降级原因只存在于当次工具返回里，复测通过后也无法按当初的自报回升。存量默认 1 和空串。③ `SetFindingLevels` 用一条 UPDATE 加事务，没有按骨架调两次 `setFindingCol`。`setFindingCol` 只接受文本，也不能把两次更新放进同一个事务。节点 payload 仍会镜像。④ 非法等级的错误文案是中文，不是骨架里的英文句子。⑤ `CapEvidenceLevel` 本批只是纯函数，`report_finding` 还没调用它。工具输出引用先认三种痕迹：围栏代码块、`HTTP/1.` 或 `HTTP/2` 状态行、行首 `$` / `#` 提示符。不查活动流。E-01 / E-03 落地后再换。⑥ 评级的证据完整率仍按 `CheckFindingGate` 计数，本批不改 `agent/grading.go`。已验证发现仍只数 `status='confirmed'`。严重度取值不变。⑦ 列表、详情徽章、报告透传、`GET /api/tasks/{id}` 的最高影响层级都不在本批。页面展示里卡面交给 C-06 的部分继续留给 C-06。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./db/ -run 'TestEvidenceSufficientMatrix|TestCapEvidenceLevel|TestNormalizeArchivedFindingLevels|TestFindingLevelsRoundTrip' -timeout 10m` 通过（1.6s）。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（23.1s，exit 0）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./server/`、`./agent/`（本批零改动）。
+- 留下：C-04B 把上限接到 `report_finding` 和复测 `verdict=reproduced` 之后的回升。不开始 C-05。
+
 ## [0.15.107] - 2026-11-27
 
 ### 新增（C-03C：终态评级、重新评级与详情回读）
