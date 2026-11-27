@@ -1,0 +1,33 @@
+# 已知良性命中豁免清单 —— 内容钉定 blob SHA（一行一枚；# 注释行）。
+#
+# 铁律（scan-sensitive.sh 头注释「第三层」）：
+#   - 只收「历史不可重写 + 现行内容不可改」双约束下的占位/上游原件残留；
+#   - 每条必须写明：哪个文件、什么形状、为什么不可清、根治路径；
+#   - blob 内容一变 SHA 即变、豁免自动失效 —— 这份清单永远不会掩盖新内容。
+#
+# ① config.example.json（历史 blob，≤0.15.79 各老 tip 的现行树）
+#    形状："dsn": "postgres://user:pass@db.example.com:5432/artex?sslmode=require"
+#    —— 教科书式文档占位（user:pass / example.com），非真实凭据。
+#    为什么不可清：A-09（0.15.79）已把现行样例折进 _comment 说明文字；旧 blob
+#    遍布两代历史线（含 feat/task-hall 独立根与各版本 tag），清掉它们的唯一手段
+#    是全历史改写（force-push），推送纪律禁止。
+#    根治路径：无（占位本无风险；规则侧已是终态）。
+295eb8867fdd8e4515cf89152fba4e0f4385231b
+#
+# ② patches/norma-z-backfill-drift.patch（现行 blob，历史同内容）
+#    形状：`-` 行记录 norma 上游原件 v0.4.4 noa/prompts_rules_test.go:13 的
+#    /home/<user>/acp-kernel 字面量（该路径在上游模块里实证在案）。
+#    为什么不可清：prepare-norma.sh 优先 git apply（严格预像校验）；改写 `-` 行
+#    后 git apply 与 patch(1) 兜底双双拒打，脚本按设计 fail-closed 还原
+#    （2026-11-27 实证）——补丁管道完整性是硬约束。/home/<user> 亦为 OS 默认
+#    用户名，披露价值趋零。
+#    根治路径：上游 github.com/Autumn-27/norma 发新版（把测试常量改通用占位）
+#    后，本仓同步补丁与 go.mod require，再撤本条豁免。
+e2675b8d06c2baca02ee6730cc35d00211d0420c
+#
+# ③ docs/实施基线-v2.1差异清单.md（历史 blob，≤0.15.57）
+#    形状：表格里「本机 Go 在 /home/<user>/.local/go」一行。
+#    为什么不可清：A-09（0.15.79）已把现行文档改通用形式（如实披露既有基线红
+#    补漏）；历史 blob 不可重写（同①）。
+#    根治路径：无（文档历史记录，占位形状）。
+8015fd2dae23305ba778b9ecac33907682eabd18

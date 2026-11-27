@@ -23,6 +23,13 @@
 #     私有字面量必须挪出本文件的原因：闸门提交自身曾被本闸拦下 —— 扫描器不能
 #     成为它要拦的那类泄漏。
 #
+# 第三层：豁免（scripts/scan-exemptions.list，可选）。**内容钉定**的已知良性
+# blob SHA（40-hex，一行一枚，# 注释）——blob 内容一变 SHA 即变、豁免自动失效。
+# 开放面收得极窄：只允许「历史不可重写（推送纪律禁 force-push）+ 现行内容不可
+# 改（build 管道依赖其逐字节预像，2026-11-27 实证）」双约束下的文档占位/上游
+# 原件残留。每条豁免必须在清单注释里写明：哪个文件、什么形状、为什么不可清、
+# 根治路径是什么。它不放松任何规则，只让这枚 SHA 的内容不再逐次打红。
+#
 # 实现注意（grep 兼容性，2026-11-05 修）：
 #   - GNU grep 3.12 的 `-P` 只支持**单个模式**：`-f <多模式文件>` 与多个 `-e` 都会
 #     报 "the -P option only supports a single pattern" 并以退出码 2 失败；若不处理，
@@ -80,7 +87,25 @@ HITS=$(mktemp) || exit 1
 OBJFILE=$(mktemp) || exit 1
 BLOBFILE=$(mktemp) || exit 1
 MSGFILE=$(mktemp) || exit 1
-trap 'rm -f "$PATFILE" "$PATHFILE" "$HITS" "$OBJFILE" "$BLOBFILE" "$MSGFILE"' EXIT
+EXEMPTFILE=$(mktemp) || exit 1
+trap 'rm -f "$PATFILE" "$PATHFILE" "$HITS" "$OBJFILE" "$BLOBFILE" "$MSGFILE" "$EXEMPTFILE"' EXIT
+
+# 豁免清单（可选）：scripts/scan-exemptions.list，每行一个 40-hex blob SHA（#
+# 注释行/空行忽略）。语义：**内容钉定**的已知良性命中——blob 内容一变 SHA 即变、
+# 豁免自动失效回到受管状态，所以这只对「历史不可重写 + 内容不可改（build 管道
+# 依赖其逐字节预像）」的极少数占位/文档残留开放。它绝不放松任何规则：模式文件、
+# 路径规则、消息扫描全部照常；豁免的只是这枚 SHA 的内容不再重复打红。
+{
+	if [ -f "$SCRIPT_DIR/scan-exemptions.list" ]; then
+		cat "$SCRIPT_DIR/scan-exemptions.list"
+	fi
+} | grep -v '^#' | grep -v '^[[:space:]]*$' > "$EXEMPTFILE"
+
+# blob_sha_exempt <sha>：豁免判定。
+blob_sha_exempt() {
+	[ -s "$EXEMPTFILE" ] || return 1
+	/usr/bin/grep -qxF "$1" "$EXEMPTFILE"
+}
 
 # 组装模式文件：合并各来源后滤掉注释行与空行（git grep -f 无注释语法，
 # 注释行会被当成模式 —— 而模式说明文字自己就会命中自己）。
@@ -134,7 +159,20 @@ scan_tree_content() {
 	out=$(git grep -I -n -P -f "$PATFILE" "$rev" -- 2>/dev/null | sort -u)
 	# 空输出（无命中）不写行 —— 否则会把空行当命中。
 	[ -n "$out" ] || return 0
-	printf '%s\n' "$out" | mask | sed "s|^|内容命中 [$rev]: |" >>"$HITS"
+	# 豁免过滤：命中行格式 <rev>:<path>:<line>:<内容>，逐行取 path 解析 blob SHA，
+	# 钉定豁免的 blob 不算命中（见 scan-exemptions.list 头注释）。
+	filtered=$(printf '%s\n' "$out" | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		rev_part=${line%%:*}
+		rest=${line#*:}
+		path_part=${rest%%:*}
+		if b=$(git rev-parse "${rev_part}:${path_part}" 2>/dev/null) && blob_sha_exempt "$b"; then
+			continue
+		fi
+		printf '%s\n' "$line"
+	done)
+	[ -n "$filtered" ] || return 0
+	printf '%s\n' "$filtered" | mask | sed "s|^|内容命中 [$rev]: |" >>"$HITS"
 }
 
 # ---------------------------------------------------------------------
@@ -173,6 +211,10 @@ scan_history_blobs() {
 	else
 		git rev-list --objects --all 2>/dev/null | awk '{print $1}' > "$OBJFILE"
 	fi
+	# 豁免 blob 直接从对象清单剔除（其内容根本不进扫描面）。
+	if [ -s "$EXEMPTFILE" ]; then
+		/usr/bin/grep -vxF -f "$EXEMPTFILE" "$OBJFILE" > "${OBJFILE}.f" && mv "${OBJFILE}.f" "$OBJFILE"
+	fi
 	git cat-file --batch < "$OBJFILE" 2>/dev/null > "$BLOBFILE"
 	while IFS= read -r p; do
 		[ -n "$p" ] || continue
@@ -191,7 +233,18 @@ attribute_history_hits() {
 		[ -n "$t" ] || continue
 		out=$(git grep -I -n -P -f "$PATFILE" "$t" -- 2>/dev/null | sort -u)
 		[ -n "$out" ] || continue
-		printf '%s\n' "$out" | mask | sed "s|^|历史内容定位 [$t]: |" >>"$HITS"
+		filtered=$(printf '%s\n' "$out" | while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			rev_part=${line%%:*}
+			rest=${line#*:}
+			path_part=${rest%%:*}
+			if b=$(git rev-parse "${rev_part}:${path_part}" 2>/dev/null) && blob_sha_exempt "$b"; then
+				continue
+			fi
+			printf '%s\n' "$line"
+		done)
+		[ -n "$filtered" ] || continue
+		printf '%s\n' "$filtered" | mask | sed "s|^|历史内容定位 [$t]: |" >>"$HITS"
 	done
 }
 
