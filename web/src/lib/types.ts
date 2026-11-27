@@ -513,6 +513,12 @@ export interface Finding {
   // 证据交叉验证与同根因标记（0.15.35）：
   evidence_status?: "verified" | "unverified" | "na";
   root_cause_key?: string; // 相同键 = 疑似同根因组（合并走人工）
+  // C-04 三维分级。证据不足只在 critical/high 且证据等级 < 3 时为 true。
+  impact_level?: number;
+  evidence_level?: number;
+  evidence_level_requested?: number;
+  evidence_level_reason?: string;
+  evidence_insufficient?: boolean;
   intent_id?: string;
   param_id?: string;
   task_id?: string;

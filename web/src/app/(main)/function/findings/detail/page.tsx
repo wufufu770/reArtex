@@ -9,6 +9,7 @@ import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingLevelBadges } from "@/components/finding-level-badge";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
@@ -147,6 +148,7 @@ function FindingDetailInner() {
           <Separator orientation="vertical" className="mx-1 h-4" />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
+          <FindingLevelBadges finding={finding} />
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">来源任务 #{finding.source_task_id} · 只读</Badge>
           )}
@@ -226,6 +228,27 @@ function FindingDetailInner() {
                   <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
                     #{finding.id}
                   </code>
+                </FieldRow>
+
+                <FieldRow label="影响层级">
+                  <span>{finding.impact_level ? `L${finding.impact_level}` : "—"}</span>
+                </FieldRow>
+                <FieldRow label="证据等级">
+                  <span className="flex flex-col items-end gap-1">
+                    <span>{finding.evidence_level ? `L${finding.evidence_level}` : "—"}</span>
+                    {finding.evidence_insufficient && (
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] text-amber-700"
+                        title={finding.evidence_level_reason}
+                      >
+                        证据不足
+                      </Badge>
+                    )}
+                    {finding.evidence_level_reason && (
+                      <span className="max-w-56 text-xs text-muted-foreground">{finding.evidence_level_reason}</span>
+                    )}
+                  </span>
                 </FieldRow>
 
                 {/* 严重等级 */}
