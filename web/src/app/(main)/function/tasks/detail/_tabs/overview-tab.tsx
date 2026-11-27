@@ -23,6 +23,7 @@ import {
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { DifficultyBadge, GradeBadge, ImpactBadge } from "@/components/task-level-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -436,8 +437,46 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 },
   );
 
+  const suggestionDiffers = Boolean(task?.suggested_difficulty) && task?.suggested_difficulty !== task?.task_difficulty;
+
   return (
     <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">难度与评级</CardTitle>
+          <CardDescription>已存难度用来筛选。系统建议按目标文本计算，不会自动改掉已存难度。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">难度</div>
+            <DifficultyBadge d={task?.task_difficulty} title={task?.difficulty_reason} />
+            {task?.difficulty_reason?.trim() ? (
+              <p className="text-xs break-words text-muted-foreground">{task.difficulty_reason.trim()}</p>
+            ) : null}
+            {task?.suggested_difficulty ? (
+              <p className="text-xs break-words text-muted-foreground">
+                系统建议：{task.suggested_difficulty}
+                {task.suggested_difficulty_reason?.trim() ? `（${task.suggested_difficulty_reason.trim()}）` : ""}
+                {suggestionDiffers ? "" : "，与已存难度一致"}
+              </p>
+            ) : null}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">评级</div>
+            <GradeBadge g={task?.grade} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">最高影响层级</div>
+            <ImpactBadge level={task?.max_impact_level} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-medium text-muted-foreground">评级摘要</div>
+            <p className="text-sm break-words whitespace-pre-wrap">
+              {task?.grade_summary?.trim() ? task.grade_summary.trim() : "—"}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
       {/* 原始任务描述与目标(创建时填写的),置顶便于随时回看。 */}
       <Card>
         <CardHeader>
