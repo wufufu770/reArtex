@@ -554,11 +554,22 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 }
 
 // reapplyActiveProfile hot-reloads the engine from the active DB profile so that
-// saving or activating a profile takes effect without a restart. Best-effort:
-// logs on failure and leaves the running engine untouched.
+// saving, activating, or DELETING a profile takes effect without a restart.
+// Best-effort: logs on failure and leaves the running engine untouched — except
+// when the active profile is gone (all configs deleted): then the in-memory
+// global LLM stack is torn down, because a provider holding a deleted profile's
+// credential must not keep serving (getLLM kept reporting configured=true and
+// sessions kept a usable model after「删除全部配置」).
 func (s *Server) reapplyActiveProfile() {
 	cfg, ok := s.loadLLMConfig()
 	if !ok {
+		// Distinguish「库不可达/读失败」from「确定没有激活配置」：前者不动运行态
+		// （不能因为一次 DB 抖动把引擎拆了），后者才 teardown。
+		if s.m != nil && s.m.pg != nil {
+			if act, err := s.m.pg.ActiveProfile(); err == nil && act == nil {
+				s.teardownLLMState()
+			}
+		}
 		return
 	}
 	if err := s.applyLLM(cfg); err != nil {
@@ -566,6 +577,26 @@ func (s *Server) reapplyActiveProfile() {
 		return
 	}
 	log.Printf("[engine] LLM reapplied from active profile: %s / %s", cfg.Provider(), cfg.Model)
+}
+
+// teardownLLMState drops the in-memory global LLM stack (provider, config, chat
+// agent, direct provider) so nothing keeps serving a config that no longer
+// exists in the DB. This is the reverse of applyLLM's final section and returns
+// the server to its never-configured state: getLLM reports configured=false,
+// globalProvider()/chatAgentRef() resolve to nothing, and the next send gets the
+// plain「尚未配置 LLM」guidance instead of silently using a stale credential.
+func (s *Server) teardownLLMState() {
+	s.cfgMu.Lock()
+	s.llmProv = nil
+	s.llmCfg = agent.Config{}
+	s.llmDirect = nil
+	s.llmOn = false
+	s.chatAgent = nil
+	s.cfgMu.Unlock()
+	// 缓存面（per-profile ChatAgent / provider 缓存 / 限流器 / 401 拉黑）全清 +
+	// 任务 agent 重建——复用 invalidateProfileAgents 的最保守语义。
+	s.invalidateProfileAgents()
+	log.Printf("[engine] no active LLM profile left — global LLM state torn down (configure a profile to re-enable)")
 }
 
 // webSearchFor gates the global web-search opts (backend/key) by an agent's own

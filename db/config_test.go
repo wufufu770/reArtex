@@ -80,9 +80,6 @@ func TestConfigStores(t *testing.T) {
 	if err := d.SetActiveProfile(pid); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.DeleteProfile(pid); !errors.Is(err, ErrActiveLLMProfileDelete) {
-		t.Fatalf("deleting active profile error=%v, want %v", err, ErrActiveLLMProfileDelete)
-	}
 	act, err := d.ActiveProfile()
 	if err != nil || act == nil || act.APIKey != "secret123" {
 		t.Fatalf("active profile/key: %+v err=%v", act, err)
@@ -99,6 +96,15 @@ func TestConfigStores(t *testing.T) {
 				t.Fatalf("hint want …t123, got %q", p.APIKeyHint)
 			}
 		}
+	}
+
+	// 删除激活配置（缺陷①④修正）：此前 409 拒绝——「删除全部配置」永远做不到，
+	// 会话靠内存里残留的 provider 继续出模型。现在允许删，删除即激活面清空。
+	if err := d.DeleteProfile(pid); err != nil {
+		t.Fatalf("deleting the active profile must succeed: %v", err)
+	}
+	if act2, err := d.ActiveProfile(); err != nil || act2 != nil {
+		t.Fatalf("after delete the active profile must be gone: %+v err=%v", act2, err)
 	}
 
 	// agents seeded; prompt versioning

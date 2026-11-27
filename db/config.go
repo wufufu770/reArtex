@@ -203,6 +203,39 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 	return out, rows.Err()
 }
 
+// llmPoolOptInWatermark 标记「轮询池成员改为显式加入」的一次性数据迁移
+// （settings 键）。迁移前：凡配了 key 且未勾 pool_exclude 的配置自动进故障
+// 转移链——激活只定链首，全局路径上的任务一旦激活配置报错就被静默切到用户
+// 从未激活的配置上。迁移后：配置进链只经两扇门——被激活（is_default）或
+// 用户显式取消 pool_exclude（参与轮询）。
+const llmPoolOptInWatermark = "llm_pool_optin_migrated"
+
+// MigrateLLMPoolOptIn 是上面水位对应的一次性迁移：非激活配置一律
+// pool_exclude=true（退出故障转移链）。启动期执行，水位防重跑——迁移之后
+// 用户手动勾选的「参与轮询」绝不会被再次改写。幂等，可重复调用。
+func (d *DB) MigrateLLMPoolOptIn() error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var done bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM settings WHERE key=$1)`, llmPoolOptInWatermark).Scan(&done); err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE llm_profiles SET pool_exclude=true WHERE NOT is_default`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key, value) VALUES($1, $2) ON CONFLICT (key) DO NOTHING`,
+		llmPoolOptInWatermark, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	hint := p.APIKeyHint
@@ -271,7 +304,6 @@ VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$
 }
 
 var (
-	ErrActiveLLMProfileDelete      = errors.New("cannot delete the active LLM profile; activate another profile first")
 	ErrLLMProfileReferencesChanged = errors.New("LLM profile references changed while deleting; retry the request")
 	ErrLLMProfileNotFound          = errors.New("LLM profile not found")
 )
@@ -280,11 +312,13 @@ func (d *DB) DeleteProfile(id int64) error {
 	return d.DeleteProfileContext(context.Background(), id)
 }
 
-// DeleteProfileContext removes a non-default profile while preserving the task
-// failover cursor. Reference changes are retried because a task, agent, or
-// conversation may start pointing at the profile between the initial scan and
-// the profile row lock. A bound prevents a continuously changing workload from
-// keeping an HTTP request alive forever.
+// DeleteProfileContext removes a profile — including the active one. Deleting the
+// last/active config is how the UI implements「删除全部配置」: after it, nothing
+// may keep serving the removed credential, and the server tears its global LLM
+// state down (see Server.reapplyActiveProfile). Reference changes are retried
+// because a task, agent, or conversation may start pointing at the profile
+// between the initial scan and the profile row lock. A bound prevents a
+// continuously changing workload from keeping an HTTP request alive forever.
 func (d *DB) DeleteProfileContext(ctx context.Context, id int64) error {
 	const (
 		maxAttempts = 8
@@ -345,14 +379,16 @@ FOR UPDATE`, id)
 	}
 
 	var isDefault bool
+	// Lock the profile row itself: reference setters take their child row lock
+	// first, then this lock — keeping the old profile→child order here is what
+	// makes the retry loop below able to detect a reference that committed in
+	// between. Deletion of the ACTIVE profile is allowed (the caller is
+	// responsible for tearing down runtime state); only the row lock matters.
 	if err := tx.QueryRowContext(ctx, `SELECT is_default FROM llm_profiles WHERE id=$1 FOR UPDATE`, id).Scan(&isDefault); err != nil {
 		if err == sql.ErrNoRows {
 			return false, ErrLLMProfileNotFound
 		}
 		return false, err
-	}
-	if isDefault {
-		return false, ErrActiveLLMProfileDelete
 	}
 
 	type affectedTask struct {

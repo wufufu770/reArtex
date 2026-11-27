@@ -1875,10 +1875,13 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	// *bool shadowing the embedded json:"streaming": an absent field must default
 	// to streaming (true), which a plain bool zero value (false = non-streaming)
 	// would get wrong — legacy/partial clients that never send it stay streaming.
+	// PoolExclude 同理用 *bool 装影子：缺省时新建一律「不参与轮询」（激活是唯一
+	// 默认可用语义，其余配置显式加入才进故障转移链），更新保持库中原值。
 	var body struct {
 		db.LLMProfile
-		APIKey    string `json:"api_key"`
-		Streaming *bool  `json:"streaming"`
+		APIKey      string `json:"api_key"`
+		Streaming   *bool  `json:"streaming"`
+		PoolExclude *bool  `json:"pool_exclude"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1893,6 +1896,16 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
+	switch {
+	case body.PoolExclude != nil:
+		p.PoolExclude = *body.PoolExclude
+	case p.ID == 0:
+		p.PoolExclude = true // 新建缺省不进轮询链（缺陷②③：激活形同虚设的根因之一）
+	default:
+		if cur, err := pg.ProfileByID(p.ID); err == nil && cur != nil {
+			p.PoolExclude = cur.PoolExclude // 更新缺省=保持原值，绝不悄悄改语义
+		}
+	}
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
 	// 故非 openai 格式一律清空。未知取值同样清空,避免把 DB CHECK 的报错甩给用户。
@@ -1957,10 +1970,12 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := pathInt(r, "id")
+	// 删除前先记下 pin 在该配置上的会话：删除本身会把 pin 经 FK 置 NULL，
+	// 之后就没法知道哪些会话在用它了。删除成功后逐一会话取消在途运行并留痕
+	// ——「删了配置会话还在跑」的后端语义就是在这里收口的。
+	convIDs, convErr := pg.ConversationIDsByProfile(id)
 	if err := pg.DeleteProfileContext(r.Context(), id); err != nil {
 		switch {
-		case errors.Is(err, db.ErrActiveLLMProfileDelete):
-			writeErr(w, 409, "当前激活的 LLM 配置不能删除，请先激活其他配置")
 		case errors.Is(err, db.ErrLLMProfileReferencesChanged):
 			writeErr(w, 409, "LLM 配置正在被任务或会话修改，请重试")
 		case errors.Is(err, context.DeadlineExceeded):
@@ -1974,11 +1989,39 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidateProfileAgents() // drop cached agents for the removed profile
 	s.llmHealth.Reset(id)       // its breaker state is meaningless now (row is FK-cascaded away)
+	if convErr == nil {
+		s.stopConversationsForProfile(id, convIDs)
+	} else {
+		log.Printf("[llm-profile] 列举 pin 在配置 #%d 上的会话失败（在途运行不取消）: %v", id, convErr)
+	}
 	s.restoreTasksAfterProfileDelete(pg)
 	// Cache invalidation also removed the active profile's shared provider entry.
 	// Reapply after task-state sync so the wake-up observes the post-delete chain.
+	// 删的是最后一个/激活配置时，reapply 内部会走 teardownLLMState 把全局 LLM
+	// 栈拆掉——内存里绝无残留的 provider/凭据继续服务。
 	s.reapplyActiveProfile()
 	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+// stopConversationsForProfile cancels in-flight runs on the conversations that
+// were pinned to a deleted profile and leaves a system note on each thread, so
+// deleting a config stops what was using it instead of silently switching those
+// threads to another model. convIDs are read BEFORE the delete (the FK nulls
+// the pin); best-effort and ordered — never fails the delete itself.
+func (s *Server) stopConversationsForProfile(profileID int64, convIDs []int64) {
+	for _, cid := range convIDs {
+		s.cancelConversation(cid)
+		if pg := s.m.pg; pg != nil {
+			note := db.Activity{Worker: "system", Kind: "note",
+				Summary: fmt.Sprintf("该会话绑定的 LLM 配置 #%d 已被删除，本次运行已停止；如需继续请重新指定配置", profileID)}
+			if _, err := pg.AppendConvActivity(cid, note); err != nil {
+				log.Printf("[llm-profile] 会话 %d 删除配置留痕失败: %v", cid, err)
+			}
+		}
+	}
+	if len(convIDs) > 0 {
+		log.Printf("[llm-profile] 配置 #%d 已删除：停止并留痕 %d 个会话", profileID, len(convIDs))
+	}
 }
 
 func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {

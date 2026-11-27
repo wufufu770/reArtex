@@ -423,7 +423,9 @@ function ProfileSheet({
   const [thinkingType, setThinkingType] = React.useState(NONE);
   const [effort, setEffort] = React.useState(NONE);
   const [priority, setPriority] = React.useState("0"); // 轮询顺位;越大越先
-  const [poolExclude, setPoolExclude] = React.useState(false);
+  // 轮询池成员显式加入：新建默认「不参与轮询」——激活的配置是唯一默认可用，
+  // 其余配置必须显式勾选参与才会进故障转移链（与后端 pgSaveProfile 缺省一致）。
+  const [poolExclude, setPoolExclude] = React.useState(true);
   const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
@@ -459,7 +461,7 @@ function ProfileSheet({
     setThinkingType(fromStore(profile?.thinking_type));
     setEffort(fromStore(profile?.reasoning_effort));
     setPriority(String(profile?.priority ?? 0));
-    setPoolExclude(profile?.pool_exclude ?? false);
+    setPoolExclude(profile?.pool_exclude ?? true); // 新建缺省不参与轮询（显式加入语义）
     setStreaming(profile?.streaming ?? true);
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));

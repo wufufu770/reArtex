@@ -465,6 +465,14 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureLLMUsageTable(); err != nil {
 			return fmt.Errorf("apply llm_usage schema: %w", err)
 		}
+		// LLM 轮询池成员语义的一次性数据迁移（水位防重跑，db/config.go）：非激活
+		// 配置退出故障转移链（pool_exclude=true）——迁移前凡配了 key 的配置自动
+		// 进链，激活只定链首，全局路径一报错就被静默切到从未激活的配置。与其他
+		// Ensure* 同理必须在启动期做：不能等第一个 failover 请求把流量送进未激活
+		// 配置才暴露。迁移后用户手动勾选的「参与轮询」绝不会被改写。
+		if err := schemaDB.MigrateLLMPoolOptIn(); err != nil {
+			return fmt.Errorf("migrate llm pool opt-in: %w", err)
+		}
 		// 运行度量（P0）：llm_profile_prices 单价表，同为 Go 侧幂等 DDL。
 		if err := schemaDB.EnsureMetricsSchema(); err != nil {
 			return fmt.Errorf("apply metrics schema: %w", err)

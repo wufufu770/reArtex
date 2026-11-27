@@ -144,6 +144,27 @@ func (d *DB) UpdateConversationModel(id int64, model string) error {
 	return err
 }
 
+// ConversationIDsByProfile lists the ids of conversations pinned to a profile.
+// The delete handler reads it BEFORE DeleteProfileContext — the delete nulls the
+// pin via FK ON DELETE SET NULL — so it can stop in-flight runs and leave a
+// trace on each affected thread while the mapping is still known.
+func (d *DB) ConversationIDsByProfile(profileID int64) ([]int64, error) {
+	rows, err := d.Query(`SELECT id FROM conversations WHERE llm_profile_id=$1 ORDER BY id`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // UpdateConversationProfile sets (or clears) the LLM profile override for a conversation.
 func (d *DB) UpdateConversationProfile(id int64, llmProfileID *int64) error {
 	tx, err := d.Begin()
