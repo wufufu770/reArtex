@@ -63,20 +63,23 @@ func monitorRepoToDTO(r *db.MonitorRepo) monitorRepoDTO {
 
 // monitorAPIHostPolicy 是 API 层 SSRF 主机策略：拒绝 localhost 变体与
 // 非公网 IP 字面量（环回/私网/链路本地/CGNAT/未指定）。hostname 形态放行
-// （GHE 自建域名是设计目标；DNS 级 SSRF 属运行环境出网管控层，如实申报）。
+// （GHE 自建域名是设计目标；请求时的 DNS/拨号级校验在 monitor_github.go
+// 客户端层闭环——preflight + 拨号闸双层）。IP 判定走 monitorNetGuardIP 缝隙
+// （生产恒为 isPublicIP；httptest 本地环回测试缝隙在测试进程内生效）。
 func monitorAPIHostPolicy(hostport string) error {
 	host := hostport
 	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host, "]") {
 		host = host[:i] // 剥端口（IPv6 字面量带 [] 不剥——v6 字面量本身会被下面的 IP 闸处理）
 	}
 	host = strings.Trim(host, "[]")
+	host = strings.TrimSuffix(host, ".") // FQDN 尾点归一（localhost. ≠ localhost 的绕过面封堵）
 	low := strings.ToLower(host)
 	if low == "localhost" || strings.HasSuffix(low, ".localhost") ||
 		strings.HasSuffix(low, ".local") || strings.HasSuffix(low, ".internal") {
 		return errMonitorHostDenied
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if !isPublicIP(ip) {
+		if !monitorNetGuardIP(ip) {
 			return errMonitorHostDenied
 		}
 	}
