@@ -82,7 +82,7 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		request.TaskExecutionMode = &mode
 	}
-	oldLevel, oldReason, oldMode := s.taskDifficultyOf(taskID)
+	oldLevel, oldReason, oldMode, _, _, _ := s.taskDifficultyOf(taskID)
 	task, err := s.m.UpdateTaskMetadata(taskID, db.TaskPatch{
 		Name: request.Name, Pinned: request.Pinned,
 		Difficulty: request.TaskDifficulty, DifficultyReason: request.DifficultyReason,
@@ -104,10 +104,10 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
-	newLevel, newReason, newMode := s.taskDifficultyOf(taskID)
+	newLevel, newReason, newMode, grade, gradeSummary, gradeScore := s.taskDifficultyOf(taskID)
 	s.auditTaskDifficulty(taskID, oldLevel, oldReason, newLevel, newReason)
 	s.auditTaskExecutionMode(taskID, oldMode, newMode)
-	writeJSON(w, http.StatusOK, taskLevelView(taskDTO(task, s.resolvedTaskStatus(task)), task.Goal, task.Description, newLevel, newReason, newMode))
+	writeJSON(w, http.StatusOK, taskLevelView(taskDTO(task, s.resolvedTaskStatus(task)), task.Goal, task.Description, newLevel, newReason, newMode, grade, gradeSummary, gradeScore))
 }
 
 // normalizeCreateTaskLevel 把创建请求里的 task_difficulty 收成存储指针。
@@ -144,7 +144,7 @@ func normalizeTaskExecutionMode(raw string) (string, error) {
 // 资源模式键名是 task_execution_mode，不用 mode：mode 仍是 0.15.17 执行档。
 // default_execution_mode 是「难度 → 默认模式」；effective_execution_mode 是当前生效模式
 // （有覆盖用覆盖，否则用默认）。都不把默认模式写回数据库。
-func taskLevelView(dto TaskDTO, goal, description, stored, reason, executionMode string) map[string]any {
+func taskLevelView(dto TaskDTO, goal, description, stored, reason, executionMode, grade, gradeSummary string, gradeScore *float64) map[string]any {
 	raw, err := json.Marshal(dto)
 	out := map[string]any{}
 	if err == nil {
@@ -163,22 +163,26 @@ func taskLevelView(dto TaskDTO, goal, description, stored, reason, executionMode
 	// 复测范围和 oracle 只供展示。RequireOracle 为 true 也不拒绝人工复测。
 	out["retest_scope"] = eff.RetestScope
 	out["require_oracle"] = eff.RequireOracle
+	// 评级在终态结算时写入。未评是空串和 null，不是 0 分。
+	out["grade"] = grade
+	out["grade_summary"] = gradeSummary
+	out["grade_score"] = scoreJSON(gradeScore)
 	return out
 }
 
-func (s *Server) taskDifficultyOf(taskID string) (level, reason, executionMode string) {
+func (s *Server) taskDifficultyOf(taskID string) (level, reason, executionMode, grade, gradeSummary string, gradeScore *float64) {
 	if s == nil || s.m == nil || s.m.pg == nil {
-		return db.TaskDifficultyMedium, "", ""
+		return db.TaskDifficultyMedium, "", "", "", "", nil
 	}
 	id, err := strconv.ParseInt(taskID, 10, 64)
 	if err != nil || id <= 0 {
-		return db.TaskDifficultyMedium, "", ""
+		return db.TaskDifficultyMedium, "", "", "", "", nil
 	}
 	row, err := s.m.pg.GetTask(id)
 	if err != nil || row == nil {
-		return db.TaskDifficultyMedium, "", ""
+		return db.TaskDifficultyMedium, "", "", "", "", nil
 	}
-	return row.Difficulty, row.DifficultyReason, row.ExecutionMode
+	return row.Difficulty, row.DifficultyReason, row.ExecutionMode, row.Grade, row.GradeSummary, row.GradeScore
 }
 
 // auditTaskDifficulty 在难度或理由真的变化时写审计链。

@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.107] - 2026-11-27
+
+### 新增（C-03C：终态评级、重新评级与详情回读）
+
+- 背景：C-03A（0.15.105）是公式，C-03B（0.15.106）是三列和计数。本批把它们接到终态结算和 HTTP。前端展示仍留给 C-06，本批不改 `web/`。
+- 现状核实：生产路径改任务状态只走 `Manager.SetTaskStatus`、`SetTaskStatusGuarded` 和 `ApplyTaskAdmission`。`db.SetStatus` 本身没有别的生产调用方。超时收尾在 `server/engine_timeout.go` 的 `settleTask`，最后也是 `SetTaskStatusGuarded`。没有一个叫 settle 的统一函数把所有终态收口，所以钩子挂在这三处，而不是只挂超时收尾。
+- 进入 `done` / `failed` / `timeout` 且 `grade` 仍为空：读 `LoadTaskGradeFacts`，用 `ComputeGrade`（证据完整数走 `CountEvidenceComplete` / `CheckFindingGate`）写一次。已经评过的不覆盖，所以之后改 finding 不会改等级。离开终态（`SetTaskStatus` 写成非终态，或超时任务经 `ApplyTaskAdmission` 回到 running）时 `ClearTaskGrade`，下一轮终态再算。评级失败只记日志，不把已经落库的状态倒回去。自动这一次不写审计。
+- `POST /api/tasks/{id}/regrade`：任务要在内存注册表里，且库内状态已是终态，否则 404 / 409。强制重算并覆盖。写审计 `task.grade`（actor=operator，source=task-api，payload 含 old/new 的等级、摘要、分数）。审计失败只记日志。
+- 创建、修改和 `GET /api/tasks/{id}`（含内存任务和只读回源）增加 `grade`、`grade_summary`、`grade_score`。未评是空串和 `null`，不是 0。列表接口不加这三键。
+- 【与卡面差异（如实说明）】① 钩子不在卡面没核实到的「统一结算函数」上。三处状态写入都会碰到终态或离开终态，只挂超时收尾会漏掉普通完成和失败。② 单任务计数不调用 `GoalCountsAll()`，谓词相同（C-03B）。③ 覆盖率用 `AssetStore.TaskCoverage`，不看 `coverage_enabled`。④ 证据完整率在 C-04 之前按「通过 `CheckFindingGate`」近似。门的 R1 已经拒绝空白证据。不用 `evidence_status='verified'`，也不用 `status='confirmed'` 充当完整证据链；已验证发现仍只数 `confirmed`。⑤ 分母为 0 的维度在摘要句末注明，模板正文不变。⑥ 重新评级要求任务在内存里，与 PATCH 一样；只读回源的 GET 能看到等级，但不能对那条路径发重新评级。⑦ 自动终态不写审计，只有显式重新评级写。⑧ `grade_score` 列是 REAL，接口把读回的数原样返回。⑨ 前端列表和详情展示不做，留给 C-06。⑩ 直接 `db.SetStatus` 或手写 SQL 改状态不会自动评级。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净；`go test -race -count=1 ./server/ -run 'TestTaskGrade|TestTaskExecutionModeAPI$|TestTaskDifficultyAPI$' -timeout 10m` 通过（2.2s）。其中终态后两次 GET 的 `grade` / `grade_summary` 一致；把空证据发现改成已确认后 GET 不变；`POST /api/tasks/{id}/regrade` 后变为 B（3/4 目标、12/12 已确认、证据 100%、覆盖 0 → 70 分），审计 1 条，actor=operator，source=task-api；非终态重新评级 409；自动终态不写 `task.grade`。`go test -race -count=1 ./server/ -timeout 25m` 全包 54.6s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（`monitorFakeGH.ListNewCommits` 竞态，栈不经过本批文件）。CI 的 `go test ./...` 不带 `-race`。
+- C-03 的计算、落库和终态回读到此为止。不开始 C-04。详情页上的评级展示留给 C-06。
+
 ## [0.15.106] - 2026-11-27
 
 ### 新增（C-03B：tasks.grade / grade_summary / grade_score 落库）
