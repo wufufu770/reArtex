@@ -416,3 +416,19 @@ func ScaledPlannerTurns(configured, plannerRounds int) int {
 	}
 	return scaled
 }
+
+// RetestSuggested 按复测范围判断这个严重度算不算「建议复测」。
+// key_only 只建议 critical；high_plus 建议 high 与 critical；all 建议四档。
+// 这只是建议标记，不自动派发，也不因为 RequireOracle 拒绝人工复测。
+func RetestSuggested(scope, severity string) bool {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical":
+		return scope == RetestScopeKeyOnly || scope == RetestScopeHighPlus || scope == RetestScopeAll
+	case "high":
+		return scope == RetestScopeHighPlus || scope == RetestScopeAll
+	case "medium", "low":
+		return scope == RetestScopeAll
+	default:
+		return false
+	}
+}

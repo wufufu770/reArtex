@@ -160,6 +160,9 @@ func taskLevelView(dto TaskDTO, goal, description, stored, reason, executionMode
 	out["task_execution_mode"] = executionMode
 	out["default_execution_mode"] = string(def)
 	out["effective_execution_mode"] = string(eff.Mode)
+	// 复测范围和 oracle 只供展示。RequireOracle 为 true 也不拒绝人工复测。
+	out["retest_scope"] = eff.RetestScope
+	out["require_oracle"] = eff.RequireOracle
 	return out
 }
 
