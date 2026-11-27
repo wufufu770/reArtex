@@ -46,6 +46,15 @@ export interface Task {
   effective_execution_mode?: string; // 当前生效资源模式（有覆盖用覆盖）
   retest_scope?: string; // 建议复测的严重度范围；不自动派发
   require_oracle?: boolean; // 只标注是否希望程序化验证，不阻断人工复测
+  unmet_goals?: UnmetGoal[]; // 还没 met / abandoned 的目标；空数组表示没有
+}
+
+// 收尾闸门用的未达成目标。reason 是固定原因，不由模型写。
+export interface UnmetGoal {
+  node_id: number;
+  text: string;
+  criteria: string;
+  reason: string;
 }
 
 export interface TaskCategory {
