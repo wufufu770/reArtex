@@ -1556,15 +1556,41 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	difficulty, grade, errMsg := parseTaskListLevelFilter(r.URL.Query())
+	if errMsg != "" {
+		writeErr(w, 400, errMsg)
+		return
+	}
 	active := ""
 	if t := s.m.ActiveTask(); t != nil {
 		active = t.ID
 	}
+	var board map[int64]db.TaskBoardFact
+	var impacts map[int64]int
+	if s.m != nil && s.m.pg != nil {
+		var err error
+		board, err = s.m.pg.ListTaskBoard(difficulty, grade)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		impacts, err = s.m.pg.MaxImpactByTask()
+		if err != nil {
+			log.Printf("[task] 列表最高影响层级读取失败: %v", err)
+			impacts = map[int64]int{}
+		}
+	}
+	filtering := difficulty != "" || grade != ""
 	list := s.m.List()
 	metrics, _ := s.m.PG().TaskListMetricsAll()
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
-	dtos := make([]TaskDTO, 0, len(list))
+	dtos := make([]any, 0, len(list))
 	for _, t := range list {
+		id, _ := strconv.ParseInt(t.ID, 10, 64)
+		fact, have := board[id]
+		if filtering && !have {
+			continue
+		}
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
 		dto.Drained = s.engine.Drained(t.ID) // 0.15.42 A3：软截止可见化（列表徽章）
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
@@ -1585,7 +1611,14 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Medium:   metric.Findings.Medium,
 			Low:      metric.Findings.Low,
 		}
-		dtos = append(dtos, dto)
+		level, reason, mode := fact.Difficulty, fact.DifficultyReason, fact.ExecutionMode
+		taskGrade, summary, score := fact.Grade, fact.GradeSummary, fact.GradeScore
+		if !have {
+			level, reason, mode, taskGrade, summary, score = s.taskDifficultyOf(t.ID)
+		}
+		view := taskLevelView(dto, t.Goal, t.Description, level, reason, mode, taskGrade, summary, score)
+		view["max_impact_level"] = impacts[id]
+		dtos = append(dtos, view)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
 }
