@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.99] - 2026-11-27
+
+### 新增（C-02B：tasks.execution_mode 落库）
+
+- 背景：C-02A（0.15.98）只放了纯函数 `ResolveProfile`。本批把资源模式覆盖落进 `tasks`。整卡剩下的 PATCH、前端和派发接线仍跨 server / web / engine，本批不做（C-02C / C-02D）。
+- `db/schema_task_execution_mode.sql`（新增）：幂等补 `tasks.execution_mode TEXT NOT NULL DEFAULT ''`，CHECK 只允许 `''` / `fast` / `balanced` / `super_heavy`。约束先 `DROP CONSTRAINT IF EXISTS` 再 `ADD`，重复应用不会漏掉 CHECK。空串是合法值，意思是跟随任务难度，不是把默认模式写死。不加索引：本批没有按这个列筛选的查询。
+- `db/tasks.go`：`Task` / `TaskCreateOptions` / `TaskPatch` / `taskCols` / `scanTask` / 创建 INSERT / `UpdateTask` 同步该列。不传或纯空白落空串；`fast` / `balanced` / `super_heavy` 去空白后原样落库（easy 任务写成 `super_heavy` 仍是 `super_heavy`，不改回 fast）。`auto` / `simple` / `medium` / `hard` / `FAST` / `expert` / `insane` 返回 `ErrTaskExecutionModeInvalid`，不建行、不改旧值、不静默改成 balanced。`UpdateTask` 对 nil 字段保持原值；指向空串或纯空白则把覆盖清回跟随难度。只改名称不动模式，只改模式不动难度，也不回写已有意图。
+- `db/db.go` + `db/role.go`：启动迁移块调用 `EnsureTaskExecutionModeSchema`，并在 `markRuntimeSchemasReady` 登记。`taskCols` 已经引用新列，漏接会让受限运行角色的第一次任务读报 42703。
+- `db/task_archives_restore.go`：恢复语句补上该列。旧快照没有键时 `json_populate_record` 给出 NULL，`COALESCE` 回落空串。快照里有值则原样恢复。非法快照值留给 CHECK 拒绝，不改写。
+- 测试（`db/task_execution_mode_test.go`）：幂等 DDL + NOT NULL + 空默认 + CHECK 三值在场；easy 且不传模式 → 空串（不烘焙 fast）；显式 `super_heavy` 落库且难度仍是 easy；纯空白折成空串；非法创建不留行；更新后现读是新值；已有意图的 payload 与 state 不变；只改名称不动模式；非法更新不改旧值；列表能读到该列；直写 `auto` / `medium` 被 CHECK 拒绝；旧快照缺列回落空串、完整快照恢复 `super_heavy`。既有 C-01A 三个难度用例同批复跑通过。
+- 【与卡面差异（如实说明）】① 未改 `db/schema.sql`：该文件是 RESERVED，新列走独立 `schema_*.sql`（`scripts/db-role-bootstrap.sh` 会扫到）。② 白名单函数是 `db.ValidTaskExecutionMode`，不是 `agent.ValidResourceMode`：agent 已经 import db，db 再 import agent 会成环。三值字符串与 `ModeFast` / `ModeBalanced` / `ModeSuperHeavy` 一致。空串在写入侧合法（跟随难度）；`ValidResourceMode` 把空串当成「不是覆盖」，那是读取侧的意思，两边不矛盾。③ 写入前 `TrimSpace`。纯空白折成空串，不是改成某一档。非法值返回错误，不回落 balanced。④ 创建时不调用 `DefaultExecutionMode` / `ResolveProfile` 把默认模式写进列。空列必须保持空，否则以后改难度不会跟着变。⑤ 未做 `PATCH /api/tasks/{id}`、审计、前端，也没把画像接进 planner / worker / 复测。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净；`go test -race -count=1 ./db/ -run 'TestTaskExecutionMode|TestTaskDifficulty' -timeout 10m` 通过（1.8s，5 个用例 PASS）；`go test -race -count=1 ./db/ -timeout 25m` 全包通过（21.4s，exit 0）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./server/`（本批零改动）。
+- 留下：C-02C 才做 PATCH 白名单与 400、审计，以及「难度 → 默认模式 / 当前生效模式」的展示。C-02D 才接线派发。下一项任务卡是 C-03，本批不开始。
+
 ## [0.15.98] - 2026-11-27
 
 ### 新增（C-02A：任务难度 → 资源画像映射表，纯函数）
