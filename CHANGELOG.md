@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.124] - 2026-11-27
+
+### 新增（D-01A：Autonomous Supervisor 确定性状态机）
+
+- 背景：D-01 要给任务一个确定性控制中心。模型只能提议迁移，不能直接改状态。整卡跨状态机、PostgreSQL 和引擎回调，一次做完会超过 5 个生产文件，也会改到正在跑的规划循环。本批只做状态机本身（D-01A）。不落库，不接 planner / worker，现有循环照旧。
+- 现状核实：仓库里没有监督器。`Planner.Plan` 仍返回 `(met, reason, error)`，`MainAgent.Chat` 返回回复文本。终态写入只在 `server`（`SetTaskStatus` / `SetTaskStatusGuarded`）。`agent/planner.go` 和 `agent/mainagent.go` 不调用这两个函数。C-05 的 `GateTaskCompletion` 已经会把未达成目标的 done 改成 timeout。任务和探索图是两张表：`tasks.exploration_id` 指向 `explorations`。
+- `server/supervisor.go`：十个状态（PREPARING、PLANNING、EXECUTING、VERIFYING、WAITING、PAUSED、COMPLETING、DONE、FAILED、ABORTED）和卡面那张转移表。`Apply` 只吃确定性事件（规划轮结束、意图认领、意图结算、goal_met 闸门、预算耗尽、人工指令、超时）。`Propose` 只校验转移表，来源标记 `llm-proposal`。被拒不返回 error，调用方拿 `Accepted=false` 和原因。终态收到任何事件都拒绝，状态不变。超时和预算耗尽优先去 PAUSED，这条边不存在才去 FAILED，不会去 DONE。进入 DONE 的 goal_gate / 提议还要 `GoalsMet` 为真；读失败或没装回调按未通过。
+- 内存实现供单测。第一次见到任务按 PREPARING。空操作（例如执行中再次认领）不写历史。`SupervisorScopeAllows` 只认 `task`，session / conversation / single_loop 都不认。
+- 【与卡面差异（如实说明）】① 十个状态名用的是卡面骨架。总方案 N-1 写明方案二原文没有附在材料里，仓库里也没有另一套名字可以核对。② 卡面把持久化并进 D-02 的 `db/schema_plan_dag.sql`。D-02 是下一张卡，本批不建表、不改 `db/schema.sql`。③ 卡面只给了「状态 → 允许的下一状态」，没有给每个事件落到哪。事件去向是本批按转移表补的，写在 `eventTarget`。PAUSED 上没有 PAUSED / FAILED 边，超时拒绝，不改成 ABORTED。④ 认领事件名是 `intent_claimed`。卡面注释里的事件列表只写了 `intent_settled`，正文要求认领和结算都发。⑤ `Propose` 被拒不抛错；`Apply` 被拒返回 `SupRejectError`。⑥ 终态同步 `SetTaskStatusGuarded`、审计、引擎接线和超时扫描都不在本批。监督器默认不参与运行。⑦ `MaxStay` 的时长卡面没有给秒数。PREPARING / PLANNING / VERIFYING 30 分钟，EXECUTING 2 小时，WAITING 24 小时，COMPLETING 15 分钟。PAUSED 和三个终态不自动超时。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净。`go test -race -count=1 ./server/ -run TestSupervisor -timeout 180s` 通过（1.3s）：10 个状态两两提议，表内接受、表外拒绝且状态不变；PREPARING 上的 goal_gate、DONE 上的任意事件都拒绝；未过闸门的 DONE 提议不改状态；过闸门后 EXECUTING→COMPLETING→DONE；超时不会进入 DONE；PREPARING→PLANNING→EXECUTING 的历史链在；32 路并发拒绝后仍是 PREPARING。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./server/ -timeout 25m` 全包 56.8s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（栈在 `monitor_poller.go`，不经过本批文件）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：D-01B 把状态和历史落到库（重启不丢）。引擎接线再下一批，默认关闭。不开始 D-02。
+
 ## [0.15.123] - 2026-11-27
 
 ### 新增（C-06C：任务详情展示难度、评级、最高影响层级和发现分级）
