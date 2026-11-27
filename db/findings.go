@@ -349,6 +349,32 @@ func (d *DB) RefreshFindingEvidenceLevel(findingID int64) error {
 	return d.writeFindingLevels(findingID, impact, applied, requested, newReason)
 }
 
+// MaxImpactByTask 返回每个任务的最高影响层级。没有 finding 的任务不在表里，
+// 调用方按 0 处理。task_id 为空的行不参与。
+func (d *DB) MaxImpactByTask() (map[int64]int, error) {
+	out := map[int64]int{}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, err
+	}
+	rows, err := d.Query(`SELECT task_id, MAX(impact_level) FROM findings WHERE task_id IS NOT NULL GROUP BY task_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MaxImpactLevel 返回任务下 finding 的最高影响层级。没有 finding 时返回 0。
 func (d *DB) MaxImpactLevel(taskID int64) (int, error) {
 	if taskID <= 0 {
@@ -1120,6 +1146,11 @@ type FindingMeta struct {
 	ID       int64
 	Status   string
 	AssetIDs []int64
+	// 三维分级来自 findings 行。任务内列表读的是探索节点，节点 payload 不一定有这几列。
+	ImpactLevel            int
+	EvidenceLevel          int
+	EvidenceLevelRequested int
+	EvidenceLevelReason    string
 	// ValidationState 是这条漏洞的**验证态**（exploration_nodes.state）：
 	// pending（已提出，未验证）/ confirmed（验证通过）/ dismissed（不成立）。
 	// 空 = 这条漏洞没有对应的探索节点（或节点已被删）。
@@ -1145,9 +1176,13 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	if taskID <= 0 {
 		return out, nil
 	}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, err
+	}
 	rows, err := d.Query(`SELECT f.node_id, f.id, COALESCE(f.status,'pending'), f.asset_ids,
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
- COALESCE(n.state,'')
+ COALESCE(n.state,''),
+ f.impact_level, f.evidence_level, f.evidence_level_requested, COALESCE(f.evidence_level_reason,'')
 FROM findings f LEFT JOIN exploration_nodes n ON n.id = f.node_id
 WHERE f.task_id=$1 AND f.node_id IS NOT NULL`, taskID)
 	if err != nil {
@@ -1158,7 +1193,7 @@ WHERE f.task_id=$1 AND f.node_id IS NOT NULL`, taskID)
 		var nid int64
 		var m FindingMeta
 		var aidsJSON string
-		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount, &m.ValidationState); err != nil {
+		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount, &m.ValidationState, &m.ImpactLevel, &m.EvidenceLevel, &m.EvidenceLevelRequested, &m.EvidenceLevelReason); err != nil {
 			return out, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &m.AssetIDs)
