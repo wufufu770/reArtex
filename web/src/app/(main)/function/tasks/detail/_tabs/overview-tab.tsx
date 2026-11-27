@@ -459,6 +459,31 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       {/* 执行档位（0.15.17）：难度×模式，只调请求级推理强度与资源帽——切档即时生效且缓存安全 */}
       <ExecutionProfileCard taskId={taskId} />
       <ResourceModeCard taskId={taskId} />
+      {Array.isArray(task?.unmet_goals) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TargetIcon className="size-4 text-primary" /> 未达成目标
+              <span className="text-muted-foreground text-xs font-normal">（还有条目时，收尾不会记为完成）</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {task.unmet_goals.length === 0 ? (
+              <p className="text-sm text-muted-foreground">无未达成目标</p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {task.unmet_goals.map((g) => (
+                  <li key={g.node_id} className="rounded-md border px-3 py-2 text-sm">
+                    <div className="font-medium">{g.text?.trim() || `目标 #${g.node_id}`}</div>
+                    <div className="mt-1 text-muted-foreground">判定标准：{g.criteria?.trim() || "（无判定标准）"}</div>
+                    <div className="text-muted-foreground">未达成原因：{g.reason?.trim() || "未标记达成"}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
           删除仅通知规划者（不复活）。目标 = 最终可交付/可核验的结果，不是攻击步骤或侦察动作。 */}
       <Card>
