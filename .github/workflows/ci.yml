@@ -189,7 +189,13 @@ jobs:
         # 0.15.92 曾误写 --tier 1——tier 是「允许上限」，1 会把 Tier-2（server/db/
         # web 等常规开发面）也判越层，实测 A 批区间 48 条误报，每次普通推送必红；
         # Tier-0 命中在任何档位下都违规，--tier 2 才是「仅锁 Tier-0」的本意。
-        run: python3 scripts/rsi_guard.py --base "${{ github.event.before }}" --enforce --tier 2
+        # tag 推送的 event.before 是旧附注 tag 对象 sha——guard 的 <base>...HEAD
+        # 语法只认 commit，v0.15.95 重钉 tag 首次踩中（4s 即 traceback）。先剥离
+        # 到 commit 再传：event.before 本是 commit sha（分支推送）时解析结果原样，
+        # 零行为变化；剥离失败（极端残留）回退原值让 guard 显式报错不吞问题。
+        run: |
+          BASE=$(git rev-parse "${{ github.event.before }}^{commit}" 2>/dev/null || echo "${{ github.event.before }}")
+          python3 scripts/rsi_guard.py --base "$BASE" --enforce --tier 2
 
   # e2e 冒烟（0.14.9 H1）：内嵌前端（embedui）起真服务——45 条路由 HTTP 200 +
   # 尾斜杠 200 serve + legacy 308 链 + 登录页平台标识。需要前端产物（frontend
