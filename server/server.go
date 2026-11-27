@@ -1102,6 +1102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/task-templates/{id}", s.pgDeleteTaskTemplate)
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.updateTaskMetadata)
+	mux.HandleFunc("POST /api/tasks/{id}/regrade", s.regradeTask)
 	mux.HandleFunc("PATCH /api/tasks/{id}/category", s.updateTaskCategory)
 	// 任务级资产拦截/允许规则
 	mux.HandleFunc("GET /api/tasks/{id}/intercept-rules", s.taskInterceptListRules)
@@ -2145,12 +2146,15 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
 	storedLevel, storedReason, storedMode := db.TaskDifficultyMedium, strings.TrimSpace(req.DifficultyReason), taskMode
+	var grade, gradeSummary string
+	var gradeScore *float64
 	if id, err := strconv.ParseInt(t.ID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
 		if row, err := s.m.pg.GetTask(id); err == nil && row != nil {
 			storedLevel, storedReason, storedMode = row.Difficulty, row.DifficultyReason, row.ExecutionMode
+			grade, gradeSummary, gradeScore = row.Grade, row.GradeSummary, row.GradeScore
 		}
 	}
-	writeJSON(w, 201, taskLevelView(taskDTO(t, s.resolvedTaskStatus(t)), t.Goal, t.Description, storedLevel, storedReason, storedMode))
+	writeJSON(w, 201, taskLevelView(taskDTO(t, s.resolvedTaskStatus(t)), t.Goal, t.Description, storedLevel, storedReason, storedMode, grade, gradeSummary, gradeScore))
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {
@@ -2388,13 +2392,20 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		// 的只读查看不该因此 404。注意：不重建 manager 态（引擎/会话仍不可用），
 		// 返回的是基础元信息面。
 		if meta, err := s.m.PG().GetTaskMeta(r.PathValue("id")); err == nil && meta != nil {
-			writeJSON(w, 200, map[string]any{
+			body := map[string]any{
 				"id": meta.ID, "name": meta.Name, "goal": meta.Goal,
 				"description": meta.Description, "status": meta.Status,
 				"engine_mode": "readonly", "readonly_backfill": true,
 				"exploration_id": meta.ExplorationID,
 				"created_at":     meta.CreatedAt, "updated_at": meta.UpdatedAt,
-			})
+			}
+			// 只读回源同样带评级。难度键仍不在这条路径上（C-02 的范围）。
+			if row, err := s.m.PG().GetTask(meta.ID); err == nil && row != nil {
+				body["grade"] = row.Grade
+				body["grade_summary"] = row.GradeSummary
+				body["grade_score"] = scoreJSON(row.GradeScore)
+			}
+			writeJSON(w, 200, body)
 			return
 		}
 		writeErr(w, 404, "task not found")
@@ -2404,8 +2415,8 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
 	// C-02C2：详情刷新后仍要看到资源模式。只附加与创建/PATCH 相同的只读键，不改写入规则。
-	level, reason, mode := s.taskDifficultyOf(t.ID)
-	writeJSON(w, 200, taskLevelView(dto, t.Goal, t.Description, level, reason, mode))
+	level, reason, mode, grade, summary, score := s.taskDifficultyOf(t.ID)
+	writeJSON(w, 200, taskLevelView(dto, t.Goal, t.Description, level, reason, mode, grade, summary, score))
 }
 
 // taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).

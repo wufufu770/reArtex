@@ -1308,6 +1308,8 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 		})
 	}
 	m.mu.Unlock()
+	// 超时任务被重新准入时状态回到 running，上一轮评级要清掉。
+	noteTaskGrade(m.pg, n, status)
 	return nil
 }
 
@@ -1524,6 +1526,8 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 		})
 	}
 	m.mu.Unlock()
+	// 终态已经落库。评级失败不回滚状态。没抢到终态的写入不评级。
+	noteTaskGrade(m.pg, n, status)
 	return true, nil
 }
 
@@ -1555,6 +1559,8 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 		})
 	}
 	m.mu.Unlock()
+	// 进入终态算一次；离开终态清掉，避免重开后还挂着上一轮的等级。
+	noteTaskGrade(m.pg, n, status)
 	return nil
 }
 
