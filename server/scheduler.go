@@ -140,6 +140,10 @@ func (sc *Scheduler) init() {
 		}
 		_ = sc.pg.SetSchedState(schedKeyLastTaskCreate, strconv.FormatInt(maxID, 10))
 	}
+	// B-09F：Monitor poller 节流水位无条件随每次调度器启动重种——首轮 poll
+	// 固定落在启动后 15 分钟（生产：避开启动风暴；测试：Server 生命周期远短
+	// 于该间隔，结构性保证测试零真实出网。如实申报：重启会重置首轮延迟）。
+	_ = sc.pg.SetSchedState(schedKeyMonitorSweep, strconv.FormatInt(sc.now().Unix(), 10))
 }
 
 func (sc *Scheduler) step() {
@@ -151,6 +155,7 @@ func (sc *Scheduler) step() {
 	sc.dispatchStrategyCurator()
 	sc.sweepStaleReviews()
 	sc.maybeCVEMatch()
+	sc.maybeMonitorPoll() // B-09F：Monitor 增量轮询（节流水位+轮次互斥，形态同 maybeCVEMatch；实现与状态全在 monitor_poller.go）
 	// Amber curator 观察模式（0.15.40，批次 J2）：每小时水位闸内扫隔离区产
 	// 拟晋升清单——观察态不落写；amber 关闭时函数内直接返回（零开销）。
 	go sc.s.AmberCuratorObserve()
