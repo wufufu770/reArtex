@@ -5,6 +5,16 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.112] - 2026-11-27
+
+### 新增（C-04E：报告导出透传影响层级、证据等级和证据不足）
+
+- 背景：C-04D（0.15.111）让 JSON 接口带上三维分级。本批让 Markdown、CSV、TXT、HTML、SARIF 也带上。Word 兼容的 `.doc` 和打印用 HTML 包的是同一份 HTML，跟着带上。
+- 有分级的发现多一行「影响 Lx；证据 Ly」，critical/high 且证据等级 < 3 时加上「证据不足」。CSV 在表尾加「影响层级 / 证据等级 / 证据不足」。SARIF 的 `properties` 增加 `impact_level`、`evidence_level`、`evidence_insufficient`。两级都还是 0 的内存结构不写给人读的那一行，避免把零值印成 L0。
+- 【与卡面差异（如实说明）】① JSON 导出在上一批已经跟着 DTO 走，本批不另写一份。② 评级的证据完整率仍按 `CheckFindingGate`，不改成「证据等级 ≥ L3」。存量 finding 默认 L1，现在切换会让重新评级的证据完整率变成 0。已验证发现仍只数 `status='confirmed'`。严重度取值没变。③ 页面徽章和任务列表上的最高影响层级仍未做。任务详情接口已经返回 `max_impact_level`，展示归 C-06。
+- 验证：`gofmt` 干净。`go test -race -count=1 ./report/ -timeout 5m` 通过（1.0s）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./server/`（本批不改它）。
+- 留下：发现列表和详情页的「证据不足」徽章。不开始 C-05。
+
 ## [0.15.111] - 2026-11-27
 
 ### 新增（C-04D：发现接口透出三维分级，PATCH 非法等级返回 400）
