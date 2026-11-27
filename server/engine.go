@@ -1868,15 +1868,21 @@ func (e *Engine) noteWrapupRoundResult(t *Task, intentsBefore int) {
 			_ = t.Store.Link(origin, db.RelYields, id)
 		}
 	}
-	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-		Summary: fmt.Sprintf("【停滞闸】连续 %d 个零产出意图 + 收尾评估 %d 轮无新方向，任务收尾（done·concluded）", stagnationThreshold, wrapupConcludeRounds)})
 	if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil || !won {
 		log.Printf("[stagnation] task %s 落终态失败/已被判: %v", t.ID, err)
 		return
 	}
+	// 写入前的完成闸可能把 done 改成 timeout。蒸馏只在真正记成 done 时做。
+	// 评级已经在 SetTaskStatusGuarded 里按最终状态算过一次。
+	timedOut := e.m.TaskStatus(t.ID) == "timeout"
+	summary := fmt.Sprintf("【停滞闸】连续 %d 个零产出意图 + 收尾评估 %d 轮无新方向，任务收尾（done·concluded）", stagnationThreshold, wrapupConcludeRounds)
+	if detail, ok := e.unmetTimeoutDetail(t, "【停滞闸】连续零产出，目标未全部达成，终态记 timeout"); timedOut && ok {
+		summary = detail
+	}
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
 	e.settleIntentsOnConclude(t, "停滞闸收尾：连续零产出意图判定终态，残留非终态意图统一 stopped")
 	e.freezeReplayCorpus(t.ID)
-	if e.LegacyDistiller != nil {
+	if !timedOut && e.LegacyDistiller != nil {
 		e.LegacyDistiller(t)
 	}
 	e.emitAuditSummary(t)
@@ -2010,12 +2016,19 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
 					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
 				} else if won {
-					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
+					timedOut := e.m.TaskStatus(t.ID) == "timeout"
+					summary := "目标已全部达成，直投意图已执行完毕，任务结束"
+					if timedOut {
+						summary = "【完成闸】拒绝记 done，终态记 timeout"
+						if detail, ok := e.unmetTimeoutDetail(t, "【完成闸】目标未全部达成，拒绝记 done，终态记 timeout"); ok {
+							summary = detail
+						}
+					}
+					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: summary})
 					// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
 					e.freezeReplayCorpus(t.ID)
-					// P5 传承图：终局蒸馏（异步，draft 待人工评审）。
-					if e.LegacyDistiller != nil {
+					// P5 传承图：终局蒸馏（异步，draft 待人工评审）。未达成改记 timeout 时不蒸馏。
+					if !timedOut && e.LegacyDistiller != nil {
 						e.LegacyDistiller(t)
 					}
 					e.emitAuditSummary(t)
@@ -2085,10 +2098,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
 				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
 			} else {
+				timedOut := e.m.TaskStatus(t.ID) == "timeout"
+				if detail, ok := e.unmetTimeoutDetail(t, "【完成闸】planner 宣布完成，但目标未全部达成，终态记 timeout"); timedOut && ok {
+					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: detail})
+				}
 				// 任务进入终态 ⇒ 冻结重放语料（计划 Task 4 Step 6）。
 				e.freezeReplayCorpus(t.ID)
-				// P5 传承图：终局蒸馏（异步，draft 待人工评审）。
-				if e.LegacyDistiller != nil {
+				// P5 传承图：终局蒸馏（异步，draft 待人工评审）。未达成改记 timeout 时不蒸馏。
+				if !timedOut && e.LegacyDistiller != nil {
 					e.LegacyDistiller(t)
 				}
 				e.emitAuditSummary(t)
@@ -3076,12 +3093,59 @@ func (e *Engine) ConcludeTask(taskID, summary string) (bool, string) {
 	}
 	e.settleIntentsOnConclude(t, "任务收尾：治理判定终态，残留非终态意图统一 stopped")
 	e.freezeReplayCorpus(t.ID)
-	if e.LegacyDistiller != nil {
+	timedOut := e.m.TaskStatus(t.ID) == "timeout"
+	if !timedOut && e.LegacyDistiller != nil {
 		e.LegacyDistiller(t)
 	}
 	e.emitAuditSummary(t)
 	e.emitTaskTokenTotal(t) // W9（方案 v10 §6）：终态播报 token 总量
+	if timedOut {
+		detail, ok := e.unmetTimeoutDetail(t, "【完成闸】治理收尾时目标未全部达成，终态记 timeout")
+		if !ok {
+			detail = "【完成闸】治理收尾时目标未全部达成，终态记 timeout"
+		}
+		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: detail})
+		return true, "还有未达成目标，终态记 timeout，未记 done"
+	}
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
 		Summary: "【治理收尾】监督者判定目标实质达成（三门满足）：" + trunc(summary, 120)})
 	return true, "任务已收尾"
+}
+
+// unmetTimeoutDetail 在完成闸把 done 改成 timeout 之后，把未达成目标写进活动。
+// 没有未达成目标时 ok 为 false，调用方不要写「未达成」。
+func (e *Engine) unmetTimeoutDetail(t *Task, lead string) (string, bool) {
+	if t == nil || e.m == nil || e.m.pg == nil {
+		return "", false
+	}
+	n, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil {
+		return "", false
+	}
+	unmet, err := e.m.pg.UnmetGoalsByTask(n)
+	if err != nil || len(unmet) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString(lead)
+	b.WriteString("。未达成：")
+	for i, g := range unmet {
+		if i >= 8 {
+			fmt.Fprintf(&b, "；另有 %d 条", len(unmet)-i)
+			break
+		}
+		if i > 0 {
+			b.WriteString("；")
+		}
+		text := strings.TrimSpace(g.Text)
+		if text == "" {
+			text = fmt.Sprintf("#%d", g.NodeID)
+		}
+		criteria := strings.TrimSpace(g.Criteria)
+		if criteria == "" {
+			criteria = "（无判定标准）"
+		}
+		fmt.Fprintf(&b, "%s（标准：%s；%s）", text, criteria, g.Reason)
+	}
+	return b.String(), true
 }

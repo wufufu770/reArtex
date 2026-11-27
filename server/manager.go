@@ -1512,6 +1512,10 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	if err != nil {
 		return false, err
 	}
+	status, err = m.rewriteDoneIfUnmet(n, status)
+	if err != nil {
+		return false, err
+	}
 	won, err = m.pg.SetTerminalStatusGuarded(n, status)
 	if err != nil || !won {
 		return won, err
@@ -1540,6 +1544,10 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	if err != nil {
 		return err
 	}
+	status, err = m.rewriteDoneIfUnmet(n, status)
+	if err != nil {
+		return err
+	}
 	if err := m.pg.SetStatus(n, status); err != nil {
 		return err
 	}
@@ -1562,6 +1570,29 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 	// 进入终态算一次；离开终态清掉，避免重开后还挂着上一轮的等级。
 	noteTaskGrade(m.pg, n, status)
 	return nil
+}
+
+// rewriteDoneIfUnmet 在写入前改终态。想记 done 但还有未达成目标时改成 timeout。
+// 查询失败则不写 done（调用方看到错误，状态保持原样，也不会评级）。
+// 任务行不存在时不拦：后面的 UPDATE 本来也不会改到行。
+// 已经是 done 的历史任务不会被扫描；只有这一次新的「要记 done」会经过这里。
+// noteTaskGrade 只看到改写之后的状态，所以评级只算一次。
+func (m *Manager) rewriteDoneIfUnmet(taskID int64, status string) (string, error) {
+	if status != "done" || m == nil || m.pg == nil {
+		return status, nil
+	}
+	unmet, err := m.pg.UnmetGoalsByTask(taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return status, nil
+		}
+		return "", err
+	}
+	rewritten, _ := agent.GateTaskCompletion(unmet, status)
+	if rewritten != status {
+		log.Printf("[goal-gate] task %d 还有 %d 个目标未达成，拒绝记 done，改记 %s", taskID, len(unmet), rewritten)
+	}
+	return rewritten, nil
 }
 
 // DeleteTask removes a task and optionally its related global data. Traffic has
