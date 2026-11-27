@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.105] - 2026-11-27
+
+### 新增（C-03A：任务评级公式，纯函数）
+
+- 背景：C-03 要求任务进入终态时按确定性公式给出 S/A/B/C 和一句话摘要，全程不让 LLM 打分。整卡跨 agent / db / server：公式、三列落库、终态结算、重新评级接口、详情回读加在一起超过 5 个生产文件。本批只做公式（C-03A）。不落库、不改接口、任务跑到终态也不会出现评级。
+- 现状核实：① 没有 `agent/grading.go`，`tasks` 也没有 `grade` / `grade_summary` / `grade_score`。② `db.GoalCountsAll` 在 `db/exploration.go`，按探索汇总 `kind='goal'` 的总数和 `state='met'`。③ 发现「已验证」的口径是 `findings.status='confirmed'`（`db.FindingConfirmed`），不是 0.15.35 的 `evidence_status='verified'`。④ 覆盖率已有 `AssetStore.TaskCoverage`：分母是命中 `task_scope` 的资产，分子是锚定到 fact 节点的已测资产。⑤ `agent.CheckFindingGate` 已在上报时拦截空白证据和自否结论，但没有把「过门」存成列。⑥ 证据等级是 C-04，本仓还没有 `evidence_level`。⑦ 终态入口不是一个函数：生产路径走 `Manager.SetTaskStatus` / `SetTaskStatusGuarded`，底层是 `db.SetStatus` / `db.SetTerminalStatusGuarded`。本批都不接线。
+- `agent/grading.go`（新增）：`ComputeGrade` 按目标达成率 40%、发现质量 30%、覆盖率 20%、证据完整率 10% 计分。≥90 为 S，≥75 为 A，≥60 为 B，其余为 C。分母 ≤ 0 的维度按 0 分，不按满分，也不 panic。摘要模板固定为「{met}/{total} 目标达成，{verified}/{total} 条发现已验证，覆盖率 {pct}%，证据完整率 {pct}%」。任一分母 ≤ 0 时在句末加注「无目标按 0 计 / 无发现按 0 计 / 无范围资产按 0 计」。`CountEvidenceComplete` 用现有 `CheckFindingGate` 计数：过门即「非空 evidence 且通过 finding_gate」（门的 R1 已拒绝空白）。`ValidGrade` 只认 S/A/B/C。函数不读库、不调 LLM。
+- 【与卡面差异（如实说明）】① 私有函数叫 `gradeRatio`，不叫 `ratio`，避免以后和别的比例函数撞名；语义与骨架一致（分母 ≤ 0 返回 0）。② 骨架只写了摘要模板。注释要求分母为 0 时在摘要里注明，本批把注明接在模板后面，模板本身不改。全满和 76.4 的例子没有这句注明。③ 分子大于分母时不封顶，分数可以超过 100，等级仍按 ≥90 取 S。骨架没有封顶。④ 证据完整率本批只提供计数函数，还没接到查询。finding 没有证据等级列，所以不读 `evidence_level`；也不把 `evidence_status='verified'` 当成完整证据链。等 C-04 落地后再换口径。⑤ 未加 `tasks` 三列，未接终态钩子，未做「重新评级」接口，`GET /api/tasks/{id}` 还不返回 `grade`。前端展示归 C-06，本批不做。
+- 验证：`gofmt` 干净；`go vet ./agent/` 干净；`go test -race -count=1 ./agent/ -run 'TestComputeGrade|TestCountEvidenceComplete|TestGradingSource|TestValidGrade' -timeout 5m` 通过（1.3s）。`ARTEX_PG_DSN` 指向本机测试库后 `go test -race -count=1 ./agent/ -timeout 20m` 全包通过（8.6s）。全满 → 100 S；3/4、9/12、82%、75% → 76.4 A；90/75/60 边界分别是 S/A/B；分母为 0 或为负不 panic、分数为 0、等级为 C。
+- 留下：C-03B 把 `grade` / `grade_summary` / `grade_score` 落进 `tasks`。C-03C 才在终态结算时算一次并落库，并提供带审计的重新评级。下一项不开始 C-04。
+
 ## [0.15.104] - 2026-11-27
 
 ### 修复（C-02D2 CI：密文篡改测试在末字节已是 A 时会放行）
