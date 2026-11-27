@@ -6,8 +6,9 @@
 #   - blob 内容一变 SHA 即变、豁免自动失效 —— 这份清单永远不会掩盖新内容。
 #
 # ① config.example.json（历史 blob，≤0.15.79 各老 tip 的现行树）
-#    形状："dsn": "postgres://user:pass@db.example.com:5432/artex?sslmode=require"
-#    —— 教科书式文档占位（user:pass / example.com），非真实凭据。
+#    形状：历史版本 database 段的占位连接串样例（user:pass@db.example.com
+#    教科书占位，位于 dsn 字段值；此处刻意不写出带引号键名的完整形状——
+#    本文件自身也在扫描面内，注释不得复现被禁形状，0.15.95 首推实证）。
 #    为什么不可清：A-09（0.15.79）已把现行样例折进 _comment 说明文字；旧 blob
 #    遍布两代历史线（含 feat/task-hall 独立根与各版本 tag），清掉它们的唯一手段
 #    是全历史改写（force-push），推送纪律禁止。
