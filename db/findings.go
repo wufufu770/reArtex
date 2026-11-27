@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // DBFinding is a row in the standalone findings table. It persists across task
@@ -37,6 +40,15 @@ type DBFinding struct {
 	RootCauseKey    string // 同根因合并标记键（0.15.35，空=自由文本无 URL 未标记）
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
+
+	// C-04 三维分级。严重度仍是 Severity，这两列不替代它。
+	// ImpactLevel：1 信息 / 2 认证·越权 / 3 控制 / 4 数据·资金。
+	// EvidenceLevel：1 推断 / 2 复现 / 3 完整证据链 / 4 独立复核通过。
+	// EvidenceLevelRequested 是自报值；与 EvidenceLevel 不同时看 EvidenceLevelReason。
+	ImpactLevel            int    `json:"impact_level"`
+	EvidenceLevel          int    `json:"evidence_level"`
+	EvidenceLevelRequested int    `json:"evidence_level_requested"`
+	EvidenceLevelReason    string `json:"evidence_level_reason"`
 }
 
 // Finding triage states (findings.status).
@@ -82,6 +94,177 @@ func ValidSeverity(s string) bool {
 	return false
 }
 
+//go:embed schema_finding_levels.sql
+var findingLevelsSchemaSQL string
+
+// findingLevelsSchemaReady 按连接池标记 DDL 已就位（markRuntimeSchemasReady 同键）。
+var findingLevelsSchemaReady sync.Map
+
+// ErrFindingLevelInvalid 表示影响层级或证据等级不在 1–4。
+var ErrFindingLevelInvalid = errors.New("影响层级与证据等级必须是 1-4")
+
+// EnsureFindingLevelsSchema 幂等补上 findings 的影响层级、证据等级、自报值与降级原因。
+// 启动期用迁移连接调用；运行期连接被 markRuntimeSchemasReady 标成就位后不再执行 DDL。
+func (d *DB) EnsureFindingLevelsSchema() error {
+	if d == nil || d.DB == nil {
+		return errors.New("数据库未装配")
+	}
+	if _, ok := findingLevelsSchemaReady.Load(d.DB); ok {
+		return nil
+	}
+	if _, err := d.Exec(findingLevelsSchemaSQL); err != nil {
+		return fmt.Errorf("应用漏洞分级 schema 失败: %w", err)
+	}
+	findingLevelsSchemaReady.Store(d.DB, struct{}{})
+	return nil
+}
+
+// ValidFindingLevel 报告 n 是否在 1–4。0 不是合法等级（省略由调用方折成 1）。
+func ValidFindingLevel(n int) bool {
+	return n >= 1 && n <= 4
+}
+
+// EvidenceSufficient 判断这条严重度是否算「证据够用」。
+// critical / high 必须证据等级 ≥ L3；其余严重度（含 info 与空串）不强制。
+// 这是展示和统计口径，不负责拒绝入库。
+func EvidenceSufficient(severity string, evidenceLevel int) bool {
+	if severity == SeverityCritical || severity == SeverityHigh {
+		return evidenceLevel >= 3
+	}
+	return true
+}
+
+// 证据等级上限的近似规则（E-01 的 finding_gate 落地前）。
+// L3：去空白后不少于 20 个字符，且能看出引用了工具输出。
+// L4：在 L3 之上，还要有独立复测 verdict=reproduced。
+// 空证据最高 L1；有正文但够不上 L3 的最高 L2。
+const evidenceChainMinRunes = 20
+
+var (
+	evidenceFencedOutput = regexp.MustCompile("(?s)```[^\\n]*\\n[[:space:]]*\\S.*?```")
+	evidenceShellPrompt  = regexp.MustCompile("(?m)^[[:space:]]*[$#][[:space:]]+\\S")
+)
+
+// EvidenceCitesToolOutput 判断证据正文是否「够长且引用了工具输出」。
+// 引用只认三种确定性痕迹：markdown 围栏代码块、HTTP 状态行、shell 提示符后的命令。
+// 不查活动流，也不把任意 20 字散文当成完整证据链。E-03 落地后应改成逐字比对。
+func EvidenceCitesToolOutput(evidence string) bool {
+	text := strings.TrimSpace(evidence)
+	if utf8.RuneCountInString(text) < evidenceChainMinRunes {
+		return false
+	}
+	if evidenceFencedOutput.MatchString(text) {
+		return true
+	}
+	if strings.Contains(text, "HTTP/1.") || strings.Contains(text, "HTTP/2") {
+		return true
+	}
+	return evidenceShellPrompt.MatchString(text)
+}
+
+// EvidenceCeiling 是当前证据正文和复测状态下，证据等级允许写下的最高档。
+func EvidenceCeiling(evidence string, reproduced bool) int {
+	if strings.TrimSpace(evidence) == "" {
+		return 1
+	}
+	if !EvidenceCitesToolOutput(evidence) {
+		return 2
+	}
+	if reproduced {
+		return 4
+	}
+	return 3
+}
+
+// CapEvidenceLevel 把自报证据等级收进可验证上限。
+// requested 为 0 视为省略，按 L1 处理，不记降级。
+// 超出 1–4 返回 ErrFindingLevelInvalid，调用方不得落库。
+// 自报高于上限时 applied 是上限，reason 非空；没有降级时 reason 为空。
+// 只降不升：自报低于上限时保持自报值。
+func CapEvidenceLevel(requested int, evidence string, reproduced bool) (applied int, reason string, err error) {
+	if requested == 0 {
+		requested = 1
+	}
+	if !ValidFindingLevel(requested) {
+		return 0, "", ErrFindingLevelInvalid
+	}
+	ceiling := EvidenceCeiling(evidence, reproduced)
+	if requested <= ceiling {
+		return requested, "", nil
+	}
+	reason = fmt.Sprintf("自报证据等级 L%d，可验证上限为 L%d", requested, ceiling)
+	switch {
+	case requested >= 4 && !reproduced && !EvidenceCitesToolOutput(evidence):
+		reason += "（尚无独立复测 verdict=reproduced，且证据未达到长度≥20并含工具输出引用）"
+	case requested >= 4 && !reproduced:
+		reason += "（尚无独立复测 verdict=reproduced）"
+	case !EvidenceCitesToolOutput(evidence):
+		reason += "（证据未达到长度≥20并含工具输出引用）"
+	}
+	return ceiling, reason, nil
+}
+
+// SetFindingLevels 在一个事务里写下影响层级和证据等级，并把同样的值镜像到
+// 来源探索节点的 payload。本函数只做 1–4 白名单，不按证据正文降级——
+// agent 自报要先过 CapEvidenceLevel，再把结果交进来。
+// 显式写入会把自报值改成这次的证据等级，并清空降级原因。
+// 找不到行返回 ErrFindingNotFound。
+func (d *DB) SetFindingLevels(id int64, impact, evidence int) error {
+	if !ValidFindingLevel(impact) || !ValidFindingLevel(evidence) {
+		return ErrFindingLevelInvalid
+	}
+	return d.writeFindingLevels(id, impact, evidence, evidence, "")
+}
+
+// writeFindingLevels 把四列一起写入。requested 必须已是 1–4。
+func (d *DB) writeFindingLevels(id int64, impact, evidence, requested int, reason string) error {
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return err
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var nodeID sql.NullInt64
+	err = tx.QueryRow(`UPDATE findings
+		SET impact_level=$1, evidence_level=$2, evidence_level_requested=$3, evidence_level_reason=$4
+		WHERE id=$5 RETURNING node_id`, impact, evidence, requested, reason, id).Scan(&nodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrFindingNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if nodeID.Valid {
+		if _, err := tx.Exec(`UPDATE exploration_nodes
+			SET payload = jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						jsonb_set(COALESCE(payload, '{}'::jsonb), '{impact_level}', to_jsonb($1::int), true),
+						'{evidence_level}', to_jsonb($2::int), true),
+					'{evidence_level_requested}', to_jsonb($3::int), true),
+				'{evidence_level_reason}', to_jsonb($4::text), true)
+			WHERE id=$5`, impact, evidence, requested, reason, nodeID.Int64); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// MaxImpactLevel 返回任务下 finding 的最高影响层级。没有 finding 时返回 0。
+func (d *DB) MaxImpactLevel(taskID int64) (int, error) {
+	if taskID <= 0 {
+		return 0, nil
+	}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return 0, err
+	}
+	var n int
+	err := d.QueryRow(`SELECT COALESCE(MAX(impact_level), 0) FROM findings WHERE task_id=$1`, taskID).Scan(&n)
+	return n, err
+}
+
 // AddFinding inserts a finding into the standalone findings table. taskID and
 // nodeID may be 0 (stored as NULL). name may be "" (frontend falls back to
 // vulnclass). Returns the new finding id.
@@ -112,7 +295,29 @@ const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.n
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
 	       COALESCE(f.evidence_status, 'na'), COALESCE(f.root_cause_key, ''),
- (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
+ (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
+ f.impact_level, f.evidence_level, f.evidence_level_requested, COALESCE(f.evidence_level_reason, '')`
+
+// scanFindingRow 按 findingSelectCols 的顺序读一行。withReport 为真时再读末尾的 report。
+func scanFindingRow(scanner interface{ Scan(...any) error }, withReport bool) (*DBFinding, error) {
+	f := &DBFinding{}
+	var aidsJSON string
+	dest := []any{
+		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
+		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion,
+		&f.EvidenceStatus, &f.RootCauseKey, &f.TrafficCount,
+		&f.ImpactLevel, &f.EvidenceLevel, &f.EvidenceLevelRequested, &f.EvidenceLevelReason,
+	}
+	if withReport {
+		dest = append(dest, &f.Report)
+	}
+	if err := scanner.Scan(dest...); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	return f, nil
+}
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -122,14 +327,10 @@ func scanFindings(rows interface {
 }) ([]*DBFinding, error) {
 	var out []*DBFinding
 	for rows.Next() {
-		f := &DBFinding{}
-		var aidsJSON string
-		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion,
-			&f.EvidenceStatus, &f.RootCauseKey, &f.TrafficCount); err != nil {
+		f, err := scanFindingRow(rows, false)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -138,6 +339,9 @@ func scanFindings(rows interface {
 // ListFindings returns all findings (newest first), joined with task description.
 // Kept for the dashboard's summary; the paginated 发现 page uses ListFindingsPage.
 func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 500
 	}
@@ -261,6 +465,9 @@ func (f FindingFilter) where() (string, []any) {
 // ListFindingsPage returns one page of findings matching the filter, plus the
 // total count of matching rows (for the frontend pager). page is 1-based.
 func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding, int, error) {
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, 0, err
+	}
 	if page <= 0 {
 		page = 1
 	}
@@ -499,6 +706,9 @@ RETURNING id, created_at`, s.expID, audit.NodeID, utf8Clean(audit.Worker), utf8C
 // filter;ids 为空时按 filter 导出(导出当前筛选/全部)。结果按严重等级降序、
 // 再按时间倒序,与「导出汇总报告」的分组顺序一致。
 func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, error) {
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, err
+	}
 	const order = `ORDER BY CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 WHEN 'info' THEN 0 ELSE 0 END DESC, f.created_at DESC`
 	cols := findingSelectCols + `, COALESCE(f.report, '')`
 
@@ -536,15 +746,10 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 
 	var out []*DBFinding
 	for rows.Next() {
-		f := &DBFinding{}
-		var aidsJSON string
-		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion,
-			&f.EvidenceStatus, &f.RootCauseKey, &f.TrafficCount, &f.Report); err != nil {
+		f, err := scanFindingRow(rows, true)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -663,23 +868,20 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 // full Markdown report), or nil when no row has that id. Unlike the list queries
 // it also selects `report` — that column is only needed on the detail page.
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
-	f := &DBFinding{}
-	var aidsJSON string
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return nil, err
+	}
+	row := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
-		WHERE f.id = $1`, id).Scan(
-		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion,
-		&f.EvidenceStatus, &f.RootCauseKey, &f.TrafficCount, &f.Report)
+		WHERE f.id = $1`, id)
+	f, err := scanFindingRow(row, true)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
 	return f, nil
 }
 
@@ -896,7 +1098,9 @@ const rerateMaxRows = 500
 // RerateFindingCandidates 列出评级基准（E1-7）下需要重评的存量 finding 候选：
 // ① severity 乱值（不在枚举内）→ info（无判级依据，只能落信息级）；
 // ② 纯信息泄露（vulnclass=info_disclosure）且现级 > info，且证据/摘要均无
-//    凭据链特征 → info（基准：纯信息泄露与暴露类一律 info）。
+//
+//	凭据链特征 → info（基准：纯信息泄露与暴露类一律 info）。
+//
 // taskID>0 时只扫该任务。只读，不改任何行。
 func (d *DB) RerateFindingCandidates(taskID int64) ([]RerateCandidate, error) {
 	q := `SELECT id, COALESCE(task_id,0), COALESCE(vulnclass,''), COALESCE(name,''), severity,
