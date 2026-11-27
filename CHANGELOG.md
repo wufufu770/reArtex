@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.97] - 2026-11-27
+
+### 新增（C-01B：任务难度建议与创建/修改接口）
+
+- 背景：C-01A（0.15.96）只把 `tasks.difficulty` / `difficulty_reason` 落库。本批接上确定性建议和 HTTP。`POST /api/tasks` 的 JSON 字段 `difficulty` 仍是 0.15.17 执行档（`auto/simple/medium/hard`），创建页默认发送 `auto`。任务难度改走新字段 `task_difficulty`，避免现有创建请求被四值校验打成 400。
+- `agent/difficulty.go`（新增）：`SuggestDifficulty(goal, description)` 与 `ValidDifficulty`。不调 LLM。关键词优先级 expert > hard > easy > medium：内网/横向/提权/多阶段 → expert；认证/登录态/支付/多域名/WAF/绕过 → hard；收集/枚举/指纹/梳理且无认证或支付词 → easy；其余 medium。理由非空。`WAF` 大小写不敏感，中文关键词按原文匹配。建议只回显，不自动落库。
+- `server/server.go`：创建请求增加 `task_difficulty` 与 `difficulty_reason`。省略或空白的 `task_difficulty` 落库 `medium`；非法值 400 且不建任务。用户显式传入的四值原样落库（含覆盖建议，例如目标含「支付接口」仍建议 hard，但 `task_difficulty=easy` 落 easy）。执行档的 `difficulty` / `mode` 分支未改。响应附加 `task_difficulty`、`difficulty_reason`、`suggested_difficulty`、`suggested_difficulty_reason`，不使用键名 `difficulty`。
+- `server/task_metadata.go`：`PATCH /api/tasks/{id}` 接受 `task_difficulty` / `difficulty_reason`（nil = 不改）。非法难度 400，库内旧值不动。难度或理由真变化时写审计链 `task.difficulty`（actor=operator，source=task-api，payload 含 old/new）。审计失败只记日志，不把已落库的修改倒成 500。只改名称/置顶不写这条审计。
+- 【与卡面差异（如实说明）】① 常量不能叫 `DifficultyMedium` / `DifficultyHard`：同包 0.15.17 执行档已经占用这两个名字。档位常量是 `LevelEasy` / `LevelMedium` / `LevelHard` / `LevelExpert`。② 未实现 `DefaultExecutionMode`，那是 C-02。③ 创建与修改的请求字段是 `task_difficulty`，不是卡面写的 `difficulty`。响应同样不用 `difficulty` 键，避免客户端把任务难度误读成执行档回显。`difficulty_reason` 无冲突，沿用卡面名字。④ 卡面「复用现有任务元数据变更的审计方式」：name/pinned 目前没有审计事件，本批只为难度变更新增 `task.difficulty`，写法与 monitor 配置保存相同（best-effort）。⑤ 前端「系统建议：hard（…）」未做。再改 `web/` 会跨出本批的 db 以外子系统并超过本批要守的文件面；列表/详情展示归 C-06。GET 列表仍不带这两列（内存 `server.Task` 未缓存难度，派发应现读 `tasks.difficulty`）。
+- 验证：`gofmt` 干净；`go vet ./agent/ ./server/` 干净；`go test -race -count=1 ./agent/ -timeout 20m` 通过（9.6s）；`go test -race -count=1 ./server/ -run 'TestTaskDifficultyAPI$' -v` PASS（0.61s）；`go test -race -count=1 ./server/ -run 'TestTaskDifficultyAPI|TestCoreTaskLifecyclePG|TestExecutionProfile' -timeout 300s` 通过（3.2s）。`go test -race -count=1 ./server/ -timeout 25m` 全包 70.0s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`：`-race` 报 `monitorFakeGH.seen` 在测试 goroutine 读、轮询 goroutine 写（`monitor_poller_test.go:40` 与 `:336`），栈不经过本批文件；单独重跑同样失败（1.5s）。CI 的 `go test ./...` 不带 `-race`。
+- 留下：前端展示归 C-06。C-02 的预算/并发映射未开始。
+
 ## [0.15.96] - 2026-11-27
 
 ### 新增（C-01A：任务难度字段第一批——difficulty / difficulty_reason 落库）
