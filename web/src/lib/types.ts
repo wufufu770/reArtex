@@ -44,6 +44,14 @@ export interface Task {
   task_execution_mode?: string; // 资源模式覆盖；空=跟随难度。不是执行档的 mode
   default_execution_mode?: string; // 难度对应的默认资源模式
   effective_execution_mode?: string; // 当前生效资源模式（有覆盖用覆盖）
+  task_difficulty?: string; // 任务难度 easy/medium/hard/expert。不是执行档的 difficulty
+  difficulty_reason?: string;
+  suggested_difficulty?: string; // 按目标文本算出的建议，不自动落库
+  suggested_difficulty_reason?: string;
+  grade?: string; // S/A/B/C；空=未评级
+  grade_summary?: string;
+  grade_score?: number | null;
+  max_impact_level?: number; // 0 = 没有 finding
   retest_scope?: string; // 建议复测的严重度范围；不自动派发
   require_oracle?: boolean; // 只标注是否希望程序化验证，不阻断人工复测
   unmet_goals?: UnmetGoal[]; // 还没 met / abandoned 的目标；空数组表示没有
