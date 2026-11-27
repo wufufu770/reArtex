@@ -456,6 +456,12 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureCredBreakerSchema(); err != nil {
 			return fmt.Errorf("apply cred breaker schema: %w", err)
 		}
+		// C-01A（0.15.96）：tasks.difficulty / difficulty_reason。列不在
+		// db/schema.sql（RESERVED），taskCols 已引用这两列——漏接启动期会让
+		// 首个任务读在受限角色下报 42703。
+		if err := schemaDB.EnsureTaskDifficultySchema(); err != nil {
+			return fmt.Errorf("apply task difficulty schema: %w", err)
+		}
 		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
 		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用
 		// 有 DDL 权限的连接建好：受限运行角色建不了表。

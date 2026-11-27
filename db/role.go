@@ -305,4 +305,7 @@ func markRuntimeSchemasReady(pool *sql.DB) {
 	interceptScopeSchemaReady.Store(pool, struct{}{})
 	// A-13（0.15.82）：凭据熔断状态表（db/credbreaker.go）——启动期已应用，运行期免 DDL。
 	credBreakerSchemaReady.Store(pool, struct{}{})
+	// C-01A（0.15.96）：tasks.difficulty / difficulty_reason（db/tasks.go）——
+	// 启动期已应用，运行期免 DDL。
+	taskDifficultySchemaReady.Store(pool, struct{}{})
 }
