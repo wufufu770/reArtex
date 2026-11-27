@@ -197,7 +197,7 @@ jobs:
         # 原值喂 guard 再崩），新内容全量面由 secret-scan all（整树+全历史）、
         # go-test、e2e-smoke 覆盖；分支推送不受影响，硬锁照常强制。
         run: |
-          BASE=$(git rev-parse "${{ github.event.before }}^{commit}" 2>/dev/null || true)
+          BASE=$(git rev-parse --verify "${{ github.event.before }}^{commit}" 2>/dev/null || true)
           if [ -z "$BASE" ]; then
             echo "event.before 无法解析为 commit（tag 对象已被强推移除）——跳过区间硬锁；内容/测试面由其余门覆盖"
             exit 0
