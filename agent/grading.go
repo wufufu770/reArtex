@@ -16,8 +16,8 @@ const (
 	GradeC = "C"
 )
 
-// GradeInput 是四项分子/分母。证据完整数在 C-04 落地前由
-// CountEvidenceComplete 按「非空 evidence 且通过 finding_gate」近似。
+// GradeInput 是四项分子/分母。证据完整数由 CountEvidenceComplete 给出：
+// 走过 C-04 写入的发现看证据等级是否 ≥ L3，存量发现仍过 finding_gate。
 type GradeInput struct {
 	GoalsMet, GoalsTotal            int
 	VerifiedFindings, TotalFindings int
@@ -33,10 +33,16 @@ type GradeResult struct {
 	Summary string  `json:"summary"`
 }
 
-// GradeFinding 是证据完整率用的一条发现。只看结论陈述和证据正文。
+// GradeFinding 是证据完整率用的一条发现。
+// 存量发现只看结论陈述和证据正文。走过 C-04 写入的发现再看证据等级：
+// EvidenceLevel 是降级后的落库值，EvidenceLevelRequested 是自报，
+// EvidenceLevelReason 是降级原因。三列都空着（0 / 0 / ""）时按存量处理。
 type GradeFinding struct {
-	Summary  string
-	Evidence string
+	Summary                string
+	Evidence               string
+	EvidenceLevel          int
+	EvidenceLevelRequested int
+	EvidenceLevelReason    string
 }
 
 // ComputeGrade 按 40/30/20/10 加权。分母 ≤ 0 的维度按 0 分，不按满分，
@@ -65,19 +71,47 @@ func ComputeGrade(in GradeInput) GradeResult {
 	return GradeResult{Score: score, Grade: grade, Summary: summary}
 }
 
-// CountEvidenceComplete 统计「有非空证据且通过 finding_gate」的发现数。
-// CheckFindingGate 的 R1 已经拒绝空白证据，所以通过门即满足原先的两项近似。
-// C-04 的 evidence_level 已经落库，但存量行默认 L1。若这里改成「证据等级 ≥ L3」，
-// 重新评级会把还没人重标过的历史任务证据完整率打成 0。口径是否切换留给业主，
-// 本函数继续不读 evidence_level，也不读 evidence_status。已验证发现仍只数 confirmed。
+// CountEvidenceComplete 统计证据完整的发现数。
+// 走过 C-04 写入的发现：evidence_level ≥ 3 算完整，不再看 finding_gate。
+// 存量发现（自报仍是默认 L1，且没有降级原因）：仍以 CheckFindingGate 为准。
+// 门的 R1 已经拒绝空白证据。不读 evidence_status。已验证发现仍只数 confirmed。
+// 本函数不改已经落库的等级；调用方只在新的终态结算或显式重新评级时使用它。
 func CountEvidenceComplete(findings []GradeFinding) int {
 	n := 0
 	for _, f := range findings {
-		if CheckFindingGate(f.Summary, f.Evidence) == nil {
+		if evidenceFindingComplete(f) {
 			n++
 		}
 	}
 	return n
+}
+
+// evidenceGradedByLevel 判断这条发现是否按证据等级计完整。
+//
+// 标记用 findings 上已经落库、且不会被 ALTER 默认值误伤的两列：
+//   - evidence_level_requested > 1：自报不是默认的 L1。省略参数和存量行
+//     的列默认都是 1，列值上分不开，所以默认 1 仍走旧门。
+//   - evidence_level_reason 去空白后非空：走过上限降级，说明是 C-04 写入。
+//
+// 调用方没填时 requested 是 0。0 不是库里的合法自报（CHECK 1–4，默认 1），
+// 按存量处理，避免只带 summary/evidence 的旧调用被当成新发现。
+//
+// 不用探索节点 payload 里有没有这几个键：RecordFinding 即使省略等级也会把键
+// 写进去，只改影响层级的写入也会补键。那样会把「默认等级、没有降级原因」的
+// 存量发现改判成新口径。也不单看 evidence_level：它是降级后的结果，不是
+// 「走过 C-04 写入」的标记。
+func evidenceGradedByLevel(f GradeFinding) bool {
+	if strings.TrimSpace(f.EvidenceLevelReason) != "" {
+		return true
+	}
+	return f.EvidenceLevelRequested > 1
+}
+
+func evidenceFindingComplete(f GradeFinding) bool {
+	if evidenceGradedByLevel(f) {
+		return f.EvidenceLevel >= 3
+	}
+	return CheckFindingGate(f.Summary, f.Evidence) == nil
 }
 
 // ValidGrade 只认 S/A/B/C。空串表示还没评，不是一个等级。
