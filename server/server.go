@@ -2021,6 +2021,10 @@ type createTaskReq struct {
 	TaskLevel string `json:"task_difficulty,omitempty"`
 	// DifficultyReason 是任务难度的一句话理由，可空。与执行档无关。
 	DifficultyReason string `json:"difficulty_reason,omitempty"`
+	// TaskExecutionMode 是资源模式覆盖（C-02C）：fast/balanced/super_heavy。
+	// 省略或空白 = 落库空串（跟随难度），不把默认模式写进列。
+	// 不是本结构体的 Mode（0.15.17 执行档，请求级推理强度）。
+	TaskExecutionMode string `json:"task_execution_mode,omitempty"`
 	// 任务授权面（EngagementPolicy，0.15.26）：authorized_active(默认=现状)/
 	// passive_recon(出网动作先确认)/strict_manual(除平台内安全读写外先确认)。
 	// 省略 = 默认档。非法值 400（授权面是安全面，坏值不静默回落）。
@@ -2081,6 +2085,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	taskMode, err := normalizeCreateTaskExecutionMode(req.TaskExecutionMode)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
@@ -2089,6 +2098,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		InterceptRules:   interceptRules,
 		Difficulty:       taskLevel,
 		DifficultyReason: strings.TrimSpace(req.DifficultyReason),
+		ExecutionMode:    taskMode,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -2101,6 +2111,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, db.ErrTaskDifficultyInvalid) {
 			writeErr(w, 400, err.Error())
+			return
+		}
+		if errors.Is(err, db.ErrTaskExecutionModeInvalid) {
+			writeErr(w, 400, "task_execution_mode 必须是 fast、balanced、super_heavy 之一；留空表示跟随难度")
 			return
 		}
 		writeErr(w, 500, err.Error())
@@ -2130,13 +2144,13 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
-	storedLevel, storedReason := db.TaskDifficultyMedium, strings.TrimSpace(req.DifficultyReason)
+	storedLevel, storedReason, storedMode := db.TaskDifficultyMedium, strings.TrimSpace(req.DifficultyReason), taskMode
 	if id, err := strconv.ParseInt(t.ID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
 		if row, err := s.m.pg.GetTask(id); err == nil && row != nil {
-			storedLevel, storedReason = row.Difficulty, row.DifficultyReason
+			storedLevel, storedReason, storedMode = row.Difficulty, row.DifficultyReason, row.ExecutionMode
 		}
 	}
-	writeJSON(w, 201, taskLevelView(taskDTO(t, s.resolvedTaskStatus(t)), t.Goal, t.Description, storedLevel, storedReason))
+	writeJSON(w, 201, taskLevelView(taskDTO(t, s.resolvedTaskStatus(t)), t.Goal, t.Description, storedLevel, storedReason, storedMode))
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {
