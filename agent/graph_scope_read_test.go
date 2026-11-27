@@ -290,7 +290,7 @@ func TestGraphOverviewKeepsTaskOwnedNodes(t *testing.T) {
 	ts := fx.tools(t)
 
 	graphScopeCall(t, ts, "set_goals", map[string]any{"goals": []any{
-		map[string]any{"text": "把范围内的站点摸清楚"},
+		map[string]any{"text": "把范围内的站点摸清楚", "criteria": "范围内的站点都有一条事实记录"},
 	}})
 	graphScopeCall(t, ts, "add_hint", map[string]any{"text": "注意别把范围外的资产写进来"})
 	graphScopeCall(t, ts, "add_intent", map[string]any{"summary": "先看范围内的入口"})

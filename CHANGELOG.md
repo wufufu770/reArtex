@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.115] - 2026-11-27
+
+### 新增（C-05B：目标必须带判定标准，证明时记下证据，完成闸门是纯函数）
+
+- 背景：C-05A（0.15.114）只放了查询和 `MarkGoalMet`。本批接到工具上，并放上不读库的闸门函数。终态还没改：agent 宣布完成仍然会把任务记成 done。那是下一批。
+- `set_goals`：每条目标必须有非空 `criteria`（一句话判定标准）。缺了或只有空白就拒绝这一条，不入库。批量里失败的下标进 `errors`，其它条照常落下。判定标准写进 goal 节点 payload 的 `criteria`。目标拆解提示词同步要求这句话。已有库里如果已经有 goals 提示词，启动播种不会覆盖；工具描述和拒绝逻辑仍生效。
+- `prove_goal`：没有 `evidence_id`，或引用的不是本任务（及直接关联任务）可见的 fact / finding 节点，就拒绝，状态保持 open。通过后先连 `proves` 边，再调用 `MarkGoalMet`，把证据节点 id 和理由写进 payload。连边或落库失败都不标 met。`abandoned` 和 `met` 一样算已经了结：其余目标都 met 时，一条 abandoned 不再挡住自动收官。
+- `GateTaskCompletion`：没有未达成目标时，想记的状态原样返回。还有未达成目标却想记 `done`，返回 `timeout`。想记的本来就是 `timeout`、`failed` 或 `paused`，不改写。函数不读库。
+- 【与卡面差异（如实说明）】① 骨架把「想记 done 但未达成」改成 `failed`，并写明 failed 是否表示未完成要实施确认。本轮按卡面标题和「终态记 timeout」落实：未达成时改记 `timeout`，不记 `failed`。`failed` 仍留给额度耗尽等既有路径。② 闸门本批没有挂到 `SetTaskStatus`。调用它之前，任务仍可能被记成 done。③ `evidence_id` 是探索节点 id，不是 `findings` 表主键。④ 人工在页面上新增目标的接口本批不强制 criteria，否则现有表单会 400。那条路径下一小批再决定要不要收。⑤ 已完成的任务不回写。⑥ goals 提示词摘要锚点从 `72a7a015…` 更新为 `08293b25…`，这是有意识的行为变更。
+- 验证：`gofmt` 干净；`go vet ./agent/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./agent/ -run 'TestGateTaskCompletion|TestSetGoalsRequiresCriteriaAndProveCitesEvidence|TestGraphOverviewKeepsTaskOwnedNodes|TestBuiltinPromptDigestAnchors' -timeout 10m` 通过（1.8s）。`go test -race -count=1 ./agent/ -timeout 20m` 全包通过（9.0s）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./server/`（本批零改动）。#20 的 CI 在本批开始前已经通过（go-test、rsi-guard、frontend、secret-scan、e2e-smoke）。
+- 留下：C-05C 把闸门接到终态写入。想记 done 且还有未达成目标时，实际写入 timeout，评级只对这个最终状态算一次。不开始 C-06。
+
 ## [0.15.114] - 2026-11-27
 
 ### 新增（C-05A：未达成目标查询，达成时记下证据引用）

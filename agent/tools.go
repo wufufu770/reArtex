@@ -1679,26 +1679,31 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 				return actool.Errorf("goal_id 必须是本任务的目标节点（关联任务目标只读）"), nil
 			}
 			// evidence 必须是 fact/finding —— 资产锚定节点，按【调用者】的范围取。
+			// 引用的是探索节点 id，不是 findings 表主键。没有引用就拒绝，不标 met。
 			evidenceNode, err := t.ts.GetNodeWithSourcesVisible(t.scopeTaskID(), ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
-			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
-			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
+			if err := t.ts.Link(ev, db.RelProves, goal); err != nil {
+				return actool.Errorf("连接证据失败: " + err.Error()), nil
+			}
+			if err := t.ts.MarkGoalMet(goal, ev, a.Reason); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			// 每标记一个目标 met，就检查是否已经没有未了结目标（met 与 abandoned 都算了结）。
+			// 还有 open 目标时不置 GoalMet。abandoned 不再挡住自动收官。
 			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
+				allResolved := true
 				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
+					if g.State != "met" && g.State != "abandoned" {
+						allResolved = false
 						break
 					}
 				}
-				if allMet {
+				if allResolved {
 					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
-					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
+					t.Reason = fmt.Sprintf("所有 %d 个目标均已了结（met 或 abandoned，最后由 goal %d 触发）", len(goals), goal)
+					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已了结，任务自动判定完成", goal)), nil
 				}
 			}
 			return actool.Text(fmt.Sprintf("goal %d marked met", goal)), nil
@@ -2064,6 +2069,7 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 type goalItem struct {
 	Text      string `json:"text"`
 	VulnClass string `json:"vulnclass"`
+	Criteria  string `json:"criteria"`
 }
 
 // addOneGoal 挂一条 goal 节点(open)到探索图:连到任务根(origin fact,rel spawns)。
@@ -2074,7 +2080,11 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 	if text == "" {
 		return 0, fmt.Errorf("text 不能为空")
 	}
-	payload := map[string]any{"text": text}
+	criteria := strings.TrimSpace(it.Criteria)
+	if criteria == "" {
+		return 0, fmt.Errorf("criteria 不能为空：每个目标要有一句话判定标准")
+	}
+	payload := map[string]any{"text": text, "criteria": criteria}
 	if vc := strings.TrimSpace(it.VulnClass); vc != "" {
 		payload["vulnclass"] = vc
 	}
@@ -2097,11 +2107,13 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 func (t *ToolSet) setGoals() actool.CoreTool {
 	return writeTool("set_goals",
 		"给【本任务】新增探索目标(goal)。目标=最终可交付/可核验的结果,不是攻击步骤或侦察动作。\n"+
-			"★优先批量:多个目标放进 goals 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 goals 直接给顶层 text。\n"+
+			"★每个目标必须带 criteria：一句话判定标准，写清看到什么证据才算达成。没有 criteria 的目标会被拒绝，不入库。\n"+
+			"★优先批量:多个目标放进 goals 数组一次提交,返回 ids 与之等长同序(失败项 id=0,详情见 errors)。单条则省略 goals 直接给顶层 text 和 criteria。\n"+
 			"vulnclass 可选:对应漏洞类(如 SQLi/IDOR),业务逻辑类目标留空。目标是否达成由系统判定标记 met,本工具只负责新增。",
 		obj(map[string]any{
-			"goals":     map[string]any{"type": "array", "description": "【优先用这个】要新增的目标数组,按顺序处理。每个元素:text(必填,一个独立可验证的最终目标)+ vulnclass(可选)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"goals":     map[string]any{"type": "array", "description": "【优先用这个】要新增的目标数组,按顺序处理。每个元素:text(必填)+ criteria(必填,一句话判定标准)+ vulnclass(可选)。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"text":      str("[单条] 一个独立可验证的最终目标"),
+			"criteria":  str("[单条] 一句话判定标准：看到什么证据才算这个目标达成"),
 			"vulnclass": str("[单条] 对应漏洞类(若明确),如 SQLi/IDOR;业务逻辑目标可留空"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {

@@ -19,7 +19,9 @@ import (
 // 注意：四个顾问 agent 的提示词【不】钉摘要——它们的事实来源是文件，文件一改
 // 种子就该跟着变（见 TestAdvisoryPromptSeedsMatchSourceFiles）。
 var builtinPromptDigestAnchors = map[string]string{
-	"goals":     "72a7a0159443b41dde29dfba8a3de6a2c8a15b273935495a7b88561fa708aa68",
+	// C-05B：目标拆解提示词要求每个目标带一句话判定标准。工具本身会拒绝空 criteria，
+	// 这里同步提示词，锚点是有意识更新（2026-11-27）。已有库里编辑过的 goals 提示词不会被覆盖。
+	"goals": "08293b25ef67e27ce700de40c8c52bdbeb0eb9d5105695a8e9de17ee96e09dec",
 	// P1 角色工具纪律（方案 v3.1 §5.1）：planner 移除 Bash 探测授权段（工具面编译期
 	// 白名单同步收口）——有意识的提示词行为变更，锚点随之更新（2026-11-05）。
 	"planner":   "4d1f7ca0282c577f09106f1e8c95b83b3aae03bacfb7dca722d4a7aeb0b84a42", // F1 许愿纪律（方案 v10 §12）：planner 提示词加预测字段与可证伪许愿段——有意识的变更，锚点随之更新（2026-11-11）。
@@ -76,8 +78,8 @@ func TestBuiltinPromptSeedsKeys(t *testing.T) {
 		"curator": true, "verifier": true, "redteam": true, "creative": true,
 		"intent_normalizer": true,
 		"edge":              true, "edge_exec": true,
-		"miniprogram":       true,
-		"arbiter":           true,
+		"miniprogram": true,
+		"arbiter":     true,
 	}
 	if len(seeds) != len(want) {
 		t.Fatalf("提示词种子数量不对：got %d want %d（%v）", len(seeds), len(want), seeds)
