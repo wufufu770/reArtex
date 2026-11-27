@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.121] - 2026-11-27
+
+### 新增（C-06A：任务列表按难度和评级筛选，并带上最高影响层级）
+
+- 背景：C-06 要在任务列表和详情上看到难度、评级、最高影响层级，并能按难度和评级筛选。详情接口已经有这些字段。列表接口没有，任务内的发现列表也还从探索节点读、不带等级列。整卡跨 db / server / web，一次做完会超过 5 个生产文件。本批只做列表筛选和任务内发现的等级出口。页面下一小批。
+- `GET /api/tasks` 增加查询参数 `difficulty` 与 `grade`。空着表示不筛选。`difficulty` 只接受 easy / medium / hard / expert。`grade` 接受 S / A / B / C，另加 `ungraded` 表示还没评。非法值 400，不返回列表。两个都传时取交集。筛的是 `tasks.difficulty` 和 `tasks.grade`，不是 POST 正文里的执行档 `difficulty`，也不是资源模式。
+- 列表每一行补上与详情相同的 `task_difficulty`、`difficulty_reason`、`suggested_difficulty`、`suggested_difficulty_reason`、评级三键、资源模式只读键，以及 `max_impact_level`。没有 finding 时最高影响层级是 0。筛选失败返回 500，避免静默退回全量。最高影响层级这一次聚合失败只记日志，该键按 0，列表仍返回。
+- 带 `task` 参数的 `GET /api/exploration/findings` 从 findings 行带上 `impact_level`、`evidence_level`、`evidence_level_requested`、`evidence_level_reason`、`evidence_insufficient`。没有对应 findings 行的旧节点仍不带这些值（保持 0 / false）。
+- 【与卡面差异（如实说明）】① HTTP 列表不走 `db.ListTasks`。它走内存里的 `Manager.List()`，再拼运行中的状态。`ListTasks` 还被启动加载使用，没有改它的签名。筛选下推到新的 `ListTaskBoard`，按难度和评级在 SQL 里过滤，再和内存列表取交集。② 卡面骨架的评级白名单只有 S/A/B/C。同一张卡的下拉还有「未评级」。`grade=ungraded` 表示 `grade=''`。空参数仍是「不筛选」，不能用来表示未评级。③ 非法值的文案是中文，和现有任务接口一致，不是骨架里的 `invalid difficulty`。④ 查询参数名叫 `difficulty`，按卡面。响应字段仍是 `task_difficulty`，避免和执行档的 `difficulty` 混成一个键。⑤ 详情页四格、列表徽章、发现 tab 的徽章还没画。⑥ 只读回源的 `GET /api/tasks/{id}` 原本就有 `max_impact_level` 和评级，本批不改那条路径的难度键。
+- 验证：`gofmt` 干净；`go vet ./db/ ./server/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./server/ -run 'TestParseTaskListLevelFilter|TestTaskListLevelFilter|TestFindingLevelsAPI|TestTaskDifficultyAPI$|TestTaskGradeAPI$' -timeout 10m` 通过（2.4s）：`difficulty=hard` 只有 hard；`grade=S` 只有 S；两者联选是交集；`grade=ungraded` 只有空等级；`difficulty=auto` 和 `grade=Z` 都是 400；列表行带 `max_impact_level=4` 和建议难度；`GET /api/exploration/findings?task=` 上 critical + 证据 L2 的 `evidence_insufficient=true`。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（22.0s）。`go test -race -count=1 ./server/ -timeout 25m` 全包 57.5s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（栈在 `monitor_poller.go`，不经过本批文件）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：列表页的筛选和徽章，详情概览四格，发现 tab 把已经返回的三维分级画出来。不开始 D-01。
+
 ## [0.15.120] - 2026-11-27
 
 ### 新增（C-03D：新发现按证据等级计完整，存量仍过门）
