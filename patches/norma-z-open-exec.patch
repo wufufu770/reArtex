@@ -25,8 +25,21 @@ argv[0] 观感不变。
     patch -p1 < patches/norma-z-open-exec.patch
 
 文件名以 z- 开头且排在 z-backfill-drift 之后：prepare-norma.sh 按文件名排序
-应用，本补丁的 hunk 上下文假定 z-backfill-drift.patch 已应用（import 块里的
-"time" 来自握手预算那组 hunk）。
+应用，本补丁的 hunk 上下文假定握手预算那组 hunk（import 块里的 "time"）与
+privdrop 降权 hunk 已应用。
+
+【0.15.95 修订：build-tag 平台拆分】原实现把 openVerifiedCommand 连同
+syscall.O_NOFOLLOW / syscall.Stat_t 全文放进平台中立的 stdio.go，仅用
+runtime.GOOS 运行时判断挡住——但 GOOS 检查不参与编译期目标选择，windows/
+darwin 等缺这些符号的目标照样编译整段代码，release 交叉编译实证必炸
+（CI run 5：windows/amd64 报 undefined: syscall.O_NOFOLLOW / syscall.Stat_t，
+linux/arm64 与 darwin/arm64 因 fail-fast 连锁取消）。修订拆成
+openexec_linux.go（//go:build linux，fd-exec 身份校验全文）与
+openexec_other.go（//go:build !linux，按路径 spawn 的平凡实现）：Linux 行为
+逐字节不变，非 Linux 从「编译不过」回到「按路径 spawn」——即 A-07B 前的
+原始行为，与上文「非 Linux 平台保留原路径 spawn」的既述边界一致。
+stdio.go 本体回到只改调用点（import 零变化：fmt/runtime/syscall 随函数一并
+迁出，"time"/privdrop 本就是既有 hunk 的上下文）。
 
 目标版本：github.com/Autumn-27/norma v0.4.4。模块缓存是只读共享的，本补丁不
 改动它；仓库里由 scripts/prepare-norma.sh 复制到 third_party/norma 后再应用，
@@ -35,20 +48,7 @@ diff --git a/mcp/stdio.go b/mcp/stdio.go
 index 5117db0..8f2e2b7 100644
 --- a/mcp/stdio.go
 +++ b/mcp/stdio.go
-@@ -2,9 +2,12 @@
-
- import (
- 	"context"
-+	"fmt"
- 	"io"
- 	"os"
- 	"os/exec"
-+	"runtime"
-+	"syscall"
- 	"time"
-
- 	"github.com/Autumn-27/norma/tool/privdrop"
-@@ -33,7 +36,16 @@
+@@ -33,7 +33,16 @@
  // env holds extra environment variables (e.g. API tokens an MCP server needs)
  // applied on top of the parent process environment; pass nil for none.
  func NewStdioClient(ctx context.Context, server, command string, env map[string]string, args ...string) (*Client, error) {
@@ -66,10 +66,21 @@ index 5117db0..8f2e2b7 100644
  	// Drop to the agent identity: with a root platform process the MCP server
  	// would inherit root and could read the platform's 0600 credential files.
  	if attr := privdrop.ProcAttr(); attr != nil && privdrop.CanDrop() {
-@@ -82,3 +94,52 @@
- 	}
- 	return c, nil
- }
+diff --git a/mcp/openexec_linux.go b/mcp/openexec_linux.go
+new file mode 100644
+--- /dev/null
++++ b/mcp/openexec_linux.go
+@@ -0,0 +1,60 @@
++//go:build linux
++
++package mcp
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"syscall"
++)
 +
 +// openVerifiedCommand pins the exec target to an opened, identity-verified file
 +// handle (A-07B fd-exec). exec.Command(command) resolves the path again at start
@@ -80,14 +91,15 @@ index 5117db0..8f2e2b7 100644
 +// the kernel runs the exact object that was inspected. Any mismatch fails
 +// closed; there is deliberately no fallback to spawning by path.
 +//
-+// Linux-only: O_NOFOLLOW and /proc/<pid>/fd are Linux conventions. Other
-+// platforms keep the plain path spawn — the identity check is a Linux
-+// hardening layer, not a portable guarantee.
++// Linux-only: O_NOFOLLOW and /proc/<pid>/fd are Linux conventions. The non-Linux
++// counterpart lives in openexec_other.go (//go:build !linux) and keeps the plain
++// path spawn — the identity check is a Linux hardening layer, not a portable
++// guarantee. The split into build-tagged files (0.15.95) replaces the previous
++// runtime.GOOS check inside a platform-neutral file, which failed to compile on
++// platforms lacking syscall.O_NOFOLLOW / syscall.Stat_t (windows, and any target
++// without them) even though the guarded branch never ran there.
 +func openVerifiedCommand(command string, args []string) (*exec.Cmd, func(), error) {
 +	noop := func() {}
-+	if runtime.GOOS != "linux" {
-+		return exec.Command(command, args...), noop, nil
-+	}
 +	// O_NOFOLLOW: a symlinked command path resolves here or not at all, so the
 +	// handle we verify is the final object — not an intermediate link.
 +	f, err := os.OpenFile(command, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -118,4 +130,25 @@ index 5117db0..8f2e2b7 100644
 +	cmd.Args[0] = command
 +	cmd.ExtraFiles = []*os.File{f}
 +	return cmd, closer, nil
++}
+diff --git a/mcp/openexec_other.go b/mcp/openexec_other.go
+new file mode 100644
+--- /dev/null
++++ b/mcp/openexec_other.go
+@@ -0,0 +1,16 @@
++//go:build !linux
++
++package mcp
++
++import (
++	"os/exec"
++)
++
++// openVerifiedCommand is the non-Linux counterpart of the fd-exec identity check
++// (see openexec_linux.go): O_NOFOLLOW and /proc/<pid>/fd are Linux conventions,
++// so other platforms keep the plain path spawn. The identity check is a Linux
++// hardening layer, not a portable guarantee.
++func openVerifiedCommand(command string, args []string) (*exec.Cmd, func(), error) {
++	noop := func() {}
++	return exec.Command(command, args...), noop, nil
 +}
