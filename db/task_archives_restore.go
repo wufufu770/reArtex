@@ -326,6 +326,10 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  -- NOT NULL，所以缺列回落迁移默认（medium / 空理由），有列则原样恢复。
  difficulty=COALESCE(archived.difficulty, 'medium'),
  difficulty_reason=COALESCE(archived.difficulty_reason, ''),
+ -- C-02B：旧快照没有 execution_mode 时 json_populate_record 给出 NULL。
+ -- 直接赋值会撞 NOT NULL。缺列回落空串（跟随难度），有列则原样恢复，
+ -- 不把空值改写成某一档。非法快照值留给 CHECK 拒绝。
+ execution_mode=COALESCE(archived.execution_mode, ''),
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
