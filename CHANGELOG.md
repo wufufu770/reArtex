@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.116] - 2026-11-27
+
+### 新增（C-05C：未达成目标不许记 done，终态记 timeout）
+
+- 背景：C-05B（0.15.115）的闸门还只是纯函数。本批把它接到任务终态写入。想记 `done` 但还有未达成目标（不是 met，也不是 abandoned）时，实际写入 `timeout`。
+- `Manager.SetTaskStatus` 和 `SetTaskStatusGuarded` 在落库之前调用 `GateTaskCompletion`。查询失败就不写 `done`，状态保持原样，这次也不评级。任务行不存在时不拦。`failed`、`paused`、本来就要记的 `timeout` 不改写。
+- 停滞闸、无目标收尾、planner 判定达成、治理收尾、超时收尾都走这两处写入。改写成 timeout 时不跑终局蒸馏。活动里列出未达成目标的文本、判定标准和原因。超时收尾如果终局 planner 宣称达成、库里仍有未达成目标，日志和蒸馏看的是落库后的 `timeout`。
+- 评级只算一次：改写发生在 `SetStatus` / `SetTerminalStatusGuarded` 之前，`noteTaskGrade` 只看到最终状态。不会先按 done 评一次再按 timeout 评一次。已有等级不覆盖（`force=false`），所以之后再写一次「要记 done」也不会重算。离开终态时的清除还是原来的逻辑。证据完整率仍按 `CheckFindingGate`，没有改成证据等级 ≥ L3。
+- 【与卡面差异（如实说明）】① 骨架把 agent 宣布完成改记 `failed`。本轮按卡面标题记 `timeout`，不占用 `failed`。② 不扫描、不改写已经是 done 的任务。只有新的一次「要记 done」会过闸门。直接 SQL 写成 done 的历史行保持 done。③ 没有目标，或只剩 met / abandoned 时，仍可记 done。④ 人工 `ConcludeTask` 在还有 open 目标时本来就拒绝并要求人工确认，这条没改成自动收尾。闸门只在它已经决定落 done 时再挡一层。⑤ 终局 planner 轮禁止新意图还没做，下一小批。详情页和报告里的未达成清单也还没画。⑥ 准入 `ApplyTaskAdmission` 不负责记完成，不挂闸门。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./server/ -run 'TestGoalGateRewritesDoneToTimeout|TestTaskGradeAPI$|TestTaskGradeSourceDoesNotCallLLM' -timeout 10m` 通过（1.9s）：3 met + 1 open 记 timeout，评级与公式一致；补一条发现后再记一次 done，状态仍是 timeout，等级和摘要不变；4 个都 met、没有目标、met+abandoned 都可以记 done；想记 failed 仍是 failed；SQL 直接写成 done 的历史任务保持 done。`go test -race -count=1 ./server/ -timeout 25m` 全包 56.4s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（`monitor_poller.go` 竞态，栈不经过本批文件）。CI 的 `go test ./...` 不带 `-race`。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：终局规划轮不产新意图；详情和报告列出未达成目标。不开始 C-06。
+
 ## [0.15.115] - 2026-11-27
 
 ### 新增（C-05B：目标必须带判定标准，证明时记下证据，完成闸门是纯函数）
