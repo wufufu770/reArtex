@@ -560,6 +560,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tc := taskClockFrom(ctx)
 	if tc.Final {
 		situational += "\n\n【任务终局收尾（本轮特殊指令，覆盖上面的常规规划流程）】：" + resolveTaskTimeoutWrapup("planner")
+		// 终局轮只判定目标。从工具面拿掉新意图；处理器里还有一道拒绝。
+		tools = dropNamedTools(tools, "add_intent", "propose_intent")
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
@@ -682,6 +684,22 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			}
 		})
 	return tsx.GoalMet, tsx.Reason, err
+}
+
+// dropNamedTools 按工具名去掉若干工具。终局规划轮用它禁止新意图。
+func dropNamedTools(tools []actool.CoreTool, names ...string) []actool.CoreTool {
+	skip := map[string]bool{}
+	for _, name := range names {
+		skip[name] = true
+	}
+	out := make([]actool.CoreTool, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil || skip[tool.Name()] {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 // BacklogWatermarkSettingKey 是积压水位的 settings 键（T5）：open 意图数超过
