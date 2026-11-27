@@ -5,6 +5,17 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.109] - 2026-11-27
+
+### 新增（C-04B：report_finding 的落库路径按证据上限降级）
+
+- 背景：C-04A（0.15.108）只放了列和纯函数。本批把上限接到漏洞写入和复测回升。`report_finding` 的工具参数还没改，那是下一小批；本批不改 `agent/tools.go`，避免和 db 写路径混成两个子系统。
+- `RecordFinding` / `RecordFindingTx`：接受 `ImpactLevel` 和 `EvidenceLevel`。0 视为省略，按 L1。不在 1–4 时整单拒绝（`ErrFindingLevelInvalid`），探索节点和 findings 行都不写。证据等级先过 `CapEvidenceLevel`。新建时还没有复测，所以自报 L4 最高落到 L3，并写下原因。影响层级只做白名单，不降级。结果写进四列、探索节点 payload，以及返回的 `RecordedFinding`（含 `evidence_insufficient`：critical/high 且证据等级 < 3）。
+- `RefreshFindingEvidenceLevel`：按当前证据正文和是否已有 `finding_retests.verdict='reproduced'` 重算。只向自报值回升，不升过自报，不改影响层级。存量行自报默认是 1，复测通过不会把没申请过的旧记录抬到 L4。`RecordFindingRetestResult` 在 verdict 写成 `reproduced` 之后调用它。相同结论的重试仍安全，刷新失败时结论已在，重试会再刷一次。
+- 【与卡面差异（如实说明）】① 工具 schema 还没加这两个参数，所以模型现在传了也会被忽略，落库仍是 L1/L1。非法值的 400 要等工具和 PATCH 那一批；本批的拒绝是 `RecordFinding` 返回错误且不入库。② 降级原因落在 `evidence_level_reason`，同时出现在 `RecordedFinding`，不是只打一条日志。③ L4 不会在复测完成时无条件升上去，只升到当初自报且现在验证得了的那一档。④ 工具输出引用的三种痕迹与 C-04A 相同，仍不查活动流。⑤ 评级口径未改。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净。`go test -race -count=1 ./db/ -run 'TestRecordFindingCapsLevels|TestFindingRetest' -timeout 10m` 通过（1.5s）。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（22.7s）。`go test -race -count=1 ./agent/ -run 'TestReportFinding' -timeout 10m` 通过（1.8s）：现有上报不传分级，仍能入库。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：C-04C 让 `report_finding` 接收这两个参数，非法值拒绝且不入库。不开始 C-05。
+
 ## [0.15.108] - 2026-11-27
 
 ### 新增（C-04A：findings 影响层级与证据等级落库）

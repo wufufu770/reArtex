@@ -348,12 +348,22 @@ type RecordFindingInput struct {
 	// tier2_inconsistent」），由闸门按 fail-closed 拒掉，而不是在登记时炸掉整条
 	// 上报路径。
 	ReplayEvidenceID string
+	// ImpactLevel / EvidenceLevel 是 agent 自报的三维分级。0 = 省略，按 L1。
+	// 超出 1–4 整单拒绝。证据等级高于可验证上限时由系统降级，不按自报原样落库。
+	ImpactLevel   int
+	EvidenceLevel int
 }
 
 type RecordedFinding struct {
 	FindingID int64           `json:"finding_id,string"`
 	NodeID    int64           `json:"finding_node_id,string"`
 	Traffic   *FindingTraffic `json:"traffic"`
+	// 三维分级的落库结果。EvidenceLevel 可能低于自报；原因在 EvidenceLevelReason。
+	ImpactLevel            int    `json:"impact_level"`
+	EvidenceLevel          int    `json:"evidence_level"`
+	EvidenceLevelRequested int    `json:"evidence_level_requested"`
+	EvidenceLevelReason    string `json:"evidence_level_reason,omitempty"`
+	EvidenceInsufficient   bool   `json:"evidence_insufficient"`
 }
 
 // replayEvidenceID 解析这条 finding 的「可重放证据」标识。
@@ -423,7 +433,20 @@ func (d *DB) RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingIn
 			return nil, errors.New("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})
+	// 分级在写节点之前算完。非法值整单拒绝，不能留下没有 findings 行的探索节点。
+	// 刚创建的漏洞还没有复测，证据等级最高到 L3。
+	impact, applied, requested, reason, err := resolveFindingLevels(in.ImpactLevel, in.EvidenceLevel, in.Evidence, false)
+	if err != nil {
+		return nil, err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary,
+		"evidence":                 map[string]any{"by": in.Worker, "poc": in.Evidence},
+		"impact_level":             impact,
+		"evidence_level":           applied,
+		"evidence_level_requested": requested,
+		"evidence_level_reason":    reason,
+	})
 	out := &RecordedFinding{}
 	// 出生态是 **pending**（已提出，未验证），不是 confirmed。
 	//
@@ -462,10 +485,15 @@ VALUES($1,'finding',$2,9,'pending',$3) RETURNING id`, in.ExplorationID, string(p
 	}
 	raw, _ := json.Marshal(assets)
 	replayID := replayEvidenceID(in, prepared)
-	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids,replay_evidence_id)
-VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw), replayID).Scan(&out.FindingID); err != nil {
+	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids,replay_evidence_id,impact_level,evidence_level,evidence_level_requested,evidence_level_reason)
+VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw), replayID, impact, applied, requested, reason).Scan(&out.FindingID); err != nil {
 		return nil, err
 	}
+	out.ImpactLevel = impact
+	out.EvidenceLevel = applied
+	out.EvidenceLevelRequested = requested
+	out.EvidenceLevelReason = reason
+	out.EvidenceInsufficient = !EvidenceSufficient(in.Severity, applied)
 	// 在**同一事务**里登记一条推送事件：提交即保证「漏洞落库」与「推送任务存在」
 	// 原子一致，不存在提交成功却没入队、消息永久丢失的窗口。
 	// 这里的失败被隔离在保存点上、不影响漏洞写入（见函数注释），因此忽略返回值。
@@ -482,7 +510,6 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.N
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
 		return nil, err
 	}
-	var err error
 	out.Traffic, err = FindingTrafficTx(tx, out.FindingID)
 	if err != nil {
 		return nil, err
