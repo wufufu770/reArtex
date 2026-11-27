@@ -2013,8 +2013,14 @@ type createTaskReq struct {
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 	// 执行档位（0.15.17）：auto(默认,文本启发式判定)/simple/medium/hard ×
 	// auto(默认)/fast/balanced/super_heavy。省略 = 默认档（medium/balanced）。
+	// 这个字段不是任务难度。任务难度走 TaskLevel / difficulty_reason（C-01B）。
 	Difficulty string `json:"difficulty,omitempty"`
 	Mode       string `json:"mode,omitempty"`
+	// TaskLevel 是任务难度 easy/medium/hard/expert（C-01）。省略或空白 = 落库 medium，
+	// 不采用建议值。非法值 400。不要把执行档的 auto/simple 写到这里。
+	TaskLevel string `json:"task_difficulty,omitempty"`
+	// DifficultyReason 是任务难度的一句话理由，可空。与执行档无关。
+	DifficultyReason string `json:"difficulty_reason,omitempty"`
 	// 任务授权面（EngagementPolicy，0.15.26）：authorized_active(默认=现状)/
 	// passive_recon(出网动作先确认)/strict_manual(除平台内安全读写外先确认)。
 	// 省略 = 默认档。非法值 400（授权面是安全面，坏值不静默回落）。
@@ -2070,12 +2076,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
 		return
 	}
+	taskLevel, err := normalizeCreateTaskLevel(req.TaskLevel)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
-		CoverageEnabled: req.CoverageEnabled,
-		InterceptRules:  interceptRules,
+		CoverageEnabled:  req.CoverageEnabled,
+		InterceptRules:   interceptRules,
+		Difficulty:       taskLevel,
+		DifficultyReason: strings.TrimSpace(req.DifficultyReason),
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -2084,6 +2097,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, db.ErrTaskCompanyIDsInvalid) || errors.Is(err, db.ErrTaskCompanyNotFound) {
 			writeErr(w, 400, "关联企业不存在或无效")
+			return
+		}
+		if errors.Is(err, db.ErrTaskDifficultyInvalid) {
+			writeErr(w, 400, err.Error())
 			return
 		}
 		writeErr(w, 500, err.Error())
@@ -2113,7 +2130,13 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
-	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
+	storedLevel, storedReason := db.TaskDifficultyMedium, strings.TrimSpace(req.DifficultyReason)
+	if id, err := strconv.ParseInt(t.ID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
+		if row, err := s.m.pg.GetTask(id); err == nil && row != nil {
+			storedLevel, storedReason = row.Difficulty, row.DifficultyReason
+		}
+	}
+	writeJSON(w, 201, taskLevelView(taskDTO(t, s.resolvedTaskStatus(t)), t.Goal, t.Description, storedLevel, storedReason))
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {
