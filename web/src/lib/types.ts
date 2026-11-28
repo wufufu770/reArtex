@@ -44,6 +44,8 @@ export interface Task {
   task_execution_mode?: string; // 资源模式覆盖；空=跟随难度。不是执行档的 mode
   default_execution_mode?: string; // 难度对应的默认资源模式
   effective_execution_mode?: string; // 当前生效资源模式（有覆盖用覆盖）
+  retest_scope?: string; // 建议复测的严重度范围；不自动派发
+  require_oracle?: boolean; // 只标注是否希望程序化验证，不阻断人工复测
 }
 
 export interface TaskCategory {

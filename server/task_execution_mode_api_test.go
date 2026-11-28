@@ -74,6 +74,9 @@ func TestTaskExecutionModeAPI(t *testing.T) {
 	if out["task_execution_mode"] != "" || out["default_execution_mode"] != string(agent.ModeBalanced) || out["effective_execution_mode"] != string(agent.ModeBalanced) {
 		t.Fatalf("plain 模式: %v", out)
 	}
+	if out["retest_scope"] != agent.RetestScopeHighPlus || out["require_oracle"] != false {
+		t.Fatalf("plain 复测建议: %v", out)
+	}
 	if rowOf(plainID).ExecutionMode != "" {
 		t.Fatalf("plain 库内应为空串，得到 %q", rowOf(plainID).ExecutionMode)
 	}
@@ -109,6 +112,9 @@ func TestTaskExecutionModeAPI(t *testing.T) {
 	overID, _ := out["id"].(string)
 	if out["task_execution_mode"] != string(agent.ModeSuperHeavy) || out["default_execution_mode"] != string(agent.ModeFast) || out["effective_execution_mode"] != string(agent.ModeSuperHeavy) {
 		t.Fatalf("覆盖响应: %v", out)
+	}
+	if out["retest_scope"] != agent.RetestScopeAll || out["require_oracle"] != true {
+		t.Fatalf("super_heavy 应标注全量复测和 oracle，且不因此拒绝创建: %v", out)
 	}
 	if rowOf(overID).ExecutionMode != db.TaskExecutionModeSuperHeavy || rowOf(overID).Difficulty != db.TaskDifficultyEasy {
 		t.Fatalf("覆盖落库 mode=%q difficulty=%q", rowOf(overID).ExecutionMode, rowOf(overID).Difficulty)

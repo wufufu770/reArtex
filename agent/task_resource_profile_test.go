@@ -134,6 +134,38 @@ func TestResolveProfileIllegalModeFallsBack(t *testing.T) {
 	}
 }
 
+func TestRetestSuggestedDoesNotImplyDispatch(t *testing.T) {
+	cases := []struct {
+		scope string
+		sev   string
+		want  bool
+	}{
+		{RetestScopeKeyOnly, "critical", true},
+		{RetestScopeKeyOnly, "high", false},
+		{RetestScopeKeyOnly, "low", false},
+		{RetestScopeHighPlus, "high", true},
+		{RetestScopeHighPlus, "critical", true},
+		{RetestScopeHighPlus, "medium", false},
+		{RetestScopeAll, "low", true},
+		{RetestScopeAll, "medium", true},
+		{RetestScopeAll, "", false},
+		{"", "critical", false},
+	}
+	for _, c := range cases {
+		if got := RetestSuggested(c.scope, c.sev); got != c.want {
+			t.Fatalf("scope=%s sev=%s got=%v want=%v", c.scope, c.sev, got, c.want)
+		}
+	}
+	heavy := ResolveProfile(LevelExpert, "")
+	if !heavy.RequireOracle || heavy.RetestScope != RetestScopeAll {
+		t.Fatalf("expert 默认应标注 oracle 且复测 all: %+v", heavy)
+	}
+	easy := ResolveProfile(LevelEasy, "")
+	if easy.RequireOracle || easy.RetestScope != RetestScopeKeyOnly {
+		t.Fatalf("easy 默认不应要求 oracle，复测 key_only: %+v", easy)
+	}
+}
+
 func TestScaledPlannerTurns(t *testing.T) {
 	if got := ScaledPlannerTurns(0, 3); got != 0 {
 		t.Fatalf("0 应保持不限，得到 %d", got)

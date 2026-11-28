@@ -19,6 +19,15 @@ import type { Finding, FindingsPage } from "@/lib/types";
 
 const PAGE_SIZE = 20;
 
+// 与 agent.RetestSuggested 同一口径。只标记建议，不隐藏条目，人工复测按钮仍在。
+function retestSuggested(scope: string, severity: string): boolean {
+  const level = severity.toLowerCase();
+  if (scope === "all") return level === "critical" || level === "high" || level === "medium" || level === "low";
+  if (scope === "high_plus") return level === "critical" || level === "high";
+  if (scope === "key_only") return level === "critical";
+  return false;
+}
+
 function findingLabel(finding: Finding) {
   return finding.name?.trim() || finding.vulnclass.trim() || "未分类";
 }
@@ -64,6 +73,22 @@ export function RetestsTab({ taskId }: { taskId: string }) {
     };
   }, [taskId, page, refreshVersion]);
 
+  const [retestScope, setRetestScope] = React.useState("");
+  React.useEffect(() => {
+    let disposed = false;
+    api
+      .task(taskId)
+      .then((task) => {
+        if (!disposed) setRetestScope(task.retest_scope ?? "");
+      })
+      .catch(() => {
+        if (!disposed) setRetestScope("");
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [taskId]);
+
   const loaded = data?.page === page;
   const findings = loaded ? data.items : [];
   const selected = findings.find((finding) => finding.id === selectedId);
@@ -102,6 +127,11 @@ export function RetestsTab({ taskId }: { taskId: string }) {
                   <span className="flex flex-wrap items-center gap-2">
                     <StatusBadge domain="severity" value={finding.severity} dot />
                     <StatusBadge domain="finding" value={finding.status} dot />
+                    {retestSuggested(retestScope, finding.severity) ? (
+                      <span className="rounded-full border border-primary/40 px-2 py-0.5 text-[10px] text-primary">
+                        建议复测
+                      </span>
+                    ) : null}
                   </span>
                 </Button>
               </React.Fragment>

@@ -1555,6 +1555,14 @@ function ResourceModeCard({ taskId }: { taskId: string }) {
           <span className="text-muted-foreground">当前生效模式：</span>
           {view?.effective_execution_mode ? resourceModeLabel(view.effective_execution_mode) : "—"}
         </div>
+        <div className="text-sm">
+          <span className="text-muted-foreground">建议复测范围：</span>
+          {view?.retest_scope || "—"}
+        </div>
+        <div className="text-sm">
+          <span className="text-muted-foreground">程序化验证：</span>
+          {view ? (view.require_oracle ? "需要标注（不阻断人工复测）" : "不要求") : "—"}
+        </div>
         {saving ? <Spinner className="size-3.5" /> : null}
       </CardContent>
     </Card>
