@@ -3194,6 +3194,7 @@ function CreateTaskSheet({
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [execDifficulty, setExecDifficulty] = React.useState("auto"); // 执行档位难度(0.15.17);auto=后端按任务书判定
   const [execMode, setExecMode] = React.useState("auto"); // 执行档位模式;auto=后端按任务书判定
+  const [resourceMode, setResourceMode] = React.useState(""); // 资源模式覆盖;空=跟随难度。不是执行档 mode
   const [engagementProfile, setEngagementProfile] = React.useState("authorized_active"); // 任务授权面(0.15.26);默认=现状行为
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
@@ -3265,6 +3266,7 @@ function CreateTaskSheet({
         coverageEnabled,
         difficulty: execDifficulty,
         mode: execMode,
+        taskExecutionMode: resourceMode,
         engagementProfile: engagementProfile === "authorized_active" ? undefined : engagementProfile,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
@@ -3284,6 +3286,7 @@ function CreateTaskSheet({
       setSeedFirstIntent(false);
       setExecDifficulty("auto");
       setExecMode("auto");
+      setResourceMode("");
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
@@ -3449,7 +3452,7 @@ function CreateTaskSheet({
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
                 <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
                 高级设置
-                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · 首个意图</span>
+                <span className="text-muted-foreground ml-auto text-xs font-normal">超时 · 心跳 · 资源模式</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
                 <div className="grid gap-2">
@@ -3496,6 +3499,23 @@ function CreateTaskSheet({
                       <option value="super_heavy">重火力（高强度+熔断预算）</option>
                     </select>
                   </div>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="resource-mode">资源模式</Label>
+                  <select
+                    id="resource-mode"
+                    className="h-8 rounded-md border bg-background px-2 text-sm"
+                    value={resourceMode}
+                    onChange={(e) => setResourceMode(e.target.value)}
+                  >
+                    <option value="">跟随难度</option>
+                    <option value="fast">fast（轻快）</option>
+                    <option value="balanced">balanced（均衡）</option>
+                    <option value="super_heavy">super_heavy（重火力）</option>
+                  </select>
+                  <p className="text-muted-foreground text-xs">
+                    与上面的「执行模式」不同。跟随难度时不写死档位；指定后作为资源模式覆盖。
+                  </p>
                 </div>
                 {/* 任务授权面（0.15.26）：声明本任务允许自动进行的动作边界；
                     创建后可在任务总览「执行档位」卡中途切换。 */}

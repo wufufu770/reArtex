@@ -334,6 +334,7 @@ export const api = {
     interceptRules?: AssetInterceptRuleInput[];
     difficulty?: string; // 执行档位（0.15.17）：auto=文本启发式判定
     mode?: string;
+    taskExecutionMode?: string; // 资源模式覆盖；空=跟随难度。不是上面的 mode
     engagementProfile?: string; // 任务授权面（0.15.26）：默认 authorized_active
   }) =>
     post<Task>("/tasks", {
@@ -351,8 +352,10 @@ export const api = {
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       difficulty: input.difficulty ?? "", // auto=后端文本启发式判定
       mode: input.mode ?? "",
+      task_execution_mode: input.taskExecutionMode ?? "",
       engagement_profile: input.engagementProfile ?? "", // 省略=authorized_active
     }),
+  patchTaskExecutionMode: (id: string, mode: string) => patch<Task>(`/tasks/${id}`, { task_execution_mode: mode }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),

@@ -5,6 +5,18 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.101] - 2026-11-27
+
+### 新增（C-02C2：资源模式的创建表单与详情展示）
+
+- 背景：C-02C1（0.15.100）只做了接口。本批把 `task_execution_mode` 接到页面上，不改写入规则。
+- 创建任务抽屉的高级设置增加「资源模式」：跟随难度 / fast / balanced / super_heavy，提交字段是 `task_execution_mode`。旁边的「执行难度 / 执行模式」仍是 0.15.17 执行档，两条互不影响。
+- 任务详情总览在执行档卡片下面增加「资源模式」卡：可改覆盖，并展示「难度 → 默认模式」和「当前生效模式」。人工选择写的是 `PATCH /api/tasks/{id}`，不是执行档的 `execution-profile`。
+- `GET /api/tasks/{id}` 对内存中的任务复用 `taskLevelView`，这样刷新详情仍能看到这三个键。顺带带上任务难度和建议键，与创建响应相同。只读回源（任务不在内存里）的那条路径没有这三键。
+- 【与卡面差异（如实说明）】① 编辑入口是详情卡上的下拉，不是单独的任务编辑弹窗。现有编辑面只有改名。② GET 详情为了展示而附加只读键，写入校验和落库规则没变。③ 未接线派发，预算数字仍不当 token。
+- 验证：`web` 下 `biome check` 四个改动文件无 error（文件里原有的 warning/info 仍在）；`tsc --noEmit` 通过；`npm run test:mentions` 通过；`npm run build:static` 通过（54 页）。`go test -race -count=1 ./server/ -run 'TestTaskExecutionModeAPI$' -timeout 10m` 通过（2.1s，含新的 GET 断言）。`gofmt` 干净。
+- 留下：C-02D 按业主选定的方案 B 接线。不开始 C-03。
+
 ## [0.15.100] - 2026-11-27
 
 ### 新增（C-02C1：资源模式覆盖的创建/修改接口与审计）

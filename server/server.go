@@ -2403,7 +2403,9 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	dto := taskDTO(t, s.resolvedTaskStatus(t))
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
-	writeJSON(w, 200, dto)
+	// C-02C2：详情刷新后仍要看到资源模式。只附加与创建/PATCH 相同的只读键，不改写入规则。
+	level, reason, mode := s.taskDifficultyOf(t.ID)
+	writeJSON(w, 200, taskLevelView(dto, t.Goal, t.Description, level, reason, mode))
 }
 
 // taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).
