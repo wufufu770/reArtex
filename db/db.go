@@ -473,6 +473,12 @@ func Open(dsn string) (*DB, error) {
 		if err := schemaDB.EnsureTaskGradeSchema(); err != nil {
 			return fmt.Errorf("apply task grade schema: %w", err)
 		}
+		// C-04A：findings.impact_level / evidence_level（及自报值、降级原因）。
+		// 列不在 db/schema.sql（RESERVED）。findingSelectCols 已引用这些列，
+		// 漏接会让受限运行角色的第一次发现读报 42703。
+		if err := schemaDB.EnsureFindingLevelsSchema(); err != nil {
+			return fmt.Errorf("apply finding levels schema: %w", err)
+		}
 		// llm_records / llm_usage 不在 db/schema.sql 里（这两张表由它们自己的
 		// 幂等 DDL 建，见 db/commands.go 与 db/llm_usage.go）⇒ 必须在启动期用
 		// 有 DDL 权限的连接建好：受限运行角色建不了表。
