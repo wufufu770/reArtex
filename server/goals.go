@@ -422,7 +422,8 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		if g := strings.TrimSpace(t.Goal); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
 			origin, _ := t.Store.OriginFactID()
-			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g}, 0, "open", "system", nil)
+			// 拆解器没产出时，用任务原文同时当目标文本和判定标准，避免闸门清单里标准是空的。
+			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g, "criteria": g}, 0, "open", "system", nil)
 			if origin > 0 && id > 0 {
 				_ = t.Store.Link(origin, db.RelSpawns, id) // goal descends from the task root (origin fact)
 			}
