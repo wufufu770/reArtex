@@ -196,6 +196,18 @@ func (d *DB) Exploration(id int64) *ExplorationStore { return &ExplorationStore{
 
 func (s *ExplorationStore) ID() int64 { return s.expID }
 
+// TaskResourceFields 现读这条探索对应任务的难度和资源模式覆盖。
+// 空 execution_mode 表示跟随难度。读失败交给调用方保持原行为，不在这里改写。
+func (s *ExplorationStore) TaskResourceFields() (difficulty, executionMode string, err error) {
+	if s == nil || s.db == nil {
+		return "", "", errors.New("探索存储未装配")
+	}
+	err = s.db.QueryRow(`SELECT COALESCE(difficulty,'medium'), COALESCE(execution_mode,'')
+FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL
+ORDER BY id DESC LIMIT 1`, s.expID).Scan(&difficulty, &executionMode)
+	return difficulty, executionMode, err
+}
+
 // Root returns the exploration's description and goal.
 func (s *ExplorationStore) Root() (description, goal string, err error) {
 	var d sql.NullString
