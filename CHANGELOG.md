@@ -5,6 +5,19 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.114] - 2026-11-27
+
+### 新增（C-05A：未达成目标查询，达成时记下证据引用）
+
+- 背景：C-05 要在收尾时拦住「目标没全部达成却记 done」。整卡跨 db / agent / server：判定标准、证据引用、完成闸门、终态改写、终局规划不再产意图、详情和报告里的未达成清单，加在一起超过 5 个生产文件，也跨了好几层。本批只做数据层（C-05A）。不改 `set_goals`，不改 `prove_goal`，任务照旧可以记 done。
+- 现状核实：目标是 `exploration_nodes` 里 `kind='goal'` 的节点。状态只有 `open` / `met` / `abandoned`（`ck_node_state`）。`HasOpenGoal` 把 met 和 abandoned 都当成已经了结。`GoalCountsAll` 只数总数和 `state='met'`，abandoned 算进总数、不算达成，评级沿用这个口径，本批不改。`prove_goal` 已经要求 `evidence_id`，并 `Link(RelProves)` 后 `SetNodeState(met)`，但 payload 里不留下引用。`UpdateGoalPayload` 整包替换 payload，只留 text / vulnclass。payload 键名是 `text`，没有 `criteria`。
+- `db.UnmetGoals` / `UnmetGoalsByTask`：查出 `kind='goal'` 且 `state NOT IN ('met','abandoned')` 的节点，带 `payload->>'text'` 和 `payload->>'criteria'`。没有未达成目标时是空切片。每条的 `reason` 固定为「未标记达成（met），也未放弃（abandoned）」，不另落一列。不存在或已删除的任务，`UnmetGoalsByTask` 返回 `sql.ErrNoRows`。别的任务的目标不会混进来。意图节点不算目标。
+- `ExplorationStore.MarkGoalMet`：把本探索的一条目标标成 met，并把 `evidence_id`（探索节点 id）和 `evidence_reason` 并进 payload。`goal_id` 或 `evidence_id` 缺失、目标不存在、或不属于本探索时返回错误，不改行。
+- `UpdateGoalPayload` 改为在原 payload 上改 text / vulnclass。判定标准和证据引用还在。空 vulnclass 仍会删掉该键。
+- 【与卡面差异（如实说明）】① 查询和类型放在 `db`，不放在 `agent/goal_gate.go`。`db` 不能 import `agent`，而卡面把 `UnmetGoals` 写成 `db.DB` 的方法、类型却放在 agent。本批先把查询落在 db。闸门函数下一小批放 agent，入参用这里的 `db.UnmetGoal`。② 多了一个 `reason` 字段。卡面骨架只有 node_id / text / criteria。报告要写未达成原因，空着会让调用方各写一句。③ `evidence_id` 是探索节点 id（fact 或 finding 节点），不是 `findings` 表主键。现有 `prove_goal` 就是这个口径。本批的写入函数还没接到工具上。④ 没改终态。已完成的任务不回写。⑤ 没加新表、没改 `db/schema.sql`。判定标准和证据引用都在已有的 JSONB payload 里。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./db/ -run 'TestUnmetGoalsAndMarkGoalMet$' -timeout 10m` 通过（1.5s）：4 条 met + 1 条 open + 1 条 abandoned 只返回 open 那条，文本和判定标准都在；缺 id、跨探索都不改行；标 met 后未达成清单为空，payload 里有 evidence_id 和去掉空白的理由；改文本后判定标准和证据引用还在，空 vulnclass 会删掉该键。`go test -race -count=1 ./db/ -timeout 25m` 全包通过（21.5s，exit 0）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。未跑 `./agent/`、`./server/`（本批零改动）。
+- 留下：C-05B 让 `set_goals` 必填判定标准，`prove_goal` 调用 `MarkGoalMet`，并放上纯函数闸门。终态改写再下一批。不开始 C-06。
+
 ## [0.15.113] - 2026-11-27
 
 ### 新增（C-04F：发现列表和详情页标出「证据不足」）
