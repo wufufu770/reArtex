@@ -135,6 +135,7 @@ func TestComputeGradeDoesNotClampNumerator(t *testing.T) {
 }
 
 func TestCountEvidenceCompleteUsesFindingGate(t *testing.T) {
+	// 没填自报等级（0）的调用按存量：仍只看 finding_gate。
 	findings := []GradeFinding{
 		{Summary: "SQL 注入可读取他人数据", Evidence: "GET /api?id=1 HTTP/1.1\n200 OK"},
 		{Summary: "SQL 注入可读取他人数据", Evidence: "   "},
@@ -146,6 +147,108 @@ func TestCountEvidenceCompleteUsesFindingGate(t *testing.T) {
 	}
 	if n := CountEvidenceComplete(nil); n != 0 {
 		t.Fatalf("空列表应是 0，得到 %d", n)
+	}
+}
+
+func TestCountEvidenceCompleteLegacyKeepsGate(t *testing.T) {
+	good := "GET /api?id=1 HTTP/1.1\n200 OK"
+	legacy := func(summary, evidence string, level int) GradeFinding {
+		return GradeFinding{
+			Summary: summary, Evidence: evidence,
+			EvidenceLevel: level, EvidenceLevelRequested: 1,
+		}
+	}
+	cases := []struct {
+		name string
+		f    GradeFinding
+		want bool
+	}{
+		{"默认 L1 且过门", legacy("SQL 注入可读取他人数据", good, 1), true},
+		{"空白降级原因仍按存量", GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 1, EvidenceLevelRequested: 1, EvidenceLevelReason: "  "}, true},
+		{"默认 L1 但证据为空", legacy("SQL 注入可读取他人数据", "  ", 1), false},
+		{"默认 L1 但结论自否", legacy("这不是漏洞", good, 1), false},
+		// 只改了落库等级、自报仍是默认且没有原因：不是 C-04 写入标记，仍过门。
+		{"自报仍是 L1 时不看落库等级", legacy("这不是漏洞", good, 4), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CountEvidenceComplete([]GradeFinding{tc.f})
+			want := 0
+			if tc.want {
+				want = 1
+			}
+			if got != want {
+				t.Fatalf("got %d want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestCountEvidenceCompleteNewUsesLevel(t *testing.T) {
+	good := "GET /api?id=1 HTTP/1.1\n200 OK"
+	cases := []struct {
+		name string
+		f    GradeFinding
+		want bool
+	}{
+		{
+			"自报 L3 且落到 L3，结论自否也算完整",
+			GradeFinding{Summary: "这不是漏洞", Evidence: good, EvidenceLevel: 3, EvidenceLevelRequested: 3},
+			true,
+		},
+		{
+			"自报 L2 落到 L2，过门也不算完整",
+			GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 2, EvidenceLevelRequested: 2},
+			false,
+		},
+		{
+			"有降级原因且落到 L2",
+			GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 2, EvidenceLevelRequested: 4, EvidenceLevelReason: "自报证据等级 L4，可验证上限为 L2"},
+			false,
+		},
+		{
+			"有降级原因且落到 L3，证据正文为空也算完整",
+			GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: "", EvidenceLevel: 3, EvidenceLevelRequested: 4, EvidenceLevelReason: "自报证据等级 L4，可验证上限为 L3"},
+			true,
+		},
+		{
+			"自报 L4 落到 L4",
+			GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 4, EvidenceLevelRequested: 4},
+			true,
+		},
+		{
+			"自报仍是 L1 但写了降级原因，落到 L3",
+			GradeFinding{Summary: "SQL 注入可读取他人数据", Evidence: "", EvidenceLevel: 3, EvidenceLevelRequested: 1, EvidenceLevelReason: "走过上限"},
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CountEvidenceComplete([]GradeFinding{tc.f})
+			want := 0
+			if tc.want {
+				want = 1
+			}
+			if got != want {
+				t.Fatalf("got %d want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestCountEvidenceCompleteMixed(t *testing.T) {
+	good := "GET /api?id=1 HTTP/1.1\n200 OK"
+	findings := []GradeFinding{
+		{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 1, EvidenceLevelRequested: 1},
+		{Summary: "待补证据", Evidence: "", EvidenceLevel: 1, EvidenceLevelRequested: 1},
+		{Summary: "这不是漏洞", Evidence: good, EvidenceLevel: 3, EvidenceLevelRequested: 3},
+		{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 2, EvidenceLevelRequested: 4, EvidenceLevelReason: "降到 L2"},
+		{Summary: "SQL 注入可读取他人数据", Evidence: good, EvidenceLevel: 2, EvidenceLevelRequested: 2},
+		{Summary: "未授权访问可导出用户列表", Evidence: good, EvidenceLevel: 4, EvidenceLevelRequested: 4},
+	}
+	// 新口径 3 条：存量过门、自报 L3、落到 L4。两条 L2 不算。旧门会把两条 L2 算进去、把自否的 L3 排除，得到 4。
+	if n := CountEvidenceComplete(findings); n != 3 {
+		t.Fatalf("混合任务应有 3 条完整，得到 %d", n)
 	}
 }
 

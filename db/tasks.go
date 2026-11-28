@@ -996,11 +996,15 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 	return result, tx.Commit()
 }
 
-// TaskGradeFinding 是评级取证用的一条发现。只带结论和证据正文，
-// 证据是否完整由 agent.CheckFindingGate 判定（db 不能 import agent）。
+// TaskGradeFinding 是评级取证用的一条发现。
+// 证据是否完整由 agent 判定（db 不能 import agent）：自报不是默认 L1，
+// 或降级原因非空，按证据等级 ≥ 3；否则仍过 CheckFindingGate。
 type TaskGradeFinding struct {
-	Summary  string
-	Evidence string
+	Summary                string
+	Evidence               string
+	EvidenceLevel          int
+	EvidenceLevelRequested int
+	EvidenceLevelReason    string
 }
 
 // TaskGradeFacts 是一次评级要用的确定性计数。
@@ -1021,6 +1025,9 @@ func (d *DB) LoadTaskGradeFacts(taskID int64) (TaskGradeFacts, error) {
 	if err := d.EnsureTaskGradeSchema(); err != nil {
 		return facts, err
 	}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return facts, err
+	}
 	var expID int64
 	err := d.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&expID)
 	if err != nil {
@@ -1039,7 +1046,8 @@ WHERE task_id=$1`, taskID, FindingConfirmed).Scan(&facts.TotalFindings, &facts.V
 		return facts, err
 	}
 	rows, err := d.Query(`
-SELECT COALESCE(summary,''), COALESCE(evidence,'')
+SELECT COALESCE(summary,''), COALESCE(evidence,''),
+       evidence_level, evidence_level_requested, COALESCE(evidence_level_reason,'')
 FROM findings
 WHERE task_id=$1
 ORDER BY id`, taskID)
@@ -1049,7 +1057,7 @@ ORDER BY id`, taskID)
 	defer rows.Close()
 	for rows.Next() {
 		var f TaskGradeFinding
-		if err := rows.Scan(&f.Summary, &f.Evidence); err != nil {
+		if err := rows.Scan(&f.Summary, &f.Evidence, &f.EvidenceLevel, &f.EvidenceLevelRequested, &f.EvidenceLevelReason); err != nil {
 			return facts, err
 		}
 		facts.Findings = append(facts.Findings, f)
