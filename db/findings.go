@@ -252,6 +252,61 @@ func (d *DB) writeFindingLevels(id int64, impact, evidence, requested int, reaso
 	return tx.Commit()
 }
 
+// resolveFindingLevels 把自报的两维收成可落库的四元组。
+// 影响层级只做 1–4 白名单（0 视为省略，按 L1）。证据等级走 CapEvidenceLevel。
+func resolveFindingLevels(impact, evidence int, evidenceText string, reproduced bool) (impactOut, applied, requested int, reason string, err error) {
+	if impact == 0 {
+		impact = 1
+	}
+	if !ValidFindingLevel(impact) {
+		return 0, 0, 0, "", ErrFindingLevelInvalid
+	}
+	applied, reason, err = CapEvidenceLevel(evidence, evidenceText, reproduced)
+	if err != nil {
+		return 0, 0, 0, "", err
+	}
+	requested = evidence
+	if requested == 0 {
+		requested = 1
+	}
+	return impact, applied, requested, reason, nil
+}
+
+// RefreshFindingEvidenceLevel 按当前证据正文和是否已有 reproduced 复测，
+// 重新套用上限。只把证据等级往自报值回升或维持，不会升过自报，也不会改影响层级。
+// 存量行自报默认是 1，所以复测通过不会把没人申请过 L4 的旧记录抬上去。
+func (d *DB) RefreshFindingEvidenceLevel(findingID int64) error {
+	if findingID <= 0 {
+		return nil
+	}
+	if err := d.EnsureFindingLevelsSchema(); err != nil {
+		return err
+	}
+	var evidence string
+	var impact, current, requested int
+	var reason string
+	err := d.QueryRow(`SELECT COALESCE(evidence,''), impact_level, evidence_level, evidence_level_requested, COALESCE(evidence_level_reason,'')
+		FROM findings WHERE id=$1`, findingID).Scan(&evidence, &impact, &current, &requested, &reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var reproduced bool
+	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_retests WHERE finding_id=$1 AND verdict='reproduced')`, findingID).Scan(&reproduced); err != nil {
+		return err
+	}
+	applied, newReason, err := CapEvidenceLevel(requested, evidence, reproduced)
+	if err != nil {
+		return err
+	}
+	if applied == current && newReason == reason {
+		return nil
+	}
+	return d.writeFindingLevels(findingID, impact, applied, requested, newReason)
+}
+
 // MaxImpactLevel 返回任务下 finding 的最高影响层级。没有 finding 时返回 0。
 func (d *DB) MaxImpactLevel(taskID int64) (int, error) {
 	if taskID <= 0 {
