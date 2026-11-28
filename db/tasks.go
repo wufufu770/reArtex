@@ -64,6 +64,11 @@ type Task struct {
 	Difficulty string `json:"difficulty"`
 	// DifficultyReason 是一句话理由。空串合法（默认）。
 	DifficultyReason string `json:"difficulty_reason"`
+	// ExecutionMode 是资源模式覆盖（C-02B）：fast / balanced / super_heavy。
+	// 空串 = 跟随任务难度的默认模式，不在创建时把默认模式写进列里——
+	// 难度以后改了，空列仍然跟新难度走。不是 0.15.17 执行档的
+	// auto/simple/medium/hard。非法值拒绝写入，不静默改成 balanced。
+	ExecutionMode string `json:"execution_mode"`
 }
 
 // TaskDeleteResult reports optional related-data cleanup performed in the same
@@ -115,6 +120,9 @@ var (
 	// ErrTaskDifficultyInvalid 表示难度不在四值白名单。非法值拒绝写入，
 	// 不静默回落 medium。HTTP 400 映射留给 C-01B。
 	ErrTaskDifficultyInvalid = errors.New("task difficulty must be easy, medium, hard, or expert")
+	// ErrTaskExecutionModeInvalid 表示资源模式不在白名单。空串合法（跟随难度）。
+	// 非法值拒绝写入，不静默改成 balanced。HTTP 400 留给 C-02C。
+	ErrTaskExecutionModeInvalid = errors.New("task execution_mode must be empty, fast, balanced, or super_heavy")
 )
 
 // 任务难度四值（C-01）。与执行档位的 simple/auto 不是同一套枚举。
@@ -123,13 +131,25 @@ const (
 	TaskDifficultyMedium = "medium"
 	TaskDifficultyHard   = "hard"
 	TaskDifficultyExpert = "expert"
+	// 资源模式三值（C-02B）。必须与 agent.ModeFast / ModeBalanced / ModeSuperHeavy
+	// 的字符串一致。db 不能 import agent（agent 已经 import db）。
+	// 空串不在这三个常量里：空是「未覆盖」，由 ValidTaskExecutionMode 单独接受。
+	TaskExecutionModeFast       = "fast"
+	TaskExecutionModeBalanced   = "balanced"
+	TaskExecutionModeSuperHeavy = "super_heavy"
 )
 
 //go:embed schema_task_difficulty.sql
 var taskDifficultySchemaSQL string
 
+//go:embed schema_task_execution_mode.sql
+var taskExecutionModeSchemaSQL string
+
 // taskDifficultySchemaReady 按连接池标记 DDL 已就位（markRuntimeSchemasReady 同键）。
 var taskDifficultySchemaReady sync.Map
+
+// taskExecutionModeSchemaReady 同上，键是运行期连接池指针。
+var taskExecutionModeSchemaReady sync.Map
 
 // EnsureTaskDifficultySchema 幂等补上 tasks.difficulty / difficulty_reason。
 // 启动期用迁移连接调用；运行期连接被 markRuntimeSchemasReady 标成就位后不再执行 DDL。
@@ -144,6 +164,22 @@ func (d *DB) EnsureTaskDifficultySchema() error {
 		return fmt.Errorf("应用任务难度 schema 失败: %w", err)
 	}
 	taskDifficultySchemaReady.Store(d.DB, struct{}{})
+	return nil
+}
+
+// EnsureTaskExecutionModeSchema 幂等补上 tasks.execution_mode。
+// 启动期用迁移连接调用；运行期连接被 markRuntimeSchemasReady 标成就位后不再执行 DDL。
+func (d *DB) EnsureTaskExecutionModeSchema() error {
+	if d == nil || d.DB == nil {
+		return errors.New("数据库未装配")
+	}
+	if _, ok := taskExecutionModeSchemaReady.Load(d.DB); ok {
+		return nil
+	}
+	if _, err := d.Exec(taskExecutionModeSchemaSQL); err != nil {
+		return fmt.Errorf("应用任务执行模式 schema 失败: %w", err)
+	}
+	taskExecutionModeSchemaReady.Store(d.DB, struct{}{})
 	return nil
 }
 
@@ -164,6 +200,28 @@ func resolveCreateDifficulty(p *string) (string, error) {
 	v := strings.TrimSpace(*p)
 	if !ValidTaskDifficulty(v) {
 		return "", fmt.Errorf("%w: %q", ErrTaskDifficultyInvalid, v)
+	}
+	return v, nil
+}
+
+// ValidTaskExecutionMode 报告 s 是否可落库。空串合法（跟随难度）。
+// 三值与 agent.ValidResourceMode 相同，且大小写敏感。
+// auto/simple/medium/hard 是 0.15.17 执行档，不是本列的值。
+// 不 TrimSpace——调用方先规范化。
+func ValidTaskExecutionMode(s string) bool {
+	switch s {
+	case "", TaskExecutionModeFast, TaskExecutionModeBalanced, TaskExecutionModeSuperHeavy:
+		return true
+	}
+	return false
+}
+
+// normalizeTaskExecutionMode 把写入值收成落库值。空白折成空串（跟随难度），
+// 不是改成某一档。其余非法值拒绝。
+func normalizeTaskExecutionMode(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if !ValidTaskExecutionMode(v) {
+		return "", fmt.Errorf("%w: %q", ErrTaskExecutionModeInvalid, v)
 	}
 	return v, nil
 }
@@ -229,6 +287,10 @@ type TaskCreateOptions struct {
 	Difficulty *string
 	// DifficultyReason 是一句话理由。写入前 TrimSpace；空串合法。
 	DifficultyReason string
+	// ExecutionMode 是资源模式覆盖。空串 = 跟随难度；非空必须是
+	// fast/balanced/super_heavy。写入前 TrimSpace。纯空白折成空串，
+	// 不是改成某一档。非法值拒绝，不静默改成 balanced。
+	ExecutionMode string
 }
 
 // SetToolTableFallback 注册「工具表不可读但仍有上一份可用快照」的判定。
@@ -282,6 +344,10 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	difficultyReason := strings.TrimSpace(opts.DifficultyReason)
+	executionMode, err := normalizeTaskExecutionMode(opts.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 	// 工具表不可读且无快照 → 拒绝创建新 run。
 	//
 	// 降级放行只是「少给几个工具」，但冷启动那一次恰恰是无人值守的时刻：
@@ -292,6 +358,9 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	if err := d.EnsureTaskDifficultySchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
 		return nil, err
 	}
 	tx, err := d.Begin()
@@ -350,11 +419,12 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		TimeoutSeconds: opts.TimeoutSeconds, PlanHeartbeatSeconds: opts.PlanHeartbeatSeconds,
 		CoverageEnabled: coverageEnabled,
 		Difficulty:      difficulty, DifficultyReason: difficultyReason,
+		ExecutionMode: executionMode,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, difficulty, difficulty_reason)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11)
-RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, difficulty, difficultyReason).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
+INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, difficulty, difficulty_reason, execution_mode)
+VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11,$12)
+RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, difficulty, difficultyReason, executionMode).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
@@ -470,11 +540,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), COALESCE(scope_configured,true), first_run_at, deadline_at, COALESCE(difficulty,'medium'), COALESCE(difficulty_reason,'')`
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), COALESCE(scope_configured,true), first_run_at, deadline_at, COALESCE(difficulty,'medium'), COALESCE(difficulty_reason,''), COALESCE(execution_mode,'')`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ScopeConfigured, &t.FirstRunAt, &t.DeadlineAt, &t.Difficulty, &t.DifficultyReason); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ScopeConfigured, &t.FirstRunAt, &t.DeadlineAt, &t.Difficulty, &t.DifficultyReason, &t.ExecutionMode); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil
@@ -514,6 +584,9 @@ func (d *DB) ListTasks() ([]*Task, error) {
 	if err := d.EnsureTaskDifficultySchema(); err != nil {
 		return nil, err
 	}
+	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
+		return nil, err
+	}
 	// id 是 BIGSERIAL，同一时刻创建的任务也有稳定且唯一的顺序。
 	rows, err := d.Query(`SELECT ` + taskCols + ` FROM tasks WHERE deleted_at IS NULL
 ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
@@ -541,11 +614,13 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 
 // TaskPatch updates task list metadata without changing execution state.
 // 难度字段同样是元数据：nil = 不改。改难度只更新 tasks 行，不碰已有意图。
+// ExecutionMode 同理：nil = 不改；指向空串 = 改回跟随难度。
 type TaskPatch struct {
 	Name             *string
 	Pinned           *bool
 	Difficulty       *string
 	DifficultyReason *string
+	ExecutionMode    *string
 }
 
 // UpdateTask applies a partial task name/pin/difficulty mutation and returns the updated row.
@@ -553,6 +628,9 @@ type TaskPatch struct {
 // 难度每次现读现写，不在调用方缓存快照；非法难度在 SQL 之前拒绝，行保持原值。
 func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
 	if err := d.EnsureTaskDifficultySchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
 		return nil, err
 	}
 	var difficulty string
@@ -566,6 +644,14 @@ func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
 	if patch.DifficultyReason != nil {
 		reason = strings.TrimSpace(*patch.DifficultyReason)
 	}
+	var executionMode string
+	if patch.ExecutionMode != nil {
+		var err error
+		executionMode, err = normalizeTaskExecutionMode(*patch.ExecutionMode)
+		if err != nil {
+			return nil, err
+		}
+	}
 	task, err := scanTask(d.QueryRow(`UPDATE tasks SET
 	name = CASE WHEN $2::boolean THEN $3 ELSE name END,
 	pinned_at = CASE
@@ -574,9 +660,10 @@ func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
 		ELSE NULL
 	END,
 	difficulty = CASE WHEN $5::boolean THEN $6 ELSE difficulty END,
-	difficulty_reason = CASE WHEN $7::boolean THEN $8 ELSE difficulty_reason END
+	difficulty_reason = CASE WHEN $7::boolean THEN $8 ELSE difficulty_reason END,
+	execution_mode = CASE WHEN $9::boolean THEN $10 ELSE execution_mode END
 WHERE id=$1 AND deleted_at IS NULL
-RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Difficulty != nil, difficulty, patch.DifficultyReason != nil, reason))
+RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Difficulty != nil, difficulty, patch.DifficultyReason != nil, reason, patch.ExecutionMode != nil, executionMode))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -589,6 +676,9 @@ RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Dif
 // GetTask returns one alive task (nil if not found/deleted).
 func (d *DB) GetTask(id int64) (*Task, error) {
 	if err := d.EnsureTaskDifficultySchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
 		return nil, err
 	}
 	t, err := scanTask(d.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=$1 AND deleted_at IS NULL`, id))
