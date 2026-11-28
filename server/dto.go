@@ -442,6 +442,11 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 			d.Status = m.Status
 			d.TrafficCount = m.TrafficCount
 			d.Assets = findingAssetDTOs(m.AssetIDs, assets)
+			d.ImpactLevel = m.ImpactLevel
+			d.EvidenceLevel = m.EvidenceLevel
+			d.EvidenceLevelRequested = m.EvidenceLevelRequested
+			d.EvidenceLevelReason = m.EvidenceLevelReason
+			d.EvidenceInsufficient = !db.EvidenceSufficient(d.Severity, m.EvidenceLevel)
 		}
 		out = append(out, d)
 	}

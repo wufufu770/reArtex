@@ -154,6 +154,9 @@ const (
 	TaskGradeA = "A"
 	TaskGradeB = "B"
 	TaskGradeC = "C"
+	// TaskGradeUngraded 只用于列表筛选，不是一个能落库的等级。
+	// 它表示 grade=''（还没评）。S/A/B/C 是精确匹配。
+	TaskGradeUngraded = "ungraded"
 )
 
 //go:embed schema_task_difficulty.sql
@@ -633,6 +636,77 @@ func (d *DB) SetTaskScopeConfigured(taskID int64, configured bool) error {
 	}
 	_, err := d.Exec(`UPDATE tasks SET scope_configured=$2 WHERE id=$1`, taskID, configured)
 	return err
+}
+
+// TaskBoardFact 是列表筛选用的已落库字段。不含运行中的状态。
+// 难度是 tasks.difficulty（easy/medium/hard/expert），不是执行档。
+type TaskBoardFact struct {
+	Difficulty       string
+	DifficultyReason string
+	ExecutionMode    string
+	Grade            string
+	GradeSummary     string
+	GradeScore       *float64
+}
+
+// ListTaskBoard 返回未删除任务的难度和评级。
+// difficulty 空 = 不按难度筛；否则必须是四值白名单。
+// grade 空 = 不按评级筛；ungraded = 还没评；S/A/B/C = 精确匹配。
+// 不改 ListTasks 的签名：启动加载和归档仍要拿全量任务。
+func (d *DB) ListTaskBoard(difficulty, grade string) (map[int64]TaskBoardFact, error) {
+	out := map[int64]TaskBoardFact{}
+	if difficulty != "" && !ValidTaskDifficulty(difficulty) {
+		return nil, ErrTaskDifficultyInvalid
+	}
+	if grade != "" && grade != TaskGradeUngraded && !ValidTaskGrade(grade) {
+		return nil, ErrTaskGradeInvalid
+	}
+	if err := d.EnsureTaskDifficultySchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskExecutionModeSchema(); err != nil {
+		return nil, err
+	}
+	if err := d.EnsureTaskGradeSchema(); err != nil {
+		return nil, err
+	}
+	q := `SELECT id, difficulty, COALESCE(difficulty_reason,''), COALESCE(execution_mode,''), grade, grade_summary, grade_score
+FROM tasks WHERE deleted_at IS NULL`
+	args := []any{}
+	if difficulty != "" {
+		args = append(args, difficulty)
+		q += fmt.Sprintf(" AND difficulty=$%d", len(args))
+	}
+	switch grade {
+	case "":
+	case TaskGradeUngraded:
+		q += ` AND grade=''`
+	default:
+		args = append(args, grade)
+		q += fmt.Sprintf(" AND grade=$%d", len(args))
+	}
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var fact TaskBoardFact
+		var score sql.NullFloat64
+		if err := rows.Scan(&id, &fact.Difficulty, &fact.DifficultyReason, &fact.ExecutionMode, &fact.Grade, &fact.GradeSummary, &score); err != nil {
+			return nil, err
+		}
+		if score.Valid {
+			v := score.Float64
+			fact.GradeScore = &v
+		}
+		out[id] = fact
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListTasks returns alive tasks with pinned tasks first, then newest ids.
