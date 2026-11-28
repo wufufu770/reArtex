@@ -5,6 +5,29 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.124] - 2026-11-27
+
+### 新增（D-01A：Autonomous Supervisor 确定性状态机）
+
+- 背景：D-01 要给任务一个确定性控制中心。模型只能提议迁移，不能直接改状态。整卡跨状态机、PostgreSQL 和引擎回调，一次做完会超过 5 个生产文件，也会改到正在跑的规划循环。本批只做状态机本身（D-01A）。不落库，不接 planner / worker，现有循环照旧。
+- 现状核实：仓库里没有监督器。`Planner.Plan` 仍返回 `(met, reason, error)`，`MainAgent.Chat` 返回回复文本。终态写入只在 `server`（`SetTaskStatus` / `SetTaskStatusGuarded`）。`agent/planner.go` 和 `agent/mainagent.go` 不调用这两个函数。C-05 的 `GateTaskCompletion` 已经会把未达成目标的 done 改成 timeout。任务和探索图是两张表：`tasks.exploration_id` 指向 `explorations`。
+- `server/supervisor.go`：十个状态（PREPARING、PLANNING、EXECUTING、VERIFYING、WAITING、PAUSED、COMPLETING、DONE、FAILED、ABORTED）和卡面那张转移表。`Apply` 只吃确定性事件（规划轮结束、意图认领、意图结算、goal_met 闸门、预算耗尽、人工指令、超时）。`Propose` 只校验转移表，来源标记 `llm-proposal`。被拒不返回 error，调用方拿 `Accepted=false` 和原因。终态收到任何事件都拒绝，状态不变。超时和预算耗尽优先去 PAUSED，这条边不存在才去 FAILED，不会去 DONE。进入 DONE 的 goal_gate / 提议还要 `GoalsMet` 为真；读失败或没装回调按未通过。
+- 内存实现供单测。第一次见到任务按 PREPARING。空操作（例如执行中再次认领）不写历史。`SupervisorScopeAllows` 只认 `task`，session / conversation / single_loop 都不认。
+- 【与卡面差异（如实说明）】① 十个状态名用的是卡面骨架。总方案 N-1 写明方案二原文没有附在材料里，仓库里也没有另一套名字可以核对。② 卡面把持久化并进 D-02 的 `db/schema_plan_dag.sql`。D-02 是下一张卡，本批不建表、不改 `db/schema.sql`。③ 卡面只给了「状态 → 允许的下一状态」，没有给每个事件落到哪。事件去向是本批按转移表补的，写在 `eventTarget`。PAUSED 上没有 PAUSED / FAILED 边，超时拒绝，不改成 ABORTED。④ 认领事件名是 `intent_claimed`。卡面注释里的事件列表只写了 `intent_settled`，正文要求认领和结算都发。⑤ `Propose` 被拒不抛错；`Apply` 被拒返回 `SupRejectError`。⑥ 终态同步 `SetTaskStatusGuarded`、审计、引擎接线和超时扫描都不在本批。监督器默认不参与运行。⑦ `MaxStay` 的时长卡面没有给秒数。PREPARING / PLANNING / VERIFYING 30 分钟，EXECUTING 2 小时，WAITING 24 小时，COMPLETING 15 分钟。PAUSED 和三个终态不自动超时。
+- 验证：`gofmt` 干净；`go vet ./server/` 干净。`go test -race -count=1 ./server/ -run TestSupervisor -timeout 180s` 通过（1.3s）：10 个状态两两提议，表内接受、表外拒绝且状态不变；PREPARING 上的 goal_gate、DONE 上的任意事件都拒绝；未过闸门的 DONE 提议不改状态；过闸门后 EXECUTING→COMPLETING→DONE；超时不会进入 DONE；PREPARING→PLANNING→EXECUTING 的历史链在；32 路并发拒绝后仍是 PREPARING。`ARTEX_PG_DSN` 指向本机测试库后，`go test -race -count=1 ./server/ -timeout 25m` 全包 56.8s，唯一失败是既有 `TestMonitorPollerShutdownAndThrottle`（栈在 `monitor_poller.go`，不经过本批文件）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- 留下：D-01B 把状态和历史落到库（重启不丢）。引擎接线再下一批，默认关闭。不开始 D-02。
+
+## [0.15.123] - 2026-11-27
+
+### 新增（C-06C：任务详情展示难度、评级、最高影响层级和发现分级）
+
+- 背景：C-06B（0.15.122）画了列表。本批画详情。概览用的仍是 `GET /api/tasks/{id}`，发现 tab 用的是 C-06A 已经补上等级列的 `GET /api/exploration/findings?task=`。
+- 概览顶部增加「难度与评级」四格：难度、评级、最高影响层级、评级摘要。未评级和没有 finding 显示「—」。评级摘要全文展示，不截断。难度格同时写已存理由，以及「系统建议：…」。建议和已存难度相同的时候注明一致。建议不会改掉已存难度。
+- 发现 tab 在严重度旁边显示影响层级、证据等级。critical / high 且证据等级低于 L3 时显示「证据不足」。没有等级列的旧节点不画这些徽章。
+- 【与卡面差异（如实说明）】① 四格放在描述卡片之前，用的是详情接口里已经有的字段，没有再加一个接口。② 严重度沿用原来的严重度徽章，没有再画一枚。影响和证据是后加的两枚，证据不足是第三枚。③ 没有在浏览器里点进一条真实任务。页面要登录。类型检查、格式检查和 `next build` 通过。critical + 证据 L2 在任务发现列表上 `evidence_insufficient=true` 已在 C-06A 的 `TestTaskListLevelFilter` 里跑过。④ 列表筛选不在本批。
+- 验证：`web` 下对改动文件 `biome check --diagnostic-level=error` 通过（先按格式收了一行）；`tsc --noEmit` 通过；`npm run test:mentions` 通过；`npm run build` 通过（54 页）。`rsi_guard --staged --enforce --tier 2` 在提交前跑。
+- C-06 到此为止：列表筛选和徽章、详情四格、发现 tab 的三维分级都已落地。不开始 D-01。
+
 ## [0.15.122] - 2026-11-27
 
 ### 新增（C-06B：任务列表展示难度、评级和最高影响层级）
