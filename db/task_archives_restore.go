@@ -322,6 +322,10 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,
  timeout_seconds=archived.timeout_seconds,plan_heartbeat_seconds=archived.plan_heartbeat_seconds,
  coverage_enabled=archived.coverage_enabled,pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
+ -- C-01A：旧快照没有这两列时 json_populate_record 给出 NULL。直接赋值会撞
+ -- NOT NULL，所以缺列回落迁移默认（medium / 空理由），有列则原样恢复。
+ difficulty=COALESCE(archived.difficulty, 'medium'),
+ difficulty_reason=COALESCE(archived.difficulty_reason, ''),
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,

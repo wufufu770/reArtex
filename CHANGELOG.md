@@ -5,6 +5,20 @@
 > 本文件记录 **reArtex**（ARTEX 的安全加固分支）的变更。reArtex 走自己的发布线，
 > 不自动同步上游 ARTEX 的变更。
 
+## [0.15.96] - 2026-11-27
+
+### 新增（C-01A：任务难度字段第一批——difficulty / difficulty_reason 落库）
+
+- 背景：C-01 要求每个任务持久化难度 `easy/medium/hard/expert` 与一句话理由。现状核实后整卡不能一次做完——① `tasks` 表没有这两列；② `POST /api/tasks` 的 JSON 字段 `difficulty` 已被 0.15.17 执行档占用（`auto/simple/medium/hard`，只调算力、存在进程内档位，不落库）。总方案 N-5 已写明这两套同名不同义。创建接口、修改接口与审计、确定性建议、前端展示加在一起会超过 5 个生产文件，并且跨 db / agent / server / web。本批只做数据层（C-01A）。
+- `db/schema_task_difficulty.sql`（新增）：幂等补 `tasks.difficulty`（默认 `medium`，CHECK 四值）与 `tasks.difficulty_reason`（默认空串），外加 `idx_tasks_difficulty`。约束先 `DROP CONSTRAINT IF EXISTS` 再 `ADD`，重复应用不会因「列已存在就整句跳过」而漏掉 CHECK。存量行靠默认值补齐，不改写任何意图。
+- `db/tasks.go`：`Task` / `TaskCreateOptions` / `TaskPatch` / `taskCols` / `scanTask` / 创建 INSERT / `UpdateTask` 同步这两列。不传难度落 `medium`、理由空串；传入值 `TrimSpace` 后必须命中四值白名单，否则 `ErrTaskDifficultyInvalid`（不静默回落）。`UpdateTask` 对 nil 字段保持原值；非法更新在 SQL 之前返回，行不变。改的是任务行本身，不回写已有 `exploration_nodes`。
+- `db/db.go` + `db/role.go`：启动迁移块调用 `EnsureTaskDifficultySchema`，并在 `markRuntimeSchemasReady` 登记。`taskCols` 已经引用新列，漏接会让受限运行角色的第一次任务读报 42703（列不存在）。
+- `db/task_archives_restore.go`：恢复语句补上这两列。旧快照没有键时 `json_populate_record` 给出 NULL，直接赋值会撞 NOT NULL；`COALESCE` 回落 `medium` / 空串。快照里有值则原样恢复。
+- 测试（`db/task_difficulty_test.go`）：幂等 DDL + CHECK/索引在场；不传 → medium；`expert` + 理由去空白后原样落库；`insane` / 空白 / `auto` / `simple` / `Expert` 拒绝且不留行；更新后 `GetTask` 读到新值；已有意图的 payload 与 state 不变；只改理由不动难度；非法更新不改旧值；直写 `insane` 被 CHECK 拒绝；旧快照缺列回落默认、完整快照恢复 expert。
+- 【与卡面差异（如实说明）】① 未改 `db/schema.sql`：该文件在本仓是 RESERVED，B-09 / TI 等新列都走独立 `schema_*.sql`（`scripts/db-role-bootstrap.sh` 会扫到）。② 未新建 `agent/difficulty.go`，未实现 `SuggestDifficulty`，未改 `POST /api/tasks` 与 `PATCH /api/tasks/{id}`，未做审计与前端。卡面骨架里的 `DefaultExecutionMode` 属于 C-02，本批不做。③ 白名单函数落在 `db.ValidTaskDifficulty` 而不是卡面的 `agent.ValidDifficulty`：写入闸必须在 db，而 agent 已经 import db，db 再 import agent 会成环。④ 卡面行号已漂移：`taskCols` 不在 `db/tasks.go:393` 的原样位置（本批把两列接在 `deadline_at` 之后）；`updateTaskMetadata` 在 `server/task_metadata.go` 而不在卡面写的 `server.go:1016`。⑤ C-01B 不能把四值校验直接套到现有 JSON 字段 `difficulty` 上——任务创建页默认发送 `auto`，套上去会让现有创建全部 400。执行档字段保持原语义。
+- 验证：`gofmt` 干净；`go vet ./db/` 干净；`go test -race -count=1 ./db/ -timeout 25m` 全包通过（22.8s，exit 0）。同包无竞态再统计为 471 pass / 93 skip / 0 fail（skip 是缺主密钥等既有用例，本批三个难度用例均 PASS）。归档往返 `TestTaskArchiveDatabaseRoundTrip` PASS（0.37s）。
+- 留下一批（C-01B，本批不做）：`agent/difficulty.go` 的确定性建议（认证/登录态/支付/多域名/WAF/绕过 → hard；纯信息收集 → easy；内网/横向/提权/多阶段 → expert）、创建接口返回 `suggested_difficulty`、用户覆盖落库、PATCH 改难度写审计链。前端展示归 C-01B 或 C-06。C-02 的派发映射仍未开始——本批保证它以后可以每次现读 `tasks.difficulty`，而不是读一份创建时的快照。
+
 ## [0.15.95] - 2026-11-25
 
 ### 新增（SEC-01：A-03 第一批——统一受管执行判据与三路 SoD 接线）
